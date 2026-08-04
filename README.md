@@ -48,7 +48,7 @@ cp irongrid.example.yaml irongrid.yaml
 docker compose up -d --build
 ```
 
-### Native (Go 1.22+)
+### Native (Go 1.26+)
 
 ```bash
 # 1. Start Dragonfly (Redis protocol) — required
