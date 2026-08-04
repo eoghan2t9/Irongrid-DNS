@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- Stage 1: build the React frontend ----
-FROM node:20-alpine AS web
+FROM node:22-alpine AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
 RUN npm install --no-audit --no-fund
@@ -9,7 +9,7 @@ COPY web/ ./
 RUN npm run build
 
 # ---- Stage 2: build the Go backend (cloudflared baked in) ----
-FROM golang:1.22-alpine AS gobuild
+FROM golang:1.26-alpine AS gobuild
 RUN apk add --no-cache git ca-certificates
 WORKDIR /src
 COPY go.mod go.sum ./
