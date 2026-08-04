@@ -1,0 +1,69 @@
+# Irongrid DNS configuration
+# Copy to irongrid.yaml and adjust. The server generates a default config on
+# first run if none exists.
+
+server:
+  listen_udp: "0.0.0.0:53"     # plain DNS over UDP ("" disables)
+  listen_tcp: "0.0.0.0:53"     # plain DNS over TCP
+  listen_dot: "0.0.0.0:853"    # DNS over TLS
+  listen_doh: "0.0.0.0:443"    # DNS over HTTPS
+  listen_doq: "0.0.0.0:853"    # DNS over QUIC
+  doh_path: "/dns-query"       # RFC 8484 path
+  web_listen: "0.0.0.0:8080"   # dashboard + REST API
+  timeout_sec: 5               # per-query upstream timeout
+
+# Upstream DNS servers to forward to (udp, tcp, tls, https, quic supported).
+upstreams:
+  - "udp://1.1.1.1:53"
+  - "udp://8.8.8.8:53"
+  # - "tls://1.1.1.1:853"                  # DNS over TLS upstream
+  # - "https://cloudflare-dns.com/dns-query" # DNS over HTTPS upstream
+
+cache:
+  # Dragonfly is a HARD requirement: the server refuses to start without it.
+  addr: "localhost:6379"
+  password: ""                 # set if Dragonfly requires auth
+  db: 0
+  ttl: 6h                      # positive answer cache lifetime
+  negative_ttl: 1m             # cached NXDOMAIN / SERVFAIL lifetime
+
+tls:
+  cert_file: ""                # PEM cert chain for DoT/DoH/DoQ ("" = self-signed)
+  key_file: ""
+  generate_self_signed: true   # auto-create a self-signed cert when no cert given
+  self_signed_hosts:
+    - "localhost"
+    - "dns.example.com"        # use your real hostname for Android Private DNS
+  cert_dir: "data/certs"
+
+filter:
+  # What blocked queries receive: "nxdomain", "refused", or an IP like "0.0.0.0".
+  block_response: "nxdomain"
+  block_ttl: 600
+  blocklists:
+    # - id: "oisd"
+    #   name: "OISD Big"
+    #   url: "https://big.oisd.nl/"
+    #   enabled: true
+    #   auto_update: 24h
+  whitelist: []                # always allow (overrides every blocklist)
+  blacklist: []                # always block (domains, wildcards, IPs)
+
+log:
+  query_log_file: "data/querylog.db"
+  retention_days: 30
+  verbose: true
+
+web:
+  username: "admin"
+  # Plaintext passwords are hashed automatically on first save.
+  password: "change-me"
+  # session_secret: ""          # auto-generated if empty
+
+tunnel:
+  enabled: false               # start the baked-in cloudflared on boot?
+  token: ""                    # named tunnel token (Cloudflare Zero Trust)
+  config_file: ""              # or point at a cloudflared YAML config
+  quick_tunnel: false          # or use an unauthenticated trycloudflare.com tunnel
+  quick_tunnel_url: "http://localhost:8080"
+  hostname: "dns.example.com"

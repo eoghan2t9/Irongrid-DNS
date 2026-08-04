@@ -1,0 +1,125 @@
+package dnsserver
+
+import (
+	"context"
+	"encoding/binary"
+	"io"
+	"log"
+	"net"
+	"time"
+
+	"github.com/miekg/dns"
+	"github.com/quic-go/quic-go"
+)
+
+// startDoQ launches the RFC 9250 DNS-over-QUIC listener.
+func (m *Manager) startDoQ(addr string) error {
+	tlsConf := m.tlsConf.Clone()
+	// RFC 9250 requires the "doq" ALPN token.
+	tlsConf.NextProtos = []string{"doq"}
+
+	quicConf := &quic.Config{
+		MaxIdleTimeout:       60 * time.Second,
+		KeepAlivePeriod:      20 * time.Second,
+		HandshakeIdleTimeout: 8 * time.Second,
+	}
+	ln, err := quic.ListenAddr(addr, tlsConf, quicConf)
+	if err != nil {
+		return err
+	}
+	m.doqLns = append(m.doqLns, ln)
+	log.Printf("[dns] DoQ listener on %s", addr)
+	go func() {
+		for {
+			conn, err := ln.Accept(context.Background())
+			if err != nil {
+				log.Printf("[dns] DoQ listener on %s stopped: %v", addr, err)
+				m.results <- Listener{Proto: "doq", Addr: addr, Err: err}
+				return
+			}
+			go m.handleDoQConn(conn)
+		}
+	}()
+	return nil
+}
+
+// DoQAddr returns the bound address of the DoQ listener (useful when
+// binding to port 0 for tests or dynamic ports).
+func (m *Manager) DoQAddr() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.doqLns) == 0 {
+		return ""
+	}
+	return m.doqLns[len(m.doqLns)-1].Addr().String()
+}
+
+func (m *Manager) handleDoQConn(conn quic.Connection) {
+	defer conn.CloseWithError(0, "")
+	for {
+		stream, err := conn.AcceptStream(context.Background())
+		if err != nil {
+			return
+		}
+		go m.handleDoQStream(stream, conn.RemoteAddr())
+	}
+}
+
+func (m *Manager) handleDoQStream(stream quic.Stream, remote net.Addr) {
+	defer stream.Close()
+	// RFC 9250: each message is prefixed with a 2-byte length field.
+	var lenBuf [2]byte
+	if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
+		return
+	}
+	msgLen := binary.BigEndian.Uint16(lenBuf[:])
+	if msgLen == 0 || msgLen > 65535 {
+		return
+	}
+	msgBuf := make([]byte, msgLen)
+	if _, err := io.ReadFull(stream, msgBuf); err != nil {
+		return
+	}
+	req := new(dns.Msg)
+	if err := req.Unpack(msgBuf); err != nil {
+		return
+	}
+
+	clientIP := ""
+	if remote != nil {
+		if host, _, err := net.SplitHostPort(remote.String()); err == nil {
+			clientIP = host
+		}
+	}
+	w := &doqResponseWriter{stream: stream, clientIP: clientIP}
+	m.handler.ServeDNSFromContext(w, req, clientIP, "doq")
+}
+
+// doqResponseWriter adapts dns.ResponseWriter to a QUIC stream.
+type doqResponseWriter struct {
+	stream   quic.Stream
+	clientIP string
+}
+
+func (w *doqResponseWriter) WriteMsg(m *dns.Msg) error {
+	packed, err := m.Pack()
+	if err != nil {
+		return err
+	}
+	buf := make([]byte, 2+len(packed))
+	binary.BigEndian.PutUint16(buf[:2], uint16(len(packed)))
+	copy(buf[2:], packed)
+	_, err = w.stream.Write(buf)
+	return err
+}
+
+func (w *doqResponseWriter) Write(b []byte) (int, error) {
+	return w.stream.Write(b)
+}
+
+func (w *doqResponseWriter) LocalAddr() net.Addr  { return addrOnly("") }
+func (w *doqResponseWriter) RemoteAddr() net.Addr { return addrOnly(w.clientIP) }
+func (w *doqResponseWriter) Close() error        { return nil }
+func (w *doqResponseWriter) TsigStatus() error   { return nil }
+func (w *doqResponseWriter) TsigTimersOnly(bool) {}
+func (w *doqResponseWriter) Hijack()             {}

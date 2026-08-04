@@ -1,0 +1,38 @@
+services:
+  irongrid-dns:
+    build: .
+    container_name: irongrid-dns
+    restart: unless-stopped
+    ports:
+      - "53:53/udp"      # plain DNS over UDP
+      - "53:53/tcp"      # plain DNS over TCP
+      - "853:853/tcp"    # DNS over TLS
+      - "853:853/udp"    # DNS over QUIC
+      - "443:443/tcp"    # DNS over HTTPS
+      - "8080:8080/tcp"  # web dashboard + API
+    volumes:
+      - ./irongrid.yaml:/app/irongrid.yaml:ro
+      - irongrid-data:/data
+    depends_on:
+      - dragonfly
+    environment:
+      - TZ=UTC
+    cap_add:
+      - NET_BIND_SERVICE   # allow binding to port 53 as non-root
+
+  dragonfly:
+    image: docker.dragonflydb.io/dragonfly/dragonfly
+    container_name: irongrid-dragonfly
+    restart: unless-stopped
+    command: >
+      --cache_mode=true
+      --maxmemory=512mb
+      --port=6379
+    ports:
+      - "127.0.0.1:6379:6379"   # only reachable from the host / other containers
+    volumes:
+      - dragonfly-data:/data
+
+volumes:
+  irongrid-data:
+  dragonfly-data:

@@ -1,0 +1,16 @@
+# Go
+/irongrid
+*.test
+
+# Runtime data
+/data/
+*.log
+
+# Frontend build artifacts (built in CI / make web; placeholder dist/index.html is committed)
+web/node_modules/
+web/dist/assets/
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store

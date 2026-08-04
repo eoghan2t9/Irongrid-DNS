@@ -1,0 +1,8 @@
+.git
+.gitignore
+data/
+*.log
+web/node_modules/
+web/dist/
+irongrid
+*.test
