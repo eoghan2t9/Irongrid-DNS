@@ -49,6 +49,19 @@ type Manager struct {
 	srv      *http.Server
 	ln       net.Listener
 
+	// externalHTTP01 tells the manager that the web server's own HTTP
+	// listener serves /.well-known/acme-challenge/* (used when web_redirect
+	// shares the http-01 port), so it must not bind its own challenge server.
+	externalHTTP01 bool
+
+	// stopCh is closed by Stop to halt the renewal loop.
+	stopCh   chan struct{}
+	stopOnce sync.Once
+
+	// OnIssued, when non-nil, is called after a successful issuance so the
+	// server can rebind its listeners with the fresh certificate.
+	OnIssued func()
+
 	// dns is the optional DNS-01 provider. When set, issuance uses TXT
 	// records instead of the HTTP-01 challenge server.
 	dns DNSProvider
@@ -81,8 +94,12 @@ type Options struct {
 	Staging         bool
 	HTTP01Port      int
 	RenewBeforeDays int
-	DNS             DNSProvider   // optional DNS-01 provider
-	DNSProvider     string        // provider name for status, e.g. "cloudflare"
+	DNS             DNSProvider // optional DNS-01 provider
+	DNSProvider     string      // provider name for status, e.g. "cloudflare"
+	// ExternalHTTP01 tells the manager that the web server serves the http-01
+	// challenge on the same port (web_redirect on port 80), so it must not
+	// bind its own challenge listener.
+	ExternalHTTP01 bool
 }
 
 // New creates a Manager. The HTTP-01 challenge server is not started until
@@ -96,14 +113,16 @@ func New(o Options) *Manager {
 	}
 	renewIn := time.Duration(o.RenewBeforeDays) * 24 * time.Hour
 	m := &Manager{
-		email:    o.Email,
-		domains:  append([]string(nil), o.Domains...),
-		dir:      o.CertDir,
-		staging:  o.Staging,
-		httpPort: o.HTTP01Port,
-		renewIn:  renewIn,
-		dns:      o.DNS,
-		tokens:   map[string]string{},
+		email:           o.Email,
+		domains:         append([]string(nil), o.Domains...),
+		dir:             o.CertDir,
+		staging:         o.Staging,
+		httpPort:        o.HTTP01Port,
+		renewIn:         renewIn,
+		dns:             o.DNS,
+		externalHTTP01:  o.ExternalHTTP01,
+		tokens:          map[string]string{},
+		stopCh:          make(chan struct{}),
 	}
 	m.Status.Enabled = true
 	m.Status.Email = o.Email
@@ -137,7 +156,11 @@ func (m *Manager) Serve() error {
 		return fmt.Errorf("acme: cannot listen on %s for the HTTP-01 challenge (Let's Encrypt validates your domain on port 80): %w", addr, err)
 	}
 	m.ln = ln
-	m.srv = &http.Server{Handler: http.HandlerFunc(m.handleChallenge)}
+	m.srv = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !m.HandleChallenge(w, r) {
+			http.NotFound(w, r)
+		}
+	})}
 	go func() {
 		if err := m.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("[acme] challenge server on %s stopped: %v", addr, err)
@@ -147,10 +170,9 @@ func (m *Manager) Serve() error {
 	return nil
 }
 
-// Stop shuts the challenge listener down.
+// Stop shuts the challenge listener down and halts the renewal loop.
 func (m *Manager) Stop() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	if m.srv != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		_ = m.srv.Shutdown(ctx)
@@ -158,13 +180,18 @@ func (m *Manager) Stop() {
 		m.srv = nil
 	}
 	m.Status.Running = false
+	m.mu.Unlock()
+	m.stopOnce.Do(func() { close(m.stopCh) })
 }
 
-func (m *Manager) handleChallenge(w http.ResponseWriter, r *http.Request) {
+// HandleChallenge serves an http-01 challenge token when the request path is
+// an ACME challenge path. It reports whether the path was a challenge path
+// (even when no token is found, so callers can stop processing). It is used
+// by the web_redirect listener when it shares the challenge port.
+func (m *Manager) HandleChallenge(w http.ResponseWriter, r *http.Request) bool {
 	const prefix = "/.well-known/acme-challenge/"
 	if !strings.HasPrefix(r.URL.Path, prefix) {
-		http.NotFound(w, r)
-		return
+		return false
 	}
 	token := strings.TrimPrefix(r.URL.Path, prefix)
 	m.tokensMu.Lock()
@@ -172,10 +199,11 @@ func (m *Manager) handleChallenge(w http.ResponseWriter, r *http.Request) {
 	m.tokensMu.Unlock()
 	if !ok {
 		http.NotFound(w, r)
-		return
+		return true
 	}
 	w.Header().Set("Content-Type", "text/plain")
 	fmt.Fprint(w, val)
+	return true
 }
 
 // setToken registers an http-01 response for the challenge server.
@@ -201,8 +229,10 @@ func (m *Manager) Issue(ctx context.Context) error {
 	m.Status.LastError = ""
 	m.mu.Unlock()
 
-	// DNS-01 needs no inbound listener; HTTP-01 needs the challenge server.
-	if m.dns == nil {
+	// DNS-01 needs no inbound listener; HTTP-01 needs the challenge server
+	// unless the web server serves the challenge externally (web_redirect on
+	// the same port).
+	if m.dns == nil && !m.externalHTTP01 {
 		if err := m.Serve(); err != nil {
 			m.noteErr(err)
 			return err
@@ -350,6 +380,14 @@ func (m *Manager) Issue(ctx context.Context) error {
 	return nil
 }
 
+// notifyIssued fires OnIssued (wired in main to rebind listeners with the
+// fresh certificate). Called only after a successful issuance.
+func (m *Manager) notifyIssued() {
+	if m.OnIssued != nil {
+		m.OnIssued()
+	}
+}
+
 
 
 // NeedsRenewal reports whether the current certificate is missing, expired,
@@ -392,13 +430,29 @@ func (m *Manager) RunLoop(ctx context.Context) {
 	// the network.
 	go func() {
 		time.Sleep(2 * time.Second) // let listeners bind first
+		// Abort if the manager was stopped while we waited (e.g. ACME toggled
+		// off via a config reload during the startup window).
+		select {
+		case <-m.stopCh:
+			return
+		default:
+		}
 		if !m.NeedsRenewal() {
 			return
 		}
 		log.Printf("[acme] certificate missing or expiring soon — issuing")
 		if err := m.Issue(ctx); err != nil {
 			log.Printf("[acme] initial issuance failed: %v", err)
+			return
 		}
+		// Don't fire OnIssued if the manager was stopped while the issuance was
+		// in flight (e.g. ACME toggled off via reload during the startup window).
+		select {
+		case <-m.stopCh:
+			return
+		default:
+		}
+		m.notifyIssued()
 	}()
 	t := time.NewTicker(24 * time.Hour)
 	defer t.Stop()
@@ -407,13 +461,24 @@ func (m *Manager) RunLoop(ctx context.Context) {
 		case <-ctx.Done():
 			m.Stop()
 			return
+		case <-m.stopCh:
+			return
 		case <-t.C:
 			if !m.NeedsRenewal() {
 				continue
 			}
 			if err := m.Issue(ctx); err != nil {
 				log.Printf("[acme] renewal failed: %v", err)
+				continue
 			}
+			// Don't fire OnIssued if the manager was stopped while the issuance
+			// was in flight (e.g. ACME toggled off via reload mid-renewal).
+			select {
+			case <-m.stopCh:
+				return
+			default:
+			}
+			m.notifyIssued()
 		}
 	}
 }

@@ -12,6 +12,8 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -196,8 +198,26 @@ func main() {
 	apiApp.Handler = apiHandler
 
 	// ---- ACME (Let's Encrypt) auto-issuance ----
-	var acmeMgr *acme.Manager
-	if cfg.TLS.ACME.Enabled {
+	// startACME is callable at boot AND from the reload hook so toggling
+	// tls.acme.enabled in the dashboard takes effect without a restart.
+	// acmeMgr is an atomic pointer: the web_redirect handler reads it on
+	// every port-80 request while reload may swap it, so a plain variable
+	// would be a data race.
+	var acmeMgr atomic.Pointer[acme.Manager]
+	// acmeExternalHTTP01 remembers the ExternalHTTP01 mode the running
+	// manager was created with so a reload that toggles web_tls/web_redirect
+	// can recreate the manager instead of leaving a port-80 conflict.
+	acmeExternalHTTP01 := false
+	stopACME := func() {
+		if m := acmeMgr.Swap(nil); m != nil {
+			m.Stop()
+		}
+		apiHandler.ACME = nil
+	}
+	startACME := func() {
+		if !cfg.TLS.ACME.Enabled || acmeMgr.Load() != nil {
+			return
+		}
 		dnsProvider, err := acme.NewDNSProvider(
 			cfg.TLS.ACME.DNS01.Provider,
 			acme.DNSProviderConfig{
@@ -212,9 +232,22 @@ func main() {
 			time.Duration(cfg.TLS.ACME.DNS01.PropagationWait)*time.Second,
 		)
 		if err != nil {
-			log.Fatalf("acme: %v", err)
+			log.Printf("[acme] disabled: %v", err)
+			return
 		}
-		acmeMgr = acme.New(acme.Options{
+		// When web_redirect listens on the same port as the http-01 challenge,
+		// the redirect listener serves the challenge tokens itself so the
+		// manager must not bind a second listener on that port.
+		httpPort := cfg.TLS.ACME.HTTP01Port
+		if httpPort == 0 {
+			httpPort = 80
+		}
+		redirectPort := cfg.Server.WebRedirectPort
+		if redirectPort == 0 {
+			redirectPort = 80
+		}
+		acmeExternalHTTP01 = cfg.Server.WebTLS && cfg.Server.WebRedirect && redirectPort == httpPort
+		m := acme.New(acme.Options{
 			Email:           cfg.TLS.ACME.Email,
 			Domains:         cfg.TLS.ACME.Domains,
 			CertDir:         cfg.TLS.CertDir,
@@ -223,13 +256,16 @@ func main() {
 			RenewBeforeDays: cfg.TLS.ACME.RenewBeforeDays,
 			DNS:             dnsProvider,
 			DNSProvider:     cfg.TLS.ACME.DNS01.Provider,
+			ExternalHTTP01:  acmeExternalHTTP01,
 		})
-		apiHandler.ACME = acmeMgr
+		acmeMgr.Store(m)
+		apiHandler.ACME = m
 		if cfg.TLS.CertDir == "" {
 			cfg.TLS.CertDir = "data/certs"
 		}
-		go acmeMgr.RunLoop(ctx)
+		go m.RunLoop(ctx)
 	}
+	startACME()
 
 	// ---- web server (dashboard + API) ----
 	webSrv := &http.Server{
@@ -241,6 +277,9 @@ func main() {
 	// Track the TLS mode of the currently running web server so toggling
 	// web_tls without changing the address also triggers a rebind.
 	webTLSServing := cfg.Server.WebTLS
+	// webMu serialises web-server rebinding between the ACME RunLoop goroutine
+	// (OnIssued) and the config reload hook, which both swap webSrv.
+	var webMu sync.Mutex
 	startWebServer := func(srv *http.Server, useTLS bool) {
 		if useTLS {
 			// Serve the dashboard + API over HTTPS with the same cert that
@@ -302,9 +341,17 @@ func main() {
 			return
 		}
 		host, httpsPort := hostOnly(cfg.Server.WebListen), webTLSPort(cfg.Server.WebListen)
+		// When web_redirect shares the http-01 challenge port, serve the ACME
+		// challenge tokens on this same listener instead of redirecting them.
+		redirect := httpsRedirect(httpsPort)
 		ns := &http.Server{
-			Addr:    addr,
-			Handler: http.HandlerFunc(httpsRedirect(httpsPort)),
+			Addr: addr,
+			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if m := acmeMgr.Load(); m != nil && m.HandleChallenge(w, r) {
+					return
+				}
+				redirect(w, r)
+			}),
 		}
 		redirectSrv = ns
 		go func() {
@@ -338,32 +385,45 @@ func main() {
 
 	// After an ACME issuance/renewal, rebind the listeners + web server with
 	// the fresh certificate. Wrap the base ReloadTLS (captured first) so the
-	// ACME path also restarts an HTTPS web server.
-	if acmeMgr != nil {
-		baseReloadTLS := apiHandler.ReloadTLS
-		apiHandler.ReloadTLS = func() error {
-			if err := baseReloadTLS(); err != nil {
-				return err
+	// ACME path also restarts an HTTPS web server. Wired unconditionally (not
+	// gated on acmeMgr) because startACME may create the manager later via a
+	// config reload.
+	//
+	// webMu serialises web-server rebinding between the ACME RunLoop goroutine
+	// (OnIssued) and the config reload hook, which both swap webSrv.
+	baseReloadTLS := apiHandler.ReloadTLS
+	apiHandler.ReloadTLS = func() error {
+		if err := baseReloadTLS(); err != nil {
+			return err
+		}
+		// Rebind the web server too if it runs on HTTPS.
+		if cfg.Server.WebTLS {
+			webMu.Lock()
+			oldWeb := webSrv
+			newWeb := &http.Server{
+				Addr:         cfg.Server.WebListen,
+				Handler:      api.NewRouter(apiApp),
+				ReadTimeout:  30 * time.Second,
+				WriteTimeout: 30 * time.Second,
 			}
-			// Rebind the web server too if it runs on HTTPS.
-			if cfg.Server.WebTLS {
-				oldWeb := webSrv
-				newWeb := &http.Server{
-					Addr:         cfg.Server.WebListen,
-					Handler:      api.NewRouter(apiApp),
-					ReadTimeout:  30 * time.Second,
-					WriteTimeout: 30 * time.Second,
-				}
-				webSrv = newWeb
-				webTLSServing = true
-				go func() {
-					time.Sleep(200 * time.Millisecond)
-					_ = oldWeb.Shutdown(context.Background())
-					startWebServer(newWeb, true)
-				}()
-				startRedirect()
+			webSrv = newWeb
+			webTLSServing = true
+			webMu.Unlock()
+			go func() {
+				time.Sleep(200 * time.Millisecond)
+				_ = oldWeb.Shutdown(context.Background())
+				startWebServer(newWeb, true)
+			}()
+			startRedirect()
+		}
+		return nil
+	}
+	// After a successful ACME issuance, rebind everything with the new cert.
+	if m := acmeMgr.Load(); m != nil {
+		m.OnIssued = func() {
+			if err := apiHandler.ReloadTLS(); err != nil {
+				log.Printf("[acme] reload after issuance: %v", err)
 			}
-			return nil
 		}
 	}
 
@@ -425,7 +485,10 @@ func main() {
 		//    is run in a goroutine: calling Shutdown synchronously from inside
 		//    a request served by the same server would wait on the in-flight
 		//    handler and deadlock, and the delay lets the reload flush first.
-		if webSrv.Addr != cfg.Server.WebListen || webTLSServing != cfg.Server.WebTLS {
+		webMu.Lock()
+		addrChanged := webSrv.Addr != cfg.Server.WebListen
+		tlsChanged := webTLSServing != cfg.Server.WebTLS
+		if addrChanged || tlsChanged {
 			oldWeb := webSrv
 			newWeb := &http.Server{
 				Addr:         cfg.Server.WebListen,
@@ -436,11 +499,45 @@ func main() {
 			webSrv = newWeb
 			webTLSServing = cfg.Server.WebTLS
 			useTLS := webTLSServing
+			webMu.Unlock()
 			go func() {
 				time.Sleep(200 * time.Millisecond) // let the reload response flush
 				_ = oldWeb.Shutdown(context.Background())
 				startWebServer(newWeb, useTLS)
 			}()
+		} else {
+			webMu.Unlock()
+		}
+		// 7. Start/stop the ACME manager to match the new config: toggling
+		//    tls.acme.enabled in the dashboard takes effect without a restart.
+		if cfg.TLS.ACME.Enabled {
+			// If the web_tls/web_redirect/port combination that decides
+			// ExternalHTTP01 changed, recreate the manager so it doesn't keep
+			// a stale challenge-listener arrangement (e.g. both listeners
+			// fighting for port 80).
+			httpPort := cfg.TLS.ACME.HTTP01Port
+			if httpPort == 0 {
+				httpPort = 80
+			}
+			redirectPort := cfg.Server.WebRedirectPort
+			if redirectPort == 0 {
+				redirectPort = 80
+			}
+			wantExternal := cfg.Server.WebTLS && cfg.Server.WebRedirect && redirectPort == httpPort
+			if wantExternal != acmeExternalHTTP01 {
+				stopACME()
+				acmeExternalHTTP01 = wantExternal
+			}
+			startACME()
+			if m := acmeMgr.Load(); m != nil && m.OnIssued == nil {
+				m.OnIssued = func() {
+					if err := apiHandler.ReloadTLS(); err != nil {
+						log.Printf("[acme] reload after issuance: %v", err)
+					}
+				}
+			}
+		} else {
+			stopACME()
 		}
 		// Re-evaluate the HTTP->HTTPS redirect listener on every reload: it
 		// starts/stops/keeps itself based on the new web_tls/web_redirect config.
@@ -471,7 +568,10 @@ func main() {
 	defer cancel()
 	dnsMgr.Shutdown(shutdownCtx)
 	tunnelMgr.Stop()
-	_ = webSrv.Shutdown(shutdownCtx)
+	webMu.Lock()
+	currentWeb := webSrv
+	webMu.Unlock()
+	_ = currentWeb.Shutdown(shutdownCtx)
 	ql.Close()
 	log.Printf("bye")
 }

@@ -24,7 +24,7 @@ func TestChallengeHandler(t *testing.T) {
 	m := New(Options{Email: "a@b.c", Domains: []string{"example.com"}, CertDir: t.TempDir()})
 	m.setToken("tok123", "resp456")
 
-	srv := httptest.NewServer(http.HandlerFunc(m.handleChallenge))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { m.HandleChallenge(w, r) }))
 	defer srv.Close()
 
 	resp, err := http.Get(srv.URL + "/.well-known/acme-challenge/tok123")
@@ -47,7 +47,11 @@ func TestChallengeHandler(t *testing.T) {
 
 func TestChallengeHandlerWrongPath(t *testing.T) {
 	m := New(Options{Email: "a@b.c", Domains: []string{"example.com"}, CertDir: t.TempDir()})
-	srv := httptest.NewServer(http.HandlerFunc(m.handleChallenge))
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !m.HandleChallenge(w, r) {
+			http.NotFound(w, r)
+		}
+	}))
 	defer srv.Close()
 	resp, _ := http.Get(srv.URL + "/")
 	if resp.StatusCode != http.StatusNotFound {
