@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+
+# Runtime-only image used by the release pipeline.
+#
+# The workflow cross-compiles irongrid-linux-<arch> natively (fast) in an
+# earlier step, so this file does NOT compile Go inside the container —
+# it just packages the prebuilt static binary into a minimal alpine image.
+# This avoids running the (huge, cloudflared-heavy) Go build under QEMU
+# emulation, which is what made the old multi-arch image build take ~10 min.
+#
+# The full self-contained build (for `docker compose build` locally) remains
+# in the Dockerfile in this directory.
+
+FROM alpine:3.20
+RUN apk add --no-cache ca-certificates tzdata && \
+    adduser -D -u 1000 irongrid && \
+    mkdir -p /data/lists /data/certs && chown -R irongrid /data
+USER irongrid
+WORKDIR /app
+
+# TARGETARCH is a BuildKit built-in (amd64/arm64); the release workflow
+# builds with a dedicated context directory containing the prebuilt
+# irongrid-linux-<arch> binaries.
+ARG TARGETARCH
+COPY irongrid-linux-${TARGETARCH} /app/irongrid
+
+EXPOSE 53/udp 53/tcp 853/tcp 853/udp 443/tcp 8080/tcp
+ENTRYPOINT ["/app/irongrid"]
+CMD ["-config", "/app/irongrid.yaml", "-data", "/data"]
