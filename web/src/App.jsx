@@ -264,8 +264,11 @@ function Login({ onLogin, notice }) {
     e.preventDefault()
     try {
       await onLogin(user, pass)
-    } catch {
-      setErr('Invalid credentials')
+    } catch (err) {
+      // A plain 401 throws the sentinel message "unauthorized" — keep the
+      // friendlier generic copy for that case, but surface anything more
+      // specific (e.g. the login-lockout message) as-is.
+      setErr(err.message && err.message !== 'unauthorized' ? err.message : 'Invalid credentials')
     }
   }
 

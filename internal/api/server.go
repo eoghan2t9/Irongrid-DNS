@@ -40,6 +40,14 @@ type App struct {
 	WebFS      fs.FS // embedded frontend build
 	ConfigPath string
 	SaveConfig func() error
+
+	// loginGuard throttles failed login attempts; lazily created on first
+	// use so callers don't need to wire it up, and preserved across the
+	// several NewRouter calls a config/TLS reload triggers over the
+	// process's life (re-creating it on every reload would silently clear
+	// an active lockout).
+	loginGuardOnce sync.Once
+	loginGuard     *LoginGuard
 }
 
 // APIHandler is implemented by the API to reach into the running services.
@@ -102,10 +110,29 @@ func (a *App) authorize(w http.ResponseWriter, r *http.Request) bool {
 	if a.validSession(r, username, secret) {
 		return true
 	}
+
+	a.loginGuardOnce.Do(func() { a.loginGuard = NewLoginGuard() })
+	client := clientIPFromRequest(r)
+	if locked, remaining := a.loginGuard.Locked(client); locked {
+		w.Header().Set("Retry-After", strconv.Itoa(int(remaining.Seconds())+1))
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{
+			"error": fmt.Sprintf("too many failed login attempts — try again in %d minutes", int(remaining.Minutes())+1),
+		})
+		return false
+	}
+
 	user, pass, ok := r.BasicAuth()
 	if ok && user == username && passwordMatches(pass, password) {
+		a.loginGuard.RecordSuccess(client)
 		a.issueSessionWith(w, user, secret, secure)
 		return true
+	}
+	// Only count requests that actually presented credentials — background
+	// polling from a tab whose session expired sends no Authorization
+	// header at all and isn't a password guess, so it must not consume the
+	// same budget as a real wrong-password attempt.
+	if ok {
+		a.loginGuard.RecordFailure(client)
 	}
 	// No WWW-Authenticate header on purpose: the dashboard has its own login
 	// form (Basic auth + signed cookie) and never relies on the browser's
