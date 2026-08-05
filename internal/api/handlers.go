@@ -18,6 +18,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/eoghan2t9/Irongrid-DNS/internal/acme"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/catalog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cert"
@@ -45,6 +46,12 @@ type Handler struct {
 	// (DoT/DoH/DoQ + plain). Used after the dashboard generates or uploads a
 	// certificate, without touching the cache or upstreams.
 	ReloadTLS func() error
+	// ACME is the Let's Encrypt manager; nil when disabled.
+	ACME interface {
+		GetStatus() acme.Status
+		ForceIssue(context.Context) error
+		NeedsRenewal() bool
+	}
 
 	Engine    *filter.Engine
 	Lists     *filter.ListManager
@@ -130,6 +137,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.uploadTLS(w, r)
 	case len(parts) == 2 && parts[0] == "tls" && parts[1] == "cert" && r.Method == http.MethodGet:
 		h.downloadCert(w)
+	case len(parts) == 3 && parts[0] == "tls" && parts[1] == "acme" && parts[2] == "issue" && r.Method == http.MethodPost:
+		h.issueACME(ctx, w)
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 	}
@@ -533,6 +542,7 @@ type serverPayload struct {
 	ListenDoQ  string `json:"listen_doq"`
 	DoHPath    string `json:"doh_path"`
 	WebListen  string `json:"web_listen"`
+	WebTLS     bool   `json:"web_tls"`
 	TimeoutSec int    `json:"timeout_sec"`
 }
 
@@ -545,11 +555,21 @@ type cachePayload struct {
 }
 
 type tlsPayload struct {
-	CertFile           string   `json:"cert_file"`
-	KeyFile            string   `json:"key_file"`
-	GenerateSelfSigned bool     `json:"generate_self_signed"`
-	SelfSignedHosts    []string `json:"self_signed_hosts"`
-	CertDir            string   `json:"cert_dir"`
+	CertFile           string      `json:"cert_file"`
+	KeyFile            string      `json:"key_file"`
+	GenerateSelfSigned bool        `json:"generate_self_signed"`
+	SelfSignedHosts    []string    `json:"self_signed_hosts"`
+	CertDir            string      `json:"cert_dir"`
+	ACME               acmePayload `json:"acme"`
+}
+
+type acmePayload struct {
+	Enabled         bool     `json:"enabled"`
+	Email           string   `json:"email"`
+	Domains         []string `json:"domains"`
+	Staging         bool     `json:"staging"`
+	HTTP01Port      int      `json:"http01_port"`
+	RenewBeforeDays int      `json:"renew_before_days"`
 }
 
 type filterPayload struct {
@@ -599,6 +619,7 @@ func payloadFromConfig(c *config.Config) configPayload {
 			ListenDoQ:  c.Server.ListenDoQ,
 			DoHPath:    c.Server.DoHPath,
 			WebListen:  c.Server.WebListen,
+			WebTLS:     c.Server.WebTLS,
 			TimeoutSec: c.Server.TimeoutSec,
 		},
 		Upstreams: c.Upstreams,
@@ -615,6 +636,14 @@ func payloadFromConfig(c *config.Config) configPayload {
 			GenerateSelfSigned: c.TLS.GenerateSelfSigned,
 			SelfSignedHosts:    c.TLS.SelfSignedHosts,
 			CertDir:            c.TLS.CertDir,
+			ACME: acmePayload{
+				Enabled:         c.TLS.ACME.Enabled,
+				Email:           c.TLS.ACME.Email,
+				Domains:         c.TLS.ACME.Domains,
+				Staging:         c.TLS.ACME.Staging,
+				HTTP01Port:      c.TLS.ACME.HTTP01Port,
+				RenewBeforeDays: c.TLS.ACME.RenewBeforeDays,
+			},
 		},
 		Filter: filterPayload{
 			BlockResponse: c.Filter.BlockResponse,
@@ -682,6 +711,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			ListenDoQ:  p.Server.ListenDoQ,
 			DoHPath:    p.Server.DoHPath,
 			WebListen:  p.Server.WebListen,
+			WebTLS:     p.Server.WebTLS,
 			TimeoutSec: p.Server.TimeoutSec,
 		},
 		Upstreams: p.Upstreams,
@@ -698,6 +728,14 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			GenerateSelfSigned: p.TLS.GenerateSelfSigned,
 			SelfSignedHosts:    p.TLS.SelfSignedHosts,
 			CertDir:            p.TLS.CertDir,
+			ACME: config.ACMEConfig{
+				Enabled:         p.TLS.ACME.Enabled,
+				Email:           p.TLS.ACME.Email,
+				Domains:         p.TLS.ACME.Domains,
+				Staging:         p.TLS.ACME.Staging,
+				HTTP01Port:      p.TLS.ACME.HTTP01Port,
+				RenewBeforeDays: p.TLS.ACME.RenewBeforeDays,
+			},
 		},
 		Filter: config.FilterConfig{
 			BlockResponse: p.Filter.BlockResponse,
@@ -855,8 +893,11 @@ type tlsStatus struct {
 	CertDir            string   `json:"cert_dir"`
 	GenerateSelfSigned bool     `json:"generate_self_signed"`
 	SelfSignedHosts    []string `json:"self_signed_hosts"`
+	WebTLS             bool     `json:"web_tls"`
 	// Info is nil when no certificate exists yet.
 	Info *cert.Info `json:"info"`
+	// ACME status; nil when disabled.
+	ACME *acme.Status `json:"acme,omitempty"`
 }
 
 func (h *Handler) tlsStatus() tlsStatus {
@@ -865,7 +906,7 @@ func (h *Handler) tlsStatus() tlsStatus {
 	if info != nil && !info.Present {
 		info = nil
 	}
-	return tlsStatus{
+	ts := tlsStatus{
 		Listeners: map[string]bool{
 			"dot": s.ListenDoT != "",
 			"doh": s.ListenDoH != "",
@@ -876,8 +917,14 @@ func (h *Handler) tlsStatus() tlsStatus {
 		CertDir:            h.Cfg.TLS.CertDir,
 		GenerateSelfSigned: h.Cfg.TLS.GenerateSelfSigned,
 		SelfSignedHosts:    h.Cfg.TLS.SelfSignedHosts,
+		WebTLS:             h.Cfg.Server.WebTLS,
 		Info:               info,
 	}
+	if h.ACME != nil {
+		st := h.ACME.GetStatus()
+		ts.ACME = &st
+	}
+	return ts
 }
 
 func (h *Handler) getTLS(w http.ResponseWriter) {
@@ -995,6 +1042,29 @@ func (h *Handler) uploadTLS(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "applied": applied, "apply_error": applyErr,
 		"status": h.tlsStatus(),
+	})
+}
+
+// issueACME triggers an immediate Let's Encrypt issuance/renewal.
+func (h *Handler) issueACME(ctx context.Context, w http.ResponseWriter) {
+	if h.ACME == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ACME is not enabled — set tls.acme in the config"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	if err := h.ACME.ForceIssue(ctx); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	// New cert on disk: rebind listeners and the web server with it.
+	h.cfgMu.Lock()
+	applied, applyErr := h.applyTLSReload()
+	h.cfgMu.Unlock()
+	st := h.ACME.GetStatus()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok": true, "applied": applied, "apply_error": applyErr,
+		"status": h.tlsStatus(), "acme": st,
 	})
 }
 

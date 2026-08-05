@@ -102,6 +102,8 @@ platform (systemd / launchd / Windows service / Docker).
 | 🪵 **Full query log** | Every allowed/blocked/cached request with client, reason, upstream, latency — stored in pure-Go SQLite |
 | 📊 **Dashboard** | Modern React UI: live stats, protocol breakdown, top blocked domains, log explorer, live config editing |
 | 🔄 **Built-in updater** | Checks GitHub Releases, pops up the changelog, offers the download |
+| 🔐 **TLS manager** | In-dashboard certificate management: view, generate self-signed, upload CA certs, download — applied live to DoT/DoH/DoQ |
+| 🪪 **Let's Encrypt (ACME)** | Zero-config auto-issuance + renewal for your domains via HTTP-01, or run the dashboard itself over HTTPS (`web_tls`) |
 | 🔗 **Cloudflare Tunnel** | cloudflared compiled **into the binary** (imported as Go modules) — no external install, managed from the dashboard |
 | 📱 **Android Private DNS** | DoT/DoH on your own domain via the tunnel, with auto-generated or custom TLS certificates |
 | 🐳 **Cross-platform** | Linux, macOS, Windows (single static binary) plus Docker + Dragonfly Compose |
@@ -287,6 +289,8 @@ written automatically on first launch. Key options:
 | `filter.whitelist` | Always-allow entries (override blocklists, incl. IPs) |
 | `filter.block_response` | `nxdomain`, `refused`, or a blackhole IP like `0.0.0.0` |
 | `tls.cert_file/key_file` | Your Let's Encrypt / CA cert for DoT/DoH/DoQ (else self-signed) |
+| `tls.acme` | Automatic Let's Encrypt issuance: `enabled`, `email`, `domains`, `staging`, `http01_port` |
+| `server.web_tls` | Serve the dashboard + API over HTTPS using the same TLS certificate |
 | `tunnel` | Baked-in cloudflared settings |
 
 ## Cloudflare Tunnel (baked in)
@@ -306,8 +310,15 @@ tunnel:
 
 1. Create a tunnel in Cloudflare Zero Trust, copy its token into the Tunnel page, start it.
 2. Route your hostname (`dns.example.com`) to `https://localhost:443` (your DoH listener) or `tls://localhost:853`.
-3. Obtain a real certificate for `dns.example.com` (e.g. Let's Encrypt) and set `tls.cert_file`/`tls.key_file`.
+3. Get a trusted certificate for `dns.example.com` — either:
+   - **Automatic**: enable `tls.acme` in the config or via the **TLS** page in the dashboard. Irongrid
+     obtains a Let's Encrypt certificate for you (HTTP-01 on port 80 — point `dns.example.com` at this
+     server first) and renews it automatically.
+   - **Manual**: set `tls.cert_file`/`tls.key_file` to your Let's Encrypt / CA cert.
 4. On your phone: **Settings → Network & internet → Private DNS → Private DNS provider hostname** → `dns.example.com`.
+
+To verify the certificate is trusted, download it from the TLS page (`GET /api/tls/cert`) and check its
+issuer — a Let's Encrypt chain means phones will accept it without extra steps.
 
 ## API
 
@@ -333,7 +344,33 @@ GET  /api/tls               current certificate details (subject, SANs, expiry, 
 POST /api/tls/generate      generate a self-signed cert (hosts, key type/bits, validity) and apply it
 POST /api/tls/upload        upload a CA-signed cert + key pair and apply it
 GET  /api/tls/cert          download the active certificate (for clients to trust)
+POST /api/tls/acme/issue    trigger an immediate Let's Encrypt issuance/renewal (HTTP-01)
 ```
+
+### TLS config reference
+
+```yaml
+server:
+  web_tls: false            # serve the dashboard + API over HTTPS (uses the TLS cert)
+
+tls:
+  cert_file: ""            # CA-signed cert (PEM); empty = use cert_dir/cert.pem
+  key_file: ""             # matching private key (PEM)
+  generate_self_signed: true
+  self_signed_hosts: ["localhost", "dns.example.com"]
+  cert_dir: data/certs     # where cert.pem/key.pem (and the ACME account key) live
+  acme:
+    enabled: false
+    email: "you@example.com"       # required for Let's Encrypt registration
+    domains: ["dns.example.com"]   # must point at this server (HTTP-01 on port 80)
+    staging: false                  # true = test with the Let's Encrypt staging CA
+    http01_port: 80                 # port the HTTP-01 challenge listener binds
+    renew_before_days: 30           # renew when < 30 days remain
+```
+
+The **TLS** page in the dashboard wraps all of this: view the current certificate (SANs, expiry,
+fingerprint), generate or upload one, trigger ACME issuance, and download the cert for clients. When
+`web_tls` is enabled the whole dashboard runs on `https://<host>:<web_listen>`.
 
 ## Development
 

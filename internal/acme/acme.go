@@ -1,0 +1,433 @@
+// Package acme implements automatic TLS certificate issuance from Let's
+// Encrypt (or another RFC 8555 ACME CA) using the HTTP-01 challenge, plus
+// background renewal. It stores issued certificates as cert.pem/key.pem in
+// the configured cert dir, exactly where the rest of Irongrid expects them.
+package acme
+
+import (
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"fmt"
+	"log"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/crypto/acme"
+)
+
+const (
+	// LetsEncryptProd is the production ACME directory URL.
+	LetsEncryptProd = "https://acme-v02.api.letsencrypt.org/directory"
+	// LetsEncryptStaging issues test certificates (untrusted by clients).
+	LetsEncryptStaging = "https://acme-staging-v02.api.letsencrypt.org/directory"
+)
+
+// Manager issues and renews certificates for the configured domains.
+type Manager struct {
+	mu       sync.Mutex
+	email    string
+	domains  []string
+	dir      string
+	staging  bool
+	httpPort int
+	renewIn  time.Duration
+
+	// tokenHandler is installed by Serve: it answers /.well-known/acme-challenge/<token>.
+	tokens   map[string]string
+	tokensMu sync.Mutex
+	srv      *http.Server
+	ln       net.Listener
+
+	// Status mirrors the last issuance/renewal attempt for the dashboard.
+	Status Status
+}
+
+// Status is the public state of the ACME manager.
+type Status struct {
+	Enabled       bool      `json:"enabled"`
+	Email         string    `json:"email"`
+	Domains       []string  `json:"domains"`
+	Staging       bool      `json:"staging"`
+	LastAttempt   time.Time `json:"last_attempt"`
+	LastSuccess   time.Time `json:"last_success"`
+	LastError     string    `json:"last_error,omitempty"`
+	NextRenewal   time.Time `json:"next_renewal,omitempty"`
+	ChallengePort int       `json:"challenge_port"`
+	Running       bool      `json:"running"`
+}
+
+// Options configures a Manager.
+type Options struct {
+	Email      string
+	Domains    []string
+	CertDir    string
+	Staging    bool
+	HTTP01Port int
+	RenewBeforeDays int
+}
+
+// New creates a Manager. The HTTP-01 challenge server is not started until
+// Serve is called (called by the server when ACME is enabled).
+func New(o Options) *Manager {
+	if o.HTTP01Port == 0 {
+		o.HTTP01Port = 80
+	}
+	if o.RenewBeforeDays <= 0 {
+		o.RenewBeforeDays = 30
+	}
+	renewIn := time.Duration(o.RenewBeforeDays) * 24 * time.Hour
+	m := &Manager{
+		email:    o.Email,
+		domains:  append([]string(nil), o.Domains...),
+		dir:      o.CertDir,
+		staging:  o.Staging,
+		httpPort: o.HTTP01Port,
+		renewIn:  renewIn,
+		tokens:   map[string]string{},
+	}
+	m.Status.Enabled = true
+	m.Status.Email = o.Email
+	m.Status.Domains = m.domains
+	m.Status.Staging = o.Staging
+	m.Status.ChallengePort = o.HTTP01Port
+	return m
+}
+
+// Dir returns the certificate directory.
+func (m *Manager) Dir() string { return m.dir }
+
+// Serve starts the HTTP-01 challenge listener on the configured port. It is
+// only needed while an order is being validated, but the listener is kept up
+// for the lifetime of the process so renewals work unattended.
+func (m *Manager) Serve() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.srv != nil {
+		return nil
+	}
+	addr := fmt.Sprintf(":%d", m.httpPort)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("acme: cannot listen on %s for the HTTP-01 challenge (Let's Encrypt validates your domain on port 80): %w", addr, err)
+	}
+	m.ln = ln
+	m.srv = &http.Server{Handler: http.HandlerFunc(m.handleChallenge)}
+	go func() {
+		if err := m.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			log.Printf("[acme] challenge server on %s stopped: %v", addr, err)
+		}
+	}()
+	m.Status.Running = true
+	return nil
+}
+
+// Stop shuts the challenge listener down.
+func (m *Manager) Stop() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.srv != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		_ = m.srv.Shutdown(ctx)
+		cancel()
+		m.srv = nil
+	}
+	m.Status.Running = false
+}
+
+func (m *Manager) handleChallenge(w http.ResponseWriter, r *http.Request) {
+	const prefix = "/.well-known/acme-challenge/"
+	if !strings.HasPrefix(r.URL.Path, prefix) {
+		http.NotFound(w, r)
+		return
+	}
+	token := strings.TrimPrefix(r.URL.Path, prefix)
+	m.tokensMu.Lock()
+	val, ok := m.tokens[token]
+	m.tokensMu.Unlock()
+	if !ok {
+		http.NotFound(w, r)
+		return
+	}
+	w.Header().Set("Content-Type", "text/plain")
+	fmt.Fprint(w, val)
+}
+
+// setToken registers an http-01 response for the challenge server.
+func (m *Manager) setToken(token, value string) {
+	m.tokensMu.Lock()
+	m.tokens[token] = value
+	m.tokensMu.Unlock()
+}
+
+// clearTokens removes stale challenge tokens.
+func (m *Manager) clearTokens() {
+	m.tokensMu.Lock()
+	m.tokens = map[string]string{}
+	m.tokensMu.Unlock()
+}
+
+// Issue runs a full ACME order for the configured domains and writes the
+// resulting certificate chain to cert.pem/key.pem in the cert dir. It is safe
+// to call repeatedly (renewal does the same thing).
+func (m *Manager) Issue(ctx context.Context) error {
+	m.mu.Lock()
+	m.Status.LastAttempt = time.Now()
+	m.Status.LastError = ""
+	m.mu.Unlock()
+
+	if err := m.Serve(); err != nil {
+		m.noteErr(err)
+		return err
+	}
+
+	dirURL := LetsEncryptProd
+	if m.staging {
+		dirURL = LetsEncryptStaging
+	}
+	client := &acme.Client{
+		Key:          mustAccountKey(m),
+		DirectoryURL: dirURL,
+	}
+
+	// 1. Register the account (idempotent).
+	acct := &acme.Account{Contact: []string{"mailto:" + m.email}}
+	acct, err := client.Register(ctx, acct, acme.AcceptTOS)
+	if err != nil {
+		// ErrAccountAlreadyExists is fine: we can proceed with the existing account.
+		if err != acme.ErrAccountAlreadyExists {
+			m.noteErr(fmt.Errorf("register ACME account: %w", err))
+			return fmt.Errorf("acme: register account: %w", err)
+		}
+	}
+
+	// 2. Create an order for all domains.
+	order, err := client.AuthorizeOrder(ctx, acme.DomainIDs(m.domains...))
+	if err != nil {
+		m.noteErr(fmt.Errorf("create order: %w", err))
+		return fmt.Errorf("acme: create order: %w", err)
+	}
+
+	// 3. Fulfil the http-01 challenge for each pending authorization.
+	m.clearTokens()
+	for _, authzURL := range order.AuthzURLs {
+		authz, err := client.GetAuthorization(ctx, authzURL)
+		if err != nil {
+			m.noteErr(fmt.Errorf("get authorization: %w", err))
+			return err
+		}
+		if authz.Status == acme.StatusValid {
+			continue // already validated (renewal)
+		}
+		var chal *acme.Challenge
+		for _, c := range authz.Challenges {
+			if c.Type == "http-01" {
+				chal = c
+				break
+			}
+		}
+		if chal == nil {
+			m.noteErr(fmt.Errorf("no http-01 challenge offered for %s", authz.Identifier.Value))
+			return fmt.Errorf("acme: CA did not offer http-01 challenge for %s", authz.Identifier.Value)
+		}
+		resp, err := client.HTTP01ChallengeResponse(chal.Token)
+		if err != nil {
+			m.noteErr(err)
+			return err
+		}
+		m.setToken(chal.Token, resp)
+		if _, err := client.Accept(ctx, chal); err != nil {
+			m.noteErr(fmt.Errorf("accept challenge: %w", err))
+			return err
+		}
+		if _, err := client.WaitAuthorization(ctx, authzURL); err != nil {
+			m.noteErr(fmt.Errorf("wait for authorization of %s: %w", authz.Identifier.Value, err))
+			return err
+		}
+	}
+
+	// 4. Build a CSR and finalize the order.
+	csr, keyPEM, err := makeCSR(m.domains)
+	if err != nil {
+		m.noteErr(err)
+		return err
+	}
+	der, _, err := client.CreateOrderCert(ctx, order.FinalizeURL, csr, true)
+	if err != nil {
+		m.noteErr(fmt.Errorf("finalize order: %w", err))
+		return err
+	}
+	if len(der) == 0 {
+		m.noteErr(fmt.Errorf("CA returned no certificate"))
+		return fmt.Errorf("acme: CA returned no certificate")
+	}
+
+	// 5. Persist cert chain + key.
+	certPEM := make([]byte, 0, 4096)
+	for _, d := range der {
+		certPEM = append(certPEM, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: d})...)
+	}
+	if err := os.MkdirAll(m.dir, 0o755); err != nil {
+		m.noteErr(err)
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(m.dir, "cert.pem"), certPEM, 0o644); err != nil {
+		m.noteErr(err)
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(m.dir, "key.pem"), keyPEM, 0o600); err != nil {
+		m.noteErr(err)
+		return err
+	}
+
+	m.mu.Lock()
+	m.Status.LastSuccess = time.Now()
+	m.Status.LastError = ""
+	m.Status.NextRenewal = time.Now().Add(m.renewIn)
+	m.mu.Unlock()
+	log.Printf("[acme] certificate issued for %v -> %s", m.domains, m.dir)
+	return nil
+}
+
+// NeedsRenewal reports whether the current certificate is missing, expired,
+// within the renewal window, or does not cover every configured ACME domain
+// (e.g. only a self-signed fallback exists).
+func (m *Manager) NeedsRenewal() bool {
+	cert, err := tls.LoadX509KeyPair(
+		filepath.Join(m.dir, "cert.pem"),
+		filepath.Join(m.dir, "key.pem"),
+	)
+	if err != nil {
+		return true
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		return true
+	}
+	// The startup self-signed fallback must be replaced even if it happens
+	// to cover the domain names (issuer == subject is the self-signed mark).
+	if leaf.Issuer.CommonName == leaf.Subject.CommonName {
+		return true
+	}
+	// A cert that doesn't cover the ACME domains must be replaced.
+	covered := map[string]bool{}
+	for _, d := range leaf.DNSNames {
+		covered[strings.ToLower(d)] = true
+	}
+	for _, d := range m.domains {
+		if !covered[strings.ToLower(d)] {
+			return true
+		}
+	}
+	return time.Until(leaf.NotAfter) < m.renewIn
+}
+
+// RunLoop renews on start when needed and then on a fixed daily schedule until
+// ctx is cancelled.
+func (m *Manager) RunLoop(ctx context.Context) {
+	// Initial issuance/renewal in the background so startup isn't blocked on
+	// the network.
+	go func() {
+		time.Sleep(2 * time.Second) // let listeners bind first
+		if !m.NeedsRenewal() {
+			return
+		}
+		log.Printf("[acme] certificate missing or expiring soon — issuing")
+		if err := m.Issue(ctx); err != nil {
+			log.Printf("[acme] initial issuance failed: %v", err)
+		}
+	}()
+	t := time.NewTicker(24 * time.Hour)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			m.Stop()
+			return
+		case <-t.C:
+			if !m.NeedsRenewal() {
+				continue
+			}
+			if err := m.Issue(ctx); err != nil {
+				log.Printf("[acme] renewal failed: %v", err)
+			}
+		}
+	}
+}
+
+func (m *Manager) noteErr(err error) {
+	m.mu.Lock()
+	m.Status.LastError = err.Error()
+	m.mu.Unlock()
+}
+
+// GetStatus returns a copy of the manager status.
+func (m *Manager) GetStatus() Status {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.Status
+}
+
+// accountKeyPath is where the ACME account key is persisted so renewals reuse
+// the same account.
+func (m *Manager) accountKeyPath() string {
+	return filepath.Join(m.dir, "acme-account.key")
+}
+
+func mustAccountKey(m *Manager) *ecdsa.PrivateKey {
+	path := m.accountKeyPath()
+	if data, err := os.ReadFile(path); err == nil {
+		if block, _ := pem.Decode(data); block != nil {
+			if k, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+				return k
+			}
+		}
+	}
+	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	der, err := x509.MarshalECPrivateKey(k)
+	if err == nil {
+		_ = os.MkdirAll(filepath.Dir(path), 0o755)
+		_ = os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600)
+	}
+	return k
+}
+
+// makeCSR builds a CSR for the given domains and returns it plus the key PEM.
+func makeCSR(domains []string) ([]byte, []byte, error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
+	tmpl := &x509.CertificateRequest{
+		Subject:  pkix.Name{CommonName: domains[0]},
+		DNSNames: domains,
+	}
+	csrDER, err := x509.CreateCertificateRequest(rand.Reader, tmpl, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		return nil, nil, err
+	}
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return csrDER, keyPEM, nil
+}
+
+// ForceIssue is used by the API to trigger an immediate issuance.
+func (m *Manager) ForceIssue(ctx context.Context) error {
+	return m.Issue(ctx)
+}

@@ -5,6 +5,7 @@ const fmt = (n) => (n ?? 0).toLocaleString()
 
 export default function Dashboard({ onNavigate }) {
   const [stats, setStats] = useState(null)
+  const [tls, setTls] = useState(null)
   const [error, setError] = useState('')
 
   const load = useCallback(async () => {
@@ -13,11 +14,14 @@ export default function Dashboard({ onNavigate }) {
     } catch (e) {
       setError(e.message)
     }
+    try {
+      setTls(await api.tlsStatus())
+    } catch { /* optional */ }
   }, [])
 
   useEffect(() => {
     load()
-    const t = setInterval(load, 5000)
+    const t = setInterval(load, 10000)
     return () => clearInterval(t)
   }, [load])
 
@@ -40,9 +44,23 @@ export default function Dashboard({ onNavigate }) {
 
   const topBlocked = q.top_blocked || []
 
+  const cert = tls?.info
+  const certExpiring = cert && cert.expires_in_days >= 0 && cert.expires_in_days < 30
+  const certExpired = cert && cert.expires_in_days < 0
+
   return (
     <div className="stack">
       {error && <div className="error-banner">{error}</div>}
+      {certExpired && (
+        <div className="error-banner" role="button" tabIndex={0} onClick={() => onNavigate('tls')} onKeyDown={(e) => e.key === 'Enter' && onNavigate('tls')} style={{ cursor: 'pointer' }}>
+          ⚠ The TLS certificate has <strong>expired</strong> — DoT/DoH/DoQ clients will fail. Generate a new one, upload a CA cert, or renew via Let's Encrypt on the <strong>SSL / TLS</strong> page.
+        </div>
+      )}
+      {certExpiring && !certExpired && (
+        <div className="info-banner" role="button" tabIndex={0} onClick={() => onNavigate('tls')} onKeyDown={(e) => e.key === 'Enter' && onNavigate('tls')} style={{ cursor: 'pointer' }}>
+          ⚠ The TLS certificate expires in <strong>{cert.expires_in_days} days</strong> ({new Date(cert.not_after).toLocaleDateString()}). Renew it on the <strong>SSL / TLS</strong> page.
+        </div>
+      )}
 
       <div className="cards">
         {cards.map((card) => (

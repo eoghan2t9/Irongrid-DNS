@@ -4,11 +4,11 @@ import { api } from '../api'
 const empty = () => ({
   server: {
     listen_udp: '', listen_tcp: '', listen_dot: '', listen_doh: '', listen_doq: '',
-    doh_path: '/dns-query', web_listen: '', timeout_sec: 5,
+    doh_path: '/dns-query', web_listen: '', web_tls: false, timeout_sec: 5,
   },
   upstreams: [],
   cache: { addr: '', password: '', db: 0, ttl: '6h', negative_ttl: '1m' },
-  tls: { cert_file: '', key_file: '', generate_self_signed: true, self_signed_hosts: [], cert_dir: '' },
+  tls: { cert_file: '', key_file: '', generate_self_signed: true, self_signed_hosts: [], cert_dir: '', acme: { enabled: false, email: '', domains: [], staging: false, http01_port: 80, renew_before_days: 30 } },
   filter: { block_response: 'nxdomain', block_ttl: 600, blocklists: [], whitelist: [], blacklist: [] },
   log: { query_log_file: '', retention_days: 30, verbose: true },
   web: { username: 'admin', password: '' },
@@ -263,6 +263,7 @@ export default function Settings() {
           {text('DoQ (QUIC)', 'server.listen_doq', null, '0.0.0.0:853')}
           {text('DoH path', 'server.doh_path', null, '/dns-query')}
           {text('Web dashboard', 'server.web_listen', null, '0.0.0.0:8080')}
+          {toggle('Serve dashboard over HTTPS (web_tls)', 'server.web_tls')}
           {number('Upstream timeout (s)', 'server.timeout_sec')}
         </div>
       </div>
@@ -295,6 +296,15 @@ export default function Settings() {
           {text('Cert directory', 'tls.cert_dir', null, 'data/certs')}
           {toggle('Generate self-signed', 'tls.generate_self_signed')}
           {textarea('Self-signed hosts (SANs)', 'tls.self_signed_hosts', 'one per line')}
+        </div>
+        <h4 style={{ margin: '16px 0 10px' }}>Let&apos;s Encrypt (ACME)</h4>
+        <div className="form-grid">
+          {toggle('Enable ACME auto-issuance', 'tls.acme.enabled')}
+          {text('Email (account contact)', 'tls.acme.email', 'required when enabled', 'you@example.com')}
+          {textarea('Domains', 'tls.acme.domains', 'public hostnames, one per line — must answer on port 80')}
+          {toggle('Use staging CA (test certificates)', 'tls.acme.staging')}
+          {number('HTTP-01 challenge port', 'tls.acme.http01_port')}
+          {number('Renew when < N days left', 'tls.acme.renew_before_days')}
         </div>
       </div>
 

@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"flag"
 	"fmt"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/eoghan2t9/Irongrid-DNS/internal/acme"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/api"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/catalog"
@@ -192,18 +195,65 @@ func main() {
 	}
 	apiApp.Handler = apiHandler
 
+	// ---- ACME (Let's Encrypt) auto-issuance ----
+	var acmeMgr *acme.Manager
+	if cfg.TLS.ACME.Enabled {
+		acmeMgr = acme.New(acme.Options{
+			Email:           cfg.TLS.ACME.Email,
+			Domains:         cfg.TLS.ACME.Domains,
+			CertDir:         cfg.TLS.CertDir,
+			Staging:         cfg.TLS.ACME.Staging,
+			HTTP01Port:      cfg.TLS.ACME.HTTP01Port,
+			RenewBeforeDays: cfg.TLS.ACME.RenewBeforeDays,
+		})
+		apiHandler.ACME = acmeMgr
+		if cfg.TLS.CertDir == "" {
+			cfg.TLS.CertDir = "data/certs"
+		}
+		go acmeMgr.RunLoop(ctx)
+	}
+
+	// ---- web server (dashboard + API) ----
 	webSrv := &http.Server{
 		Addr:         cfg.Server.WebListen,
 		Handler:      api.NewRouter(apiApp),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
-	go func() {
-		log.Printf("[web] dashboard + API on http://%s", cfg.Server.WebListen)
-		if err := webSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Printf("[web] server error: %v", err)
+	// Track the TLS mode of the currently running web server so toggling
+	// web_tls without changing the address also triggers a rebind.
+	webTLSServing := cfg.Server.WebTLS
+	startWebServer := func(srv *http.Server, useTLS bool) {
+		if useTLS {
+			// Serve the dashboard + API over HTTPS with the same cert that
+			// secures DoT/DoH/DoQ.
+			wtls, err := cert.LoadOrGenerate(cfg.TLS.CertFile, cfg.TLS.KeyFile, cfg.TLS.CertDir, cfg.TLS.SelfSignedHosts)
+			if err != nil {
+				log.Printf("[web] cannot enable HTTPS: %v (falling back to plain HTTP)", err)
+				go func() { _ = srv.ListenAndServe() }()
+				return
+			}
+			go func() {
+				ln, err := net.Listen("tcp", srv.Addr)
+				if err != nil {
+					log.Printf("[web] server error: %v", err)
+					return
+				}
+				log.Printf("[web] dashboard + API on https://%s (HTTPS)", srv.Addr)
+				if err := srv.Serve(tls.NewListener(ln, wtls)); err != nil && err != http.ErrServerClosed {
+					log.Printf("[web] server error: %v", err)
+				}
+			}()
+			return
 		}
-	}()
+		go func() {
+			log.Printf("[web] dashboard + API on http://%s", srv.Addr)
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("[web] server error: %v", err)
+			}
+		}()
+	}
+	startWebServer(webSrv, webTLSServing)
 
 	// ---- TLS-only reload: used after the dashboard generates/uploads a
 	// certificate. Rebinds the DNS listeners with the new cert; leaves the
@@ -222,6 +272,36 @@ func main() {
 		}
 		log.Printf("[tls] certificate reloaded and listeners rebound")
 		return nil
+	}
+
+	// After an ACME issuance/renewal, rebind the listeners + web server with
+	// the fresh certificate. Wrap the base ReloadTLS (captured first) so the
+	// ACME path also restarts an HTTPS web server.
+	if acmeMgr != nil {
+		baseReloadTLS := apiHandler.ReloadTLS
+		apiHandler.ReloadTLS = func() error {
+			if err := baseReloadTLS(); err != nil {
+				return err
+			}
+			// Rebind the web server too if it runs on HTTPS.
+			if cfg.Server.WebTLS {
+				oldWeb := webSrv
+				newWeb := &http.Server{
+					Addr:         cfg.Server.WebListen,
+					Handler:      api.NewRouter(apiApp),
+					ReadTimeout:  30 * time.Second,
+					WriteTimeout: 30 * time.Second,
+				}
+				webSrv = newWeb
+				webTLSServing = true
+				go func() {
+					time.Sleep(200 * time.Millisecond)
+					_ = oldWeb.Shutdown(context.Background())
+					startWebServer(newWeb, true)
+				}()
+			}
+			return nil
+		}
 	}
 
 	// ---- config reload: apply listener/cache/TLS/web changes in-process ----
@@ -278,11 +358,11 @@ func main() {
 		dfly = newCache
 		_ = oldCache.Close()
 
-		// 6. Rebind the web server if its address changed. Shutdown is run in
-		//    a goroutine: calling Shutdown synchronously from inside a request
-		//    served by the same server would wait on the in-flight handler and
-		//    deadlock, and the delay lets the reload response flush first.
-		if webSrv.Addr != cfg.Server.WebListen {
+		// 6. Rebind the web server if its address or TLS mode changed. Shutdown
+		//    is run in a goroutine: calling Shutdown synchronously from inside
+		//    a request served by the same server would wait on the in-flight
+		//    handler and deadlock, and the delay lets the reload flush first.
+		if webSrv.Addr != cfg.Server.WebListen || webTLSServing != cfg.Server.WebTLS {
 			oldWeb := webSrv
 			newWeb := &http.Server{
 				Addr:         cfg.Server.WebListen,
@@ -291,13 +371,12 @@ func main() {
 				WriteTimeout: 30 * time.Second,
 			}
 			webSrv = newWeb
+			webTLSServing = cfg.Server.WebTLS
+			useTLS := webTLSServing
 			go func() {
 				time.Sleep(200 * time.Millisecond) // let the reload response flush
 				_ = oldWeb.Shutdown(context.Background())
-				log.Printf("[web] dashboard + API on http://%s", cfg.Server.WebListen)
-				if err := newWeb.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-					log.Printf("[web] server error: %v", err)
-				}
+				startWebServer(newWeb, useTLS)
 			}()
 		}
 		log.Printf("[config] reload applied: listeners, cache, TLS, upstreams")

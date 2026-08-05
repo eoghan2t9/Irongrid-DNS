@@ -7,11 +7,19 @@ const fmtDate = (iso) => {
   return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
 }
 
+const TRUST_STEPS = [
+  { os: 'Android', steps: ['Download the certificate (⬇ button above).', 'Open Settings → Security → Encryption & credentials → Install a certificate → CA certificate.', 'Pick the downloaded irongrid-cert.pem file and confirm.'] },
+  { os: 'iOS / macOS', steps: ['Download the certificate.', 'Open it from Files/Downloads — the profile installer appears.', 'Install the profile, then go to Settings → General → About → Certificate Trust Settings and enable full trust for it.'] },
+  { os: 'Windows', steps: ['Download the certificate.', 'Double-click it → Install Certificate → Local Machine → Place all certificates in: Trusted Root Certification Authorities.'] },
+  { os: 'Linux', steps: ['Download the certificate.', 'Copy it into the system trust store, e.g.: sudo cp irongrid-cert.pem /usr/local/share/ca-certificates/ && sudo update-ca-certificates'] },
+]
+
 export default function Tls() {
   const [status, setStatus] = useState(null)
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
+  const [showTrust, setShowTrust] = useState(false)
 
   // generate form
   const [hosts, setHosts] = useState('localhost\ndns.example.com')
@@ -90,6 +98,25 @@ export default function Tls() {
     }
   }
 
+  const issueAcme = async () => {
+    setBusy(true)
+    setErr('')
+    setMsg('')
+    try {
+      const r = await api.tlsAcmeIssue()
+      setStatus(r.status)
+      setMsg(
+        r.applied
+          ? 'Let\'s Encrypt certificate issued and applied to the listeners.'
+          : `Certificate issued but could not be applied in place: ${r.apply_error || 'reload hook unavailable'}.`
+      )
+    } catch (e) {
+      setErr('ACME issuance failed: ' + e.message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   if (!status) return <div className="loading">Loading TLS status…</div>
 
   const info = status.info
@@ -113,6 +140,9 @@ export default function Tls() {
         <div className="row-between">
           <h3 style={{ margin: 0 }}>SSL / TLS certificate</h3>
           <div className="row">
+            <button className="btn" onClick={() => setShowTrust(true)} disabled={!info}>
+              ☑ Trust on devices
+            </button>
             <button className="btn" onClick={download} disabled={!info}>
               ⬇ Download cert
             </button>
@@ -237,17 +267,123 @@ export default function Tls() {
         </div>
       </div>
 
+      <div className="card">
+        <div className="row-between">
+          <h3 style={{ margin: 0 }}>Let's Encrypt (ACME) auto-issuance</h3>
+          {status.acme?.enabled && (
+            <span className={`badge ${status.acme.last_error ? 'badge-error' : 'badge-allowed'}`}>
+              {status.acme.running ? 'challenge server on' : 'configured'}
+            </span>
+          )}
+        </div>
+        <p className="dim small" style={{ marginTop: 6 }}>
+          Automatically issues and renews a trusted certificate for a public hostname via the
+          HTTP-01 challenge — your domains must answer on port 80. Route the hostname to this
+          machine (or through the Cloudflare Tunnel) first.
+        </p>
+        {!status.acme?.enabled ? (
+          <div className="empty">
+            ACME is disabled. Enable <code>tls.acme</code> (email + domains) in the config,
+            then return here to issue the first certificate.
+          </div>
+        ) : (
+          <div className="kv-grid">
+            <div className="kv-row">
+              <span className="kv-label">Email</span>
+              <span className="kv-value">{status.acme.email}</span>
+            </div>
+            <div className="kv-row">
+              <span className="kv-label">Domains</span>
+              <span className="kv-value">{(status.acme.domains || []).join(', ') || '—'}</span>
+            </div>
+            <div className="kv-row">
+              <span className="kv-label">CA</span>
+              <span className="kv-value">{status.acme.staging ? 'Let\'s Encrypt staging (test)' : 'Let\'s Encrypt production'}</span>
+            </div>
+            <div className="kv-row">
+              <span className="kv-label">Challenge port</span>
+              <span className="kv-value">:{status.acme.challenge_port}</span>
+            </div>
+            {status.acme.last_success && (
+              <div className="kv-row">
+                <span className="kv-label">Last issued</span>
+                <span className="kv-value">{fmtDate(status.acme.last_success)}</span>
+              </div>
+            )}
+            {status.acme.next_renewal && (
+              <div className="kv-row">
+                <span className="kv-label">Next renewal</span>
+                <span className="kv-value">{fmtDate(status.acme.next_renewal)}</span>
+              </div>
+            )}
+            {status.acme.last_error && (
+              <div className="kv-row">
+                <span className="kv-label">Last error</span>
+                <span className="kv-value error-text">{status.acme.last_error}</span>
+              </div>
+            )}
+          </div>
+        )}
+        {status.acme?.enabled && (
+          <div className="quick-actions" style={{ marginTop: 14 }}>
+            <button className="btn primary" onClick={issueAcme} disabled={busy}>
+              {busy ? 'Issuing…' : 'Issue / renew now'}
+            </button>
+          </div>
+        )}
+      </div>
+
       <div className="card hint-card">
         <h3>How the certificate is used</h3>
         <p className="dim small">
           The certificate secures the <strong>DoT (853), DoH (443) and DoQ (853)</strong> DNS
-          listeners. Generating or uploading applies it immediately by rebinding the listeners
-          (a sub-second interruption) — no process restart needed. For a public hostname, route
-          it through the Cloudflare Tunnel and use a CA-signed certificate so phones trust it
-          without extra setup; for local use, <button className="btn-link" onClick={download} disabled={!info}>download
-          this certificate</button> and install it as a trusted CA on each device.
+          listeners, and the dashboard itself when <code>web_tls</code> is enabled. Generating,
+          uploading or ACME-issuing applies it immediately by rebinding the listeners (a
+          sub-second interruption) — no process restart needed. For a public hostname, route it
+          through the Cloudflare Tunnel and use a CA-signed or Let's Encrypt certificate so
+          phones trust it without extra setup; for local use,{' '}
+          <button className="btn-link" onClick={() => setShowTrust(true)} disabled={!info}>
+            trust this certificate on your devices
+          </button>
+          .
         </p>
       </div>
+
+      {showTrust && (
+        <div className="modal-overlay" onClick={() => setShowTrust(false)}>
+          <div className="modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-head">
+              <div>
+                <div className="modal-title">Trust this certificate</div>
+                <div className="modal-sub">
+                  <span className="chip">irongrid-cert.pem</span>
+                  <span className="modal-date">install as a trusted CA on each client</span>
+                </div>
+              </div>
+              <button className="modal-x" onClick={() => setShowTrust(false)}>✕</button>
+            </div>
+            <div className="modal-body changelog">
+              {TRUST_STEPS.map((t) => (
+                <div key={t.os}>
+                  <h4>{t.os}</h4>
+                  <ol>
+                    {t.steps.map((s, i) => <li key={i}>{s}</li>)}
+                  </ol>
+                </div>
+              ))}
+              <p className="modal-note">
+                First <strong>download</strong> the certificate above, then follow the steps for
+                each device. For Android Private DNS, use a CA-signed or Let's Encrypt
+                certificate instead so no manual trust is needed.
+              </p>
+            </div>
+            <div className="modal-foot">
+              <div className="modal-spacer" />
+              <button className="btn" onClick={() => setShowTrust(false)}>Close</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

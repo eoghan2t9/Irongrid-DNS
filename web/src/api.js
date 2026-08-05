@@ -65,6 +65,7 @@ export const api = {
   tlsStatus: () => request('/api/tls'),
   tlsGenerate: (body) => request('/api/tls/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   tlsUpload: (body) => request('/api/tls/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  tlsAcmeIssue: () => request('/api/tls/acme/issue', { method: 'POST' }),
   tlsCertDownload: async () => {
     // Raw fetch so we can return a blob (the auth header is attached the
     // same way as request() does).

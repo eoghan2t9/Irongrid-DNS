@@ -34,6 +34,7 @@ type ServerConfig struct {
 	ListenDoQ  string `yaml:"listen_doq"`  // DNS over QUIC, "" disables
 	DoHPath    string `yaml:"doh_path"`    // HTTP path served for DoH (RFC 8484)
 	WebListen  string `yaml:"web_listen"`  // management web UI + REST API
+	WebTLS     bool   `yaml:"web_tls"`     // serve the web UI + API over HTTPS (uses the TLS cert)
 	TimeoutSec int    `yaml:"timeout_sec"` // per-query timeout
 }
 
@@ -47,13 +48,26 @@ type CacheConfig struct {
 	NegativeTTL time.Duration `yaml:"negative_ttl"`  // cached NXDOMAIN/SERVFAIL TTL
 }
 
-// TLSConfig controls certificates used by DoT, DoH and DoQ.
+// TLSConfig controls certificates used by DoT, DoH and DoQ (and the web UI
+// when server.web_tls is enabled).
 type TLSConfig struct {
 	CertFile          string   `yaml:"cert_file"`            // PEM cert chain
 	KeyFile           string   `yaml:"key_file"`             // PEM private key
 	GenerateSelfSigned bool    `yaml:"generate_self_signed"` // create a self-signed cert if none given
 	SelfSignedHosts   []string `yaml:"self_signed_hosts"`    // SANs for the generated cert
 	CertDir           string   `yaml:"cert_dir"`             // where generated certs are stored
+	ACME              ACMEConfig `yaml:"acme"`               // Let's Encrypt auto-issuance
+}
+
+// ACMEConfig enables automatic certificate issuance from Let's Encrypt using
+// the HTTP-01 challenge (needs the domains to answer on port 80).
+type ACMEConfig struct {
+	Enabled    bool     `yaml:"enabled"`
+	Email      string   `yaml:"email"`      // account contact (required)
+	Domains    []string `yaml:"domains"`    // public hostnames to cover
+	Staging    bool     `yaml:"staging"`    // use Let's Encrypt staging CA (untrusted, for testing)
+	HTTP01Port int      `yaml:"http01_port"` // port for the HTTP-01 challenge, default 80
+	RenewBeforeDays int `yaml:"renew_before_days"` // renew when fewer days remain, default 30
 }
 
 // FilterConfig configures blocking behaviour and lists.
@@ -198,6 +212,20 @@ func (c *Config) validate() error {
 	}
 	if c.Log.RetentionDays < 1 {
 		return fmt.Errorf("log.retention_days must be >= 1")
+	}
+	if c.TLS.ACME.Enabled {
+		if c.TLS.ACME.Email == "" {
+			return fmt.Errorf("tls.acme.email is required when ACME is enabled")
+		}
+		if len(c.TLS.ACME.Domains) == 0 {
+			return fmt.Errorf("tls.acme.domains requires at least one domain when ACME is enabled")
+		}
+		if c.TLS.ACME.HTTP01Port == 0 {
+			c.TLS.ACME.HTTP01Port = 80
+		}
+		if c.TLS.ACME.RenewBeforeDays <= 0 {
+			c.TLS.ACME.RenewBeforeDays = 30
+		}
 	}
 	if c.Web.Username == "" {
 		return fmt.Errorf("web.username is required")
