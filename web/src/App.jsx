@@ -4,6 +4,8 @@ import Dashboard from './components/Dashboard'
 import QueryLog from './components/QueryLog'
 import Blocklists from './components/Blocklists'
 import Lists from './components/Lists'
+import Rewrites from './components/Rewrites'
+import ClientGroups from './components/ClientGroups'
 import Tunnel from './components/Tunnel'
 import Settings from './components/Settings'
 import Tls from './components/Tls'
@@ -39,6 +41,14 @@ const NAV = [
   {
     id: 'lists', label: 'Allow / Block',
     icon: navSvg(<><circle cx="12" cy="12" r="9" /><path d="M8 12.5l2.5 2.5 5.5-6" /></>),
+  },
+  {
+    id: 'rewrites', label: 'Local DNS',
+    icon: navSvg(<><path d="M12 21s-7-6.5-7-11a7 7 0 1 1 14 0c0 4.5-7 11-7 11z" /><circle cx="12" cy="10" r="2.5" /></>),
+  },
+  {
+    id: 'client-groups', label: 'Client Groups',
+    icon: navSvg(<><circle cx="9" cy="8" r="3" /><path d="M2.5 20c0-3.3 3-5.5 6.5-5.5s6.5 2.2 6.5 5.5" /><circle cx="17" cy="8.5" r="2.2" /><path d="M15.7 13.3c2.3.5 4.1 2.2 4.1 4.7" /></>),
   },
   {
     id: 'tls', label: 'SSL / TLS',
@@ -233,6 +243,8 @@ export default function App() {
           {view === 'log' && <QueryLog />}
           {view === 'blocklists' && <Blocklists />}
           {view === 'lists' && <Lists />}
+          {view === 'rewrites' && <Rewrites />}
+          {view === 'client-groups' && <ClientGroups />}
           {view === 'tls' && <Tls />}
           {view === 'tunnel' && <Tunnel />}
           {view === 'changelog' && <Changelog />}

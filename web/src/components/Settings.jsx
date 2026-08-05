@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
+import { useToast } from '../toast'
 
 const empty = () => ({
   server: {
@@ -20,14 +21,13 @@ const empty = () => ({
 })
 
 export default function Settings({ onSessionInvalidated }) {
+  const toast = useToast()
   const [cfg, setCfg] = useState(null)
   const [initialUser, setInitialUser] = useState('')
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [restartNeeded, setRestartNeeded] = useState([])
   const [restarting, setRestarting] = useState(false)
-  const [msg, setMsg] = useState('')
-  const [err, setErr] = useState('')
   const [diagName, setDiagName] = useState('example.com')
   const [diagType, setDiagType] = useState('A')
   const [diagResult, setDiagResult] = useState(null)
@@ -52,7 +52,6 @@ export default function Settings({ onSessionInvalidated }) {
       return next
     })
     setDirty(true)
-    setErr('')
   }
 
   const setListItem = (path, index, value) => {
@@ -84,8 +83,6 @@ export default function Settings({ onSessionInvalidated }) {
 
   const save = async () => {
     setSaving(true)
-    setErr('')
-    setMsg('')
     try {
       // A non-empty password field means "change the password" — the server
       // then rotates the session secret, invalidating every session cookie
@@ -107,7 +104,7 @@ export default function Settings({ onSessionInvalidated }) {
       }
       const restart = r.restart_required || []
       setRestartNeeded(restart)
-      setMsg(
+      toast(
         restart.length
           ? `Saved. Block policy, filter lists and upstreams applied live. Restart needed for: ${restart.join(', ')}.`
           : 'Saved and applied live — no restart required.'
@@ -115,7 +112,7 @@ export default function Settings({ onSessionInvalidated }) {
       setDirty(false)
       await load()
     } catch (e) {
-      setErr(e.message)
+      toast(e.message, 'error')
     } finally {
       setSaving(false)
     }
@@ -124,19 +121,18 @@ export default function Settings({ onSessionInvalidated }) {
   const restart = async () => {
     if (!window.confirm('Rebind DNS listeners, cache, TLS and the web server now? This takes a moment and briefly interrupts DNS service.')) return
     setRestarting(true)
-    setErr('')
     try {
       const r = await api.reloadConfig()
       const remaining = r.still_requires_restart || []
       setRestartNeeded(remaining)
-      setMsg(
+      toast(
         remaining.length
           ? `Reloaded in place — listeners, cache, TLS and upstreams are live. ${remaining.join(', ')} still needs a process restart.`
           : 'Restarted in place — all configuration is now live.'
       )
       await load()
     } catch (e) {
-      setErr('Restart failed: ' + e.message)
+      toast('Restart failed: ' + e.message, 'error')
     } finally {
       setRestarting(false)
     }
@@ -153,8 +149,12 @@ export default function Settings({ onSessionInvalidated }) {
   }
 
   const flush = async () => {
-    const r = await api.flushCache()
-    setMsg(`Cache flushed (${r.deleted} keys removed)`)
+    try {
+      const r = await api.flushCache()
+      toast(`Cache flushed (${r.deleted} keys removed)`)
+    } catch (e) {
+      toast('Flush failed: ' + e.message, 'error')
+    }
   }
 
   if (!cfg) return <div className="loading">Loading configuration…</div>
@@ -223,8 +223,8 @@ export default function Settings({ onSessionInvalidated }) {
       <span className="field-label">{label}</span>
       {(cfg[path] || []).map((item, i) => (
         <div className="list-row" key={i}>
-          <input className="input mono" value={item} onChange={(e) => setListItem(path, i, e.target.value)} />
-          <button className="btn small danger" type="button" onClick={() => removeList(path, i)}>✕</button>
+          <input className="input mono" value={item} onChange={(e) => setListItem(path, i, e.target.value)} aria-label={`${label} entry ${i + 1}`} />
+          <button className="btn small danger" type="button" onClick={() => removeList(path, i)} aria-label={`Remove ${item || 'this entry'}`}>✕</button>
         </div>
       ))}
       <button className="btn small" type="button" onClick={() => addList(path)}>+ Add</button>
@@ -259,67 +259,8 @@ export default function Settings({ onSessionInvalidated }) {
     setDirty(true)
   }
 
-  const setRewrite = (i, patch) => {
-    setCfg((prev) => {
-      const next = JSON.parse(JSON.stringify(prev))
-      next.rewrites[i] = { ...next.rewrites[i], ...patch }
-      return next
-    })
-    setDirty(true)
-  }
-  const addRewrite = () => {
-    setCfg((prev) => {
-      const next = JSON.parse(JSON.stringify(prev))
-      next.rewrites = [...(next.rewrites || []), { domain: '', type: 'A', value: '', ttl: 300 }]
-      return next
-    })
-    setDirty(true)
-  }
-  const removeRewrite = (i) => {
-    setCfg((prev) => {
-      const next = JSON.parse(JSON.stringify(prev))
-      next.rewrites = next.rewrites.filter((_, x) => x !== i)
-      return next
-    })
-    setDirty(true)
-  }
-
-  const linesOf = (v) => (v || []).join('\n')
-  const parseLines = (s) => s.split('\n').map((x) => x.trim()).filter(Boolean)
-
-  const setGroup = (i, patch) => {
-    setCfg((prev) => {
-      const next = JSON.parse(JSON.stringify(prev))
-      next.client_groups[i] = { ...next.client_groups[i], ...patch }
-      return next
-    })
-    setDirty(true)
-  }
-  const addGroup = () => {
-    setCfg((prev) => {
-      const next = JSON.parse(JSON.stringify(prev))
-      next.client_groups = [
-        ...(next.client_groups || []),
-        { id: '', name: '', enabled: true, cidrs: [], blocklists: [], whitelist: [], blacklist: [], upstreams: [] },
-      ]
-      return next
-    })
-    setDirty(true)
-  }
-  const removeGroup = (i) => {
-    setCfg((prev) => {
-      const next = JSON.parse(JSON.stringify(prev))
-      next.client_groups = next.client_groups.filter((_, x) => x !== i)
-      return next
-    })
-    setDirty(true)
-  }
-
   return (
     <div className="stack">
-      {msg && <div className="info-banner">{msg}</div>}
-      {err && <div className="error-banner">{err}</div>}
-
       <div className="card">
         <div className="row-between">
           <h3 style={{ margin: 0 }}>Configuration</h3>
@@ -481,7 +422,10 @@ export default function Settings({ onSessionInvalidated }) {
 
       <div className="card">
         <h3>Blocklists</h3>
-        <p className="dim small">Same lists as the Blocklists page — kept in sync with this config.</p>
+        <p className="dim small">
+          Same lists as the Blocklists page — kept in sync with this config. Local DNS records and per-client
+          policy now have their own pages in the sidebar.
+        </p>
         {(cfg.filter.blocklists || []).map((bl, i) => (
           <div className="blocklist-row" key={i}>
             <div className="list-row">
@@ -492,87 +436,20 @@ export default function Settings({ onSessionInvalidated }) {
               <input className="input mono" placeholder="URL or file:// path" value={bl.url || ''} onChange={(e) => setBlocklist(i, { url: e.target.value })} />
               <input className="input" placeholder="Auto update (e.g. 24h)" value={bl.auto_update || ''} onChange={(e) => setBlocklist(i, { auto_update: e.target.value })} />
               <label className="switch" title="Enabled">
-                <input type="checkbox" checked={!!bl.enabled} onChange={(e) => setBlocklist(i, { enabled: e.target.checked })} />
+                <input
+                  type="checkbox"
+                  checked={!!bl.enabled}
+                  onChange={(e) => setBlocklist(i, { enabled: e.target.checked })}
+                  aria-label={`Enable ${bl.name || bl.id || 'this blocklist'}`}
+                />
                 <span className="slider" />
               </label>
-              <button className="btn small danger" type="button" onClick={() => removeBlocklist(i)}>✕</button>
+              <button className="btn small danger" type="button" onClick={() => removeBlocklist(i)} aria-label={`Remove ${bl.name || bl.id || 'this blocklist'}`}>✕</button>
             </div>
           </div>
         ))}
         <div className="quick-actions" style={{ marginTop: 12 }}>
           <button className="btn small" type="button" onClick={addBlocklist}>+ Add blocklist</button>
-        </div>
-      </div>
-
-      <div className="card">
-        <h3>Local DNS records</h3>
-        <p className="dim small" style={{ marginTop: -6 }}>
-          Answer a domain yourself instead of forwarding it — e.g. <code>nas.home</code> → <code>192.168.1.10</code>.
-          Takes priority over blocklists and the cache. Domain may start with <code>*.</code> to cover a whole
-          subtree; a CNAME rule answers any query type.
-        </p>
-        {(cfg.rewrites || []).map((rw, i) => (
-          <div className="blocklist-row" key={i}>
-            <div className="list-row">
-              <input className="input mono" placeholder="domain (e.g. nas.home or *.internal.example.com)" value={rw.domain || ''} onChange={(e) => setRewrite(i, { domain: e.target.value })} />
-              <select className="input" value={rw.type || 'A'} onChange={(e) => setRewrite(i, { type: e.target.value })}>
-                <option value="A">A</option>
-                <option value="AAAA">AAAA</option>
-                <option value="CNAME">CNAME</option>
-              </select>
-            </div>
-            <div className="list-row">
-              <input className="input mono" placeholder="value (IP or hostname)" value={rw.value || ''} onChange={(e) => setRewrite(i, { value: e.target.value })} />
-              <input className="input" type="number" placeholder="TTL (s)" value={rw.ttl || 300} onChange={(e) => setRewrite(i, { ttl: Number(e.target.value) })} />
-              <button className="btn small danger" type="button" onClick={() => removeRewrite(i)}>✕</button>
-            </div>
-          </div>
-        ))}
-        <div className="quick-actions" style={{ marginTop: 12 }}>
-          <button className="btn small" type="button" onClick={addRewrite}>+ Add record</button>
-        </div>
-      </div>
-
-      <div className="card">
-        <h3>Client groups</h3>
-        <p className="dim small" style={{ marginTop: -6 }}>
-          Apply a different policy to specific devices/subnets — e.g. a kids' device group with stricter
-          blocklists, or an IoT VLAN pinned to specific upstreams. The first matching group wins; clients matching
-          none use the global filtering and upstreams above. Leave "Blocklists" empty to use every enabled global
-          blocklist.
-        </p>
-        {(cfg.client_groups || []).map((g, i) => (
-          <div className="blocklist-row" key={i}>
-            <div className="list-row">
-              <input className="input" placeholder="id (e.g. kids)" value={g.id || ''} onChange={(e) => setGroup(i, { id: e.target.value })} />
-              <input className="input" placeholder="Name" value={g.name || ''} onChange={(e) => setGroup(i, { name: e.target.value })} />
-              <label className="switch" title="Enabled">
-                <input type="checkbox" checked={!!g.enabled} onChange={(e) => setGroup(i, { enabled: e.target.checked })} />
-                <span className="slider" />
-              </label>
-              <button className="btn small danger" type="button" onClick={() => removeGroup(i)}>✕</button>
-            </div>
-            <div className="form-grid">
-              {field('Client CIDRs / IPs', 'one per line, e.g. 192.168.1.50 or 10.0.5.0/24', (
-                <textarea className="input mono" rows={2} value={linesOf(g.cidrs)} onChange={(e) => setGroup(i, { cidrs: parseLines(e.target.value) })} />
-              ))}
-              {field('Blocklist IDs', 'one per line; empty = all enabled global blocklists', (
-                <textarea className="input mono" rows={2} value={linesOf(g.blocklists)} onChange={(e) => setGroup(i, { blocklists: parseLines(e.target.value) })} />
-              ))}
-              {field('Extra whitelist', 'one per line, added to the global whitelist', (
-                <textarea className="input mono" rows={2} value={linesOf(g.whitelist)} onChange={(e) => setGroup(i, { whitelist: parseLines(e.target.value) })} />
-              ))}
-              {field('Extra blacklist', 'one per line, added to the global blacklist', (
-                <textarea className="input mono" rows={2} value={linesOf(g.blacklist)} onChange={(e) => setGroup(i, { blacklist: parseLines(e.target.value) })} />
-              ))}
-              {field('Upstream override', 'one per line; empty = use the global upstreams above', (
-                <textarea className="input mono" rows={2} value={linesOf(g.upstreams)} onChange={(e) => setGroup(i, { upstreams: parseLines(e.target.value) })} />
-              ))}
-            </div>
-          </div>
-        ))}
-        <div className="quick-actions" style={{ marginTop: 12 }}>
-          <button className="btn small" type="button" onClick={addGroup}>+ Add group</button>
         </div>
       </div>
 
@@ -639,7 +516,7 @@ export default function Settings({ onSessionInvalidated }) {
         <h3>Cache &amp; maintenance</h3>
         <div className="quick-actions">
           <button className="btn" onClick={flush}>Flush DNS cache (Dragonfly)</button>
-          <button className="btn" onClick={() => api.refreshLists().then(() => setMsg('Blocklists refreshed'))}>Refresh blocklists</button>
+          <button className="btn" onClick={() => api.refreshLists().then(() => toast('Blocklists refreshed')).catch((e) => toast('Refresh failed: ' + e.message, 'error'))}>Refresh blocklists</button>
         </div>
       </div>
     </div>
