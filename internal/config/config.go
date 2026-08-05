@@ -19,26 +19,26 @@ import (
 
 // Config is the root configuration document.
 type Config struct {
-	Server    ServerConfig    `yaml:"server"`
-	Upstreams []string        `yaml:"upstreams"`
-	Cache     CacheConfig     `yaml:"cache"`
-	TLS       TLSConfig       `yaml:"tls"`
-	Filter    FilterConfig    `yaml:"filter"`
-	Log       LogConfig       `yaml:"log"`
-	Web       WebConfig       `yaml:"web"`
-	Tunnel    TunnelConfig    `yaml:"tunnel"`
+	Server    ServerConfig `yaml:"server"`
+	Upstreams []string     `yaml:"upstreams"`
+	Cache     CacheConfig  `yaml:"cache"`
+	TLS       TLSConfig    `yaml:"tls"`
+	Filter    FilterConfig `yaml:"filter"`
+	Log       LogConfig    `yaml:"log"`
+	Web       WebConfig    `yaml:"web"`
+	Tunnel    TunnelConfig `yaml:"tunnel"`
 }
 
 // ServerConfig controls every network listener.
 type ServerConfig struct {
-	ListenUDP  string `yaml:"listen_udp"`  // plain DNS over UDP, "" disables
-	ListenTCP  string `yaml:"listen_tcp"`  // plain DNS over TCP, "" disables
-	ListenDoT  string `yaml:"listen_dot"`  // DNS over TLS, "" disables
-	ListenDoH  string `yaml:"listen_doh"`  // DNS over HTTPS, "" disables
-	ListenDoQ  string `yaml:"listen_doq"`  // DNS over QUIC, "" disables
-	DoHPath    string `yaml:"doh_path"`    // HTTP path served for DoH (RFC 8484)
-	WebListen  string `yaml:"web_listen"`  // management web UI + REST API
-	WebTLS     bool   `yaml:"web_tls"`     // serve the web UI + API over HTTPS (uses the TLS cert)
+	ListenUDP string `yaml:"listen_udp"` // plain DNS over UDP, "" disables
+	ListenTCP string `yaml:"listen_tcp"` // plain DNS over TCP, "" disables
+	ListenDoT string `yaml:"listen_dot"` // DNS over TLS, "" disables
+	ListenDoH string `yaml:"listen_doh"` // DNS over HTTPS, "" disables
+	ListenDoQ string `yaml:"listen_doq"` // DNS over QUIC, "" disables
+	DoHPath   string `yaml:"doh_path"`   // HTTP path served for DoH (RFC 8484)
+	WebListen string `yaml:"web_listen"` // management web UI + REST API
+	WebTLS    bool   `yaml:"web_tls"`    // serve the web UI + API over HTTPS (uses the TLS cert)
 	// WebRedirect serves a plain-HTTP listener on WebRedirectPort that 301s
 	// to https://<host>/ — a convenience when web_tls is enabled.
 	WebRedirect     bool `yaml:"web_redirect"`
@@ -49,22 +49,25 @@ type ServerConfig struct {
 // CacheConfig points at the Dragonfly instance that is the authoritative
 // response cache. Irongrid DNS will not start if it cannot reach it.
 type CacheConfig struct {
-	Addr        string        `yaml:"addr"`          // host:port of Dragonfly
-	Password    string        `yaml:"password"`      // optional auth
-	DB          int           `yaml:"db"`            // logical db index
-	TTL         time.Duration `yaml:"ttl"`           // positive answer cache TTL
-	NegativeTTL time.Duration `yaml:"negative_ttl"`  // cached NXDOMAIN/SERVFAIL TTL
+	Addr        string        `yaml:"addr"`         // host:port of Dragonfly
+	Password    string        `yaml:"password"`     // optional auth
+	DB          int           `yaml:"db"`           // logical db index
+	TTL         time.Duration `yaml:"ttl"`          // positive answer cache TTL
+	NegativeTTL time.Duration `yaml:"negative_ttl"` // cached NXDOMAIN/SERVFAIL TTL
+	// L1Entries is the per-shard entry capacity of the in-process L1 cache
+	// layered in front of Dragonfly. 0 disables the L1 entirely.
+	L1Entries int `yaml:"l1_entries"`
 }
 
 // TLSConfig controls certificates used by DoT, DoH and DoQ (and the web UI
 // when server.web_tls is enabled).
 type TLSConfig struct {
-	CertFile          string   `yaml:"cert_file"`            // PEM cert chain
-	KeyFile           string   `yaml:"key_file"`             // PEM private key
-	GenerateSelfSigned bool    `yaml:"generate_self_signed"` // create a self-signed cert if none given
-	SelfSignedHosts   []string `yaml:"self_signed_hosts"`    // SANs for the generated cert
-	CertDir           string   `yaml:"cert_dir"`             // where generated certs are stored
-	ACME              ACMEConfig `yaml:"acme"`               // Let's Encrypt auto-issuance
+	CertFile           string     `yaml:"cert_file"`            // PEM cert chain
+	KeyFile            string     `yaml:"key_file"`             // PEM private key
+	GenerateSelfSigned bool       `yaml:"generate_self_signed"` // create a self-signed cert if none given
+	SelfSignedHosts    []string   `yaml:"self_signed_hosts"`    // SANs for the generated cert
+	CertDir            string     `yaml:"cert_dir"`             // where generated certs are stored
+	ACME               ACMEConfig `yaml:"acme"`                 // Let's Encrypt auto-issuance
 }
 
 // ACMEConfig enables automatic certificate issuance from Let's Encrypt using
@@ -72,26 +75,26 @@ type TLSConfig struct {
 // tls.acme.dns01.provider is set, the DNS-01 challenge (needs DNS API access
 // but no inbound port).
 type ACMEConfig struct {
-	Enabled    bool     `yaml:"enabled"`
-	Email      string   `yaml:"email"`      // account contact (required)
-	Domains    []string `yaml:"domains"`    // public hostnames to cover
-	Staging    bool     `yaml:"staging"`    // use Let's Encrypt staging CA (untrusted, for testing)
-	HTTP01Port int      `yaml:"http01_port"` // port for the HTTP-01 challenge, default 80
-	RenewBeforeDays int `yaml:"renew_before_days"` // renew when fewer days remain, default 30
-	DNS01      DNS01Config `yaml:"dns01"`   // optional: issue via DNS TXT records instead of HTTP-01
+	Enabled         bool        `yaml:"enabled"`
+	Email           string      `yaml:"email"`             // account contact (required)
+	Domains         []string    `yaml:"domains"`           // public hostnames to cover
+	Staging         bool        `yaml:"staging"`           // use Let's Encrypt staging CA (untrusted, for testing)
+	HTTP01Port      int         `yaml:"http01_port"`       // port for the HTTP-01 challenge, default 80
+	RenewBeforeDays int         `yaml:"renew_before_days"` // renew when fewer days remain, default 30
+	DNS01           DNS01Config `yaml:"dns01"`             // optional: issue via DNS TXT records instead of HTTP-01
 }
 
 // DNS01Config configures DNS-01 challenge issuance through a DNS provider API.
 // Supported providers: cloudflare, digitalocean, hetzner, godaddy, route53.
 type DNS01Config struct {
-	Provider           string `yaml:"provider"`             // "" = HTTP-01 challenge
+	Provider           string `yaml:"provider"`              // "" = HTTP-01 challenge
 	PropagationWait    int    `yaml:"propagation_wait_sec"`  // seconds to wait for TXT propagation, default 60
-	CloudflareToken    string `yaml:"cloudflare_token"`     // Cloudflare API token (Zone:DNS:Edit)
-	DigitalOceanToken  string `yaml:"digitalocean_token"`   // DigitalOcean personal access token (DNS:edit)
-	HetznerToken       string `yaml:"hetzner_token"`        // Hetzner DNS API token
-	GoDaddyKey         string `yaml:"godaddy_key"`          // GoDaddy API key
-	GoDaddySecret      string `yaml:"godaddy_secret"`       // GoDaddy API secret
-	AWSAccessKeyID     string `yaml:"aws_access_key_id"`    // AWS access key (Route53)
+	CloudflareToken    string `yaml:"cloudflare_token"`      // Cloudflare API token (Zone:DNS:Edit)
+	DigitalOceanToken  string `yaml:"digitalocean_token"`    // DigitalOcean personal access token (DNS:edit)
+	HetznerToken       string `yaml:"hetzner_token"`         // Hetzner DNS API token
+	GoDaddyKey         string `yaml:"godaddy_key"`           // GoDaddy API key
+	GoDaddySecret      string `yaml:"godaddy_secret"`        // GoDaddy API secret
+	AWSAccessKeyID     string `yaml:"aws_access_key_id"`     // AWS access key (Route53)
 	AWSSecretAccessKey string `yaml:"aws_secret_access_key"` // AWS secret key (Route53)
 }
 
@@ -108,12 +111,12 @@ type FilterConfig struct {
 
 // BlocklistSpec describes a remote or local blocklist source.
 type BlocklistSpec struct {
-	ID         string        `yaml:"id"`          // unique identifier shown in the UI
-	Name       string        `yaml:"name"`        // friendly name
-	URL        string        `yaml:"url"`         // remote URL, or local file path (file://)
-	Enabled    bool          `yaml:"enabled"`     // fetched and applied when true
-	AutoUpdate time.Duration `yaml:"auto_update"` // refresh interval, 0 = never
-	LastUpdated time.Time    `yaml:"-"`           // runtime state, not persisted here
+	ID          string        `yaml:"id"`          // unique identifier shown in the UI
+	Name        string        `yaml:"name"`        // friendly name
+	URL         string        `yaml:"url"`         // remote URL, or local file path (file://)
+	Enabled     bool          `yaml:"enabled"`     // fetched and applied when true
+	AutoUpdate  time.Duration `yaml:"auto_update"` // refresh interval, 0 = never
+	LastUpdated time.Time     `yaml:"-"`           // runtime state, not persisted here
 }
 
 // LogConfig controls the query log.
@@ -121,6 +124,9 @@ type LogConfig struct {
 	QueryLogFile  string `yaml:"query_log_file"`
 	RetentionDays int    `yaml:"retention_days"`
 	Verbose       bool   `yaml:"verbose"`
+	// BatchSize is how many entries the async query-log writer commits per
+	// transaction. 0 uses the built-in default (256).
+	BatchSize int `yaml:"batch_size"`
 }
 
 // WebConfig controls the management interface auth.
@@ -135,12 +141,12 @@ type WebConfig struct {
 
 // TunnelConfig controls the baked-in cloudflared tunnel.
 type TunnelConfig struct {
-	Enabled       bool   `yaml:"enabled"`
-	Token         string `yaml:"token"`   // named tunnel token (remote-managed)
-	ConfigFile    string `yaml:"config_file"` // cloudflared YAML config, if used
-	QuickTunnel   bool   `yaml:"quick_tunnel"` // unauth trycloudflare.com quick tunnel
+	Enabled        bool   `yaml:"enabled"`
+	Token          string `yaml:"token"`            // named tunnel token (remote-managed)
+	ConfigFile     string `yaml:"config_file"`      // cloudflared YAML config, if used
+	QuickTunnel    bool   `yaml:"quick_tunnel"`     // unauth trycloudflare.com quick tunnel
 	QuickTunnelURL string `yaml:"quick_tunnel_url"` // origin URL exposed by quick tunnel
-	Hostname      string `yaml:"hostname"` // e.g. dns.example.com
+	Hostname       string `yaml:"hostname"`         // e.g. dns.example.com
 }
 
 // Default returns the built-in default configuration.
@@ -165,6 +171,7 @@ func Default() *Config {
 			DB:          0,
 			TTL:         6 * time.Hour,
 			NegativeTTL: 60 * time.Second,
+			L1Entries:   512,
 		},
 		TLS: TLSConfig{
 			GenerateSelfSigned: true,
@@ -181,6 +188,7 @@ func Default() *Config {
 			QueryLogFile:  "data/querylog.db",
 			RetentionDays: 30,
 			Verbose:       true,
+			BatchSize:     256,
 		},
 		Web: WebConfig{
 			Username: "admin",
@@ -257,6 +265,12 @@ func (c *Config) validate() error {
 	}
 	if c.Cache.Addr == "" {
 		return fmt.Errorf("cache.addr is required (Dragonfly endpoint)")
+	}
+	if c.Cache.L1Entries < 0 {
+		return fmt.Errorf("cache.l1_entries must be >= 0 (0 disables the in-memory cache)")
+	}
+	if c.Log.BatchSize < 0 {
+		return fmt.Errorf("log.batch_size must be >= 0 (0 uses the default)")
 	}
 	if c.Server.ListenUDP == "" && c.Server.ListenTCP == "" &&
 		c.Server.ListenDoT == "" && c.Server.ListenDoH == "" && c.Server.ListenDoQ == "" {

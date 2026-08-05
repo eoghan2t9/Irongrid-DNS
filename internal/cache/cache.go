@@ -30,8 +30,9 @@ type Cache struct {
 }
 
 // New connects to Dragonfly. It returns an error if the instance is
-// unreachable, enforcing the hard dependency.
-func New(addr, password string, db int, ttl, negativeTTL time.Duration) (*Cache, error) {
+// unreachable, enforcing the hard dependency. l1Entries is the per-shard
+// capacity of the in-process L1 cache; <= 0 disables the L1 layer.
+func New(addr, password string, db int, ttl, negativeTTL time.Duration, l1Entries int) (*Cache, error) {
 	client := redis.NewClient(&redis.Options{
 		Addr:         addr,
 		Password:     password,
@@ -54,9 +55,13 @@ func New(addr, password string, db int, ttl, negativeTTL time.Duration) (*Cache,
 	}
 	log.Printf("[cache] connected: %s", summarizeServerInfo(info))
 
+	var l1 *l1Cache
+	if l1Entries > 0 {
+		l1 = newL1(l1Entries)
+	}
 	return &Cache{
 		client:      client,
-		l1:          newL1(),
+		l1:          l1,
 		prefix:      "irongrid:dns:",
 		ttl:         ttl,
 		negativeTTL: negativeTTL,
@@ -121,6 +126,12 @@ const cacheEntryPrefixLen = 8
 // hit is then re-warmed into L1.
 func (c *Cache) Get(ctx context.Context, q dns.Question) *dns.Msg {
 	key := c.msgKey(q)
+	if c.l1 == nil {
+		if raw, ok := c.l2Get(ctx, key); ok {
+			return unpackEntry(raw)
+		}
+		return nil
+	}
 	now := time.Now()
 	if raw, ok := c.l1.get(key, now); ok {
 		return unpackEntry(raw)
@@ -202,7 +213,9 @@ func (c *Cache) Set(ctx context.Context, q dns.Question, m *dns.Msg, capTTL time
 	binary.BigEndian.PutUint64(buf[:cacheEntryPrefixLen], uint64(now.Unix()))
 	copy(buf[cacheEntryPrefixLen:], packed)
 	key := c.msgKey(q)
-	c.l1.set(key, buf, ttl, now)
+	if c.l1 != nil {
+		c.l1.set(key, buf, ttl, now)
+	}
 	if c.client != nil {
 		c.client.Set(ctx, key, buf, ttl)
 	}
@@ -229,7 +242,9 @@ func (c *Cache) SetNegative(ctx context.Context, q dns.Question, m *dns.Msg, ttl
 	}
 	key := c.negKey(q)
 	now := time.Now()
-	c.l1.set(key, raw, ttl, now)
+	if c.l1 != nil {
+		c.l1.set(key, raw, ttl, now)
+	}
 	if c.client != nil {
 		c.client.Set(ctx, key, raw, ttl)
 	}
@@ -238,6 +253,12 @@ func (c *Cache) SetNegative(ctx context.Context, q dns.Question, m *dns.Msg, ttl
 // GetNegative returns a cached empty response, if any (L1 first, then L2).
 func (c *Cache) GetNegative(ctx context.Context, q dns.Question) *dns.Msg {
 	key := c.negKey(q)
+	if c.l1 == nil {
+		if raw, ok := c.l2Get(ctx, key); ok {
+			return unpackNegative(raw)
+		}
+		return nil
+	}
 	now := time.Now()
 	if raw, ok := c.l1.get(key, now); ok {
 		return unpackNegative(raw)
@@ -263,7 +284,9 @@ func unpackNegative(raw []byte) *dns.Msg {
 // FlushAll clears every cached entry in L1 and L2 (used by the UI "clear
 // cache" action).
 func (c *Cache) FlushAll(ctx context.Context) (int64, error) {
-	c.l1.flush()
+	if c.l1 != nil {
+		c.l1.flush()
+	}
 	if c.client == nil {
 		return 0, nil
 	}

@@ -11,10 +11,7 @@ import (
 // in-memory cache, optional shared L2). It is purely an accelerator: entries
 // are never authoritative and losing it is harmless (it just re-warms from
 // L2).
-const (
-	l1Shards      = 256
-	l1CapPerShard = 512 // bounds memory: 256*512 = 131k entries max
-)
+const l1Shards = 256
 
 // l1Entry stores the packed response (with the 8-byte store-timestamp prefix
 // for positive entries) plus its expiry so reads can rebase TTLs.
@@ -30,10 +27,12 @@ type l1Shard struct {
 
 type l1Cache struct {
 	shards [l1Shards]*l1Shard
+	cap    int // per-shard entry cap (0 = unlimited)
 }
 
-func newL1() *l1Cache {
-	c := &l1Cache{}
+// newL1 creates the sharded cache with a per-shard entry capacity.
+func newL1(capPerShard int) *l1Cache {
+	c := &l1Cache{cap: capPerShard}
 	for i := range c.shards {
 		c.shards[i] = &l1Shard{m: make(map[string]l1Entry, 16)}
 	}
@@ -77,7 +76,7 @@ func (c *l1Cache) set(key string, raw []byte, ttl time.Duration, now time.Time) 
 	s := c.shard(key)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if len(s.m) >= l1CapPerShard {
+	if c.cap > 0 && len(s.m) >= c.cap {
 		for k := range s.m {
 			delete(s.m, k)
 			break

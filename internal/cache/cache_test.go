@@ -12,7 +12,7 @@ import (
 // l1onlyCache builds a Cache with only the in-memory L1 layer (nil Redis
 // client), so the fast path is fully exercised offline.
 func l1onlyCache(ttl, negTTL time.Duration) *Cache {
-	return &Cache{client: nil, l1: newL1(), prefix: "irongrid:dns:", ttl: ttl, negativeTTL: negTTL}
+	return &Cache{client: nil, l1: newL1(512), prefix: "irongrid:dns:", ttl: ttl, negativeTTL: negTTL}
 }
 
 func aQuestion() dns.Question {

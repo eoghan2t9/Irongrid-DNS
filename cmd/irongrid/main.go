@@ -84,7 +84,7 @@ func main() {
 	defer stop()
 
 	// ---- Dragonfly cache (hard requirement) ----
-	dfly, err := cache.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Cache.TTL, cfg.Cache.NegativeTTL)
+	dfly, err := cache.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Cache.TTL, cfg.Cache.NegativeTTL, cfg.Cache.L1Entries)
 	if err != nil {
 		log.Fatalf("cache: %v\n\nDragonfly is a hard requirement — start it (see docker-compose.yml) and retry.", err)
 	}
@@ -125,7 +125,7 @@ func main() {
 	}
 
 	// ---- query log ----
-	ql, err := querylog.New(cfg.Log.QueryLogFile, cfg.Log.RetentionDays)
+	ql, err := querylog.New(cfg.Log.QueryLogFile, cfg.Log.RetentionDays, cfg.Log.BatchSize)
 	if err != nil {
 		log.Fatalf("query log: %v", err)
 	}
@@ -196,25 +196,25 @@ func main() {
 
 	saveConfig := func() error { return cfg.Save(*configPath) }
 	apiApp := &api.App{
-		Config:      cfg,
-		ConfigPath:  *configPath,
-		SaveConfig:  saveConfig,
-		WebFS:       webFS,
+		Config:     cfg,
+		ConfigPath: *configPath,
+		SaveConfig: saveConfig,
+		WebFS:      webFS,
 	}
 	apiHandler := &api.Handler{
-		Cfg:         cfg,
-		ConfigPath:  *configPath,
-		SaveConfig:  saveConfig,
-		Engine:      engine,
-		Lists:       lists,
-		Cache:       dfly,
-		Log:         ql,
-		DNS:         handler,
-		Tunnel:      tunnelMgr,
-		Upstreams:   upstreams,
-		Catalog:     catalog.Default(),
-		StartedAt:   time.Now(),
-		Version:     version.Version,
+		Cfg:        cfg,
+		ConfigPath: *configPath,
+		SaveConfig: saveConfig,
+		Engine:     engine,
+		Lists:      lists,
+		Cache:      dfly,
+		Log:        ql,
+		DNS:        handler,
+		Tunnel:     tunnelMgr,
+		Upstreams:  upstreams,
+		Catalog:    catalog.Default(),
+		StartedAt:  time.Now(),
+		Version:    version.Version,
 	}
 	apiApp.Handler = apiHandler
 	// authorize/validSession/issueSession snapshot the auth fields under the
@@ -483,7 +483,7 @@ func main() {
 
 		// 1. Cache: connect to the new endpoint first; keep the old one on
 		//    failure so a bad config never takes the server down.
-		newCache, err := cache.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Cache.TTL, cfg.Cache.NegativeTTL)
+		newCache, err := cache.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Cache.TTL, cfg.Cache.NegativeTTL, cfg.Cache.L1Entries)
 		if err != nil {
 			return fmt.Errorf("cache: %w", err)
 		}
@@ -662,5 +662,3 @@ func hostOnly(addr string) string {
 	}
 	return host
 }
-
-

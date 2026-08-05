@@ -51,6 +51,7 @@ type Log struct {
 	mu        sync.Mutex // serialises Exec/Prune (raw writes by callers)
 	retention time.Duration
 	dir       string
+	batchSize int
 
 	entries chan Entry
 	done    chan struct{}
@@ -58,8 +59,9 @@ type Log struct {
 	wg      sync.WaitGroup
 }
 
-// New opens (creating if needed) the query log database.
-func New(path string, retentionDays int) (*Log, error) {
+// New opens (creating if needed) the query log database. batchSize is the
+// number of entries committed per transaction; <= 0 uses the default.
+func New(path string, retentionDays int, batchSize int) (*Log, error) {
 	if path == "" {
 		return nil, fmt.Errorf("query log path required")
 	}
@@ -106,10 +108,15 @@ func New(path string, retentionDays int) (*Log, error) {
 		return nil, err
 	}
 
+	bs := logBatchSize
+	if batchSize > 0 {
+		bs = batchSize
+	}
 	l := &Log{
 		db:        db,
 		retention: time.Duration(retentionDays) * 24 * time.Hour,
 		dir:       filepath.Dir(path),
+		batchSize: bs,
 		entries:   make(chan Entry, logQueueCap),
 		done:      make(chan struct{}),
 	}
@@ -140,7 +147,7 @@ func (l *Log) Record(e Entry) {
 // a closed channel would panic.
 func (l *Log) runWriter() {
 	defer l.wg.Done()
-	batch := make([]Entry, 0, logBatchSize)
+	batch := make([]Entry, 0, l.batchSize)
 	ticker := time.NewTicker(logFlushInterval)
 	defer ticker.Stop()
 	flush := func() {
@@ -154,7 +161,7 @@ func (l *Log) runWriter() {
 		select {
 		case e := <-l.entries:
 			batch = append(batch, e)
-			if len(batch) >= logBatchSize {
+			if len(batch) >= l.batchSize {
 				flush()
 			}
 		case <-ticker.C:
@@ -165,7 +172,7 @@ func (l *Log) runWriter() {
 				select {
 				case e := <-l.entries:
 					batch = append(batch, e)
-					if len(batch) >= logBatchSize {
+					if len(batch) >= l.batchSize {
 						flush()
 					}
 				default:

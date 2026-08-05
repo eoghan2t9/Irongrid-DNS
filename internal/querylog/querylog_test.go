@@ -19,7 +19,7 @@ func entry(domain string) Entry {
 // to the database — the final partial batch must not be lost at shutdown.
 func TestRecordFlushesOnClose(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "queries.db")
-	l, err := New(path, 30)
+	l, err := New(path, 30, 0)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -31,7 +31,7 @@ func TestRecordFlushesOnClose(t *testing.T) {
 	}
 
 	// Reopen the same file and count what was persisted.
-	r, err := New(path, 30)
+	r, err := New(path, 30, 0)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestRecordFlushesOnClose(t *testing.T) {
 // TestBatchFlush verifies queued entries are flushed without Close, via both
 // the batch-size and the ticker paths.
 func TestBatchFlush(t *testing.T) {
-	l, err := New(filepath.Join(t.TempDir(), "queries.db"), 30)
+	l, err := New(filepath.Join(t.TempDir(), "queries.db"), 30, 0)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestBatchFlush(t *testing.T) {
 
 // TestRecordAfterCloseIsSafe verifies Record never panics after Close.
 func TestRecordAfterCloseIsSafe(t *testing.T) {
-	l, err := New(filepath.Join(t.TempDir(), "queries.db"), 30)
+	l, err := New(filepath.Join(t.TempDir(), "queries.db"), 30, 0)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -88,7 +88,7 @@ func TestRecordAfterCloseIsSafe(t *testing.T) {
 // BenchmarkRecord measures the enqueue throughput of the async writer — the
 // rate the DNS hot path can log at without ever blocking on disk.
 func BenchmarkRecord(b *testing.B) {
-	l, err := New(filepath.Join(b.TempDir(), "queries.db"), 30)
+	l, err := New(filepath.Join(b.TempDir(), "queries.db"), 30, 0)
 	if err != nil {
 		b.Fatal(err)
 	}

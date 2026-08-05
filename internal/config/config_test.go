@@ -5,14 +5,40 @@ import (
 	"testing"
 )
 
+// TestPerfTunablesDefaults verifies the performance tunables ship with sane
+// defaults: the L1 cache on (512 entries/shard) and a 256-entry log batch.
+func TestPerfTunablesDefaults(t *testing.T) {
+	c := Default()
+	if c.Cache.L1Entries != 512 {
+		t.Errorf("cache.l1_entries = %d, want default 512", c.Cache.L1Entries)
+	}
+	if c.Log.BatchSize != 256 {
+		t.Errorf("log.batch_size = %d, want default 256", c.Log.BatchSize)
+	}
+}
+
+// TestPerfTunablesValidation verifies negative values are rejected.
+func TestPerfTunablesValidation(t *testing.T) {
+	c := validBase()
+	c.Cache.L1Entries = -1
+	if err := c.Validate(); err == nil {
+		t.Error("negative cache.l1_entries accepted")
+	}
+	c = validBase()
+	c.Log.BatchSize = -1
+	if err := c.Validate(); err == nil {
+		t.Error("negative log.batch_size accepted")
+	}
+}
+
 func validBase() *Config {
 	return &Config{
 		Server: ServerConfig{
-			ListenUDP: "0.0.0.0:53",
-			WebListen: "0.0.0.0:8080",
+			ListenUDP:  "0.0.0.0:53",
+			WebListen:  "0.0.0.0:8080",
 			TimeoutSec: 5,
 		},
-		Cache: CacheConfig{Addr: "localhost:6379", TTL: 6 * 3600e9, NegativeTTL: 60e9},
+		Cache:     CacheConfig{Addr: "localhost:6379", TTL: 6 * 3600e9, NegativeTTL: 60e9},
 		Upstreams: []string{"udp://1.1.1.1:53"},
 		Log:       LogConfig{RetentionDays: 30},
 		Web:       WebConfig{Username: "admin"},

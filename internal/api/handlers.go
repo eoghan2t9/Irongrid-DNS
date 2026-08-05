@@ -176,11 +176,11 @@ func (h *Handler) getStatus(w http.ResponseWriter) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":     version.String(),
-		"uptime_sec":  int(time.Since(h.StartedAt).Seconds()),
-		"listeners":   listeners,
-		"cache_ok":    cacheOK,
-		"tunnel":      h.Tunnel.Status(),
+		"version":    version.String(),
+		"uptime_sec": int(time.Since(h.StartedAt).Seconds()),
+		"listeners":  listeners,
+		"cache_ok":   cacheOK,
+		"tunnel":     h.Tunnel.Status(),
 	})
 }
 
@@ -196,7 +196,7 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 		proto[k] = v.Load()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"query":  stats,
+		"query": stats,
 		"counters": map[string]int64{
 			"total":   h.DNS.Stats.Total.Load(),
 			"blocked": h.DNS.Stats.Blocked.Load(),
@@ -533,14 +533,14 @@ func (h *Handler) tunnelLog(w http.ResponseWriter) {
 // the web UI. Durations are human strings ("6h") and the web password is a
 // plaintext field that is empty unless the user wants to change it.
 type configPayload struct {
-	Server    serverPayload    `json:"server"`
-	Upstreams []string         `json:"upstreams"`
-	Cache     cachePayload     `json:"cache"`
-	TLS       tlsPayload       `json:"tls"`
-	Filter    filterPayload    `json:"filter"`
-	Log       logPayload       `json:"log"`
-	Web       webPayload       `json:"web"`
-	Tunnel    tunnelPayload    `json:"tunnel"`
+	Server    serverPayload `json:"server"`
+	Upstreams []string      `json:"upstreams"`
+	Cache     cachePayload  `json:"cache"`
+	TLS       tlsPayload    `json:"tls"`
+	Filter    filterPayload `json:"filter"`
+	Log       logPayload    `json:"log"`
+	Web       webPayload    `json:"web"`
+	Tunnel    tunnelPayload `json:"tunnel"`
 }
 
 type serverPayload struct {
@@ -563,6 +563,7 @@ type cachePayload struct {
 	DB          int    `json:"db"`
 	TTL         string `json:"ttl"`
 	NegativeTTL string `json:"negative_ttl"`
+	L1Entries   int    `json:"l1_entries"`
 }
 
 type tlsPayload struct {
@@ -575,12 +576,12 @@ type tlsPayload struct {
 }
 
 type acmePayload struct {
-	Enabled         bool        `json:"enabled"`
-	Email           string      `json:"email"`
-	Domains         []string    `json:"domains"`
-	Staging         bool        `json:"staging"`
-	HTTP01Port      int         `json:"http01_port"`
-	RenewBeforeDays int         `json:"renew_before_days"`
+	Enabled         bool         `json:"enabled"`
+	Email           string       `json:"email"`
+	Domains         []string     `json:"domains"`
+	Staging         bool         `json:"staging"`
+	HTTP01Port      int          `json:"http01_port"`
+	RenewBeforeDays int          `json:"renew_before_days"`
 	DNS01           dns01Payload `json:"dns01"`
 }
 
@@ -597,11 +598,11 @@ type dns01Payload struct {
 }
 
 type filterPayload struct {
-	BlockResponse string              `json:"block_response"`
-	BlockTTL      uint32              `json:"block_ttl"`
-	Blocklists    []blocklistPayload  `json:"blocklists"`
-	Whitelist     []string            `json:"whitelist"`
-	Blacklist     []string            `json:"blacklist"`
+	BlockResponse string             `json:"block_response"`
+	BlockTTL      uint32             `json:"block_ttl"`
+	Blocklists    []blocklistPayload `json:"blocklists"`
+	Whitelist     []string           `json:"whitelist"`
+	Blacklist     []string           `json:"blacklist"`
 }
 
 type blocklistPayload struct {
@@ -616,6 +617,7 @@ type logPayload struct {
 	QueryLogFile  string `json:"query_log_file"`
 	RetentionDays int    `json:"retention_days"`
 	Verbose       bool   `json:"verbose"`
+	BatchSize     int    `json:"batch_size"`
 }
 
 type webPayload struct {
@@ -655,6 +657,7 @@ func payloadFromConfig(c *config.Config) configPayload {
 			DB:          c.Cache.DB,
 			TTL:         c.Cache.TTL.String(),
 			NegativeTTL: c.Cache.NegativeTTL.String(),
+			L1Entries:   c.Cache.L1Entries,
 		},
 		TLS: tlsPayload{
 			CertFile:           c.TLS.CertFile,
@@ -693,6 +696,7 @@ func payloadFromConfig(c *config.Config) configPayload {
 			QueryLogFile:  c.Log.QueryLogFile,
 			RetentionDays: c.Log.RetentionDays,
 			Verbose:       c.Log.Verbose,
+			BatchSize:     c.Log.BatchSize,
 		},
 		Web: webPayload{Username: c.Web.Username},
 		Tunnel: tunnelPayload{
@@ -760,6 +764,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			DB:          p.Cache.DB,
 			TTL:         ttl,
 			NegativeTTL: negTTL,
+			L1Entries:   p.Cache.L1Entries,
 		},
 		TLS: config.TLSConfig{
 			CertFile:           p.TLS.CertFile,
@@ -798,6 +803,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			QueryLogFile:  p.Log.QueryLogFile,
 			RetentionDays: p.Log.RetentionDays,
 			Verbose:       p.Log.Verbose,
+			BatchSize:     p.Log.BatchSize,
 		},
 		Web: config.WebConfig{
 			Username: p.Web.Username,
@@ -941,8 +947,8 @@ func (h *Handler) reloadConfig(w http.ResponseWriter) {
 		remaining = append(remaining, "tunnel")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":                true,
-		"reloaded":          true,
+		"ok":                     true,
+		"reloaded":               true,
 		"still_requires_restart": remaining,
 	})
 }
@@ -1312,4 +1318,3 @@ func removeStr(list []string, s string) []string {
 	}
 	return out
 }
-

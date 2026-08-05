@@ -23,15 +23,16 @@ upstreams:
   - "udp://1.1.1.1:53"
   - "udp://8.8.8.8:53"
   # - "tls://1.1.1.1:853"                  # DNS over TLS upstream
-  # - "https://cloudflare-dns.com/dns-query" # DNS over HTTPS upstream
-
-cache:
+  # - "https://cloudflare-dns.com/dns-query" # DNS over HTTPS upstreamcache:
   # Dragonfly is a HARD requirement: the server refuses to start without it.
   addr: "localhost:6379"
   password: ""                 # set if Dragonfly requires auth
   db: 0
   ttl: 6h                      # positive answer cache lifetime
-  negative_ttl: 1m             # cached NXDOMAIN / SERVFAIL lifetime
+  negative_ttl: 1m             # cached NXDOMAIN/SERVFAIL lifetime
+  # l1_entries: 512            # per-shard size of the in-process L1 cache in
+                               # front of Dragonfly (0 disables it; hits then
+                               # always round-trip to Redis)
 
 tls:
   cert_file: ""                # PEM cert chain for DoT/DoH/DoQ ("" = self-signed)
@@ -75,6 +76,7 @@ log:
   query_log_file: "data/querylog.db"
   retention_days: 30
   verbose: true
+  # batch_size: 256            # entries per query-log transaction (0 = default)
 
 web:
   username: "admin"
