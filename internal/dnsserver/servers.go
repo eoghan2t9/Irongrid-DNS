@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"time"
 
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
@@ -127,6 +128,32 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	for _, ln := range m.doqLns {
 		_ = ln.Close()
 	}
+}
+
+// SetTLS replaces the TLS config used by the DoT/DoH/DoQ listeners.
+func (m *Manager) SetTLS(conf *tls.Config) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.tlsConf = conf
+}
+
+// Restart stops every current listener and starts fresh ones with the given
+// addresses and TLS config. It is used by the config-reload flow so listener
+// changes apply without killing the process. Returns a bind error if any hard
+// listener (DoH/DoQ) fails to come back up.
+func (m *Manager) Restart(udpAddr, tcpAddr, dotAddr, dohAddr, doqAddr, dohPath string, tlsConf *tls.Config) error {
+	// Bound the shutdown so a stuck listener can't wedge the reload forever.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	m.Shutdown(shutdownCtx)
+	cancel()
+	m.mu.Lock()
+	m.servers = nil
+	m.httpSrv = nil
+	m.doqLns = nil
+	m.tlsConf = tlsConf
+	m.mu.Unlock()
+	_, err := m.Start(udpAddr, tcpAddr, dotAddr, dohAddr, doqAddr, dohPath)
+	return err
 }
 
 // ensureTLSListener helper for DoT uses the shared TLS config.

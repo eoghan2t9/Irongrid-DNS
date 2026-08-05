@@ -62,7 +62,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("cache: %v\n\nDragonfly is a hard requirement — start it (see docker-compose.yml) and retry.", err)
 	}
-	defer dfly.Close()
+	// Note: closes the *current* cache, which reload may have swapped.
+	defer func() { _ = dfly.Close() }()
 	log.Printf("[cache] Dragonfly caching enabled (positive TTL %s, negative TTL %s)", cfg.Cache.TTL, cfg.Cache.NegativeTTL)
 
 	// ---- upstreams ----
@@ -183,6 +184,86 @@ func main() {
 			log.Printf("[web] server error: %v", err)
 		}
 	}()
+
+	// ---- config reload: apply listener/cache/TLS/web changes in-process ----
+	apiHandler.Reload = func() error {
+		// Failure-atomic ordering: build every new component first and restart
+		// the listeners before swapping any live references, so a bad config
+		// leaves the running server untouched.
+
+		// 1. Cache: connect to the new endpoint first; keep the old one on
+		//    failure so a bad config never takes the server down.
+		newCache, err := cache.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Cache.TTL, cfg.Cache.NegativeTTL)
+		if err != nil {
+			return fmt.Errorf("cache: %w", err)
+		}
+		// 2. TLS: reload certificates before touching the listeners.
+		newTLS, err := cert.LoadOrGenerate(cfg.TLS.CertFile, cfg.TLS.KeyFile, cfg.TLS.CertDir, cfg.TLS.SelfSignedHosts)
+		if err != nil {
+			_ = newCache.Close()
+			return fmt.Errorf("tls: %w", err)
+		}
+		// 3. Upstreams: rebuild from the new specs.
+		newUps := make([]*upstream.Upstream, 0, len(cfg.Upstreams))
+		for _, spec := range cfg.Upstreams {
+			up, err := upstream.Parse(spec)
+			if err != nil {
+				_ = newCache.Close()
+				return fmt.Errorf("upstream %q: %w", spec, err)
+			}
+			newUps = append(newUps, up)
+		}
+
+		// 4. Restart the DNS listeners with the new addresses + TLS. This is
+		//    the only step that can fail with hard bind errors, so it runs
+		//    before anything is swapped. Note: UDP/TCP/DoT bind failures are
+		//    reported asynchronously via the results channel, not as errors.
+		if err := dnsMgr.Restart(
+			cfg.Server.ListenUDP, cfg.Server.ListenTCP,
+			cfg.Server.ListenDoT, cfg.Server.ListenDoH, cfg.Server.ListenDoQ,
+			cfg.Server.DoHPath, newTLS,
+		); err != nil {
+			_ = newCache.Close()
+			return fmt.Errorf("dns listeners: %w", err)
+		}
+
+		// 5. Now swap the hot references — listeners are already serving with
+		//    the new TLS config, so this only changes cache/upstreams/policy.
+		handler.SetCache(newCache)
+		handler.SetUpstreams(newUps)
+		handler.SetBlockPolicy(cfg.Filter.BlockResponse, cfg.Filter.BlockTTL)
+		handler.SetTimeout(time.Duration(cfg.Server.TimeoutSec) * time.Second)
+		apiHandler.Cache = newCache
+		apiHandler.Upstreams = newUps
+		oldCache := dfly
+		dfly = newCache
+		_ = oldCache.Close()
+
+		// 6. Rebind the web server if its address changed. Shutdown is run in
+		//    a goroutine: calling Shutdown synchronously from inside a request
+		//    served by the same server would wait on the in-flight handler and
+		//    deadlock, and the delay lets the reload response flush first.
+		if webSrv.Addr != cfg.Server.WebListen {
+			oldWeb := webSrv
+			newWeb := &http.Server{
+				Addr:         cfg.Server.WebListen,
+				Handler:      api.NewRouter(apiApp),
+				ReadTimeout:  30 * time.Second,
+				WriteTimeout: 30 * time.Second,
+			}
+			webSrv = newWeb
+			go func() {
+				time.Sleep(200 * time.Millisecond) // let the reload response flush
+				_ = oldWeb.Shutdown(context.Background())
+				log.Printf("[web] dashboard + API on http://%s", cfg.Server.WebListen)
+				if err := newWeb.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					log.Printf("[web] server error: %v", err)
+				}
+			}()
+		}
+		log.Printf("[config] reload applied: listeners, cache, TLS, upstreams")
+		return nil
+	}
 
 	// ---- auto-start tunnel if configured ----
 	if cfg.Tunnel.Enabled {

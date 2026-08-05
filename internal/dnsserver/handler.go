@@ -93,6 +93,13 @@ func (h *Handler) SetUpstreams(ups []*upstream.Upstream) {
 	h.Upstreams = ups
 }
 
+// SetCache hot-swaps the response cache (config reload).
+func (h *Handler) SetCache(c *cache.Cache) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.Cache = c
+}
+
 // SetBlockPolicy hot-swaps the block response mode and TTL.
 func (h *Handler) SetBlockPolicy(resp string, ttl uint32) {
 	h.mu.Lock()
@@ -121,6 +128,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	blockResp := h.BlockResponse
 	blockTTL := h.BlockTTL
 	timeout := h.Timeout
+	cache := h.Cache
 	h.mu.RUnlock()
 
 	if r == nil || len(r.Question) == 0 {
@@ -149,9 +157,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 
 	// 2. Cache lookup (only for standard record types). Cached messages carry
 	//    the ID of the original query, so rebase to this request's ID.
-	if h.Cache != nil && !isMetaQuery(q) {
+	if cache != nil && !isMetaQuery(q) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		if cached := h.Cache.Get(ctx, q); cached != nil {
+		if cached := cache.Get(ctx, q); cached != nil {
 			cancel()
 			cached.Id = r.Id
 			h.Stats.Cached.Add(1)
@@ -159,7 +167,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			w.WriteMsg(cached)
 			return
 		}
-		if neg := h.Cache.GetNegative(ctx, q); neg != nil {
+		if neg := cache.GetNegative(ctx, q); neg != nil {
 			cancel()
 			neg.Id = r.Id
 			h.Stats.Cached.Add(1)
@@ -210,12 +218,12 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 
 	// 5. Cache the result (positive or negative) and return. Zero TTLs fall
 	//    back to the configured Dragonfly cache lifetimes.
-	if h.Cache != nil && !isMetaQuery(q) {
+	if cache != nil && !isMetaQuery(q) {
 		cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
 		if len(resp.Answer) > 0 {
-			h.Cache.Set(cctx, q, resp, 0)
+			cache.Set(cctx, q, resp, 0)
 		} else {
-			h.Cache.SetNegative(cctx, q, resp, 0)
+			cache.SetNegative(cctx, q, resp, 0)
 		}
 		ccancel()
 	}

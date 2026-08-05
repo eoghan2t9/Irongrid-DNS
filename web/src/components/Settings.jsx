@@ -19,6 +19,8 @@ export default function Settings() {
   const [cfg, setCfg] = useState(null)
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
+  const [restartNeeded, setRestartNeeded] = useState([])
+  const [restarting, setRestarting] = useState(false)
   const [msg, setMsg] = useState('')
   const [err, setErr] = useState('')
   const [diagName, setDiagName] = useState('example.com')
@@ -81,9 +83,10 @@ export default function Settings() {
     try {
       const r = await api.saveConfig(cfg)
       const restart = r.restart_required || []
+      setRestartNeeded(restart)
       setMsg(
         restart.length
-          ? `Saved. Applied live: block policy, filter lists and upstreams. Restart needed for: ${restart.join(', ')}.`
+          ? `Saved. Block policy, filter lists and upstreams applied live. Restart needed for: ${restart.join(', ')}.`
           : 'Saved and applied live — no restart required.'
       )
       setDirty(false)
@@ -92,6 +95,27 @@ export default function Settings() {
       setErr(e.message)
     } finally {
       setSaving(false)
+    }
+  }
+
+  const restart = async () => {
+    if (!window.confirm('Rebind DNS listeners, cache, TLS and the web server now? This takes a moment and briefly interrupts DNS service.')) return
+    setRestarting(true)
+    setErr('')
+    try {
+      const r = await api.reloadConfig()
+      const remaining = r.still_requires_restart || []
+      setRestartNeeded(remaining)
+      setMsg(
+        remaining.length
+          ? `Reloaded in place — listeners, cache, TLS and upstreams are live. ${remaining.join(', ')} still needs a process restart.`
+          : 'Restarted in place — all configuration is now live.'
+      )
+      await load()
+    } catch (e) {
+      setErr('Restart failed: ' + e.message)
+    } finally {
+      setRestarting(false)
     }
   }
 
@@ -175,6 +199,33 @@ export default function Settings() {
     </div>
   )
 
+  const setBlocklist = (i, patch) => {
+    setCfg((prev) => {
+      const next = JSON.parse(JSON.stringify(prev))
+      next.filter.blocklists[i] = { ...next.filter.blocklists[i], ...patch }
+      return next
+    })
+    setDirty(true)
+  }
+
+  const addBlocklist = () => {
+    setCfg((prev) => {
+      const next = JSON.parse(JSON.stringify(prev))
+      next.filter.blocklists = [...(next.filter.blocklists || []), { id: '', name: '', url: '', enabled: true, auto_update: '' }]
+      return next
+    })
+    setDirty(true)
+  }
+
+  const removeBlocklist = (i) => {
+    setCfg((prev) => {
+      const next = JSON.parse(JSON.stringify(prev))
+      next.filter.blocklists = next.filter.blocklists.filter((_, x) => x !== i)
+      return next
+    })
+    setDirty(true)
+  }
+
   return (
     <div className="stack">
       {msg && <div className="info-banner">{msg}</div>}
@@ -185,6 +236,11 @@ export default function Settings() {
           <h3 style={{ margin: 0 }}>Configuration</h3>
           <div className="row">
             {dirty && <span className="dim small">unsaved changes</span>}
+            {restartNeeded.length > 0 && !dirty && (
+              <button className="btn primary" onClick={restart} disabled={restarting}>
+                {restarting ? 'Restarting…' : `Apply & restart (${restartNeeded.length})`}
+              </button>
+            )}
             <button className="btn primary" onClick={save} disabled={saving || !dirty}>
               {saving ? 'Saving…' : 'Save & apply'}
             </button>
@@ -192,7 +248,8 @@ export default function Settings() {
         </div>
         <p className="dim small">
           Editing <code>irongrid.yaml</code>. Block policy, filter lists and upstreams apply immediately;
-          listener/cache/TLS/log changes need a restart (the UI will tell you which).
+          listener/cache/TLS changes can be applied in place with <strong>Apply &amp; restart</strong> — no process
+          restart needed.
         </p>
       </div>
 
@@ -251,7 +308,31 @@ export default function Settings() {
           {textarea('Whitelist (always allow)', 'filter.whitelist')}
           {textarea('Blacklist (always block)', 'filter.blacklist')}
         </div>
-        <p className="card-hint">Blocklists are managed on the <strong>Blocklists</strong> page — they are saved as part of this config too.</p>
+      </div>
+
+      <div className="card">
+        <h3>Blocklists</h3>
+        <p className="dim small">Same lists as the Blocklists page — kept in sync with this config.</p>
+        {(cfg.filter.blocklists || []).map((bl, i) => (
+          <div className="blocklist-row" key={i}>
+            <div className="list-row">
+              <input className="input" placeholder="ID" value={bl.id || ''} onChange={(e) => setBlocklist(i, { id: e.target.value })} />
+              <input className="input" placeholder="Name" value={bl.name || ''} onChange={(e) => setBlocklist(i, { name: e.target.value })} />
+            </div>
+            <div className="list-row">
+              <input className="input mono" placeholder="URL or file:// path" value={bl.url || ''} onChange={(e) => setBlocklist(i, { url: e.target.value })} />
+              <input className="input" placeholder="Auto update (e.g. 24h)" value={bl.auto_update || ''} onChange={(e) => setBlocklist(i, { auto_update: e.target.value })} />
+              <label className="switch" title="Enabled">
+                <input type="checkbox" checked={!!bl.enabled} onChange={(e) => setBlocklist(i, { enabled: e.target.checked })} />
+                <span className="slider" />
+              </label>
+              <button className="btn small danger" type="button" onClick={() => removeBlocklist(i)}>✕</button>
+            </div>
+          </div>
+        ))}
+        <div className="quick-actions" style={{ marginTop: 12 }}>
+          <button className="btn small" type="button" onClick={addBlocklist}>+ Add blocklist</button>
+        </div>
       </div>
 
       <div className="card">

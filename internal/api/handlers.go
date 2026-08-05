@@ -32,6 +32,9 @@ type Handler struct {
 	Cfg        *config.Config
 	ConfigPath string
 	SaveConfig func() error
+	// Reload rebinds listeners, cache, TLS and the web server from the
+	// current in-memory config. Wired up by main; nil when unavailable.
+	Reload func() error
 
 	Engine    *filter.Engine
 	Lists     *filter.ListManager
@@ -100,6 +103,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.getConfig(w)
 	case len(parts) == 1 && parts[0] == "config" && r.Method == http.MethodPut:
 		h.putConfig(w, r)
+	case len(parts) == 2 && parts[0] == "config" && parts[1] == "reload" && r.Method == http.MethodPost:
+		h.reloadConfig(w)
 	case len(parts) == 2 && parts[0] == "diag" && parts[1] == "dns" && r.Method == http.MethodGet:
 		h.diagDNS(ctx, w, r)
 	default:
@@ -777,6 +782,32 @@ func (h *Handler) putConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":               true,
 		"restart_required": restart,
+	})
+}
+
+func (h *Handler) reloadConfig(w http.ResponseWriter) {
+	if h.Reload == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "reload not supported in this build"})
+		return
+	}
+	// Hold cfgMu: Reload reads the in-memory config which putConfig mutates
+	// under the same mutex.
+	h.cfgMu.Lock()
+	err := h.Reload()
+	h.cfgMu.Unlock()
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	// Sections the in-process reload does not handle still need a restart.
+	remaining := []string{}
+	if h.Cfg.Tunnel.Enabled || h.Cfg.Tunnel.Token != "" || h.Cfg.Tunnel.QuickTunnel {
+		remaining = append(remaining, "tunnel")
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":                true,
+		"reloaded":          true,
+		"still_requires_restart": remaining,
 	})
 }
 

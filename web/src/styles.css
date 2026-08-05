@@ -217,6 +217,11 @@ body {
 }
 .list-row { display: flex; gap: 8px; align-items: center; }
 .list-row .input { flex: 1; }
+.blocklist-row {
+  display: flex; flex-direction: column; gap: 8px;
+  background: var(--bg2); border: 1px solid var(--border);
+  border-radius: 9px; padding: 10px 12px; margin-bottom: 10px;
+}
 
 /* ---------- log filters ---------- */
 .log-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
