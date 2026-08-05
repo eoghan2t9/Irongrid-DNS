@@ -205,6 +205,25 @@ func main() {
 		}
 	}()
 
+	// ---- TLS-only reload: used after the dashboard generates/uploads a
+	// certificate. Rebinds the DNS listeners with the new cert; leaves the
+	// cache and upstreams untouched so it works even while Dragonfly is down.
+	apiHandler.ReloadTLS = func() error {
+		newTLS, err := cert.LoadOrGenerate(cfg.TLS.CertFile, cfg.TLS.KeyFile, cfg.TLS.CertDir, cfg.TLS.SelfSignedHosts)
+		if err != nil {
+			return fmt.Errorf("tls: %w", err)
+		}
+		if err := dnsMgr.Restart(
+			cfg.Server.ListenUDP, cfg.Server.ListenTCP,
+			cfg.Server.ListenDoT, cfg.Server.ListenDoH, cfg.Server.ListenDoQ,
+			cfg.Server.DoHPath, newTLS,
+		); err != nil {
+			return fmt.Errorf("dns listeners: %w", err)
+		}
+		log.Printf("[tls] certificate reloaded and listeners rebound")
+		return nil
+	}
+
 	// ---- config reload: apply listener/cache/TLS/web changes in-process ----
 	apiHandler.Reload = func() error {
 		// Failure-atomic ordering: build every new component first and restart

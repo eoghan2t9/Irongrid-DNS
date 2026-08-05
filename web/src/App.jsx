@@ -6,6 +6,7 @@ import Blocklists from './components/Blocklists'
 import Lists from './components/Lists'
 import Tunnel from './components/Tunnel'
 import Settings from './components/Settings'
+import Tls from './components/Tls'
 import UpdateChecker from './components/UpdateChecker'
 
 const NAV = [
@@ -13,6 +14,7 @@ const NAV = [
   { id: 'log', label: 'Query Log', icon: '≡' },
   { id: 'blocklists', label: 'Blocklists', icon: '▤' },
   { id: 'lists', label: 'Allow / Block', icon: '✓' },
+  { id: 'tls', label: 'SSL / TLS', icon: '🔒' },
   { id: 'tunnel', label: 'Tunnel', icon: '↗' },
   { id: 'settings', label: 'Settings', icon: '⚙' },
 ]
@@ -102,6 +104,7 @@ export default function App() {
           {view === 'log' && <QueryLog />}
           {view === 'blocklists' && <Blocklists />}
           {view === 'lists' && <Lists />}
+          {view === 'tls' && <Tls />}
           {view === 'tunnel' && <Tunnel />}
           {view === 'settings' && <Settings />}
         </div>

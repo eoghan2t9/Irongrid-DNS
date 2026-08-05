@@ -62,4 +62,21 @@ export const api = {
   reloadConfig: () => request('/api/config/reload', { method: 'POST' }),
   diagDNS: (name, type) => request(`/api/diag/dns?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`),
   updateCheck: () => request('/api/update/check'),
+  tlsStatus: () => request('/api/tls'),
+  tlsGenerate: (body) => request('/api/tls/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  tlsUpload: (body) => request('/api/tls/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  tlsCertDownload: async () => {
+    // Raw fetch so we can return a blob (the auth header is attached the
+    // same way as request() does).
+    const headers = {}
+    if (credentials) headers.Authorization = 'Basic ' + btoa(`${credentials.user}:${credentials.pass}`)
+    const resp = await fetch('/api/tls/cert', { headers })
+    if (resp.status === 401) {
+      if (onUnauthorized) onUnauthorized()
+      throw new Error('unauthorized')
+    }
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    return resp.blob()
+  },
 }
+

@@ -285,6 +285,10 @@ export default function Settings() {
 
       <div className="card">
         <h3>TLS</h3>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          Prefer the dedicated <strong>SSL / TLS</strong> page for generating or uploading
+          certificates — these fields are the raw config behind it.
+        </p>
         <div className="form-grid">
           {text('Cert file', 'tls.cert_file', null, 'data/certs/cert.pem')}
           {text('Key file', 'tls.key_file', null, 'data/certs/key.pem')}

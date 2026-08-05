@@ -329,6 +329,10 @@ GET/PUT /api/config         read / update the full config (live-apply + restart 
 POST /api/config/reload     apply listener/cache/TLS/upstream changes in-process (no restart)
 GET  /api/diag/dns?name=…   resolve through your upstreams
 GET  /api/update/check      check GitHub Releases for a newer version + changelog
+GET  /api/tls               current certificate details (subject, SANs, expiry, fingerprint)
+POST /api/tls/generate      generate a self-signed cert (hosts, key type/bits, validity) and apply it
+POST /api/tls/upload        upload a CA-signed cert + key pair and apply it
+GET  /api/tls/cert          download the active certificate (for clients to trust)
 ```
 
 ## Development

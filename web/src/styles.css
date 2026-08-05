@@ -259,6 +259,7 @@ body {
 .badge-blocked { background: rgba(251, 113, 133, 0.14); color: var(--rose); }
 .badge-cached { background: rgba(167, 139, 250, 0.14); color: var(--violet); }
 .badge-error { background: rgba(251, 113, 133, 0.14); color: var(--rose); }
+.badge-warn { background: rgba(251, 191, 36, 0.14); color: var(--amber); }
 .chip {
   background: var(--bg2); border: 1px solid var(--border);
   padding: 2px 8px; border-radius: 6px; font-size: 11.5px;
@@ -336,6 +337,23 @@ body {
 }
 .switch input:checked + .slider { background: rgba(52, 211, 153, 0.35); border-color: var(--emerald); }
 .switch input:checked + .slider::before { transform: translateX(18px); background: var(--emerald); box-shadow: 0 0 8px var(--emerald); }
+
+/* ---------- SSL / TLS page ---------- */
+.cert-summary { display: flex; flex-direction: column; gap: 16px; }
+.kv-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 6px 24px; }
+.kv-row { display: flex; flex-direction: column; gap: 2px; }
+.kv-label { font-size: 11px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.4px; }
+.kv-value { font-size: 13px; word-break: break-all; }
+.expiry-ok { color: var(--emerald); }
+.expiry-warn { color: var(--amber); }
+.expiry-bad { color: var(--rose); }
+.san-block { display: flex; flex-direction: column; gap: 8px; }
+.pem-box { font-size: 11px; resize: vertical; }
+.btn-link {
+  background: none; border: none; padding: 0;
+  color: var(--cyan); font-size: inherit; cursor: pointer; text-decoration: underline;
+}
+.btn-link:disabled { opacity: 0.5; cursor: not-allowed; }
 
 /* ---------- presets / banners / empty ---------- */
 .presets { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
