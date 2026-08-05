@@ -2,14 +2,20 @@
 package api
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
 	"embed"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
 	"mime"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -62,16 +68,92 @@ func NewRouter(a *App) http.Handler {
 	return logRequests(mux)
 }
 
-// authorize checks HTTP Basic auth against the configured credentials.
+// sessionCookie is the signed login cookie. It keeps the dashboard logged in
+// across page reloads without the browser needing to resend the password.
+const sessionCookie = "irongrid_session"
+
+const sessionLifetime = 30 * 24 * time.Hour
+
+// authorize allows requests carrying a valid signed session cookie (login
+// persists across reloads) or valid HTTP Basic credentials. A successful
+// Basic login also issues the session cookie for the next request.
 func (a *App) authorize(w http.ResponseWriter, r *http.Request) bool {
+	if a.validSession(r) {
+		return true
+	}
 	user, pass, ok := r.BasicAuth()
 	cfg := a.Config
 	if ok && user == cfg.Web.Username && passwordMatches(pass, cfg.Web.Password) {
+		a.issueSession(w, user)
 		return true
 	}
 	w.Header().Set("WWW-Authenticate", `Basic realm="Irongrid DNS"`)
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 	return false
+}
+
+// issueSession sets a signed, HttpOnly login cookie valid for sessionLifetime.
+// The payload ("user.exp") is base64url-encoded so usernames containing dots
+// can't break the "payload.sig" split.
+func (a *App) issueSession(w http.ResponseWriter, user string) {
+	secret := a.Config.Web.SessionSecret
+	if secret == "" {
+		return
+	}
+	exp := time.Now().Add(sessionLifetime).Unix()
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%s.%d", user, exp)))
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(payload))
+	val := payload + "." + hex.EncodeToString(mac.Sum(nil))
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    val,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		// Only send over HTTPS when the dashboard runs on TLS.
+		Secure: a.Config.Server.WebTLS,
+		MaxAge: int(sessionLifetime.Seconds()),
+	})
+}
+
+// validSession reports whether the request carries a valid, unexpired login
+// cookie for the configured user.
+func (a *App) validSession(r *http.Request) bool {
+	c, err := r.Cookie(sessionCookie)
+	if err != nil {
+		return false
+	}
+	secret := a.Config.Web.SessionSecret
+	if secret == "" {
+		return false
+	}
+	parts := strings.SplitN(c.Value, ".", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	payload, sig := parts[0], parts[1]
+	raw, err := base64.RawURLEncoding.DecodeString(payload)
+	if err != nil {
+		return false
+	}
+	// The payload is "<user>.<exp>"; usernames may themselves contain dots,
+	// so split on the last dot (the expiry is always the final field).
+	idx := strings.LastIndexByte(string(raw), '.')
+	if idx < 0 {
+		return false
+	}
+	user := string(raw[:idx])
+	exp, err := strconv.ParseInt(string(raw[idx+1:]), 10, 64)
+	if err != nil || time.Now().Unix() > exp {
+		return false
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write([]byte(payload))
+	if !hmac.Equal([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil)))) {
+		return false
+	}
+	return user == a.Config.Web.Username
 }
 
 // passwordMatches compares a plaintext password against a stored value that

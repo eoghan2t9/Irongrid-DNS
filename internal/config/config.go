@@ -3,6 +3,8 @@
 package config
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -210,7 +212,30 @@ func Load(path string) (*Config, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
+	// Generate the session secret on first load so signed login cookies work.
+	// Persisting it is best-effort: on a read-only config mount (e.g. Docker
+	// with :ro) the write fails, so the secret stays in memory and sessions
+	// simply reset on restart — never abort startup over it.
+	if cfg.Web.SessionSecret == "" {
+		if sec, err := randomHex(32); err != nil {
+			return nil, fmt.Errorf("generate session secret: %w", err)
+		} else {
+			cfg.Web.SessionSecret = sec
+			if err := cfg.Save(path); err != nil {
+				fmt.Fprintf(os.Stderr, "warning: could not persist session secret (%v); sessions will reset on restart\n", err)
+			}
+		}
+	}
 	return cfg, nil
+}
+
+// randomHex returns n random bytes hex-encoded.
+func randomHex(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // Validate checks the configuration for required fields. It is used by the

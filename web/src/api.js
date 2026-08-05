@@ -1,6 +1,16 @@
 let credentials = null // { user, pass }
 let onUnauthorized = null
 
+// authHeader returns the Basic auth header for the in-memory credentials, or
+// null when there is no usable password. After a page reload the password is
+// gone from memory — the signed irongrid_session cookie (set on login) keeps
+// the user authenticated instead, so we don't send a broken empty-password
+// header that would 401 before the cookie is considered.
+function authHeader() {
+  if (!credentials || !credentials.user || !credentials.pass) return null
+  return 'Basic ' + btoa(`${credentials.user}:${credentials.pass}`)
+}
+
 export function setAuthHandler(fn) { onUnauthorized = fn }
 export function setCredentials(user, pass) {
   credentials = { user, pass }
@@ -11,15 +21,16 @@ export function hasCredentials() {
 }
 export function restoreCredentials() {
   const user = localStorage.getItem('irongrid_user')
+  // Password lives only in memory (Basic auth); the session cookie covers
+  // reloads, so an empty pass here is expected and fine.
   if (user) credentials = { user, pass: '' }
   return credentials
 }
 
 async function request(path, options = {}) {
   const headers = { ...(options.headers || {}) }
-  if (credentials) {
-    headers.Authorization = 'Basic ' + btoa(`${credentials.user}:${credentials.pass}`)
-  }
+  const auth = authHeader()
+  if (auth) headers.Authorization = auth
   const resp = await fetch(path, { ...options, headers })
   if (resp.status === 401) {
     if (onUnauthorized) onUnauthorized()
@@ -69,9 +80,10 @@ export const api = {
   tlsAcmeIssue: () => request('/api/tls/acme/issue', { method: 'POST' }),
   tlsCertDownload: async () => {
     // Raw fetch so we can return a blob (the auth header is attached the
-    // same way as request() does).
+    // same way as request() does; after a reload the session cookie covers it).
     const headers = {}
-    if (credentials) headers.Authorization = 'Basic ' + btoa(`${credentials.user}:${credentials.pass}`)
+    const auth = authHeader()
+    if (auth) headers.Authorization = auth
     const resp = await fetch('/api/tls/cert', { headers })
     if (resp.status === 401) {
       if (onUnauthorized) onUnauthorized()

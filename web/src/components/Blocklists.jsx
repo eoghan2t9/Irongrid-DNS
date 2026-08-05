@@ -28,7 +28,7 @@ export default function Blocklists() {
   useEffect(() => {
     api.catalog()
       .then((c) => setPresets(c.blocklists || []))
-      .catch(() => { /* fall back to hardcoded presets below */ })
+      .catch(() => { /* keep hardcoded PRESETS fallback */ })
   }, [])
 
   const toggle = async (id, enabled) => {
@@ -51,6 +51,19 @@ export default function Blocklists() {
     } catch (e) { setMsg('Update failed: ' + e.message) }
     setBusy(false)
     load()
+  }
+
+  const addPreset = async (p) => {
+    if (lists.some((l) => l.spec.id === p.id)) return
+    setBusy(true); setMsg(`Adding "${p.name}" — fetching content…`)
+    try {
+      await api.addList({ id: p.id, name: p.name, url: p.url, enabled: true, auto_update_hours: presetHours(p) })
+      setMsg('Fetching list content…')
+      await api.refreshList(p.id)
+      setMsg(`Added "${p.name}"`)
+      load()
+    } catch (e) { setMsg('Failed: ' + e.message) }
+    setBusy(false)
   }
 
   const submit = async (e) => {
@@ -113,12 +126,36 @@ export default function Blocklists() {
                   name: p.name,
                   url: p.url,
                   enabled: true,
-                  auto_update_hours: p.auto_update ? hoursOfStr(p.auto_update) : (p.auto_update_hours || 24),
+                  auto_update_hours: presetHours(p),
                 })}
               >
                 {p.name.split(' ')[0]}
               </button>
             ))}
+          </div>
+        </div>
+      )}
+
+      {(presets.length ? presets : PRESETS).length > 0 && (
+        <div className="card">
+          <h3>Pre-made blocklists</h3>
+          <p className="dim small">One click adds a curated blocklist and starts fetching it. Already-added lists are skipped.</p>
+          <div className="presets">
+            {(presets.length ? presets : PRESETS).map((p) => {
+              const id = p.id || slug(p.name)
+              const added = lists.some((l) => l.spec.id === id)
+              return (
+                <button
+                  key={p.url}
+                  className={`btn ghost small ${added ? 'dim' : ''}`}
+                  title={p.description || p.name}
+                  disabled={added}
+                  onClick={() => addPreset({ ...p, id })}
+                >
+                  {added ? '✓ ' : '+ '}{p.name}
+                </button>
+              )
+            })}
           </div>
         </div>
       )}
@@ -192,5 +229,9 @@ const hoursOfStr = (s) => {
   if (s.includes('w')) return n * 168
   return n
 }
+// Catalog presets carry a duration string ("24h"); the hardcoded fallback
+// presets carry hours directly. Support both — and keep an explicit 0
+// ("never") as 0 rather than defaulting it to 24.
+const presetHours = (p) => (p.auto_update ? hoursOfStr(p.auto_update) : (p.auto_update_hours ?? 24))
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
 const truncate = (s, n) => (s && s.length > n ? s.slice(0, n) + '…' : s)
