@@ -1257,7 +1257,6 @@ func (h *Handler) installUpdate(ctx context.Context, w http.ResponseWriter) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	h.lastInstalledVersion = res.NewVersion
 
 	payload := map[string]any{
 		"previous_version": res.PreviousVersion,
@@ -1267,9 +1266,14 @@ func (h *Handler) installUpdate(ctx context.Context, w http.ResponseWriter) {
 		"asset_name":       res.AssetName,
 		"asset_size":       res.AssetSize,
 	}
+
+	// Only claim (and guard) a restart when it can actually happen: systemd
+	// must be running and systemd-run on PATH. The swap itself is safe to
+	// retry — a repeated install simply re-downloads and re-verifies.
 	unit := update.UnitName()
 	_, systemdRunOK := exec.LookPath("systemd-run")
-	if unit != "" && systemdRunOK == nil {
+	if _, err := os.Stat("/run/systemd/system"); err == nil && unit != "" && systemdRunOK == nil {
+		h.lastInstalledVersion = res.NewVersion
 		payload["restarting"] = true
 		payload["unit"] = unit
 		go func(unit string) {
