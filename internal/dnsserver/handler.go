@@ -8,6 +8,7 @@ import (
 	"log"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -38,11 +39,14 @@ func newStats() *Stats {
 
 // Handler is the shared request pipeline for all listeners.
 type Handler struct {
-	Engine    *filter.Engine
-	Cache     *cache.Cache
-	Upstreams []*upstream.Upstream
-	Log       *querylog.Log
+	Engine *filter.Engine
+	Cache  *cache.Cache
+	Log    *querylog.Log
 
+	// mu guards the hot-swappable settings below (upstreams, block policy,
+	// timeout) so the API can live-apply config changes without a restart.
+	mu            sync.RWMutex
+	Upstreams     []*upstream.Upstream
 	BlockResponse string
 	BlockTTL      uint32
 	Timeout       time.Duration
@@ -82,12 +86,42 @@ func (h *Handler) ServeDNSFromContext(w dns.ResponseWriter, r *dns.Msg, clientIP
 	h.serve(w, r, clientIP, proto)
 }
 
+// SetUpstreams hot-swaps the upstream forwarders (config live-apply).
+func (h *Handler) SetUpstreams(ups []*upstream.Upstream) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.Upstreams = ups
+}
+
+// SetBlockPolicy hot-swaps the block response mode and TTL.
+func (h *Handler) SetBlockPolicy(resp string, ttl uint32) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.BlockResponse = resp
+	h.BlockTTL = ttl
+}
+
+// SetTimeout hot-swaps the per-query upstream timeout.
+func (h *Handler) SetTimeout(d time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.Timeout = d
+}
+
 func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) {
 	start := time.Now()
 	h.Stats.Total.Add(1)
 	if p, ok := h.Stats.ByProtocol[proto]; ok {
 		p.Add(1)
 	}
+
+	// Snapshot hot-swappable settings once so the pipeline below is race-free.
+	h.mu.RLock()
+	upstreams := h.Upstreams
+	blockResp := h.BlockResponse
+	blockTTL := h.BlockTTL
+	timeout := h.Timeout
+	h.mu.RUnlock()
 
 	if r == nil || len(r.Question) == 0 {
 		m := new(dns.Msg)
@@ -106,7 +140,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	// 1. Filtering: whitelist overrides everything; blocklists stop the query.
 	decision := h.Engine.DecideDomain(q.Name)
 	if decision.Action == filter.Block {
-		blocked := filter.BuildBlockResponse(r, h.BlockResponse, h.BlockTTL)
+		blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 		h.Stats.Blocked.Add(1)
 		h.record(client, qname, q, "blocked", decision.Reason, "", start, blocked)
 		w.WriteMsg(blocked)
@@ -137,14 +171,14 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	}
 
 	// 3. Forward to upstreams in order.
-	ctx, cancel := context.WithTimeout(context.Background(), h.Timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var (
 		resp   *dns.Msg
 		usedUp string
 		err    error
 	)
-	for _, up := range h.Upstreams {
+	for _, up := range upstreams {
 		resp, err = up.Query(ctx, r)
 		usedUp = up.Name()
 		if err == nil && resp != nil {
@@ -167,7 +201,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	// 4. IP-based blocking: if the blocklists contain IP rules, check the
 	//    answers (A/AAAA) returned by the upstream.
 	if blockedByIP, reason := h.Engine.CheckIPs(answerIPs(resp)); blockedByIP {
-		blocked := filter.BuildBlockResponse(r, h.BlockResponse, h.BlockTTL)
+		blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 		h.Stats.Blocked.Add(1)
 		h.record(client, qname, q, "blocked", reason, usedUp, start, blocked)
 		w.WriteMsg(blocked)

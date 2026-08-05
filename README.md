@@ -117,6 +117,7 @@ GET/POST /api/filter/{whitelist,blacklist}   allow/block entries
 POST /api/filter/check      test a domain or IP
 POST /api/cache/flush       clear Dragonfly cache
 GET/POST /api/tunnel/*      tunnel lifecycle + logs
+GET/PUT /api/config         read / update the full config (live-apply + restart notes)
 GET  /api/diag/dns?name=…   resolve through your upstreams
 ```
 

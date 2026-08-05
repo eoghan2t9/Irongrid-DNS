@@ -207,6 +207,17 @@ body {
 
 .quick-actions { display: flex; gap: 10px; flex-wrap: wrap; }
 
+/* ---------- settings form ---------- */
+.field { display: flex; flex-direction: column; gap: 6px; font-size: 12.5px; color: var(--dim); }
+.field-label { font-weight: 600; color: var(--dim); }
+.field-hint { font-size: 11px; opacity: 0.75; }
+.toggle-field {
+  display: flex; flex-direction: column; gap: 10px;
+  font-size: 12.5px; color: var(--dim); font-weight: 600;
+}
+.list-row { display: flex; gap: 8px; align-items: center; }
+.list-row .input { flex: 1; }
+
 /* ---------- log filters ---------- */
 .log-filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
 .log-filters .input { width: auto; min-width: 140px; }

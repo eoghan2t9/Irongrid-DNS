@@ -57,5 +57,6 @@ export const api = {
   tunnelStop: () => request('/api/tunnel/stop', { method: 'POST' }),
   tunnelLog: () => request('/api/tunnel/log'),
   config: () => request('/api/config'),
+  saveConfig: (cfg) => request('/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) }),
   diagDNS: (name, type) => request(`/api/diag/dns?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`),
 }

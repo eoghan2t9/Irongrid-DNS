@@ -3,8 +3,10 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
+	"reflect"
 	"sort"
 	"strconv"
 	"strings"
@@ -96,6 +98,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.tunnelLog(w)
 	case len(parts) == 1 && parts[0] == "config" && r.Method == http.MethodGet:
 		h.getConfig(w)
+	case len(parts) == 1 && parts[0] == "config" && r.Method == http.MethodPut:
+		h.putConfig(w, r)
 	case len(parts) == 2 && parts[0] == "diag" && parts[1] == "dns" && r.Method == http.MethodGet:
 		h.diagDNS(ctx, w, r)
 	default:
@@ -106,6 +110,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 // ---- status & stats ----
 
 func (h *Handler) getStatus(w http.ResponseWriter) {
+	h.cfgMu.Lock()
+	defer h.cfgMu.Unlock()
 	listeners := map[string]bool{}
 	for _, proto := range []string{"udp", "tcp", "dot", "doh", "doq"} {
 		s := h.Cfg.Server
@@ -468,12 +474,310 @@ func (h *Handler) tunnelLog(w http.ResponseWriter) {
 
 // ---- config & diagnostics ----
 
+// configPayload is the JSON shape used to read and write configuration from
+// the web UI. Durations are human strings ("6h") and the web password is a
+// plaintext field that is empty unless the user wants to change it.
+type configPayload struct {
+	Server    serverPayload    `json:"server"`
+	Upstreams []string         `json:"upstreams"`
+	Cache     cachePayload     `json:"cache"`
+	TLS       tlsPayload       `json:"tls"`
+	Filter    filterPayload    `json:"filter"`
+	Log       logPayload       `json:"log"`
+	Web       webPayload       `json:"web"`
+	Tunnel    tunnelPayload    `json:"tunnel"`
+}
+
+type serverPayload struct {
+	ListenUDP  string `json:"listen_udp"`
+	ListenTCP  string `json:"listen_tcp"`
+	ListenDoT  string `json:"listen_dot"`
+	ListenDoH  string `json:"listen_doh"`
+	ListenDoQ  string `json:"listen_doq"`
+	DoHPath    string `json:"doh_path"`
+	WebListen  string `json:"web_listen"`
+	TimeoutSec int    `json:"timeout_sec"`
+}
+
+type cachePayload struct {
+	Addr        string `json:"addr"`
+	Password    string `json:"password"`
+	DB          int    `json:"db"`
+	TTL         string `json:"ttl"`
+	NegativeTTL string `json:"negative_ttl"`
+}
+
+type tlsPayload struct {
+	CertFile           string   `json:"cert_file"`
+	KeyFile            string   `json:"key_file"`
+	GenerateSelfSigned bool     `json:"generate_self_signed"`
+	SelfSignedHosts    []string `json:"self_signed_hosts"`
+	CertDir            string   `json:"cert_dir"`
+}
+
+type filterPayload struct {
+	BlockResponse string              `json:"block_response"`
+	BlockTTL      uint32              `json:"block_ttl"`
+	Blocklists    []blocklistPayload  `json:"blocklists"`
+	Whitelist     []string            `json:"whitelist"`
+	Blacklist     []string            `json:"blacklist"`
+}
+
+type blocklistPayload struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	URL        string `json:"url"`
+	Enabled    bool   `json:"enabled"`
+	AutoUpdate string `json:"auto_update"` // duration string, "" = never
+}
+
+type logPayload struct {
+	QueryLogFile  string `json:"query_log_file"`
+	RetentionDays int    `json:"retention_days"`
+	Verbose       bool   `json:"verbose"`
+}
+
+type webPayload struct {
+	Username string `json:"username"`
+	Password string `json:"password"` // plaintext; empty keeps the existing hash
+}
+
+type tunnelPayload struct {
+	Enabled        bool   `json:"enabled"`
+	Token          string `json:"token"`
+	ConfigFile     string `json:"config_file"`
+	QuickTunnel    bool   `json:"quick_tunnel"`
+	QuickTunnelURL string `json:"quick_tunnel_url"`
+	Hostname       string `json:"hostname"`
+}
+
+// payloadFromConfig maps the internal config into the JSON shape.
+func payloadFromConfig(c *config.Config) configPayload {
+	p := configPayload{
+		Server: serverPayload{
+			ListenUDP:  c.Server.ListenUDP,
+			ListenTCP:  c.Server.ListenTCP,
+			ListenDoT:  c.Server.ListenDoT,
+			ListenDoH:  c.Server.ListenDoH,
+			ListenDoQ:  c.Server.ListenDoQ,
+			DoHPath:    c.Server.DoHPath,
+			WebListen:  c.Server.WebListen,
+			TimeoutSec: c.Server.TimeoutSec,
+		},
+		Upstreams: c.Upstreams,
+		Cache: cachePayload{
+			Addr:        c.Cache.Addr,
+			Password:    c.Cache.Password,
+			DB:          c.Cache.DB,
+			TTL:         c.Cache.TTL.String(),
+			NegativeTTL: c.Cache.NegativeTTL.String(),
+		},
+		TLS: tlsPayload{
+			CertFile:           c.TLS.CertFile,
+			KeyFile:            c.TLS.KeyFile,
+			GenerateSelfSigned: c.TLS.GenerateSelfSigned,
+			SelfSignedHosts:    c.TLS.SelfSignedHosts,
+			CertDir:            c.TLS.CertDir,
+		},
+		Filter: filterPayload{
+			BlockResponse: c.Filter.BlockResponse,
+			BlockTTL:      c.Filter.BlockTTL,
+			Blocklists:    make([]blocklistPayload, 0, len(c.Filter.Blocklists)),
+			Whitelist:     c.Filter.Whitelist,
+			Blacklist:     c.Filter.Blacklist,
+		},
+		Log: logPayload{
+			QueryLogFile:  c.Log.QueryLogFile,
+			RetentionDays: c.Log.RetentionDays,
+			Verbose:       c.Log.Verbose,
+		},
+		Web: webPayload{Username: c.Web.Username},
+		Tunnel: tunnelPayload{
+			Enabled:        c.Tunnel.Enabled,
+			Token:          c.Tunnel.Token,
+			ConfigFile:     c.Tunnel.ConfigFile,
+			QuickTunnel:    c.Tunnel.QuickTunnel,
+			QuickTunnelURL: c.Tunnel.QuickTunnelURL,
+			Hostname:       c.Tunnel.Hostname,
+		},
+	}
+	for _, bl := range c.Filter.Blocklists {
+		auto := ""
+		if bl.AutoUpdate > 0 {
+			auto = bl.AutoUpdate.String()
+		}
+		p.Filter.Blocklists = append(p.Filter.Blocklists, blocklistPayload{
+			ID: bl.ID, Name: bl.Name, URL: bl.URL, Enabled: bl.Enabled, AutoUpdate: auto,
+		})
+	}
+	return p
+}
+
+// applyPayload validates a submitted config, live-applies the hot parts and
+// persists it to disk. It returns the list of sections that need a restart.
+func (h *Handler) applyPayload(p configPayload) ([]string, error) {
+	parseDur := func(s string) (time.Duration, error) {
+		if strings.TrimSpace(s) == "" {
+			return 0, nil
+		}
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return 0, err
+		}
+		return d, nil
+	}
+
+	ttl, err := parseDur(p.Cache.TTL)
+	if err != nil {
+		return nil, fmt.Errorf("cache.ttl: %w", err)
+	}
+	negTTL, err := parseDur(p.Cache.NegativeTTL)
+	if err != nil {
+		return nil, fmt.Errorf("cache.negative_ttl: %w", err)
+	}
+
+	cfg := &config.Config{
+		Server: config.ServerConfig{
+			ListenUDP:  p.Server.ListenUDP,
+			ListenTCP:  p.Server.ListenTCP,
+			ListenDoT:  p.Server.ListenDoT,
+			ListenDoH:  p.Server.ListenDoH,
+			ListenDoQ:  p.Server.ListenDoQ,
+			DoHPath:    p.Server.DoHPath,
+			WebListen:  p.Server.WebListen,
+			TimeoutSec: p.Server.TimeoutSec,
+		},
+		Upstreams: p.Upstreams,
+		Cache: config.CacheConfig{
+			Addr:        p.Cache.Addr,
+			Password:    p.Cache.Password,
+			DB:          p.Cache.DB,
+			TTL:         ttl,
+			NegativeTTL: negTTL,
+		},
+		TLS: config.TLSConfig{
+			CertFile:           p.TLS.CertFile,
+			KeyFile:            p.TLS.KeyFile,
+			GenerateSelfSigned: p.TLS.GenerateSelfSigned,
+			SelfSignedHosts:    p.TLS.SelfSignedHosts,
+			CertDir:            p.TLS.CertDir,
+		},
+		Filter: config.FilterConfig{
+			BlockResponse: p.Filter.BlockResponse,
+			BlockTTL:      p.Filter.BlockTTL,
+			Blocklists:    make([]config.BlocklistSpec, 0, len(p.Filter.Blocklists)),
+			Whitelist:     p.Filter.Whitelist,
+			Blacklist:     p.Filter.Blacklist,
+		},
+		Log: config.LogConfig{
+			QueryLogFile:  p.Log.QueryLogFile,
+			RetentionDays: p.Log.RetentionDays,
+			Verbose:       p.Log.Verbose,
+		},
+		Web: config.WebConfig{
+			Username: p.Web.Username,
+			Password: p.Web.Password,
+		},
+		Tunnel: config.TunnelConfig{
+			Enabled:        p.Tunnel.Enabled,
+			Token:          p.Tunnel.Token,
+			ConfigFile:     p.Tunnel.ConfigFile,
+			QuickTunnel:    p.Tunnel.QuickTunnel,
+			QuickTunnelURL: p.Tunnel.QuickTunnelURL,
+			Hostname:       p.Tunnel.Hostname,
+		},
+	}
+	for _, bl := range p.Filter.Blocklists {
+		auto, err := parseDur(bl.AutoUpdate)
+		if err != nil {
+			return nil, fmt.Errorf("blocklist %s auto_update: %w", bl.ID, err)
+		}
+		cfg.Filter.Blocklists = append(cfg.Filter.Blocklists, config.BlocklistSpec{
+			ID: bl.ID, Name: bl.Name, URL: bl.URL, Enabled: bl.Enabled, AutoUpdate: auto,
+		})
+	}
+
+	// Keep the existing password hash/session secret unless a new plaintext
+	// password was provided (it is bcrypt-hashed by Config.Save).
+	if cfg.Web.Password == "" {
+		cfg.Web.Password = h.Cfg.Web.Password
+	}
+	cfg.Web.SessionSecret = h.Cfg.Web.SessionSecret
+
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+
+	h.cfgMu.Lock()
+	defer h.cfgMu.Unlock()
+
+	// Diff against the running config to report restart-required sections.
+	restart := []string{}
+	if !reflect.DeepEqual(h.Cfg.Server, cfg.Server) {
+		restart = append(restart, "server (listeners)")
+	}
+	if !reflect.DeepEqual(h.Cfg.Cache, cfg.Cache) {
+		restart = append(restart, "cache")
+	}
+	if !reflect.DeepEqual(h.Cfg.TLS, cfg.TLS) {
+		restart = append(restart, "tls")
+	}
+	if !reflect.DeepEqual(h.Cfg.Log, cfg.Log) {
+		restart = append(restart, "log")
+	}
+	if !reflect.DeepEqual(h.Cfg.Tunnel, cfg.Tunnel) {
+		restart = append(restart, "tunnel")
+	}
+
+	// Live-apply the hot sections.
+	if !reflect.DeepEqual(h.Cfg.Upstreams, cfg.Upstreams) {
+		ups := make([]*upstream.Upstream, 0, len(cfg.Upstreams))
+		for _, spec := range cfg.Upstreams {
+			up, err := upstream.Parse(spec)
+			if err != nil {
+				return nil, fmt.Errorf("upstream %q: %w", spec, err)
+			}
+			ups = append(ups, up)
+		}
+		h.DNS.SetUpstreams(ups)
+		h.Upstreams = ups
+	}
+	h.DNS.SetBlockPolicy(cfg.Filter.BlockResponse, cfg.Filter.BlockTTL)
+	h.DNS.SetTimeout(time.Duration(cfg.Server.TimeoutSec) * time.Second)
+	h.Cfg.Filter.Whitelist = cfg.Filter.Whitelist
+	h.Cfg.Filter.Blacklist = cfg.Filter.Blacklist
+	h.applyUserLists()
+	h.Cfg.Filter.Blocklists = cfg.Filter.Blocklists
+	h.applyLists()
+
+	*h.Cfg = *cfg
+	if err := h.SaveConfig(); err != nil {
+		return nil, err
+	}
+	return restart, nil
+}
+
 func (h *Handler) getConfig(w http.ResponseWriter) {
-	// Never leak the password hash or session secret.
-	c := *h.Cfg
-	c.Web.Password = ""
-	c.Web.SessionSecret = ""
-	writeJSON(w, http.StatusOK, c)
+	h.cfgMu.Lock()
+	defer h.cfgMu.Unlock()
+	writeJSON(w, http.StatusOK, payloadFromConfig(h.Cfg))
+}
+
+func (h *Handler) putConfig(w http.ResponseWriter, r *http.Request) {
+	var p configPayload
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad body: " + err.Error()})
+		return
+	}
+	restart, err := h.applyPayload(p)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":               true,
+		"restart_required": restart,
+	})
 }
 
 func (h *Handler) diagDNS(ctx context.Context, w http.ResponseWriter, r *http.Request) {
@@ -492,8 +796,11 @@ func (h *Handler) diagDNS(ctx context.Context, w http.ResponseWriter, r *http.Re
 	msg.SetQuestion(q.Name, q.Qtype)
 	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
+	h.cfgMu.Lock()
+	ups := append([]*upstream.Upstream(nil), h.Upstreams...)
+	h.cfgMu.Unlock()
 	var lastErr error
-	for _, up := range h.Upstreams {
+	for _, up := range ups {
 		resp, err := up.Query(cctx, msg)
 		if err == nil {
 			answers := make([]string, 0, len(resp.Answer))

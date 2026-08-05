@@ -176,6 +176,12 @@ func Load(path string) (*Config, error) {
 	return cfg, nil
 }
 
+// Validate checks the configuration for required fields. It is used by the
+// config loader and by the API when the frontend submits edited settings.
+func (c *Config) Validate() error {
+	return c.validate()
+}
+
 func (c *Config) validate() error {
 	if len(c.Upstreams) == 0 {
 		return fmt.Errorf("at least one upstream DNS server is required")
@@ -186,6 +192,12 @@ func (c *Config) validate() error {
 	if c.Server.ListenUDP == "" && c.Server.ListenTCP == "" &&
 		c.Server.ListenDoT == "" && c.Server.ListenDoH == "" && c.Server.ListenDoQ == "" {
 		return fmt.Errorf("at least one DNS listener must be enabled")
+	}
+	if c.Server.TimeoutSec < 1 {
+		return fmt.Errorf("server.timeout_sec must be >= 1")
+	}
+	if c.Log.RetentionDays < 1 {
+		return fmt.Errorf("log.retention_days must be >= 1")
 	}
 	if c.Web.Username == "" {
 		return fmt.Errorf("web.username is required")
