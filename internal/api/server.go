@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -27,6 +28,13 @@ import (
 // App bundles every dependency the API exposes.
 type App struct {
 	Config *config.Config
+	// Mu, when non-nil, is the same mutex the API Handler uses to guard
+	// config mutations (cfgMu). authorize/issueSession/validSession snapshot
+	// the auth fields under it so a concurrent config apply — which rotates
+	// the session secret in place via *h.Cfg = *cfg — can never be observed
+	// as a torn read (e.g. a cookie signed with the new secret validated
+	// against the old one).
+	Mu *sync.Mutex
 	// Set by main: live components.
 	Handler     APIHandler
 	WebFS       fs.FS // embedded frontend build
@@ -74,17 +82,29 @@ const sessionCookie = "irongrid_session"
 
 const sessionLifetime = 30 * 24 * time.Hour
 
+// authSnapshot copies the auth-relevant config fields under the shared mutex
+// (when set) so every check in a single request sees one consistent snapshot,
+// even while a config apply is rotating the session secret mid-request.
+func (a *App) authSnapshot() (username, password, secret string, secure bool) {
+	if a.Mu != nil {
+		a.Mu.Lock()
+		defer a.Mu.Unlock()
+	}
+	cfg := a.Config
+	return cfg.Web.Username, cfg.Web.Password, cfg.Web.SessionSecret, cfg.Server.WebTLS
+}
+
 // authorize allows requests carrying a valid signed session cookie (login
 // persists across reloads) or valid HTTP Basic credentials. A successful
 // Basic login also issues the session cookie for the next request.
 func (a *App) authorize(w http.ResponseWriter, r *http.Request) bool {
-	if a.validSession(r) {
+	username, password, secret, secure := a.authSnapshot()
+	if a.validSession(r, username, secret) {
 		return true
 	}
 	user, pass, ok := r.BasicAuth()
-	cfg := a.Config
-	if ok && user == cfg.Web.Username && passwordMatches(pass, cfg.Web.Password) {
-		a.issueSession(w, user)
+	if ok && user == username && passwordMatches(pass, password) {
+		a.issueSessionWith(w, user, secret, secure)
 		return true
 	}
 	w.Header().Set("WWW-Authenticate", `Basic realm="Irongrid DNS"`)
@@ -96,7 +116,13 @@ func (a *App) authorize(w http.ResponseWriter, r *http.Request) bool {
 // The payload ("user.exp") is base64url-encoded so usernames containing dots
 // can't break the "payload.sig" split.
 func (a *App) issueSession(w http.ResponseWriter, user string) {
-	secret := a.Config.Web.SessionSecret
+	_, _, secret, secure := a.authSnapshot()
+	a.issueSessionWith(w, user, secret, secure)
+}
+
+// issueSessionWith writes the signed cookie using an already-snapshotted
+// secret and Secure flag, keeping one request consistent.
+func (a *App) issueSessionWith(w http.ResponseWriter, user, secret string, secure bool) {
 	if secret == "" {
 		return
 	}
@@ -112,19 +138,18 @@ func (a *App) issueSession(w http.ResponseWriter, user string) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		// Only send over HTTPS when the dashboard runs on TLS.
-		Secure: a.Config.Server.WebTLS,
+		Secure: secure,
 		MaxAge: int(sessionLifetime.Seconds()),
 	})
 }
 
 // validSession reports whether the request carries a valid, unexpired login
 // cookie for the configured user.
-func (a *App) validSession(r *http.Request) bool {
+func (a *App) validSession(r *http.Request, username, secret string) bool {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
 		return false
 	}
-	secret := a.Config.Web.SessionSecret
 	if secret == "" {
 		return false
 	}
@@ -153,7 +178,7 @@ func (a *App) validSession(r *http.Request) bool {
 	if !hmac.Equal([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil)))) {
 		return false
 	}
-	return user == a.Config.Web.Username
+	return user == username
 }
 
 // passwordMatches compares a plaintext password against a stored value that

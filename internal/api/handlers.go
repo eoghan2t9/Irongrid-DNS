@@ -65,6 +65,11 @@ type Handler struct {
 	Version   string
 }
 
+// ConfigMu exposes the mutex that guards Cfg mutations so the App's auth
+// checks (authorize/issueSession/validSession) can snapshot config fields
+// under the same lock applyPayload uses when it rotates the session secret.
+func (h *Handler) ConfigMu() *sync.Mutex { return &h.cfgMu }
+
 // HandleAPI dispatches /api/* requests.
 func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/")
@@ -75,6 +80,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case len(parts) == 1 && parts[0] == "status" && r.Method == http.MethodGet:
 		h.getStatus(w)
+	case len(parts) == 1 && parts[0] == "logout" && r.Method == http.MethodPost:
+		h.logout(w)
 	case len(parts) == 1 && parts[0] == "stats" && r.Method == http.MethodGet:
 		h.getStats(ctx, w)
 	case len(parts) == 1 && parts[0] == "log" && r.Method == http.MethodGet:
@@ -815,12 +822,21 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 		})
 	}
 
-	// Keep the existing password hash/session secret unless a new plaintext
-	// password was provided (it is bcrypt-hashed by Config.Save).
+	// Keep the existing password hash unless a new plaintext password was
+	// provided (it is bcrypt-hashed by Config.Save). Changing the password
+	// rotates the session secret so every previously issued session cookie —
+	// including the one authorizing this very request — becomes invalid at
+	// once (session rotation on password change).
 	if cfg.Web.Password == "" {
 		cfg.Web.Password = h.Cfg.Web.Password
+		cfg.Web.SessionSecret = h.Cfg.Web.SessionSecret
+	} else {
+		sec, err := sessionSecretFor(cfg.Web.Password, h.Cfg.Web.SessionSecret)
+		if err != nil {
+			return nil, fmt.Errorf("rotate session secret: %w", err)
+		}
+		cfg.Web.SessionSecret = sec
 	}
-	cfg.Web.SessionSecret = h.Cfg.Web.SessionSecret
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -868,8 +884,15 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	h.Cfg.Filter.Blocklists = cfg.Filter.Blocklists
 	h.applyLists()
 
+	oldSecret := h.Cfg.Web.SessionSecret
 	*h.Cfg = *cfg
 	if err := h.SaveConfig(); err != nil {
+		// A failed save must not leave a rotated session secret live in
+		// memory while the file still holds the old one — sessions signed
+		// with the new secret would silently die on the next restart.
+		// Revert just the secret; the rest of the in-memory apply keeps the
+		// established (pre-existing) semantics.
+		h.Cfg.Web.SessionSecret = oldSecret
 		return nil, err
 	}
 	return restart, nil
@@ -1238,6 +1261,37 @@ func extractIPs(m *dns.Msg) []net.IP {
 		}
 	}
 	return ips
+}
+
+// logout clears the signed session cookie in the browser. The cookie is
+// stateless (HMAC-signed), so expiring it client-side is all the server
+// needs to do — no server-side session store exists.
+func (h *Handler) logout(w http.ResponseWriter) {
+	h.cfgMu.Lock()
+	secure := h.Cfg.Server.WebTLS
+	h.cfgMu.Unlock()
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookie,
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   secure,
+		MaxAge:   -1,
+		Expires:  time.Unix(1, 0),
+	})
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "logged out"})
+}
+
+// sessionSecretFor returns the session secret to persist when applying a
+// config: the existing secret unless a new plaintext password was supplied,
+// in which case a fresh secret is generated so all previously issued session
+// cookies stop validating (session rotation).
+func sessionSecretFor(newPassword, currentSecret string) (string, error) {
+	if newPassword == "" {
+		return currentSecret, nil
+	}
+	return config.NewSessionSecret()
 }
 
 func contains(list []string, s string) bool {

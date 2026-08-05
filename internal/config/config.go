@@ -238,6 +238,13 @@ func randomHex(n int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
+// NewSessionSecret returns a fresh random secret for signing login session
+// cookies. Use it when the web password changes to rotate the signing key and
+// thereby invalidate every previously issued session cookie at once.
+func NewSessionSecret() (string, error) {
+	return randomHex(32)
+}
+
 // Validate checks the configuration for required fields. It is used by the
 // config loader and by the API when the frontend submits edited settings.
 func (c *Config) Validate() error {

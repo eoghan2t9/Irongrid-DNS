@@ -217,6 +217,10 @@ func main() {
 		Version:     version.Version,
 	}
 	apiApp.Handler = apiHandler
+	// authorize/validSession/issueSession snapshot the auth fields under the
+	// same mutex applyPayload uses, so a session-secret rotation can never be
+	// read as a torn mix.
+	apiApp.Mu = apiHandler.ConfigMu()
 
 	// ---- ACME (Let's Encrypt) auto-issuance ----
 	// startACME is callable at boot AND from the reload hook so toggling

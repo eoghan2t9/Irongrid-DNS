@@ -19,6 +19,13 @@ export function setCredentials(user, pass) {
 export function hasCredentials() {
   return !!credentials || !!localStorage.getItem('irongrid_user')
 }
+// clearCredentials forgets the in-memory credentials and the persisted
+// username. Used by logout and when the server rotates the session secret
+// after a password change.
+export function clearCredentials() {
+  credentials = null
+  localStorage.removeItem('irongrid_user')
+}
 export function restoreCredentials() {
   const user = localStorage.getItem('irongrid_user')
   // Password lives only in memory (Basic auth); the session cookie covers
@@ -45,6 +52,7 @@ async function request(path, options = {}) {
 
 export const api = {
   status: () => request('/api/status'),
+  logout: () => request('/api/logout', { method: 'POST' }),
   stats: () => request('/api/stats'),
   log: (params = {}) => {
     const q = new URLSearchParams()

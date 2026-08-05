@@ -15,8 +15,9 @@ const empty = () => ({
   tunnel: { enabled: false, token: '', config_file: '', quick_tunnel: false, quick_tunnel_url: '', hostname: '' },
 })
 
-export default function Settings() {
+export default function Settings({ onSessionInvalidated }) {
   const [cfg, setCfg] = useState(null)
+  const [initialUser, setInitialUser] = useState('')
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [restartNeeded, setRestartNeeded] = useState([])
@@ -31,6 +32,7 @@ export default function Settings() {
     try {
       const c = await api.config()
       setCfg(c)
+      setInitialUser((c.web && c.web.username) || '')
     } catch { /* ignore */ }
   }, [])
 
@@ -81,7 +83,24 @@ export default function Settings() {
     setErr('')
     setMsg('')
     try {
+      // A non-empty password field means "change the password" — the server
+      // then rotates the session secret, invalidating every session cookie
+      // including this one. Changing the username invalidates them too (each
+      // cookie is bound to the username). Either way the next API call would
+      // 401, so hand it to the app: sign out locally and prompt to sign in
+      // with the updated credentials.
+      const passwordChanged = !!(cfg.web && cfg.web.password)
+      const usernameChanged = !!(initialUser && cfg.web && cfg.web.username && cfg.web.username !== initialUser)
+      const credsChanged = passwordChanged || usernameChanged
       const r = await api.saveConfig(cfg)
+      if (credsChanged && onSessionInvalidated) {
+        onSessionInvalidated(
+          passwordChanged
+            ? 'Password changed — all sessions were signed out. Sign in with your new password.'
+            : 'Username changed — all sessions were signed out. Sign in with your updated credentials.'
+        )
+        return
+      }
       const restart = r.restart_required || []
       setRestartNeeded(restart)
       setMsg(
@@ -409,7 +428,7 @@ export default function Settings() {
         <h3>Web credentials</h3>
         <div className="form-grid">
           {text('Username', 'web.username')}
-          {field('Password', 'leave blank to keep the current password', (
+          {field('Password', 'leave blank to keep the current password; changing it signs out every device (including this one)', (
             <input className="input" type="password" value={cfg.web.password} onChange={(e) => set('web.password', e.target.value)} autoComplete="new-password" />
           ))}
         </div>

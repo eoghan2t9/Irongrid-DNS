@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from 'react'
-import { api, setAuthHandler, setCredentials, restoreCredentials, hasCredentials } from './api'
+import { api, setAuthHandler, setCredentials, restoreCredentials, hasCredentials, clearCredentials } from './api'
 import Dashboard from './components/Dashboard'
 import QueryLog from './components/QueryLog'
 import Blocklists from './components/Blocklists'
@@ -27,6 +27,7 @@ export default function App() {
   const [authed, setAuthed] = useState(hasCredentials())
   const [showLogin, setShowLogin] = useState(!hasCredentials())
   const [navOpen, setNavOpen] = useState(false)
+  const [loginNotice, setLoginNotice] = useState('')
 
   const navigate = (id) => {
     setView(id)
@@ -55,9 +56,33 @@ export default function App() {
     await api.status()
     setAuthed(true)
     setShowLogin(false)
+    setLoginNotice('')
   }
 
-  if (showLogin) return <Login onLogin={handleLogin} />
+  // Best-effort server-side cookie clear, then drop local credentials.
+  const handleLogout = async () => {
+    try {
+      await api.logout()
+    } catch {
+      /* cookie may already be invalid — local clear still logs out */
+    }
+    clearCredentials()
+    setAuthed(false)
+    setShowLogin(true)
+  }
+
+  // Called by Settings after a successful password/username change: the server
+  // rotated the session secret (or the cookie is now bound to the wrong
+  // username), so every old session cookie — including this one — is dead.
+  // Sign out locally and ask the user to sign in again.
+  const handleSessionInvalidated = (message) => {
+    clearCredentials()
+    setAuthed(false)
+    setLoginNotice(message || 'Your sign-in details changed — all sessions were signed out. Please sign in again.')
+    setShowLogin(true)
+  }
+
+  if (showLogin) return <Login onLogin={handleLogin} notice={loginNotice} />
 
   return (
     <div className="shell">
@@ -114,6 +139,9 @@ export default function App() {
             <button className="btn ghost small" onClick={refreshStatus}>
               ⟳ Refresh
             </button>
+            <button className="btn ghost small danger" onClick={handleLogout} title="Sign out">
+              ⏻ Log out
+            </button>
           </div>
         </header>
         <div className="content">
@@ -124,14 +152,14 @@ export default function App() {
           {view === 'tls' && <Tls />}
           {view === 'tunnel' && <Tunnel />}
           {view === 'changelog' && <Changelog />}
-          {view === 'settings' && <Settings />}
+          {view === 'settings' && <Settings onSessionInvalidated={handleSessionInvalidated} />}
         </div>
       </main>
     </div>
   )
 }
 
-function Login({ onLogin }) {
+function Login({ onLogin, notice }) {
   const [user, setUser] = useState('admin')
   const [pass, setPass] = useState('')
   const [err, setErr] = useState('')
@@ -151,6 +179,7 @@ function Login({ onLogin }) {
         <div className="login-logo">◈</div>
         <h1>Irongrid DNS</h1>
         <p className="login-sub">Sign in to manage your DNS blocker</p>
+        {notice && <div className="info-banner">{notice}</div>}
         <input
           className="input"
           placeholder="Username"

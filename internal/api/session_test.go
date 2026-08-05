@@ -116,6 +116,66 @@ func TestSessionCookieDottedUsername(t *testing.T) {
 	}
 }
 
+// TestSessionSecretRotation verifies the session-rotation rule: the secret is
+// kept when no new password is supplied, but rotated to a fresh value whenever
+// a new plaintext password is — invalidating every previously issued cookie.
+func TestSessionSecretRotation(t *testing.T) {
+	const current = "0123456789abcdef0123456789abcdef"
+
+	// No new password: keep the current secret (existing sessions survive).
+	same, err := sessionSecretFor("", current)
+	if err != nil {
+		t.Fatalf("sessionSecretFor(\"\") error: %v", err)
+	}
+	if same != current {
+		t.Fatalf("expected existing secret to be kept, got %q", same)
+	}
+
+	// New password: the secret must rotate (and never equal the old one).
+	rotated, err := sessionSecretFor("newpass123", current)
+	if err != nil {
+		t.Fatalf("sessionSecretFor(new password) error: %v", err)
+	}
+	if rotated == "" {
+		t.Fatal("rotated secret is empty")
+	}
+	if rotated == current {
+		t.Fatal("session secret was not rotated on password change")
+	}
+	// Two consecutive rotations must produce different secrets.
+	rotated2, err := sessionSecretFor("anotherpass", rotated)
+	if err != nil {
+		t.Fatalf("second rotation error: %v", err)
+	}
+	if rotated2 == rotated {
+		t.Fatal("second rotation produced the same secret")
+	}
+}
+
+// TestLogoutClearsSessionCookie verifies POST /api/logout expires the session
+// cookie so the browser drops it.
+func TestLogoutClearsSessionCookie(t *testing.T) {
+	h := &Handler{Cfg: &config.Config{}}
+	rr := httptest.NewRecorder()
+	h.logout(rr)
+
+	var sess *http.Cookie
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == sessionCookie {
+			sess = c
+		}
+	}
+	if sess == nil {
+		t.Fatal("logout did not set a session cookie")
+	}
+	if sess.Value != "" {
+		t.Errorf("logout cookie value = %q, want empty", sess.Value)
+	}
+	if sess.MaxAge != -1 {
+		t.Errorf("logout cookie MaxAge = %d, want -1", sess.MaxAge)
+	}
+}
+
 // validCookie builds a properly signed session cookie value for the given user.
 func validCookie(t *testing.T, a *App, user string) string {
 	t.Helper()
