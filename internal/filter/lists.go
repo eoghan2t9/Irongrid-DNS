@@ -21,6 +21,11 @@ type ListManager struct {
 	engine *Engine
 	dir    string
 	client *http.Client
+	// autoUpdate is the single refresh interval applied to every enabled
+	// list; 0 disables auto-refresh entirely. Set via SetAutoUpdate rather
+	// than per-list — one global cadence instead of tracking a schedule per
+	// list.
+	autoUpdate time.Duration
 	// OnChange, if set, is invoked after every successful ReloadAll. Used to
 	// rebuild anything else that derives from the same cached list content
 	// (e.g. per-client-group engines), which ReloadAll itself knows nothing
@@ -30,11 +35,10 @@ type ListManager struct {
 
 // ListSpec mirrors the config blocklist entry.
 type ListSpec struct {
-	ID         string        `json:"id"`
-	Name       string        `json:"name"`
-	URL        string        `json:"url"`
-	Enabled    bool          `json:"enabled"`
-	AutoUpdate time.Duration `json:"auto_update"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	URL     string `json:"url"`
+	Enabled bool   `json:"enabled"`
 }
 
 // StoredList holds the last known good content of a list.
@@ -64,6 +68,15 @@ func NewListManager(engine *Engine, dir string) *ListManager {
 		dir:    dir,
 		client: &http.Client{Timeout: 60 * time.Second},
 	}
+}
+
+// SetAutoUpdate sets the global refresh interval used by StartRefresh's
+// ticker; 0 disables auto-refresh. Safe to call while StartRefresh is
+// running (e.g. after a config reload).
+func (m *ListManager) SetAutoUpdate(d time.Duration) {
+	m.mu.Lock()
+	m.autoUpdate = d
+	m.mu.Unlock()
 }
 
 // SetSpecs replaces the configured lists.
@@ -235,14 +248,16 @@ func (m *ListManager) StartRefresh(ctx context.Context) {
 			case <-ticker.C:
 				now := time.Now()
 				m.mu.Lock()
+				interval := m.autoUpdate
 				var due []string
-				for id, stored := range m.store {
-					s := stored.Spec
-					if !s.Enabled || s.AutoUpdate <= 0 {
-						continue
-					}
-					if stored.LastFetched == nil || now.Sub(*stored.LastFetched) >= s.AutoUpdate {
-						due = append(due, id)
+				if interval > 0 {
+					for id, stored := range m.store {
+						if !stored.Spec.Enabled {
+							continue
+						}
+						if stored.LastFetched == nil || now.Sub(*stored.LastFetched) >= interval {
+							due = append(due, id)
+						}
 					}
 				}
 				m.mu.Unlock()

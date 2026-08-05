@@ -253,11 +253,10 @@ func (h *Handler) getLists(w http.ResponseWriter) {
 }
 
 type listPayload struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	URL        string `json:"url"`
-	Enabled    bool   `json:"enabled"`
-	AutoUpdate int    `json:"auto_update_hours"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	URL     string `json:"url"`
+	Enabled bool   `json:"enabled"`
 }
 
 func (h *Handler) addList(w http.ResponseWriter, r *http.Request) {
@@ -269,11 +268,10 @@ func (h *Handler) addList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.Cfg.Filter.Blocklists = append(h.Cfg.Filter.Blocklists, config.BlocklistSpec{
-		ID:         p.ID,
-		Name:       p.Name,
-		URL:        p.URL,
-		Enabled:    p.Enabled,
-		AutoUpdate: time.Duration(p.AutoUpdate) * time.Hour,
+		ID:      p.ID,
+		Name:    p.Name,
+		URL:     p.URL,
+		Enabled: p.Enabled,
 	})
 	h.applyLists()
 	if err := h.SaveConfig(); err != nil {
@@ -302,7 +300,6 @@ func (h *Handler) updateList(w http.ResponseWriter, r *http.Request, id string) 
 				s.URL = p.URL
 			}
 			s.Enabled = p.Enabled
-			s.AutoUpdate = time.Duration(p.AutoUpdate) * time.Hour
 			changed = true
 			break
 		}
@@ -383,12 +380,10 @@ func (h *Handler) getCatalog(w http.ResponseWriter) {
 func (h *Handler) applyLists() {
 	specs := make([]filter.ListSpec, 0, len(h.Cfg.Filter.Blocklists))
 	for _, s := range h.Cfg.Filter.Blocklists {
-		specs = append(specs, filter.ListSpec{
-			ID: s.ID, Name: s.Name, URL: s.URL,
-			Enabled: s.Enabled, AutoUpdate: s.AutoUpdate,
-		})
+		specs = append(specs, filter.ListSpec{ID: s.ID, Name: s.Name, URL: s.URL, Enabled: s.Enabled})
 	}
 	h.Lists.SetSpecs(specs)
+	h.Lists.SetAutoUpdate(h.Cfg.Filter.AutoUpdate)
 	h.Lists.LoadCached()
 	h.Lists.ReloadAll()
 }
@@ -645,14 +640,17 @@ type filterPayload struct {
 	Blocklists    []blocklistPayload `json:"blocklists"`
 	Whitelist     []string           `json:"whitelist"`
 	Blacklist     []string           `json:"blacklist"`
+	// AutoUpdate is the single refresh interval applied to every enabled
+	// blocklist (duration string, "" = never) — replaces what used to be a
+	// per-list setting.
+	AutoUpdate string `json:"auto_update"`
 }
 
 type blocklistPayload struct {
-	ID         string `json:"id"`
-	Name       string `json:"name"`
-	URL        string `json:"url"`
-	Enabled    bool   `json:"enabled"`
-	AutoUpdate string `json:"auto_update"` // duration string, "" = never
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	URL     string `json:"url"`
+	Enabled bool   `json:"enabled"`
 }
 
 type logPayload struct {
@@ -674,6 +672,15 @@ type tunnelPayload struct {
 	QuickTunnel    bool   `json:"quick_tunnel"`
 	QuickTunnelURL string `json:"quick_tunnel_url"`
 	Hostname       string `json:"hostname"`
+}
+
+// durationOrEmpty renders d as a duration string, or "" for zero (matching
+// the "" = never/disabled convention the frontend's duration fields use).
+func durationOrEmpty(d time.Duration) string {
+	if d <= 0 {
+		return ""
+	}
+	return d.String()
 }
 
 // payloadFromConfig maps the internal config into the JSON shape.
@@ -733,6 +740,7 @@ func payloadFromConfig(c *config.Config) configPayload {
 			Blocklists:    make([]blocklistPayload, 0, len(c.Filter.Blocklists)),
 			Whitelist:     c.Filter.Whitelist,
 			Blacklist:     c.Filter.Blacklist,
+			AutoUpdate:    durationOrEmpty(c.Filter.AutoUpdate),
 		},
 		Log: logPayload{
 			QueryLogFile:  c.Log.QueryLogFile,
@@ -751,12 +759,8 @@ func payloadFromConfig(c *config.Config) configPayload {
 		},
 	}
 	for _, bl := range c.Filter.Blocklists {
-		auto := ""
-		if bl.AutoUpdate > 0 {
-			auto = bl.AutoUpdate.String()
-		}
 		p.Filter.Blocklists = append(p.Filter.Blocklists, blocklistPayload{
-			ID: bl.ID, Name: bl.Name, URL: bl.URL, Enabled: bl.Enabled, AutoUpdate: auto,
+			ID: bl.ID, Name: bl.Name, URL: bl.URL, Enabled: bl.Enabled,
 		})
 	}
 	p.Rewrites = make([]rewritePayload, 0, len(c.Rewrites))
@@ -796,6 +800,10 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	negTTL, err := parseDur(p.Cache.NegativeTTL)
 	if err != nil {
 		return nil, fmt.Errorf("cache.negative_ttl: %w", err)
+	}
+	blocklistAutoUpdate, err := parseDur(p.Filter.AutoUpdate)
+	if err != nil {
+		return nil, fmt.Errorf("filter.auto_update: %w", err)
 	}
 
 	cfg := &config.Config{
@@ -853,6 +861,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			Blocklists:    make([]config.BlocklistSpec, 0, len(p.Filter.Blocklists)),
 			Whitelist:     p.Filter.Whitelist,
 			Blacklist:     p.Filter.Blacklist,
+			AutoUpdate:    blocklistAutoUpdate,
 		},
 		Log: config.LogConfig{
 			QueryLogFile:  p.Log.QueryLogFile,
@@ -892,12 +901,8 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 		})
 	}
 	for _, bl := range p.Filter.Blocklists {
-		auto, err := parseDur(bl.AutoUpdate)
-		if err != nil {
-			return nil, fmt.Errorf("blocklist %s auto_update: %w", bl.ID, err)
-		}
 		cfg.Filter.Blocklists = append(cfg.Filter.Blocklists, config.BlocklistSpec{
-			ID: bl.ID, Name: bl.Name, URL: bl.URL, Enabled: bl.Enabled, AutoUpdate: auto,
+			ID: bl.ID, Name: bl.Name, URL: bl.URL, Enabled: bl.Enabled,
 		})
 	}
 
@@ -961,6 +966,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	h.Cfg.Filter.Blacklist = cfg.Filter.Blacklist
 	h.applyUserLists()
 	h.Cfg.Filter.Blocklists = cfg.Filter.Blocklists
+	h.Cfg.Filter.AutoUpdate = cfg.Filter.AutoUpdate
 	h.applyLists()
 	// Rewrites, client groups, rate limiting and DNSSEC are all cheap,
 	// side-effect-free hot-swaps — unlike Server/Cache/TLS there's no

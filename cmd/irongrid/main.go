@@ -111,9 +111,10 @@ func main() {
 	lists := filter.NewListManager(engine, listsDir)
 	specs := make([]filter.ListSpec, 0, len(cfg.Filter.Blocklists))
 	for _, s := range cfg.Filter.Blocklists {
-		specs = append(specs, filter.ListSpec{ID: s.ID, Name: s.Name, URL: s.URL, Enabled: s.Enabled, AutoUpdate: s.AutoUpdate})
+		specs = append(specs, filter.ListSpec{ID: s.ID, Name: s.Name, URL: s.URL, Enabled: s.Enabled})
 	}
 	lists.SetSpecs(specs)
+	lists.SetAutoUpdate(cfg.Filter.AutoUpdate)
 	lists.LoadCached()
 	lists.ReloadAll()
 	lists.StartRefresh(ctx)

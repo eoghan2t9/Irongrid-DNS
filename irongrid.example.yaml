@@ -65,12 +65,14 @@ filter:
   # What blocked queries receive: "nxdomain", "refused", or an IP like "0.0.0.0".
   block_response: "nxdomain"
   block_ttl: 600
+  # How often every enabled blocklist refreshes itself — one interval for
+  # all of them, not configured per list. "" or 0 disables auto-refresh.
+  auto_update: 24h
   blocklists:
     # - id: "oisd"
     #   name: "OISD Big"
     #   url: "https://big.oisd.nl/"
     #   enabled: true
-    #   auto_update: 24h
   whitelist: []                # always allow (overrides every blocklist)
   blacklist: []                # always block (domains, wildcards, IPs)
 

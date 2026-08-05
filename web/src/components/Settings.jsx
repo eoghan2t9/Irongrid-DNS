@@ -10,7 +10,7 @@ const empty = () => ({
   upstreams: [],
   cache: { addr: '', password: '', db: 0, ttl: '6h', negative_ttl: '1m' },
   tls: { cert_file: '', key_file: '', generate_self_signed: true, self_signed_hosts: [], cert_dir: '', acme: { enabled: false, email: '', domains: [], staging: false, http01_port: 80, renew_before_days: 30, dns01: { provider: '', propagation_wait_sec: 60, cloudflare_token: '', digitalocean_token: '', hetzner_token: '', godaddy_key: '', godaddy_secret: '', aws_access_key_id: '', aws_secret_access_key: '' } } },
-  filter: { block_response: 'nxdomain', block_ttl: 600, blocklists: [], whitelist: [], blacklist: [] },
+  filter: { block_response: 'nxdomain', block_ttl: 600, blocklists: [], whitelist: [], blacklist: [], auto_update: '24h' },
   log: { query_log_file: '', retention_days: 30, verbose: true },
   web: { username: 'admin', password: '' },
   tunnel: { enabled: false, token: '', config_file: '', quick_tunnel: false, quick_tunnel_url: '', hostname: '' },
@@ -232,33 +232,6 @@ export default function Settings({ onSessionInvalidated }) {
     </div>
   )
 
-  const setBlocklist = (i, patch) => {
-    setCfg((prev) => {
-      const next = JSON.parse(JSON.stringify(prev))
-      next.filter.blocklists[i] = { ...next.filter.blocklists[i], ...patch }
-      return next
-    })
-    setDirty(true)
-  }
-
-  const addBlocklist = () => {
-    setCfg((prev) => {
-      const next = JSON.parse(JSON.stringify(prev))
-      next.filter.blocklists = [...(next.filter.blocklists || []), { id: '', name: '', url: '', enabled: true, auto_update: '24h' }]
-      return next
-    })
-    setDirty(true)
-  }
-
-  const removeBlocklist = (i) => {
-    setCfg((prev) => {
-      const next = JSON.parse(JSON.stringify(prev))
-      next.filter.blocklists = next.filter.blocklists.filter((_, x) => x !== i)
-      return next
-    })
-    setDirty(true)
-  }
-
   return (
     <div className="stack">
       <div className="card">
@@ -406,6 +379,10 @@ export default function Settings({ onSessionInvalidated }) {
 
       <div className="card">
         <h3>Filtering</h3>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          Manage which blocklists are installed on the dedicated <strong>Blocklists</strong> page — this is just
+          the global behavior that applies to all of them.
+        </p>
         <div className="form-grid">
           {field('Block response', 'nxdomain, refused, or an IP like 0.0.0.0', (
             <input
@@ -415,41 +392,16 @@ export default function Settings({ onSessionInvalidated }) {
             />
           ))}
           {number('Block TTL (s)', 'filter.block_ttl')}
+          {field('Blocklist auto-update', 'how often every enabled blocklist refreshes itself', (
+            <select className="input" value={cfg.filter.auto_update || ''} onChange={(e) => set('filter.auto_update', e.target.value)}>
+              <option value="">Never</option>
+              <option value="6h">Every 6 hours</option>
+              <option value="24h">Daily</option>
+              <option value="168h">Weekly</option>
+            </select>
+          ))}
           {textarea('Whitelist (always allow)', 'filter.whitelist')}
           {textarea('Blacklist (always block)', 'filter.blacklist')}
-        </div>
-      </div>
-
-      <div className="card">
-        <h3>Blocklists</h3>
-        <p className="dim small">
-          Same lists as the Blocklists page — kept in sync with this config. Local DNS records and per-client
-          policy now have their own pages in the sidebar.
-        </p>
-        {(cfg.filter.blocklists || []).map((bl, i) => (
-          <div className="blocklist-row" key={i}>
-            <div className="list-row">
-              <input className="input" placeholder="ID" value={bl.id || ''} onChange={(e) => setBlocklist(i, { id: e.target.value })} />
-              <input className="input" placeholder="Name" value={bl.name || ''} onChange={(e) => setBlocklist(i, { name: e.target.value })} />
-            </div>
-            <div className="list-row">
-              <input className="input mono" placeholder="URL or file:// path" value={bl.url || ''} onChange={(e) => setBlocklist(i, { url: e.target.value })} />
-              <input className="input" placeholder="Auto update (e.g. 24h)" value={bl.auto_update || ''} onChange={(e) => setBlocklist(i, { auto_update: e.target.value })} />
-              <label className="switch" title="Enabled">
-                <input
-                  type="checkbox"
-                  checked={!!bl.enabled}
-                  onChange={(e) => setBlocklist(i, { enabled: e.target.checked })}
-                  aria-label={`Enable ${bl.name || bl.id || 'this blocklist'}`}
-                />
-                <span className="slider" />
-              </label>
-              <button className="btn small danger" type="button" onClick={() => removeBlocklist(i)} aria-label={`Remove ${bl.name || bl.id || 'this blocklist'}`}>✕</button>
-            </div>
-          </div>
-        ))}
-        <div className="quick-actions" style={{ marginTop: 12 }}>
-          <button className="btn small" type="button" onClick={addBlocklist}>+ Add blocklist</button>
         </div>
       </div>
 

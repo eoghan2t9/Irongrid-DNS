@@ -120,7 +120,7 @@ startup service (systemd / launchd / Windows task).
 | 🌐 **All protocols** | DNS over **UDP**, **TCP**, **TLS (DoT)**, **HTTPS (DoH, RFC 8484)** and **QUIC (DoQ, RFC 9250)** |
 | 🛡️ **Blocking** | Hosts files, Adblock syntax (`\|\|domain^`, `@@` exceptions), plain domains, wildcards (`*.domain`), and IP rules |
 | ✅ **Allow list** | Whitelist entries override *any* blocklist, including IP addresses |
-| 📜 **Blocklists** | Add unlimited remote/local lists, per-list auto-update, one-click refresh, curated one-click presets |
+| 📜 **Blocklists** | Add unlimited remote/local lists, a global auto-update interval, one-click refresh, curated one-click presets |
 | 🪵 **Full query log** | Every allowed/blocked/cached request with client, reason, upstream, latency — stored in pure-Go SQLite |
 | 📊 **Dashboard** | Modern React UI: live stats, protocol breakdown, top blocked domains, log explorer, live config editing |
 | 🔄 **Built-in updater** | Checks GitHub Releases, pops up the changelog, offers the download |
@@ -333,7 +333,8 @@ written automatically on first launch. Key options:
 | `server.listen_*` | Per-protocol listen addresses; empty string disables |
 | `upstreams` | Forwarders — `udp://`, `tcp://`, `tls://`, `https://`, `quic://` |
 | `cache.addr` | Dragonfly endpoint — **server will not start without it** |
-| `filter.blocklists` | Remote URLs or `file://` paths, with per-list `auto_update` |
+| `filter.blocklists` | Remote URLs or `file://` paths |
+| `filter.auto_update` | How often every enabled blocklist refreshes — one global interval, not per-list |
 | `filter.whitelist` | Always-allow entries (override blocklists, incl. IPs) |
 | `filter.block_response` | `nxdomain`, `refused`, or a blackhole IP like `0.0.0.0` |
 | `tls.cert_file/key_file` | Your Let's Encrypt / CA cert for DoT/DoH/DoQ (else self-signed) |

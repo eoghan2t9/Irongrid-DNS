@@ -20,7 +20,6 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/huh"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/catalog"
@@ -587,16 +586,11 @@ func (a *answers) buildConfig(cat *catalog.Catalog) (*config.Config, error) {
 		if !ok {
 			continue
 		}
-		var au time.Duration
-		if d, err := time.ParseDuration(b.AutoUpdate); err == nil {
-			au = d
-		}
 		cfg.Filter.Blocklists = append(cfg.Filter.Blocklists, config.BlocklistSpec{
-			ID:         b.ID,
-			Name:       b.Name,
-			URL:        b.URL,
-			Enabled:    true,
-			AutoUpdate: au,
+			ID:      b.ID,
+			Name:    b.Name,
+			URL:     b.URL,
+			Enabled: true,
 		})
 	}
 	whiteByID := make(map[string]catalog.Whitelist, len(cat.Whitelists))

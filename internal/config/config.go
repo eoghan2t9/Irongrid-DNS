@@ -163,16 +163,20 @@ type FilterConfig struct {
 	Blocklists    []BlocklistSpec `yaml:"blocklists"`
 	Whitelist     []string        `yaml:"whitelist"` // always-allowed domains & IPs (override blocklists)
 	Blacklist     []string        `yaml:"blacklist"` // manual deny entries, same syntax as lists
+	// AutoUpdate is the single refresh interval applied to every enabled
+	// blocklist (0 disables auto-refresh entirely). Replaces what used to be
+	// a per-list setting — one global cadence is simpler to reason about
+	// than tracking a different schedule per list.
+	AutoUpdate time.Duration `yaml:"auto_update"`
 }
 
 // BlocklistSpec describes a remote or local blocklist source.
 type BlocklistSpec struct {
-	ID          string        `yaml:"id"`          // unique identifier shown in the UI
-	Name        string        `yaml:"name"`        // friendly name
-	URL         string        `yaml:"url"`         // remote URL, or local file path (file://)
-	Enabled     bool          `yaml:"enabled"`     // fetched and applied when true
-	AutoUpdate  time.Duration `yaml:"auto_update"` // refresh interval, 0 = never
-	LastUpdated time.Time     `yaml:"-"`           // runtime state, not persisted here
+	ID          string    `yaml:"id"`      // unique identifier shown in the UI
+	Name        string    `yaml:"name"`    // friendly name
+	URL         string    `yaml:"url"`     // remote URL, or local file path (file://)
+	Enabled     bool      `yaml:"enabled"` // fetched and applied when true
+	LastUpdated time.Time `yaml:"-"`       // runtime state, not persisted here
 }
 
 // LogConfig controls the query log.
@@ -239,6 +243,7 @@ func Default() *Config {
 			BlockTTL:      600,
 			Whitelist:     []string{},
 			Blacklist:     []string{},
+			AutoUpdate:    24 * time.Hour,
 		},
 		Log: LogConfig{
 			QueryLogFile:  "data/querylog.db",
