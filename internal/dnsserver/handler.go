@@ -97,8 +97,16 @@ func (h *Handler) ServeDNSFromContext(w dns.ResponseWriter, r *dns.Msg, clientIP
 // SetUpstreams hot-swaps the upstream forwarders (config live-apply).
 func (h *Handler) SetUpstreams(ups []*upstream.Upstream) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	old := h.Upstreams
 	h.Upstreams = ups
+	h.mu.Unlock()
+	// TCP/DoT keep a pooled connection and DoQ keeps a persistent QUIC
+	// connection; without closing the replaced upstreams, every config
+	// reload that touches the upstream list would leak sockets for the
+	// life of the process.
+	for _, u := range old {
+		u.Close()
+	}
 }
 
 // SetCache hot-swaps the response cache (config reload).

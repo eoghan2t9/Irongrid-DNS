@@ -12,12 +12,20 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
+	"github.com/quic-go/quic-go"
 	"golang.org/x/net/http2"
 )
+
+// upstreamPoolSize bounds the number of warm TCP/DoT connections kept per
+// upstream. It's a cache of ready-to-reuse connections, not a hard
+// concurrency limit — a query that finds the pool empty just dials fresh,
+// same as before pooling existed.
+const upstreamPoolSize = 8
 
 // Transport identifies the wire protocol used to reach an upstream.
 type Transport string
@@ -36,9 +44,23 @@ type Upstream struct {
 	Addr      string // host:port
 	Host      string // hostname only (for SNI / Host header)
 	URL       *url.URL
-	client    *http.Client // for DoH
-	tlsConf   *tls.Config  // for DoT/DoH
+	client    *http.Client // for DoH (its own internal connection pool)
+	tlsConf   *tls.Config  // for DoT/DoH/DoQ
 	fails     atomic.Int64
+
+	// connPool holds warm TCP/DoT connections (nil for other transports).
+	// TCP and — worse — DoT pay for a full connection setup (a TLS
+	// handshake, for DoT) on every query without this; miekg/dns's
+	// Client.Exchange has no pooling of its own.
+	connPool chan *dns.Conn
+
+	// DoQ keeps a single persistent QUIC connection and opens a new stream
+	// per query instead of a new connection — that's the entire point of
+	// QUIC's multiplexing, which a fresh quic.DialAddr per query (the
+	// previous behavior) completely wasted, on top of paying for a fresh
+	// QUIC+TLS 1.3 handshake every time.
+	quicMu   sync.Mutex
+	quicConn quic.Connection
 }
 
 // Parse builds an Upstream from a spec string:
@@ -88,6 +110,10 @@ func Parse(spec string) (*Upstream, error) {
 	case TLS, HTTPS, QUIC:
 		u.tlsConf = &tls.Config{ServerName: u.Host, MinVersion: tls.VersionTLS12}
 	}
+	switch u.Transport {
+	case TCP, TLS:
+		u.connPool = make(chan *dns.Conn, upstreamPoolSize)
+	}
 	if u.Transport == HTTPS {
 		path := parsed.Path
 		if path == "" {
@@ -113,7 +139,10 @@ func Parse(spec string) (*Upstream, error) {
 // config (used by tests and programmatic callers).
 func NewWithTLS(transport Transport, addr, host string, tlsConf *tls.Config) *Upstream {
 	u := &Upstream{Transport: transport, Addr: addr, Host: host, tlsConf: tlsConf}
-	if u.Transport == HTTPS {
+	switch u.Transport {
+	case TCP, TLS:
+		u.connPool = make(chan *dns.Conn, upstreamPoolSize)
+	case HTTPS:
 		u.client = &http.Client{Timeout: 10 * time.Second}
 	}
 	return u
@@ -146,21 +175,100 @@ func (u *Upstream) Query(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 }
 
 func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns.Msg, error) {
-	c := &dns.Client{Net: map[bool]string{true: "tcp", false: "udp"}[tcp], Timeout: 8 * time.Second}
-	r, _, err := c.ExchangeContext(ctx, m, u.Addr)
-	if err != nil {
-		u.fails.Add(1)
+	if !tcp {
+		// UDP is connectionless — there's no handshake to amortize, so
+		// pooling buys nothing (a fresh "dial" is just a local socket()).
+		c := &dns.Client{Net: "udp", Timeout: 8 * time.Second}
+		r, _, err := c.ExchangeContext(ctx, m, u.Addr)
+		if err != nil {
+			u.fails.Add(1)
+		}
+		return r, err
 	}
-	return r, err
+	c := &dns.Client{Net: "tcp", Timeout: 8 * time.Second}
+	return u.pooledExchange(ctx, m, c)
 }
 
 func (u *Upstream) queryDoT(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	c := &dns.Client{Net: "tcp-tls", TLSConfig: u.tlsConf, Timeout: 8 * time.Second}
-	r, _, err := c.ExchangeContext(ctx, m, u.Addr)
+	return u.pooledExchange(ctx, m, c)
+}
+
+// pooledExchange runs m over client, reusing a warm connection from the
+// upstream's pool when one is available and dialing fresh otherwise. For
+// DoT in particular this avoids a full TLS handshake per query.
+func (u *Upstream) pooledExchange(ctx context.Context, m *dns.Msg, client *dns.Client) (*dns.Msg, error) {
+	if conn := u.getConn(); conn != nil {
+		r, _, err := client.ExchangeWithConnContext(ctx, m, conn)
+		if err == nil {
+			u.putConn(conn)
+			return r, nil
+		}
+		conn.Close()
+		// The pooled connection may have gone stale while idle (the
+		// upstream closed it, a NAT dropped it, a restart on their end) —
+		// fall through to a fresh dial rather than failing the query over
+		// a warm-connection hiccup.
+	}
+	conn, err := client.DialContext(ctx, u.Addr)
 	if err != nil {
 		u.fails.Add(1)
+		return nil, err
 	}
-	return r, err
+	r, _, err := client.ExchangeWithConnContext(ctx, m, conn)
+	if err != nil {
+		u.fails.Add(1)
+		conn.Close()
+		return nil, err
+	}
+	u.putConn(conn)
+	return r, nil
+}
+
+// getConn pops a warm connection from the pool, or returns nil if none are
+// available (including when connPool is nil, so this degrades cleanly for
+// transports/constructors that don't set one up).
+func (u *Upstream) getConn() *dns.Conn {
+	select {
+	case c := <-u.connPool:
+		return c
+	default:
+		return nil
+	}
+}
+
+// putConn returns a connection to the pool, closing it instead if the pool
+// is full (or nil).
+func (u *Upstream) putConn(c *dns.Conn) {
+	select {
+	case u.connPool <- c:
+	default:
+		c.Close()
+	}
+}
+
+// Close releases any pooled/persistent connections this upstream holds.
+// Called when a config reload replaces the upstream list — without it, the
+// TCP/DoT pool and DoQ's persistent QUIC connection would leak sockets on
+// every reload for the lifetime of the process.
+func (u *Upstream) Close() {
+	if u.connPool != nil {
+	drain:
+		for {
+			select {
+			case c := <-u.connPool:
+				c.Close()
+			default:
+				break drain
+			}
+		}
+	}
+	u.quicMu.Lock()
+	if u.quicConn != nil {
+		_ = u.quicConn.CloseWithError(0, "")
+		u.quicConn = nil
+	}
+	u.quicMu.Unlock()
 }
 
 func (u *Upstream) queryDoH(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
