@@ -1,4 +1,4 @@
-.PHONY: all web build run test vet docker docker-up clean
+.PHONY: all web build run install test vet docker docker-up clean
 
 # Builds the frontend and the Go binary (frontend embedded).
 all: web build
@@ -10,6 +10,10 @@ web:
 ## build: compile the single self-contained binary
 build:
 	go build -trimpath -o irongrid ./cmd/irongrid
+
+## install: run the interactive TUI setup wizard
+install: build
+	./irongrid install
 
 ## run: build and run with a local config
 run: build

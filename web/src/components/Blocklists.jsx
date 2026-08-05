@@ -12,6 +12,7 @@ const fmtWhen = (t) => (t ? new Date(t).toLocaleString([], { hour12: false }) : 
 
 export default function Blocklists() {
   const [lists, setLists] = useState([])
+  const [presets, setPresets] = useState([])
   const [busy, setBusy] = useState(false)
   const [adding, setAdding] = useState(false)
   const [form, setForm] = useState({ id: '', name: '', url: '', enabled: true, auto_update_hours: 24 })
@@ -23,6 +24,12 @@ export default function Blocklists() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  useEffect(() => {
+    api.catalog()
+      .then((c) => setPresets(c.blocklists || []))
+      .catch(() => { /* fall back to hardcoded presets below */ })
+  }, [])
 
   const toggle = async (id, enabled) => {
     const l = lists.find((x) => x.spec.id === id)
@@ -96,11 +103,18 @@ export default function Blocklists() {
           </form>
           <div className="presets">
             <span className="dim">Quick add:</span>
-            {PRESETS.map((p) => (
+            {(presets.length ? presets : PRESETS).map((p) => (
               <button
                 key={p.url}
                 className="btn ghost small"
-                onClick={() => setForm({ id: slug(p.name), name: p.name, url: p.url, enabled: true, auto_update_hours: p.auto_update_hours })}
+                title={p.description || p.name}
+                onClick={() => setForm({
+                  id: p.id || slug(p.name),
+                  name: p.name,
+                  url: p.url,
+                  enabled: true,
+                  auto_update_hours: p.auto_update ? hoursOfStr(p.auto_update) : (p.auto_update_hours || 24),
+                })}
               >
                 {p.name.split(' ')[0]}
               </button>
@@ -170,5 +184,13 @@ export default function Blocklists() {
 }
 
 const hoursOf = (v) => (v ? Math.round(v / 3.6e12) : 0) // nanoseconds -> hours
+const hoursOfStr = (s) => {
+  const m = /^(\d+)(?:h|d|w)?/.exec(String(s))
+  if (!m) return 24
+  const n = +m[1]
+  if (s.includes('d')) return n * 24
+  if (s.includes('w')) return n * 168
+  return n
+}
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 40)
 const truncate = (s, n) => (s && s.length > n ? s.slice(0, n) + '…' : s)

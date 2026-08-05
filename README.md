@@ -38,9 +38,55 @@ commercial ad-blocking DNS with sub-millisecond local responses.
 Every response passes through: **filter → cache → upstream → log**. Blocked
 queries never touch an upstream, so they are answered instantly.
 
-## Quick start
+## Installation
 
-### With Docker (Dragonfly included)
+There are three ways to install: the **interactive TUI wizard** (recommended),
+**Docker Compose**, or **native** from source. All three need a
+[Dragonfly](https://www.dragonflydb.io/) (Redis-compatible) server for the
+response cache — the Docker route includes it automatically.
+
+### 1. Interactive TUI wizard (recommended)
+
+Build the binary, then run the setup wizard. It asks about deployment mode,
+listeners, upstreams, cache, blocking presets, dashboard credentials and TLS,
+and writes a ready-to-use `irongrid.yaml` plus the service files.
+
+```bash
+make web      # build the dashboard (embedded into the binary)
+make install  # builds ./irongrid and launches `irongrid install`
+```
+
+or manually:
+
+```bash
+make build
+./irongrid install                       # writes ./irongrid.yaml
+./irongrid install -config /etc/irongrid/irongrid.yaml -data /var/lib/irongrid
+```
+
+The wizard supports **Linux, macOS, Windows and Docker** targets:
+
+| Choice | What it sets |
+|---|---|
+| Deployment | `docker` (container + bundled Dragonfly) or `native` (binary on this machine) |
+| Service manager | systemd unit, launchd plist, Windows `sc` service, or none |
+| Protocols | UDP/TCP on :53, DoT on :853, DoH on :443, DoQ on :853 |
+| Upstreams | Cloudflare, Google, Quad9 presets or custom (`udp://`, `tls://`, `https://`, `quic://`) |
+| Cache | Dragonfly address (+ optional password) |
+| Blocklists | Pick curated presets: OISD, Hagezi, StevenBlack, AdGuard, EasyList, 1Hosts… |
+| Allow lists | One-click whitelist presets: OS updates, dev/CI, cloud, banking, IoT, news |
+| Dashboard | Web UI username + password (bcrypt-hashed on save) |
+| TLS | Self-signed cert SANs (swap in a CA cert later) |
+
+Service files are written to `deploy/` next to the config, and the wizard
+prints the exact install command for your platform:
+
+- **Linux** — `sudo cp deploy/irongrid.service /etc/systemd/system/ && sudo systemctl enable --now irongrid`
+- **macOS** — `cp deploy/com.irongrid.dns.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.irongrid.dns.plist`
+- **Windows** — run `deploy/install-irongrid-service.bat` as Administrator
+- **Docker** — `cd deploy && docker compose up -d`
+
+### 2. Docker Compose (Dragonfly included)
 
 ```bash
 cp irongrid.example.yaml irongrid.yaml
@@ -48,7 +94,7 @@ cp irongrid.example.yaml irongrid.yaml
 docker compose up -d --build
 ```
 
-### Native (Go 1.26+)
+### 3. Native (Go 1.26+)
 
 ```bash
 # 1. Start Dragonfly (Redis protocol) — required
@@ -65,6 +111,20 @@ Point your router or device at the server:
 - DNS server: `53`
 - Private DNS (Android): `dns.example.com` (DoT) or `https://dns.example.com/dns-query` (DoH)
 - Dashboard: `http://<server>:8080`
+
+### Pre-made blocklist & allow-list presets
+
+Both the wizard and the dashboard come with a curated catalog of presets,
+served by `GET /api/lists/catalog` and shared by every entry point:
+
+- **Blocklists** — OISD Big/Full, Hagezi Multi PRO, StevenBlack, AdGuard DNS
+  filter, EasyList, EasyPrivacy, 1Hosts (Lite/Pro), yoyo.org, AdAway, NoTracking.
+- **Allow lists** — OS & security updates, Development & CI, Cloud &
+  collaboration, Banking & payments, Smart home & IoT, News & reference.
+
+In the **Blocklists** page, presets appear as quick-add buttons; in the
+**Lists** page, allow-list presets add their domains to the Allow list with one
+click (they override every blocklist).
 
 ## Configuration
 
@@ -112,12 +172,14 @@ GET  /api/stats             counters, protocol split, top blocked
 GET  /api/log?limit&action&domain&qtype   query log
 DELETE /api/log             clear query log
 GET/POST /api/lists         manage blocklists
+GET  /api/lists/catalog     curated blocklist & allow-list presets (used by the wizard and UI)
 POST /api/lists/refresh     update all lists
 GET/POST /api/filter/{whitelist,blacklist}   allow/block entries
 POST /api/filter/check      test a domain or IP
 POST /api/cache/flush       clear Dragonfly cache
 GET/POST /api/tunnel/*      tunnel lifecycle + logs
 GET/PUT /api/config         read / update the full config (live-apply + restart notes)
+POST /api/config/reload     apply listener/cache/TLS/upstream changes in-process (no restart)
 GET  /api/diag/dns?name=…   resolve through your upstreams
 ```
 

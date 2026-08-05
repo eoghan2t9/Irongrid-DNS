@@ -42,6 +42,7 @@ export const api = {
   },
   clearLog: () => request('/api/log', { method: 'DELETE' }),
   lists: () => request('/api/lists'),
+  catalog: () => request('/api/lists/catalog'),
   addList: (body) => request('/api/lists', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   updateList: (id, body) => request(`/api/lists/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   deleteList: (id) => request(`/api/lists/${encodeURIComponent(id)}`, { method: 'DELETE' }),

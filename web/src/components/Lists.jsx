@@ -4,6 +4,7 @@ import { api } from '../api'
 export default function Lists() {
   const [whitelist, setWhitelist] = useState([])
   const [blacklist, setBlacklist] = useState([])
+  const [whitelistPresets, setWhitelistPresets] = useState([])
   const [entry, setEntry] = useState('')
   const [kind, setKind] = useState('whitelist')
   const [checkName, setCheckName] = useState('')
@@ -17,6 +18,21 @@ export default function Lists() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  useEffect(() => {
+    api.catalog()
+      .then((c) => setWhitelistPresets(c.whitelists || []))
+      .catch(() => {})
+  }, [])
+
+  const addPreset = async (p) => {
+    const existing = new Set(whitelist)
+    const fresh = (p.domains || []).filter((d) => !existing.has(d))
+    if (fresh.length === 0) { setMsg(`"${p.name}" domains are already on the allow list.`); return }
+    for (const d of fresh) await api.addFilterEntry('whitelist', d)
+    setMsg(`Added ${fresh.length} domains from "${p.name}" to the allow list.`)
+    load()
+  }
 
   const add = async (e) => {
     e.preventDefault()
@@ -87,6 +103,20 @@ export default function Lists() {
           <button className="btn primary" type="submit">Add</button>
         </form>
       </div>
+
+      {whitelistPresets.length > 0 && (
+        <div className="card">
+          <h3>Pre-made allow lists</h3>
+          <p className="dim small">One click adds a curated set of domains to the Allow list (they override every blocklist).</p>
+          <div className="presets">
+            {whitelistPresets.map((p) => (
+              <button key={p.id} className="btn ghost small" title={`${p.domains?.length || 0} domains — ${p.description}`} onClick={() => addPreset(p)}>
+                {p.name} <span className="dim">({p.domains?.length || 0})</span>
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="card">
         <h3>Test a domain or IP</h3>

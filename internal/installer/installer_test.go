@@ -1,0 +1,108 @@
+package installer
+
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/catalog"
+)
+
+// build answers with a mix of presets that share domains (OS updates and
+// Cloud both include microsoft/apple/amazon domains) to verify dedup.
+func testAnswers() *answers {
+	return &answers{
+		deploy:   "docker",
+		service:  "docker",
+		protos:   []string{"UDP", "DoH"},
+		listenHost: "0.0.0.0",
+		upstreamPreset: "quad9",
+		cacheAddr: "dragonfly:6379",
+		blocklists: []string{"oisd-big", "stevenblack"},
+		whitelists: []string{"os-updates", "cloud"},
+		webUser:  "admin",
+		webPass:  "testpass123",
+		tlsHosts: "localhost, dns.example.com",
+	}
+}
+
+func TestBuildConfigValid(t *testing.T) {
+	a := testAnswers()
+	cfg, err := a.buildConfig(catalog.Default())
+	if err != nil {
+		t.Fatalf("buildConfig: %v", err)
+	}
+	if cfg.Server.ListenUDP != "0.0.0.0:53" {
+		t.Errorf("ListenUDP = %q, want 0.0.0.0:53", cfg.Server.ListenUDP)
+	}
+	if cfg.Server.ListenDoH != "0.0.0.0:443" {
+		t.Errorf("ListenDoH = %q, want 0.0.0.0:443", cfg.Server.ListenDoH)
+	}
+	if cfg.Server.ListenTCP != "" {
+		t.Errorf("ListenTCP = %q, want disabled", cfg.Server.ListenTCP)
+	}
+	if len(cfg.Upstreams) != 2 {
+		t.Errorf("upstreams = %v, want Quad9 pair", cfg.Upstreams)
+	}
+	if len(cfg.Filter.Blocklists) != 2 {
+		t.Errorf("blocklists = %d, want 2", len(cfg.Filter.Blocklists))
+	}
+	if cfg.Web.Password != "testpass123" {
+		t.Errorf("web password not captured")
+	}
+	if len(cfg.TLS.SelfSignedHosts) != 2 {
+		t.Errorf("self-signed hosts = %v, want 2", cfg.TLS.SelfSignedHosts)
+	}
+}
+
+func TestBuildConfigWhitelistDedup(t *testing.T) {
+	a := testAnswers()
+	cfg, err := a.buildConfig(catalog.Default())
+	if err != nil {
+		t.Fatalf("buildConfig: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, d := range cfg.Filter.Whitelist {
+		if seen[d] {
+			t.Errorf("duplicate whitelist entry %q", d)
+		}
+		seen[d] = true
+	}
+	// os-updates and cloud presets both contain microsoft.com and apple.com.
+	if !seen["microsoft.com"] {
+		t.Errorf("expected microsoft.com from the cloud preset")
+	}
+}
+
+func TestBuildConfigNoProtocolsFails(t *testing.T) {
+	a := testAnswers()
+	a.protos = []string{}
+	if _, err := a.buildConfig(catalog.Default()); err == nil {
+		t.Fatal("expected validation error when no listeners are enabled")
+	}
+}
+
+func TestWriteDockerCompose(t *testing.T) {
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "..", "irongrid.yaml") // one level above deploy/
+	a := &answers{service: "docker"}
+	files, err := writeServiceFiles(a, configPath, filepath.Join(dir, "data"))
+	if err != nil {
+		t.Fatalf("writeServiceFiles: %v", err)
+	}
+	if len(files) != 1 || !strings.HasSuffix(files[0], "docker-compose.yml") {
+		t.Fatalf("expected one docker-compose.yml, got %v", files)
+	}
+	raw, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatalf("read compose: %v", err)
+	}
+	body := string(raw)
+	if !strings.Contains(body, "../irongrid.yaml:/app/irongrid.yaml:ro") {
+		t.Errorf("compose volume should mount ../irongrid.yaml, got:\n%s", body)
+	}
+	if !strings.Contains(body, "dragonfly") {
+		t.Errorf("compose should bundle dragonfly:\n%s", body)
+	}
+}

@@ -15,10 +15,12 @@ import (
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/api"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/catalog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cert"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsserver"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/installer"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tunnel"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
@@ -38,6 +40,18 @@ func main() {
 	_ = flags.Parse(os.Args[1:])
 	if *versionF {
 		fmt.Println(version.String())
+		return
+	}
+
+	// `irongrid install` launches the interactive TUI setup wizard.
+	if len(os.Args) > 1 && os.Args[1] == "install" {
+		installFlags := flag.NewFlagSet("irongrid install", flag.ExitOnError)
+		instConfig := installFlags.String("config", "irongrid.yaml", "path to write the YAML configuration file")
+		instData := installFlags.String("data", "data", "runtime data directory (querylog, lists, certs)")
+		_ = installFlags.Parse(os.Args[2:])
+		if err := installer.Run(installer.Options{ConfigPath: *instConfig, DataDir: *instData}); err != nil {
+			log.Fatalf("install: %v", err)
+		}
 		return
 	}
 
@@ -167,6 +181,7 @@ func main() {
 		DNS:         handler,
 		Tunnel:      tunnelMgr,
 		Upstreams:   upstreams,
+		Catalog:     catalog.Default(),
 		StartedAt:   time.Now(),
 		Version:     version.Version,
 	}

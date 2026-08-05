@@ -16,6 +16,7 @@ import (
 	"github.com/miekg/dns"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/catalog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsserver"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
@@ -43,6 +44,7 @@ type Handler struct {
 	DNS       *dnsserver.Handler
 	Tunnel    *tunnel.Manager
 	Upstreams []*upstream.Upstream
+	Catalog   *catalog.Catalog
 	StartedAt time.Time
 	Version   string
 }
@@ -77,6 +79,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.refreshList(ctx, w, parts[1])
 	case len(parts) == 3 && parts[0] == "lists" && parts[2] == "content" && r.Method == http.MethodGet:
 		h.getListContent(w, parts[1])
+	case len(parts) == 2 && parts[0] == "lists" && parts[1] == "catalog" && r.Method == http.MethodGet:
+		h.getCatalog(w)
 	case len(parts) == 2 && parts[0] == "filter" && parts[1] == "whitelist" && r.Method == http.MethodGet:
 		h.getFilterList(w, "whitelist")
 	case len(parts) == 2 && parts[0] == "filter" && parts[1] == "whitelist" && r.Method == http.MethodPost:
@@ -318,6 +322,15 @@ func (h *Handler) getListContent(w http.ResponseWriter, id string) {
 	}
 	w.Header().Set("Content-Type", "text/plain")
 	w.Write(content)
+}
+
+// getCatalog serves the curated blocklist/whitelist presets.
+func (h *Handler) getCatalog(w http.ResponseWriter) {
+	if h.Catalog == nil {
+		writeJSON(w, http.StatusOK, catalog.Default())
+		return
+	}
+	writeJSON(w, http.StatusOK, h.Catalog)
 }
 
 // applyLists pushes config specs into the manager and reloads the engine.
