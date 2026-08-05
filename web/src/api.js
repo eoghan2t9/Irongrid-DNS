@@ -38,7 +38,18 @@ async function request(path, options = {}) {
   const headers = { ...(options.headers || {}) }
   const auth = authHeader()
   if (auth) headers.Authorization = auth
-  const resp = await fetch(path, { ...options, headers })
+  let resp
+  try {
+    resp = await fetch(path, { ...options, headers })
+  } catch (err) {
+    // A raw fetch() throw ("Failed to fetch") is a connection-level failure,
+    // not an HTTP error — most often the browser's pooled HTTP/2 connection
+    // going stale while the tab was backgrounded (minimised, laptop sleep,
+    // phone screen off). The browser opens a fresh connection on the very
+    // next attempt, so one silent retry clears up the vast majority of these
+    // instead of surfacing a one-off blip as a hard error.
+    resp = await fetch(path, { ...options, headers })
+  }
   if (resp.status === 401) {
     if (onUnauthorized) onUnauthorized()
     throw new Error('unauthorized')

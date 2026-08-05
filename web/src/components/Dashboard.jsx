@@ -11,6 +11,7 @@ export default function Dashboard({ onNavigate }) {
   const load = useCallback(async () => {
     try {
       setStats(await api.stats())
+      setError('')
     } catch (e) {
       setError(e.message)
     }
@@ -22,7 +23,18 @@ export default function Dashboard({ onNavigate }) {
   useEffect(() => {
     load()
     const t = setInterval(load, 10000)
-    return () => clearInterval(t)
+    // Refresh right away when the tab regains visibility (e.g. after being
+    // minimised) instead of waiting for the next 10s tick: the pooled
+    // connection can go stale while backgrounded, so this both retries
+    // promptly and clears any leftover error banner without a visible delay.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') load()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearInterval(t)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
   }, [load])
 
   if (!stats) return <div className="card loading">Loading dashboard…</div>
