@@ -3,11 +3,16 @@
 package update
 
 import (
+	"bufio"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -197,6 +202,193 @@ func assetName(goos, goarch string) string {
 		name += ".exe"
 	}
 	return name
+}
+
+// InstallResult describes an in-place update that was applied.
+type InstallResult struct {
+	PreviousVersion string `json:"previous_version"`
+	NewVersion      string `json:"new_version"`
+	InstalledTo     string `json:"installed_to"`
+	AssetName       string `json:"asset_name"`
+	AssetSize       int64  `json:"asset_size"`
+}
+
+// Install downloads the release asset for the current platform, verifies it
+// against the release's SHA256SUMS.txt and atomically replaces the running
+// binary at executable ("" = os.Executable()). The previous binary is kept
+// as "<path>.prev" for rollback. Install does NOT restart the service — the
+// caller decides how and when to restart after responding.
+func (c *Client) Install(ctx context.Context, executable string) (*InstallResult, error) {
+	cur := c.Current
+	if cur == "" {
+		cur = version.Version
+	}
+	rel, err := c.latest(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !Newer(rel.TagName, cur) {
+		return nil, fmt.Errorf("already running the latest version (%s)", cur)
+	}
+	if runtime.GOOS == "windows" {
+		return nil, fmt.Errorf("in-place update is not supported on Windows — use the manual download")
+	}
+	want := assetName(runtime.GOOS, runtime.GOARCH)
+	var asset *Asset
+	for i := range rel.Assets {
+		if rel.Assets[i].Name == want {
+			asset = &rel.Assets[i]
+			break
+		}
+	}
+	if asset == nil {
+		return nil, fmt.Errorf("no %s asset in release %s", want, rel.TagName)
+	}
+
+	execPath := executable
+	if execPath == "" {
+		execPath, err = os.Executable()
+		if err != nil {
+			return nil, fmt.Errorf("locate running binary: %w", err)
+		}
+	}
+	if resolved, err := filepath.EvalSymlinks(execPath); err == nil {
+		execPath = resolved
+	}
+
+	// Download into the same directory as the binary so the final rename is
+	// atomic (a rename across filesystems would fail with EXDEV).
+	tmp, err := os.CreateTemp(filepath.Dir(execPath), ".irongrid-update-*")
+	if err != nil {
+		return nil, fmt.Errorf("create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := c.downloadTo(ctx, asset.URL, tmp); err != nil {
+		tmp.Close()
+		return nil, fmt.Errorf("download %s: %w", asset.Name, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, err
+	}
+	if err := os.Chmod(tmpName, 0o755); err != nil {
+		return nil, err
+	}
+
+	// Verify against the SHA256SUMS.txt published with the release.
+	sum, err := c.checksumFor(ctx, rel, asset.Name)
+	if err != nil {
+		return nil, err
+	}
+	if sum != "" {
+		have, err := sha256File(tmpName)
+		if err != nil {
+			return nil, err
+		}
+		if !strings.EqualFold(have, sum) {
+			return nil, fmt.Errorf("checksum mismatch for %s (want %s, got %s)", asset.Name, sum, have)
+		}
+	}
+
+	// Atomic swap with a rollback copy.
+	backup := execPath + ".prev"
+	if err := os.Rename(execPath, backup); err != nil {
+		return nil, fmt.Errorf("back up current binary: %w", err)
+	}
+	if err := os.Rename(tmpName, execPath); err != nil {
+		_ = os.Rename(backup, execPath) // restore the old binary
+		return nil, fmt.Errorf("install new binary: %w", err)
+	}
+
+	return &InstallResult{
+		PreviousVersion: cur,
+		NewVersion:      rel.TagName,
+		InstalledTo:     execPath,
+		AssetName:       asset.Name,
+		AssetSize:       asset.Size,
+	}, nil
+}
+
+// downloadTo streams url into w (bounded to 256 MB).
+func (c *Client) downloadTo(ctx context.Context, url string, w io.Writer) error {
+	client := c.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Minute}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("User-Agent", "irongrid-dns/"+version.Version)
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("download returned %s", resp.Status)
+	}
+	_, err = io.Copy(w, io.LimitReader(resp.Body, 256<<20))
+	return err
+}
+
+// checksumFor finds the sha256 of the named asset in the release's
+// SHA256SUMS.txt. An empty sum means no checksum file was published (the
+// install then skips verification).
+func (c *Client) checksumFor(ctx context.Context, rel *release, asset string) (string, error) {
+	var sumsURL string
+	for _, a := range rel.Assets {
+		if a.Name == "SHA256SUMS.txt" {
+			sumsURL = a.URL
+			break
+		}
+	}
+	if sumsURL == "" {
+		return "", nil
+	}
+	client := c.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sumsURL, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "irongrid-dns/"+version.Version)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("checksums download returned %s", resp.Status)
+	}
+	sc := bufio.NewScanner(io.LimitReader(resp.Body, 1<<20))
+	for sc.Scan() {
+		fields := strings.Fields(sc.Text())
+		if len(fields) < 2 {
+			continue
+		}
+		name := strings.TrimPrefix(fields[1], "./")
+		if name == asset {
+			return fields[0], nil
+		}
+	}
+	return "", fmt.Errorf("no checksum entry for %s in SHA256SUMS.txt", asset)
+}
+
+// sha256File returns the hex sha256 of a file.
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // Newer reports whether the latest tag is newer than the current version.

@@ -82,6 +82,7 @@ export const api = {
   diagDNS: (name, type) => request(`/api/diag/dns?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`),
   updateCheck: () => request('/api/update/check'),
   updateChangelog: () => request('/api/update/changelog'),
+  updateInstall: () => request('/api/update/install', { method: 'POST' }),
   tlsStatus: () => request('/api/tls'),
   tlsGenerate: (body) => request('/api/tls/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   tlsUpload: (body) => request('/api/tls/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),

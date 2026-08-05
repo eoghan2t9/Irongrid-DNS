@@ -9,6 +9,9 @@ export default function UpdateChecker({ onNavigate }) {
   const [info, setInfo] = useState(null)
   const [loading, setLoading] = useState(false)
   const [show, setShow] = useState(false)
+  // idle | downloading | restarting
+  const [installing, setInstalling] = useState('idle')
+  const [installNotice, setInstallNotice] = useState('')
   const autoChecked = useRef(false)
 
   const dismissedFor = (version) => version && localStorage.getItem(DISMISS_KEY) === version
@@ -58,6 +61,29 @@ export default function UpdateChecker({ onNavigate }) {
     setShow(false)
   }
 
+  // In-place update: the server downloads the release, verifies its checksum
+  // and swaps its own binary, then restarts the service. The page reloads
+  // once the service is back (the session cookie keeps us logged in).
+  const install = async () => {
+    if (installing !== 'idle' || !info) return
+    setInstallNotice('')
+    setInstalling('downloading')
+    try {
+      const res = await api.updateInstall()
+      if (res && res.restarting) {
+        setInstalling('restarting')
+        setInstallNotice('Installed — restarting the service…')
+        setTimeout(() => window.location.reload(), 6000)
+      } else {
+        setInstalling('idle')
+        setInstallNotice((res && res.note) || 'Update installed. Restart Irongrid manually to apply it.')
+      }
+    } catch (e) {
+      setInstalling('idle')
+      setInstallNotice(e.message || 'Update failed')
+    }
+  }
+
   const badge = info && info.available && !dismissedFor(info.latest_version)
 
   return (
@@ -96,14 +122,23 @@ export default function UpdateChecker({ onNavigate }) {
               <div className="modal-install">
                 <div className="field-hint">or update from the terminal:</div>
                 <code>{INSTALL_CMD}</code>
+                <a className="manual-link" href={info.download_url} target="_blank" rel="noreferrer">
+                  or download {info.asset_name} manually
+                </a>
               </div>
             )}
 
+            {installNotice && <div className="modal-note install-note">{installNotice}</div>}
+
             <div className="modal-foot">
               {info.download_url ? (
-                <a className="btn primary" href={info.download_url} target="_blank" rel="noreferrer">
-                  ⬇ Download {info.asset_name}
-                </a>
+                <button className="btn primary" onClick={install} disabled={installing !== 'idle'}>
+                  {installing === 'downloading'
+                    ? '⬇ Downloading…'
+                    : installing === 'restarting'
+                      ? '⟳ Restarting…'
+                      : `⬇ Install ${info.latest_version}`}
+                </button>
               ) : (
                 info.release_url && (
                   <a className="btn primary" href={info.release_url} target="_blank" rel="noreferrer">

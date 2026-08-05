@@ -1,22 +1,29 @@
 package update
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestParseSemver(t *testing.T) {
 	cases := []struct {
-		in   string
-		ok   bool
-		maj  int
-		min  int
-		pat  int
-		pre  string
+		in  string
+		ok  bool
+		maj int
+		min int
+		pat int
+		pre string
 	}{
 		{"v1.2.3", true, 1, 2, 3, ""},
 		{"1.2.3", true, 1, 2, 3, ""},
@@ -53,11 +60,11 @@ func TestNewer(t *testing.T) {
 		{"v1.1.0", "v1.0.9", true},
 		{"v2.0.0", "v1.99.99", true},
 		{"v0.2.0", "v0.2.0", false},
-		{"1.0.2", "v1.0.1", true},          // mixed prefix
-		{"v1.1.0-rc.1", "v1.1.0", false},   // pre-release is not newer than its release
-		{"v1.1.0", "v1.1.0-rc.1", true},    // release beats pre-release
+		{"1.0.2", "v1.0.1", true},        // mixed prefix
+		{"v1.1.0-rc.1", "v1.1.0", false}, // pre-release is not newer than its release
+		{"v1.1.0", "v1.1.0-rc.1", true},  // release beats pre-release
 		{"v1.1.0-rc.2", "v1.1.0-rc.1", true},
-		{"v1.0.0", "dev", true},            // fallback: unparseable current
+		{"v1.0.0", "dev", true}, // fallback: unparseable current
 		{"v1.0.0", "v1.0.0", false},
 	}
 	for _, c := range cases {
@@ -183,6 +190,110 @@ func TestCheckHTTPError(t *testing.T) {
 	}
 	if info.Available {
 		t.Fatal("must not report an update when the check failed")
+	}
+}
+
+// installTestServer serves a fake "v9.9.9" release with a platform binary
+// asset and a matching SHA256SUMS.txt.
+func installTestServer(t *testing.T, bin []byte, goodSum bool) *httptest.Server {
+	t.Helper()
+	name := assetName(runtime.GOOS, runtime.GOARCH)
+	sum := sha256.Sum256(bin)
+	want := hex.EncodeToString(sum[:])
+	if !goodSum {
+		want = strings.Repeat("0", 64)
+	}
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/release", func(w http.ResponseWriter, r *http.Request) {
+		body := fmt.Sprintf(`{
+		  "tag_name":"v9.9.9",
+		  "published_at":"2026-08-06T10:00:00Z",
+		  "html_url":"https://example.com/r/9",
+		  "body":"n",
+		  "assets":[
+		    {"name":%q,"browser_download_url":%q,"size":%d},
+		    {"name":"SHA256SUMS.txt","browser_download_url":%q,"size":100}
+		  ]}`, name, srv.URL+"/binary", len(bin), srv.URL+"/sums")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body))
+	})
+	mux.HandleFunc("/binary", func(w http.ResponseWriter, r *http.Request) { w.Write(bin) })
+	mux.HandleFunc("/sums", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "%s  %s\n", want, name)
+	})
+	srv = httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestInstall(t *testing.T) {
+	bin := []byte("#!/bin/sh\necho fake binary v9.9.9\n")
+	srv := installTestServer(t, bin, true)
+
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, "irongrid")
+	if err := os.WriteFile(execPath, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL + "/release"}
+	res, err := c.Install(context.Background(), execPath)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if res.NewVersion != "v9.9.9" || res.PreviousVersion != "v1.0.0" {
+		t.Errorf("unexpected result: %+v", res)
+	}
+	if res.InstalledTo != execPath {
+		t.Errorf("InstalledTo = %q", res.InstalledTo)
+	}
+	got, err := os.ReadFile(execPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, bin) {
+		t.Error("binary was not replaced with the downloaded asset")
+	}
+	// Rollback copy must be preserved and temp files cleaned up.
+	if _, err := os.Stat(execPath + ".prev"); err != nil {
+		t.Errorf("expected .prev backup: %v", err)
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".irongrid-update-") {
+			t.Errorf("temp file not cleaned up: %s", e.Name())
+		}
+	}
+}
+
+func TestInstallChecksumMismatch(t *testing.T) {
+	bin := []byte("new binary")
+	srv := installTestServer(t, bin, false) // wrong checksum served
+
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, "irongrid")
+	if err := os.WriteFile(execPath, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL + "/release"}
+	if _, err := c.Install(context.Background(), execPath); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("expected checksum mismatch, got %v", err)
+	}
+	// The old binary must be untouched.
+	got, _ := os.ReadFile(execPath)
+	if string(got) != "old binary" {
+		t.Error("binary changed despite failed checksum")
+	}
+}
+
+func TestInstallUpToDate(t *testing.T) {
+	bin := []byte("new binary")
+	srv := installTestServer(t, bin, true)
+	c := &Client{HTTPClient: srv.Client(), Current: "v9.9.9", latestURL: srv.URL + "/release"}
+	if _, err := c.Install(context.Background(), filepath.Join(t.TempDir(), "irongrid")); err == nil {
+		t.Fatal("expected an error when already up to date")
 	}
 }
 

@@ -5,9 +5,11 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -138,6 +140,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.checkUpdate(ctx, w)
 	case len(parts) == 2 && parts[0] == "update" && parts[1] == "changelog" && r.Method == http.MethodGet:
 		h.updateChangelog(ctx, w)
+	case len(parts) == 2 && parts[0] == "update" && parts[1] == "install" && r.Method == http.MethodPost:
+		h.installUpdate(ctx, w)
 	case len(parts) == 1 && parts[0] == "tls" && r.Method == http.MethodGet:
 		h.getTLS(w)
 	case len(parts) == 2 && parts[0] == "tls" && parts[1] == "generate" && r.Method == http.MethodPost:
@@ -1211,6 +1215,56 @@ func (h *Handler) updateChangelog(ctx context.Context, w http.ResponseWriter) {
 		"current_version": cur,
 		"releases":        releases,
 	})
+}
+
+// installUpdateMu serialises in-place updates so two tabs can't race.
+var installUpdateMu sync.Mutex
+
+// installUpdate downloads the release asset for this platform, verifies it
+// against SHA256SUMS.txt, atomically swaps the running binary and — when the
+// service is systemd-managed — schedules a restart after the response has
+// flushed so the client sees a clean result before the process goes away.
+func (h *Handler) installUpdate(ctx context.Context, w http.ResponseWriter) {
+	installUpdateMu.Lock()
+	defer installUpdateMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+
+	cur := h.Version
+	if cur == "" {
+		cur = version.Version
+	}
+	client := &update.Client{Repo: update.DefaultRepo, Current: cur}
+	res, err := client.Install(ctx, "")
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	payload := map[string]any{
+		"previous_version": res.PreviousVersion,
+		"new_version":      res.NewVersion,
+		"installed_to":     res.InstalledTo,
+		"asset_name":       res.AssetName,
+		"asset_size":       res.AssetSize,
+	}
+	if _, err := os.Stat("/run/systemd/system"); err == nil {
+		payload["restarting"] = true
+		payload["restart_cmd"] = "systemctl restart irongrid"
+		go func() {
+			// Let the HTTP response flush before the service (and this
+			// process) is restarted.
+			time.Sleep(500 * time.Millisecond)
+			if out, err := exec.Command("systemctl", "restart", "irongrid").CombinedOutput(); err != nil {
+				log.Printf("[update] restart failed: %v: %s", err, out)
+			}
+		}()
+	} else {
+		payload["restarting"] = false
+		payload["note"] = "Binary updated. Restart Irongrid manually to run the new version."
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 func (h *Handler) diagDNS(ctx context.Context, w http.ResponseWriter, r *http.Request) {
