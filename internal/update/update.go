@@ -419,9 +419,12 @@ func UnitName() string {
 			}
 		}
 	}
-	// 2. Executable basename ("irongrid" → "irongrid.service").
+	// 2. Executable basename ("irongrid" → "irongrid.service"). Strip a
+	// possible ".prev" suffix — after an in-place swap the running process
+	// reports its backup path, which must not leak into the unit name.
 	if exe, err := os.Executable(); err == nil {
 		base := strings.TrimSuffix(filepath.Base(exe), ".exe")
+		base = strings.TrimSuffix(base, ".prev")
 		if base != "" {
 			return base + ".service"
 		}
