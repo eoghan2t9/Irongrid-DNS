@@ -34,16 +34,16 @@ type Decision struct {
 type Engine struct {
 	mu sync.RWMutex
 
-	blockDomains  map[string]struct{}
-	blockExact    map[string]struct{}
-	blockIPs      map[string]struct{}
-	allowDomains  map[string]struct{}
-	allowExact    map[string]struct{}
-	allowIPs      map[string]struct{}
+	blockDomains map[string]struct{}
+	blockExact   map[string]struct{}
+	blockIPs     map[string]struct{}
+	allowDomains map[string]struct{}
+	allowExact   map[string]struct{}
+	allowIPs     map[string]struct{}
 
 	// domainList tracks which list a domain came from, for reporting.
-	domainList  map[string]string // domain -> list ID
-	listNames   map[string]string // list ID -> friendly name
+	domainList map[string]string // domain -> list ID
+	listNames  map[string]string // list ID -> friendly name
 
 	// Explicit user entries take precedence over list contents.
 	userBlacklist []string
@@ -60,14 +60,14 @@ type Engine struct {
 // NewEngine returns an empty engine.
 func NewEngine() *Engine {
 	return &Engine{
-		blockDomains:  map[string]struct{}{},
-		blockExact:    map[string]struct{}{},
-		blockIPs:      map[string]struct{}{},
-		allowDomains:  map[string]struct{}{},
-		allowExact:    map[string]struct{}{},
-		allowIPs:      map[string]struct{}{},
-		domainList:    map[string]string{},
-		listNames:     map[string]string{},
+		blockDomains: map[string]struct{}{},
+		blockExact:   map[string]struct{}{},
+		blockIPs:     map[string]struct{}{},
+		allowDomains: map[string]struct{}{},
+		allowExact:   map[string]struct{}{},
+		allowIPs:     map[string]struct{}{},
+		domainList:   map[string]string{},
+		listNames:    map[string]string{},
 	}
 }
 
@@ -164,7 +164,15 @@ func (e *Engine) DecideDomain(qname string) Decision {
 	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
-	labels := strings.Split(qname, ".")
+
+	// lastDot bounds both ancestor walks below: parent suffixes are sliced
+	// directly off qname at each '.' (zero allocation — Go string slicing
+	// shares the backing array, unlike the strings.Split+Join this replaced,
+	// which allocated a new string per ancestor level per query) and the
+	// walk stops before the bare top-level label, e.g. "com" alone is never
+	// treated as a subtree rule. -1 for a single-label qname makes both
+	// loops below a no-op, correctly limiting it to the exact-match checks.
+	lastDot := strings.LastIndexByte(qname, '.')
 
 	// Whitelist (exact first, then subtree). Walks ancestor domains with map
 	// lookups — same shape as the blocklist walk below — instead of scanning
@@ -173,29 +181,35 @@ func (e *Engine) DecideDomain(qname string) Decision {
 	if _, ok := e.allowExact[qname]; ok {
 		return Decision{Action: Allow, Reason: "whitelist:" + qname}
 	}
-	for i := 0; i < len(labels)-1; i++ {
-		parent := strings.Join(labels[i:], ".")
+	if _, ok := e.allowDomains[qname]; ok {
+		return Decision{Action: Allow, Reason: "whitelist:" + qname}
+	}
+	for i := 0; i < lastDot; i++ {
+		if qname[i] != '.' {
+			continue
+		}
+		parent := qname[i+1:]
 		if _, ok := e.allowDomains[parent]; ok {
 			return Decision{Action: Allow, Reason: "whitelist:" + parent}
 		}
-	}
-	if _, ok := e.allowDomains[qname]; ok {
-		return Decision{Action: Allow, Reason: "whitelist:" + qname}
 	}
 
 	// Block exact matches.
 	if _, ok := e.blockExact[qname]; ok {
 		return Decision{Action: Block, Reason: "blocklist:exact", ListName: e.listNames[e.domainList[qname]]}
 	}
-	// Block subtree matches. Iterate over parents for better reasons.
-	for i := 0; i < len(labels)-1; i++ {
-		parent := strings.Join(labels[i:], ".")
+	if _, ok := e.blockDomains[qname]; ok {
+		return Decision{Action: Block, Reason: "blocklist:" + qname, ListName: e.listNames[e.domainList[qname]]}
+	}
+	// Block subtree matches. Walk ancestors for better reasons.
+	for i := 0; i < lastDot; i++ {
+		if qname[i] != '.' {
+			continue
+		}
+		parent := qname[i+1:]
 		if _, ok := e.blockDomains[parent]; ok {
 			return Decision{Action: Block, Reason: "blocklist:" + parent, ListName: e.listNames[e.domainList[parent]]}
 		}
-	}
-	if _, ok := e.blockDomains[qname]; ok {
-		return Decision{Action: Block, Reason: "blocklist:" + qname, ListName: e.listNames[e.domainList[qname]]}
 	}
 	return Decision{Action: Allow}
 }
