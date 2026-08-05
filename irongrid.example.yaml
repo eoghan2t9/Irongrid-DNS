@@ -43,9 +43,16 @@ tls:
   #   email: "you@example.com"
   #   domains: ["dns.example.com"]
   #   http01_port: 80
-  #   dns01:                    # optional: issue via DNS TXT (Cloudflare), no open port
-  #     provider: cloudflare
-  #     cloudflare_token: ""
+  #   dns01:                    # optional: issue via DNS TXT instead of HTTP-01
+  #     provider: cloudflare    # cloudflare | digitalocean | hetzner | godaddy | route53
+  #     cloudflare_token: ""    #   (provider-specific credentials below)
+  #     digitalocean_token: ""
+  #     hetzner_token: ""
+  #     godaddy_key: ""
+  #     godaddy_secret: ""
+  #     aws_access_key_id: ""
+  #     aws_secret_access_key: ""
+  #     propagation_wait_sec: 60
   #     propagation_wait_sec: 60
 
 filter:

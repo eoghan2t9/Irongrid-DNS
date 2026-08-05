@@ -129,6 +129,68 @@ export default function Dashboard({ onNavigate }) {
           </button>
         </div>
       </div>
+
+      <AcmeCard acme={tls?.acme} onNavigate={onNavigate} />
+    </div>
+  )
+}
+
+function daysBetween(a, b) {
+  if (!a || !b) return null
+  return Math.round((new Date(b) - new Date(a)) / 86400000)
+}
+
+// AcmeCard summarises the Let's Encrypt manager state on the dashboard.
+function AcmeCard({ acme, onNavigate }) {
+  if (!acme || !acme.enabled) return null
+  const ok = !acme.last_error
+  const days = daysBetween(new Date(), acme.next_renewal)
+  const since = daysBetween(acme.last_success, new Date())
+  return (
+    <div className={`card acme-card ${ok ? '' : 'acme-error'}`} role="button" tabIndex={0}
+      onClick={() => onNavigate('tls')} onKeyDown={(e) => e.key === 'Enter' && onNavigate('tls')}
+      style={{ cursor: 'pointer' }}>
+      <div className="row-between">
+        <h3 style={{ margin: 0 }}>
+          Let&apos;s Encrypt{' '}
+          <span className={`badge ${ok ? 'badge-allowed' : 'badge-error'}`}>
+            {ok ? 'healthy' : 'needs attention'}
+          </span>
+        </h3>
+        <span className="dim small">{acme.staging ? 'staging CA' : 'production CA'}</span>
+      </div>
+      <div className="kv-grid" style={{ marginTop: 8 }}>
+        <div className="kv-row">
+          <span className="kv-label">Challenge</span>
+          <span className="kv-value">
+            {acme.challenge || 'http-01'}
+            {acme.dns_provider ? ` · ${acme.dns_provider}` : ''}
+          </span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Domains</span>
+          <span className="kv-value">{(acme.domains || []).join(', ') || '—'}</span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Last issued</span>
+          <span className="kv-value">
+            {acme.last_success ? new Date(acme.last_success).toLocaleDateString() : 'never'}
+            {since != null && since >= 0 ? ` (${since}d ago)` : ''}
+          </span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Next renewal</span>
+          <span className="kv-value">
+            {acme.next_renewal ? new Date(acme.next_renewal).toLocaleDateString() : '—'}
+            {days != null && <span className={`badge ${days < 15 ? 'badge-warn' : ''}`}>in {days}d</span>}
+          </span>
+        </div>
+      </div>
+      {acme.last_error && (
+        <div className="error-text small" style={{ marginTop: 8 }}>
+          ⚠ {acme.last_error} — click to fix on the SSL / TLS page.
+        </div>
+      )}
     </div>
   )
 }

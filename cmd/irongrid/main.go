@@ -200,7 +200,15 @@ func main() {
 	if cfg.TLS.ACME.Enabled {
 		dnsProvider, err := acme.NewDNSProvider(
 			cfg.TLS.ACME.DNS01.Provider,
-			cfg.TLS.ACME.DNS01.CloudflareToken,
+			acme.DNSProviderConfig{
+				CloudflareToken:    cfg.TLS.ACME.DNS01.CloudflareToken,
+				DigitalOceanToken:  cfg.TLS.ACME.DNS01.DigitalOceanToken,
+				HetznerToken:       cfg.TLS.ACME.DNS01.HetznerToken,
+				GoDaddyKey:         cfg.TLS.ACME.DNS01.GoDaddyKey,
+				GoDaddySecret:      cfg.TLS.ACME.DNS01.GoDaddySecret,
+				AWSAccessKeyID:     cfg.TLS.ACME.DNS01.AWSAccessKeyID,
+				AWSSecretAccessKey: cfg.TLS.ACME.DNS01.AWSSecretAccessKey,
+			},
 			time.Duration(cfg.TLS.ACME.DNS01.PropagationWait)*time.Second,
 		)
 		if err != nil {

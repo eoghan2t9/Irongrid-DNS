@@ -8,7 +8,7 @@ const empty = () => ({
   },
   upstreams: [],
   cache: { addr: '', password: '', db: 0, ttl: '6h', negative_ttl: '1m' },
-  tls: { cert_file: '', key_file: '', generate_self_signed: true, self_signed_hosts: [], cert_dir: '', acme: { enabled: false, email: '', domains: [], staging: false, http01_port: 80, renew_before_days: 30, dns01: { provider: '', cloudflare_token: '', propagation_wait_sec: 60 } } },
+  tls: { cert_file: '', key_file: '', generate_self_signed: true, self_signed_hosts: [], cert_dir: '', acme: { enabled: false, email: '', domains: [], staging: false, http01_port: 80, renew_before_days: 30, dns01: { provider: '', propagation_wait_sec: 60, cloudflare_token: '', digitalocean_token: '', hetzner_token: '', godaddy_key: '', godaddy_secret: '', aws_access_key_id: '', aws_secret_access_key: '' } } },
   filter: { block_response: 'nxdomain', block_ttl: 600, blocklists: [], whitelist: [], blacklist: [] },
   log: { query_log_file: '', retention_days: 30, verbose: true },
   web: { username: 'admin', password: '' },
@@ -144,11 +144,21 @@ export default function Settings() {
     </label>
   )
 
+  // deepGet resolves a dotted path like 'tls.acme.dns01.provider'.
+  const deepGet = (path, fallback) => {
+    let o = cfg
+    for (const k of path.split('.')) {
+      if (o == null) return fallback
+      o = o[k]
+    }
+    return o ?? fallback
+  }
+
   const text = (label, path, hint, placeholder) =>
     field(label, hint, (
       <input
         className="input mono"
-        value={cfg[path.split('.')[0]][path.split('.')[1]] ?? ''}
+        value={deepGet(path, '')}
         onChange={(e) => set(path, e.target.value)}
         placeholder={placeholder}
       />
@@ -159,7 +169,7 @@ export default function Settings() {
       <textarea
         className="input mono"
         rows={3}
-        value={(cfg[path.split('.')[0]][path.split('.')[1]] || []).join('\n')}
+        value={(deepGet(path, []) || []).join('\n')}
         onChange={(e) => set(path, e.target.value.split('\n').map((s) => s.trim()).filter(Boolean))}
         placeholder="one entry per line"
       />
@@ -170,7 +180,7 @@ export default function Settings() {
       <input
         className="input mono"
         type="number"
-        value={cfg[path.split('.')[0]][path.split('.')[1]] ?? 0}
+        value={deepGet(path, 0)}
         onChange={(e) => set(path, Number(e.target.value))}
       />
     ))
@@ -179,7 +189,7 @@ export default function Settings() {
     <label className="toggle-field">
       <span className="field-label">{label}</span>
       <span className="switch">
-        <input type="checkbox" checked={!!cfg[path.split('.')[0]][path.split('.')[1]]} onChange={(e) => set(path, e.target.checked)} />
+        <input type="checkbox" checked={!!deepGet(path, false)} onChange={(e) => set(path, e.target.checked)} />
         <span className="slider" />
       </span>
     </label>
@@ -305,10 +315,42 @@ export default function Settings() {
           {text('Email (account contact)', 'tls.acme.email', 'required when enabled', 'you@example.com')}
           {textarea('Domains', 'tls.acme.domains', 'public hostnames, one per line')}
           {toggle('Use staging CA (test certificates)', 'tls.acme.staging')}
-          {text('DNS-01 provider', 'tls.acme.dns01.provider', '"cloudflare" for DNS TXT issuance (no open port), empty for HTTP-01', 'cloudflare')}
-          {text('Cloudflare API token', 'tls.acme.dns01.cloudflare_token', 'Zone:DNS:Edit permission — only needed for DNS-01', '••••')}
-          {number('DNS-01 propagation wait (s)', 'tls.acme.dns01.propagation_wait_sec')}
-          {number('HTTP-01 challenge port', 'tls.acme.http01_port')}
+          {field('DNS-01 provider', 'empty = HTTP-01 (domain answers on port 80)', (
+            <select
+              className="input"
+              value={deepGet('tls.acme.dns01.provider', '')}
+              onChange={(e) => set('tls.acme.dns01.provider', e.target.value)}
+            >
+              <option value="">HTTP-01 (no DNS API)</option>
+              <option value="cloudflare">Cloudflare</option>
+              <option value="digitalocean">DigitalOcean</option>
+              <option value="hetzner">Hetzner</option>
+              <option value="godaddy">GoDaddy</option>
+              <option value="route53">AWS Route53</option>
+            </select>
+          ))}
+          {deepGet('tls.acme.dns01.provider', '') === 'cloudflare' &&
+            text('Cloudflare API token', 'tls.acme.dns01.cloudflare_token', 'Zone:DNS:Edit permission', '••••')}
+          {deepGet('tls.acme.dns01.provider', '') === 'digitalocean' &&
+            text('DigitalOcean token', 'tls.acme.dns01.digitalocean_token', 'personal access token with DNS:edit', '••••')}
+          {deepGet('tls.acme.dns01.provider', '') === 'hetzner' &&
+            text('Hetzner DNS token', 'tls.acme.dns01.hetzner_token', 'Hetzner DNS API token', '••••')}
+          {deepGet('tls.acme.dns01.provider', '') === 'godaddy' && (
+            <>
+              {text('GoDaddy API key', 'tls.acme.dns01.godaddy_key', 'GoDaddy developer key', '••••')}
+              {text('GoDaddy API secret', 'tls.acme.dns01.godaddy_secret', 'matching secret', '••••')}
+            </>
+          )}
+          {deepGet('tls.acme.dns01.provider', '') === 'route53' && (
+            <>
+              {text('AWS access key ID', 'tls.acme.dns01.aws_access_key_id', 'IAM key with Route53 change-resource-record-sets', 'AKIA…')}
+              {text('AWS secret access key', 'tls.acme.dns01.aws_secret_access_key', 'matching secret', '••••')}
+            </>
+          )}
+          {deepGet('tls.acme.dns01.provider', '') !== '' &&
+            number('DNS-01 propagation wait (s)', 'tls.acme.dns01.propagation_wait_sec')}
+          {deepGet('tls.acme.dns01.provider', '') === '' &&
+            number('HTTP-01 challenge port', 'tls.acme.http01_port')}
           {number('Renew when < N days left', 'tls.acme.renew_before_days')}
         </div>
       </div>

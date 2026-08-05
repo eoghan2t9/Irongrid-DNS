@@ -24,6 +24,12 @@ export default function App() {
   const [status, setStatus] = useState(null)
   const [authed, setAuthed] = useState(hasCredentials())
   const [showLogin, setShowLogin] = useState(!hasCredentials())
+  const [navOpen, setNavOpen] = useState(false)
+
+  const navigate = (id) => {
+    setView(id)
+    setNavOpen(false)
+  }
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -53,7 +59,7 @@ export default function App() {
 
   return (
     <div className="shell">
-      <aside className="sidebar">
+      <aside className={`sidebar ${navOpen ? 'open' : ''}`}>
         <div className="brand">
           <div className="brand-mark">◈</div>
           <div>
@@ -66,7 +72,10 @@ export default function App() {
             <button
               key={n.id}
               className={`nav-item ${view === n.id ? 'active' : ''}`}
-              onClick={() => setView(n.id)}
+              onClick={() => {
+                navigate(n.id)
+                setNavOpen(false)
+              }}
             >
               <span className="nav-icon">{n.icon}</span>
               {n.label}
@@ -89,9 +98,15 @@ export default function App() {
           )}
         </div>
       </aside>
+      {navOpen && <div className="sidebar-backdrop" onClick={() => setNavOpen(false)} />}
       <main className="main">
         <header className="topbar">
-          <div className="topbar-title">{NAV.find((n) => n.id === view)?.label}</div>
+          <div className="topbar-left">
+            <button className="menu-btn" onClick={() => setNavOpen(true)} aria-label="Open navigation">
+              ☰
+            </button>
+            <div className="topbar-title">{NAV.find((n) => n.id === view)?.label}</div>
+          </div>
           <div className="topbar-actions">
             <UpdateChecker />
             <button className="btn ghost small" onClick={refreshStatus}>
@@ -100,7 +115,7 @@ export default function App() {
           </div>
         </header>
         <div className="content">
-          {view === 'dashboard' && <Dashboard onNavigate={setView} />}
+          {view === 'dashboard' && <Dashboard onNavigate={navigate} />}
           {view === 'log' && <QueryLog />}
           {view === 'blocklists' && <Blocklists />}
           {view === 'lists' && <Lists />}

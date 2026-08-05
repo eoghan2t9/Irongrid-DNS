@@ -25,16 +25,56 @@ type DNSProvider interface {
 	CleanUp(ctx context.Context, domain, value string) error
 }
 
+// DNSProviderConfig carries the credentials for every supported provider.
+// Only the fields for the configured provider are required.
+type DNSProviderConfig struct {
+	CloudflareToken   string
+	DigitalOceanToken string
+	HetznerToken      string
+	GoDaddyKey        string
+	GoDaddySecret     string
+	AWSAccessKeyID    string
+	AWSSecretAccessKey string
+}
+
+// SupportedProviders lists the DNS-01 providers this build can issue through.
+func SupportedProviders() []string {
+	return []string{"cloudflare", "digitalocean", "hetzner", "godaddy", "route53"}
+}
+
 // NewDNSProvider builds a provider by name. Unsupported names return an error
 // so a bad config fails loudly at startup rather than at renewal time.
-func NewDNSProvider(name, token string, wait time.Duration) (DNSProvider, error) {
+func NewDNSProvider(name string, cfg DNSProviderConfig, wait time.Duration) (DNSProvider, error) {
 	switch name {
 	case "":
 		return nil, nil
 	case "cloudflare":
-		return &cloudflareProvider{token: token, wait: wait, hc: &http.Client{Timeout: 30 * time.Second}}, nil
+		if cfg.CloudflareToken == "" {
+			return nil, fmt.Errorf("acme: cloudflare provider requires cloudflare_token")
+		}
+		return &cloudflareProvider{token: cfg.CloudflareToken, wait: wait, hc: httpClient()}, nil
+	case "digitalocean":
+		if cfg.DigitalOceanToken == "" {
+			return nil, fmt.Errorf("acme: digitalocean provider requires digitalocean_token")
+		}
+		return &digitalOceanProvider{token: cfg.DigitalOceanToken, wait: wait, hc: httpClient()}, nil
+	case "hetzner":
+		if cfg.HetznerToken == "" {
+			return nil, fmt.Errorf("acme: hetzner provider requires hetzner_token")
+		}
+		return &hetznerProvider{token: cfg.HetznerToken, wait: wait, hc: httpClient()}, nil
+	case "godaddy":
+		if cfg.GoDaddyKey == "" || cfg.GoDaddySecret == "" {
+			return nil, fmt.Errorf("acme: godaddy provider requires godaddy_key and godaddy_secret")
+		}
+		return &goDaddyProvider{key: cfg.GoDaddyKey, secret: cfg.GoDaddySecret, wait: wait, hc: httpClient()}, nil
+	case "route53":
+		if cfg.AWSAccessKeyID == "" || cfg.AWSSecretAccessKey == "" {
+			return nil, fmt.Errorf("acme: route53 provider requires aws_access_key_id and aws_secret_access_key")
+		}
+		return &route53Provider{accessKey: cfg.AWSAccessKeyID, secretKey: cfg.AWSSecretAccessKey, wait: wait, hc: httpClient()}, nil
 	default:
-		return nil, fmt.Errorf("acme: unsupported dns-01 provider %q (supported: cloudflare)", name)
+		return nil, fmt.Errorf("acme: unsupported dns-01 provider %q (supported: %s)", name, strings.Join(SupportedProviders(), ", "))
 	}
 }
 

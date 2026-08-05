@@ -576,9 +576,15 @@ type acmePayload struct {
 }
 
 type dns01Payload struct {
-	Provider        string `json:"provider"`
-	CloudflareToken string `json:"cloudflare_token"`
-	PropagationWait int    `json:"propagation_wait_sec"`
+	Provider           string `json:"provider"`
+	PropagationWait    int    `json:"propagation_wait_sec"`
+	CloudflareToken    string `json:"cloudflare_token"`
+	DigitalOceanToken  string `json:"digitalocean_token"`
+	HetznerToken       string `json:"hetzner_token"`
+	GoDaddyKey         string `json:"godaddy_key"`
+	GoDaddySecret      string `json:"godaddy_secret"`
+	AWSAccessKeyID     string `json:"aws_access_key_id"`
+	AWSSecretAccessKey string `json:"aws_secret_access_key"`
 }
 
 type filterPayload struct {
@@ -655,9 +661,15 @@ func payloadFromConfig(c *config.Config) configPayload {
 				HTTP01Port:      c.TLS.ACME.HTTP01Port,
 				RenewBeforeDays: c.TLS.ACME.RenewBeforeDays,
 				DNS01: dns01Payload{
-					Provider:        c.TLS.ACME.DNS01.Provider,
-					CloudflareToken: c.TLS.ACME.DNS01.CloudflareToken,
-					PropagationWait: c.TLS.ACME.DNS01.PropagationWait,
+					Provider:           c.TLS.ACME.DNS01.Provider,
+					PropagationWait:    c.TLS.ACME.DNS01.PropagationWait,
+					CloudflareToken:    c.TLS.ACME.DNS01.CloudflareToken,
+					DigitalOceanToken:  c.TLS.ACME.DNS01.DigitalOceanToken,
+					HetznerToken:       c.TLS.ACME.DNS01.HetznerToken,
+					GoDaddyKey:         c.TLS.ACME.DNS01.GoDaddyKey,
+					GoDaddySecret:      c.TLS.ACME.DNS01.GoDaddySecret,
+					AWSAccessKeyID:     c.TLS.ACME.DNS01.AWSAccessKeyID,
+					AWSSecretAccessKey: c.TLS.ACME.DNS01.AWSSecretAccessKey,
 				},
 			},
 		},
@@ -754,9 +766,15 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 				HTTP01Port:      p.TLS.ACME.HTTP01Port,
 				RenewBeforeDays: p.TLS.ACME.RenewBeforeDays,
 				DNS01: config.DNS01Config{
-					Provider:        p.TLS.ACME.DNS01.Provider,
-					CloudflareToken: p.TLS.ACME.DNS01.CloudflareToken,
-					PropagationWait: p.TLS.ACME.DNS01.PropagationWait,
+					Provider:           p.TLS.ACME.DNS01.Provider,
+					PropagationWait:    p.TLS.ACME.DNS01.PropagationWait,
+					CloudflareToken:    p.TLS.ACME.DNS01.CloudflareToken,
+					DigitalOceanToken:  p.TLS.ACME.DNS01.DigitalOceanToken,
+					HetznerToken:       p.TLS.ACME.DNS01.HetznerToken,
+					GoDaddyKey:         p.TLS.ACME.DNS01.GoDaddyKey,
+					GoDaddySecret:      p.TLS.ACME.DNS01.GoDaddySecret,
+					AWSAccessKeyID:     p.TLS.ACME.DNS01.AWSAccessKeyID,
+					AWSSecretAccessKey: p.TLS.ACME.DNS01.AWSSecretAccessKey,
 				},
 			},
 		},

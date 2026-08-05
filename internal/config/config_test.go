@@ -87,10 +87,34 @@ func TestValidateDNS01UnsupportedProvider(t *testing.T) {
 		Enabled: true,
 		Email:   "a@example.com",
 		Domains: []string{"dns.example.com"},
-		DNS01:   DNS01Config{Provider: "route53"},
+		DNS01:   DNS01Config{Provider: "route-unknown"},
 	}
 	err := c.Validate()
 	if err == nil || !strings.Contains(err.Error(), "unsupported provider") {
 		t.Fatalf("err = %v, want unsupported-provider error", err)
+	}
+}
+
+func TestValidateDNS01SupportedProviders(t *testing.T) {
+	cases := []struct {
+		provider string
+		dns01    DNS01Config
+	}{
+		{"digitalocean", DNS01Config{Provider: "digitalocean", DigitalOceanToken: "t"}},
+		{"hetzner", DNS01Config{Provider: "hetzner", HetznerToken: "t"}},
+		{"godaddy", DNS01Config{Provider: "godaddy", GoDaddyKey: "k", GoDaddySecret: "s"}},
+		{"route53", DNS01Config{Provider: "route53", AWSAccessKeyID: "a", AWSSecretAccessKey: "s"}},
+	}
+	for _, tc := range cases {
+		c := validBase()
+		c.TLS.ACME = ACMEConfig{
+			Enabled: true,
+			Email:   "a@example.com",
+			Domains: []string{"dns.example.com"},
+			DNS01:   tc.dns01,
+		}
+		if err := c.Validate(); err != nil {
+			t.Errorf("%s: %v", tc.provider, err)
+		}
 	}
 }

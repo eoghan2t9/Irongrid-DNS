@@ -289,7 +289,7 @@ written automatically on first launch. Key options:
 | `filter.whitelist` | Always-allow entries (override blocklists, incl. IPs) |
 | `filter.block_response` | `nxdomain`, `refused`, or a blackhole IP like `0.0.0.0` |
 | `tls.cert_file/key_file` | Your Let's Encrypt / CA cert for DoT/DoH/DoQ (else self-signed) |
-| `tls.acme` | Automatic Let's Encrypt issuance: `enabled`, `email`, `domains`, `staging`, `http01_port`, and `dns01` (Cloudflare DNS TXT issuance — no open port needed) |
+| `tls.acme` | Automatic Let's Encrypt issuance: `enabled`, `email`, `domains`, `staging`, `http01_port`, and `dns01` (DNS TXT issuance via Cloudflare, DigitalOcean, Hetzner, GoDaddy or AWS Route53 — no open port needed) |
 | `server.web_tls` | Serve the dashboard + API over HTTPS using the same TLS certificate |
 | `server.web_redirect` | With `web_tls`, also serve plain HTTP on `web_redirect_port` that 301s to HTTPS |
 | `tunnel` | Baked-in cloudflared settings |
@@ -368,13 +368,22 @@ tls:
     http01_port: 80                 # port the HTTP-01 challenge listener binds
     renew_before_days: 30           # renew when < 30 days remain
     dns01:                          # optional: issue via DNS TXT instead of HTTP-01
-      provider: cloudflare          #   "cloudflare" — no inbound port required
-      cloudflare_token: ""         #   Cloudflare API token with Zone:DNS:Edit
+      provider: cloudflare          #   one of: cloudflare, digitalocean, hetzner, godaddy, route53
+      cloudflare_token: ""         #   Cloudflare API token (Zone:DNS:Edit)
+      # digitalocean_token: ""      #   DigitalOcean personal access token (DNS:edit)
+      # hetzner_token: ""           #   Hetzner DNS API token (zone write access)
+      # godaddy_key: ""             #   GoDaddy API key + secret (domain DNS access)
+      # godaddy_secret: ""
+      # aws_access_key_id: ""       #   AWS Route53: access key + secret (Route53:ChangeResourceRecordSets)
+      # aws_secret_access_key: ""
       propagation_wait_sec: 60      #   wait for TXT records to propagate
 ```
 
 **HTTP-01 vs DNS-01:** HTTP-01 needs the domain to answer on port 80 at this server. DNS-01
-needs a Cloudflare API token (Zone:DNS:Edit) and works anywhere — ideal behind a tunnel or NAT.
+creates a `_acme-challenge` TXT record through your DNS provider's API and works anywhere —
+ideal behind a tunnel or NAT. Supported providers: **Cloudflare**, **DigitalOcean**, **Hetzner**,
+**GoDaddy**, and **AWS Route53** (all implemented in-process with zero extra dependencies;
+Route53 uses SigV4 signing over the standard API).
 When `server.web_tls` is on, `server.web_redirect: true` adds a plain-HTTP listener
 (`web_redirect_port`, default 80) that 301s every request to `https://<host>/`.
 

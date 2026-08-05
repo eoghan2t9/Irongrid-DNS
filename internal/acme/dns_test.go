@@ -190,13 +190,19 @@ func TestCloudflareUnauthorized(t *testing.T) {
 }
 
 func TestNewDNSProvider(t *testing.T) {
-	if p, err := NewDNSProvider("", "", time.Second); err != nil || p != nil {
+	if p, err := NewDNSProvider("", DNSProviderConfig{}, time.Second); err != nil || p != nil {
 		t.Fatalf("empty provider = %v, %v; want nil,nil", p, err)
 	}
-	if _, err := NewDNSProvider("cloudflare", "tok", time.Second); err != nil {
+	if _, err := NewDNSProvider("cloudflare", DNSProviderConfig{CloudflareToken: "tok"}, time.Second); err != nil {
 		t.Fatalf("cloudflare: %v", err)
 	}
-	if _, err := NewDNSProvider("route53", "", time.Second); err == nil {
-		t.Fatal("route53: expected unsupported error")
+	if _, err := NewDNSProvider("cloudflare", DNSProviderConfig{}, time.Second); err == nil {
+		t.Fatal("cloudflare without token: expected error")
+	}
+	if _, err := NewDNSProvider("route53", DNSProviderConfig{AWSAccessKeyID: "a", AWSSecretAccessKey: "s"}, time.Second); err != nil {
+		t.Fatalf("route53: %v", err)
+	}
+	if _, err := NewDNSProvider("nonsense", DNSProviderConfig{}, time.Second); err == nil {
+		t.Fatal("nonsense: expected unsupported error")
 	}
 }

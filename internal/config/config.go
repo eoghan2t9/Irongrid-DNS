@@ -80,10 +80,17 @@ type ACMEConfig struct {
 }
 
 // DNS01Config configures DNS-01 challenge issuance through a DNS provider API.
+// Supported providers: cloudflare, digitalocean, hetzner, godaddy, route53.
 type DNS01Config struct {
-	Provider        string `yaml:"provider"`            // "cloudflare" ("" = HTTP-01)
-	CloudflareToken string `yaml:"cloudflare_token"`    // Cloudflare API token with DNS:Edit
-	PropagationWait int    `yaml:"propagation_wait_sec"` // seconds to wait for TXT propagation, default 60
+	Provider           string `yaml:"provider"`             // "" = HTTP-01 challenge
+	PropagationWait    int    `yaml:"propagation_wait_sec"`  // seconds to wait for TXT propagation, default 60
+	CloudflareToken    string `yaml:"cloudflare_token"`     // Cloudflare API token (Zone:DNS:Edit)
+	DigitalOceanToken  string `yaml:"digitalocean_token"`   // DigitalOcean personal access token (DNS:edit)
+	HetznerToken       string `yaml:"hetzner_token"`        // Hetzner DNS API token
+	GoDaddyKey         string `yaml:"godaddy_key"`          // GoDaddy API key
+	GoDaddySecret      string `yaml:"godaddy_secret"`       // GoDaddy API secret
+	AWSAccessKeyID     string `yaml:"aws_access_key_id"`    // AWS access key (Route53)
+	AWSSecretAccessKey string `yaml:"aws_secret_access_key"` // AWS secret key (Route53)
 }
 
 // FilterConfig configures blocking behaviour and lists.
@@ -242,14 +249,35 @@ func (c *Config) validate() error {
 		if c.TLS.ACME.RenewBeforeDays <= 0 {
 			c.TLS.ACME.RenewBeforeDays = 30
 		}
-		if c.TLS.ACME.DNS01.Provider != "" && c.TLS.ACME.DNS01.Provider != "cloudflare" {
-			return fmt.Errorf("tls.acme.dns01.provider: unsupported provider %q (supported: cloudflare)", c.TLS.ACME.DNS01.Provider)
+		dns01 := &c.TLS.ACME.DNS01
+		switch dns01.Provider {
+		case "":
+			// HTTP-01; nothing extra required.
+		case "cloudflare":
+			if dns01.CloudflareToken == "" {
+				return fmt.Errorf("tls.acme.dns01.cloudflare_token is required when using the cloudflare provider")
+			}
+		case "digitalocean":
+			if dns01.DigitalOceanToken == "" {
+				return fmt.Errorf("tls.acme.dns01.digitalocean_token is required when using the digitalocean provider")
+			}
+		case "hetzner":
+			if dns01.HetznerToken == "" {
+				return fmt.Errorf("tls.acme.dns01.hetzner_token is required when using the hetzner provider")
+			}
+		case "godaddy":
+			if dns01.GoDaddyKey == "" || dns01.GoDaddySecret == "" {
+				return fmt.Errorf("tls.acme.dns01.godaddy_key and godaddy_secret are required when using the godaddy provider")
+			}
+		case "route53":
+			if dns01.AWSAccessKeyID == "" || dns01.AWSSecretAccessKey == "" {
+				return fmt.Errorf("tls.acme.dns01.aws_access_key_id and aws_secret_access_key are required when using the route53 provider")
+			}
+		default:
+			return fmt.Errorf("tls.acme.dns01.provider: unsupported provider %q (supported: cloudflare, digitalocean, hetzner, godaddy, route53)", dns01.Provider)
 		}
-		if c.TLS.ACME.DNS01.Provider == "cloudflare" && c.TLS.ACME.DNS01.CloudflareToken == "" {
-			return fmt.Errorf("tls.acme.dns01.cloudflare_token is required when using the cloudflare provider")
-		}
-		if c.TLS.ACME.DNS01.PropagationWait == 0 {
-			c.TLS.ACME.DNS01.PropagationWait = 60
+		if dns01.PropagationWait == 0 {
+			dns01.PropagationWait = 60
 		}
 	}
 	if c.Server.WebRedirect && !c.Server.WebTLS {
