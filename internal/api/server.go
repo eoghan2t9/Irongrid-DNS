@@ -36,10 +36,10 @@ type App struct {
 	// against the old one).
 	Mu *sync.Mutex
 	// Set by main: live components.
-	Handler     APIHandler
-	WebFS       fs.FS // embedded frontend build
-	ConfigPath  string
-	SaveConfig  func() error
+	Handler    APIHandler
+	WebFS      fs.FS // embedded frontend build
+	ConfigPath string
+	SaveConfig func() error
 }
 
 // APIHandler is implemented by the API to reach into the running services.
@@ -212,9 +212,11 @@ func logRequests(next http.Handler) http.Handler {
 // redirect behaviour, which would loop with client-side routing.
 func serveFromFS(w http.ResponseWriter, r *http.Request, root fs.FS) {
 	path := strings.TrimPrefix(r.URL.Path, "/")
+	fallback := false
 	data, err := fs.ReadFile(root, path)
 	if err != nil {
 		// SPA fallback: unknown path (and the root) -> index.html.
+		fallback = true
 		data, err = fs.ReadFile(root, "index.html")
 	}
 	if err != nil {
@@ -222,7 +224,12 @@ func serveFromFS(w http.ResponseWriter, r *http.Request, root fs.FS) {
 		return
 	}
 	ct := mime.TypeByExtension(filepath.Ext(path))
-	if path == "" || path == "index.html" {
+	// The content type must describe the file actually served: when the SPA
+	// fallback returned index.html (e.g. a refresh on /blocklists), the URL
+	// path has no extension, so the extension-based lookup would yield
+	// application/octet-stream and the browser would download the page
+	// instead of rendering it.
+	if fallback || path == "" || path == "index.html" {
 		ct = "text/html; charset=utf-8"
 	}
 	if ct == "" {
