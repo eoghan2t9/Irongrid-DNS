@@ -23,7 +23,9 @@ upstreams:
   - "udp://1.1.1.1:53"
   - "udp://8.8.8.8:53"
   # - "tls://1.1.1.1:853"                  # DNS over TLS upstream
-  # - "https://cloudflare-dns.com/dns-query" # DNS over HTTPS upstreamcache:
+  # - "https://cloudflare-dns.com/dns-query" # DNS over HTTPS upstream
+
+cache:
   # Dragonfly is a HARD requirement: the server refuses to start without it.
   addr: "localhost:6379"
   password: ""                 # set if Dragonfly requires auth
@@ -91,3 +93,44 @@ tunnel:
   quick_tunnel: false          # or use an unauthenticated trycloudflare.com tunnel
   quick_tunnel_url: "http://localhost:8080"
   hostname: "dns.example.com"
+
+# Local DNS records: answer a domain yourself instead of forwarding it.
+# Takes priority over blocklists and the cache. "*.suffix" covers a whole
+# subtree; a CNAME rule answers any query type.
+rewrites: []
+  # - domain: "nas.home"
+  #   type: "A"                 # A, AAAA or CNAME
+  #   value: "192.168.1.10"
+  #   ttl: 300
+
+# Per-client policy: apply a different blocklist/upstream policy to clients
+# whose source IP falls in one of a group's CIDRs. Groups are evaluated in
+# order; the first match wins. Clients matching no group use the global
+# filter/upstreams above.
+client_groups: []
+  # - id: "kids"
+  #   name: "Kids' devices"
+  #   enabled: true
+  #   cidrs: ["192.168.1.50", "192.168.1.51"]  # bare IPs or CIDRs
+  #   blocklists: []           # subset of filter.blocklists IDs; [] = all enabled
+  #   whitelist: []            # added to the global whitelist
+  #   blacklist: ["*.tiktok.com", "*.reddit.com"]
+  #   upstreams: []            # override the global upstreams; [] = use them
+
+# Per-client-IP rate limiting — a defense against a compromised LAN device
+# or a public listener being used for DNS amplification.
+rate_limit:
+  enabled: false
+  qps: 20                      # sustained queries/sec allowed per client IP
+  burst: 40                    # short-burst allowance above qps (must be >= qps)
+
+# DNSSEC: Irongrid is a forwarding resolver — like Pi-hole, AdGuard Home and
+# dnsmasq, it trusts an upstream that already validates rather than building
+# its own root-of-trust chain validator. Enabling this sets the DO bit on
+# upstream queries and (with require_ad) rejects answers the upstream didn't
+# mark authenticated. Only meaningful with an ENCRYPTED upstream (tls://,
+# https:// or quic://) — over plain udp/tcp the AD bit can be stripped or
+# forged in transit.
+dnssec:
+  enabled: false
+  require_ad: true

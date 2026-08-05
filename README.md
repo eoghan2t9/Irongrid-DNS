@@ -129,6 +129,10 @@ startup service (systemd / launchd / Windows task).
 | 🔗 **Cloudflare Tunnel** | cloudflared compiled **into the binary** (imported as Go modules) — no external install, managed from the dashboard |
 | 📱 **Android Private DNS** | DoT/DoH on your own domain via the tunnel, with auto-generated or custom TLS certificates |
 | 🐳 **Cross-platform** | Linux, macOS, Windows (single static binary) plus Docker + Dragonfly Compose |
+| 🏠 **Local DNS records** | Answer a domain yourself (`nas.home → 192.168.1.10`) — A/AAAA/CNAME, exact or `*.subtree` wildcard, wins over blocklists and the cache |
+| 👪 **Per-client policy** | Groups matched by client CIDR/IP get their own blocklist subset, extra allow/block entries and (optionally) their own upstreams — first match wins, everyone else uses the global policy |
+| 🚦 **Rate limiting** | Per-client-IP token bucket guards against a compromised LAN device or amplification abuse on a public listener |
+| 🔒 **DNSSEC** | Sets the DO bit and can require the upstream's AD bit before trusting an answer — a forwarder-model validation (like Pi-hole/AdGuard Home/dnsmasq), not a local root-of-trust chain |
 
 ## Architecture
 
@@ -338,6 +342,10 @@ written automatically on first launch. Key options:
 | `server.web_redirect` | With `web_tls`, also serve plain HTTP on `web_redirect_port` that 301s to HTTPS |
 | `server.web_listen == listen_doh` | Same port + `web_tls` → dashboard and DoH share one HTTPS listener (`https://host`, no port) |
 | `tunnel` | Baked-in cloudflared settings |
+| `rewrites` | Local DNS records (A/AAAA/CNAME) — answered directly, ahead of blocklists and the cache |
+| `client_groups` | Per-client policy: CIDR/IP-matched groups with their own blocklist subset, allow/block entries and (optional) upstream override |
+| `rate_limit` | Per-client-IP token bucket: `enabled`, `qps` (sustained), `burst` (must be ≥ `qps`) |
+| `dnssec` | `enabled` sets the DO bit upstream; `require_ad` rejects an answer without the upstream's AD bit as SERVFAIL — trusts an *encrypted* validating upstream rather than validating locally |
 
 ## Cloudflare Tunnel (baked in)
 
