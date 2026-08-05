@@ -1134,6 +1134,13 @@ func (h *Handler) issueACME(ctx context.Context, w http.ResponseWriter) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
+	// Same fix as installUpdate: the web server's 30s WriteTimeout is fixed
+	// at connection-accept time, before this handler runs. DNS-01 issuance
+	// waits propagation_wait_sec (60s by default) before even checking the
+	// TXT record, so it already exceeds 30s out of the box — without this
+	// the browser would see "Failed to fetch" on a run that's still
+	// succeeding server-side.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(6 * time.Minute))
 	if err := h.ACME.ForceIssue(ctx); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -1246,6 +1253,17 @@ func (h *Handler) installUpdate(ctx context.Context, w http.ResponseWriter) {
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
+
+	// The web server's http.Server has a 30s WriteTimeout (sane for every
+	// other endpoint), fixed at connection-accept time before this handler
+	// even starts. A download + checksum verify + binary swap can easily run
+	// past that on a slow link, so the connection would get killed out from
+	// under a perfectly successful install — the browser reports "Failed to
+	// fetch" with no clue the server kept working. Push the deadline out
+	// past the context timeout above so our own error responses win instead.
+	// (SetWriteDeadline no-ops with http.ErrNotSupported if the underlying
+	// writer doesn't support it — never possible here, but safe either way.)
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(6 * time.Minute))
 
 	cur := h.Version
 	if cur == "" {
