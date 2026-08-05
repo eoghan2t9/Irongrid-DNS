@@ -24,9 +24,11 @@ services:
     image: docker.dragonflydb.io/dragonfly/dragonfly
     container_name: irongrid-dragonfly
     restart: unless-stopped
-    command: >
+    # --maxmemory must be >= 256MiB per proactor thread (2 x 256MiB = 512mb)
+    command: >-
       --cache_mode=true
       --maxmemory=512mb
+      --proactor_threads=2
       --port=6379
     ports:
       - "127.0.0.1:6379:6379"   # only reachable from the host / other containers

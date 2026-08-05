@@ -7,7 +7,8 @@ commercial ad-blocking DNS with sub-millisecond local responses.
 ## Install in one line
 
 **Linux / macOS** (amd64 & arm64 — downloads the latest release, verifies the
-SHA-256 checksum, installs to `/usr/local/bin`):
+SHA-256 checksum, installs to `/usr/local/bin`, and installs + starts
+**Dragonfly** — the required cache — for you):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.sh | bash
@@ -31,17 +32,33 @@ docker compose up -d
 Or pull the pre-built image straight from GHCR (needs a separate Dragonfly):
 
 ```bash
-docker run -d --name dragonfly -p 6379:6379 docker.dragonflydb.io/dragonfly/dragonfly
+docker run -d --name dragonfly --restart unless-stopped \
+  -p 127.0.0.1:6379:6379 \
+  docker.dragonflydb.io/dragonfly/dragonfly --cache_mode=true --maxmemory=512mb --proactor_threads=2
 docker run -d --name irongrid --restart unless-stopped \
   -p 53:53/udp -p 53:53/tcp -p 853:853/tcp -p 853:853/udp -p 443:443/tcp -p 8080:8080 \
   -v "$PWD/irongrid.yaml:/app/irongrid.yaml:ro" \
   ghcr.io/eoghan2t9/irongrid-dns:latest
 ```
 
+### Dragonfly is included
+
+The one-line installers set up **DragonflyDB** (the required cache) for you:
+
+| Platform | How Dragonfly is installed |
+|---|---|
+| **Linux** | Native binary from the official Dragonfly release + a **systemd service** (falls back to a background process without root/systemd) |
+| **macOS** | Docker container (`docker run -d --name dragonfly …`) — Dragonfly has no native macOS build |
+| **Windows** | Docker container (WSL2) — Dragonfly has no native Windows build |
+
+It listens on `127.0.0.1:6379`, matching the default `cache.addr` in the
+config. Skip it with `--skip-dragonfly` (install.sh) if you already run a
+Redis-compatible server.
+
 ### After installing
 
-1. Start a **Dragonfly** (Redis-compatible) server — the cache is a hard
-   requirement. The Docker routes include it automatically.
+1. **Dragonfly is already installed and running** (or see the notes the
+   installer printed if you skipped it).
 2. Run the interactive setup wizard: `irongrid install` (or `sudo irongrid install`)
 3. Start the server: `irongrid -config irongrid.yaml -data data`
 4. Open the dashboard at **http://localhost:8080**
