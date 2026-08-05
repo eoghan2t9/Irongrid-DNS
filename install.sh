@@ -463,7 +463,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=$DEST/irongrid -config $CONFIG_ABS -data $DATA_ABS
-WorkingDirectory=$DATA_ABS   # resolves relative paths in the config (data/certs, data/querylog.db)
+WorkingDirectory=$DATA_ABS
+# WorkingDirectory resolves relative paths in the config (data/certs, data/querylog.db)
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
@@ -575,9 +576,17 @@ run_wizard() {
   # Restart a startup service so the wizard's config takes effect right away.
   if [ "$INSTALL_SERVICE" -eq 1 ]; then
     if [ "$OS" = linux ] && has_root && systemd_available; then
-      run_root systemctl restart irongrid >/dev/null 2>&1 \
-        && echo "==> Irongrid service restarted with the new config" \
-        || echo "   restart the Irongrid service to apply the new config"
+      if run_root systemctl restart irongrid >/dev/null 2>&1; then
+        sleep 2  # let systemd spawn the process before judging it
+        if [ "$(run_root systemctl is-active irongrid 2>/dev/null || echo failed)" = "active" ]; then
+          echo "==> Irongrid service restarted with the new config"
+        else
+          echo "!! Irongrid service did not stay up after restart — check: systemctl status irongrid"
+          echo "   (a common cause is a bad directive in the unit file or a missing data dir)"
+        fi
+      else
+        echo "   restart the Irongrid service to apply the new config"
+      fi
     elif [ "$OS" = darwin ] && command -v launchctl >/dev/null 2>&1; then
       launchctl kickstart -k "gui/$(id -u)/com.irongrid.dns" >/dev/null 2>&1 \
         && echo "==> Irongrid launchd agent restarted with the new config" \

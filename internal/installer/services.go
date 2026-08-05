@@ -151,7 +151,8 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=%s -config %s -data %s
-WorkingDirectory=%s   # resolves relative paths in the config (data/certs, data/querylog.db)
+WorkingDirectory=%s
+# WorkingDirectory resolves relative paths in the config (data/certs, data/querylog.db)
 Restart=on-failure
 RestartSec=3
 # Hardening

@@ -109,6 +109,49 @@ func TestAskDragonflyDefaultsYes(t *testing.T) {
 	}
 }
 
+// TestGeneratedUnitsNoTrailingComments guards against systemd/launchd unit
+// generators emitting inline comments after a directive value. systemd treats
+// the whole line as the value, so `WorkingDirectory=/data   # note` breaks
+// startup with status=200/CHDIR (the service crash-loops forever).
+func TestGeneratedUnitsNoTrailingComments(t *testing.T) {
+	w := &wizard{out: os.Stdout}
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "irongrid.yaml")
+	dataDir := filepath.Join(dir, "data")
+
+	files, err := writeSystemd(w, dir, configPath, dataDir)
+	if err != nil {
+		t.Fatalf("writeSystemd: %v", err)
+	}
+	data, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatalf("read unit: %v", err)
+	}
+	for i, line := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(line, "#") || strings.TrimSpace(line) == "" {
+			continue
+		}
+		if strings.Contains(line, "#") {
+			t.Errorf("unit line %d has an inline comment (systemd treats it as part of the value): %q", i+1, line)
+		}
+	}
+	if !strings.Contains(string(data), "WorkingDirectory="+dataDir+"\n") {
+		t.Errorf("expected clean WorkingDirectory=%s line, got:\n%s", dataDir, string(data))
+	}
+
+	files, err = writeLaunchd(w, dir, configPath, dataDir)
+	if err != nil {
+		t.Fatalf("writeLaunchd: %v", err)
+	}
+	plist, err := os.ReadFile(files[0])
+	if err != nil {
+		t.Fatalf("read plist: %v", err)
+	}
+	if !strings.Contains(string(plist), "<string>"+dataDir+"</string>") {
+		t.Errorf("expected clean WorkingDirectory string in plist, got:\n%s", string(plist))
+	}
+}
+
 func TestWriteDockerCompose(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "..", "irongrid.yaml") // one level above deploy/
