@@ -143,6 +143,10 @@ func binaryPath() string {
 }
 
 func writeSystemd(w *wizard, dir, configPath, dataDir string) ([]string, error) {
+	// ProtectSystem=full makes /usr (and thus the binary's directory) read-only
+	// even to root, which breaks the in-place self-updater. ReadWritePaths
+	// punches a hole just for that directory so the rest of /usr stays protected.
+	binDir := filepath.Dir(binaryPath())
 	unit := fmt.Sprintf(`[Unit]
 Description=Irongrid DNS — ad-blocking DNS server
 After=network-online.target
@@ -158,12 +162,13 @@ RestartSec=3
 # Hardening
 NoNewPrivileges=true
 ProtectSystem=full
+ReadWritePaths=%s
 PrivateTmp=true
 LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
-`, binaryPath(), configPath, dataDir, dataDir)
+`, binaryPath(), configPath, dataDir, dataDir, binDir)
 	f := filepath.Join(dir, "irongrid.service")
 	if err := os.WriteFile(f, []byte(unit), 0o644); err != nil {
 		return nil, err

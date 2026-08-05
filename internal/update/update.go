@@ -259,10 +259,15 @@ func (c *Client) Install(ctx context.Context, executable string) (*InstallResult
 	// Download into the same directory as the binary so the final rename is
 	// atomic (a rename across filesystems would fail with EXDEV). Fail fast
 	// with a clear message when the directory is not writable instead of
-	// surfacing a confusing temp-file error.
+	// surfacing a confusing temp-file error. Checked unconditionally, even as
+	// root: systemd's ProtectSystem=full (or an immutable-distro /usr mount)
+	// makes the directory read-only regardless of uid.
 	dir := filepath.Dir(execPath)
-	if runtime.GOOS != "windows" && os.Geteuid() != 0 && !isWritableDir(dir) {
-		return nil, fmt.Errorf("cannot write to %s — run as root (or the user owning the install) to update in place", dir)
+	if runtime.GOOS != "windows" && !isWritableDir(dir) {
+		if os.Geteuid() != 0 {
+			return nil, fmt.Errorf("cannot write to %s — run as root (or the user owning the install) to update in place", dir)
+		}
+		return nil, fmt.Errorf("cannot write to %s even as root — it looks read-only (e.g. systemd's ProtectSystem sandboxing, or an immutable-distro /usr mount). If running under systemd, add 'ReadWritePaths=%s' to the unit's [Service] section and run 'systemctl daemon-reload && systemctl restart <unit>', then retry the update", dir, dir)
 	}
 	tmp, err := os.CreateTemp(dir, ".irongrid-update-*")
 	if err != nil {
