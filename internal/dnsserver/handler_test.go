@@ -92,6 +92,94 @@ func TestRaceUpstreamsFastestWins(t *testing.T) {
 	}
 }
 
+// TestHandlerRewriteShortCircuitsUpstream verifies a matching local DNS
+// record answers directly without ever touching the upstream — proven by
+// pointing Upstreams at nothing reachable and confirming the query still
+// succeeds instantly with the rewritten answer.
+func TestHandlerRewriteShortCircuitsUpstream(t *testing.T) {
+	h := NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, 5*time.Second)
+	rw := filter.NewRewriter()
+	rw.Set([]filter.RewriteSpec{{Domain: "nas.home", Type: "A", Value: "192.168.1.10", TTL: 300}})
+	h.SetRewriter(rw)
+
+	m := new(dns.Msg)
+	m.SetQuestion("nas.home.", dns.TypeA)
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, m)
+
+	if fw.msg == nil || len(fw.msg.Answer) != 1 {
+		t.Fatalf("expected one rewritten answer, got %v", fw.msg)
+	}
+	a, ok := fw.msg.Answer[0].(*dns.A)
+	if !ok || a.A.String() != "192.168.1.10" {
+		t.Fatalf("unexpected answer: %v", fw.msg.Answer[0])
+	}
+}
+
+// TestHandlerRateLimitDropsUDPOverLimit verifies a client that exceeds its
+// burst gets no UDP response at all (dropped, not REFUSED — see the
+// amplification-abuse comment in serve()).
+func TestHandlerRateLimitDropsUDPOverLimit(t *testing.T) {
+	addr := startUDPTestServer(t, "1.1.1.1", 0)
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
+	h.SetRateLimiter(NewRateLimiter(1, 1))
+
+	q := func() *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("example.com.", dns.TypeA)
+		return m
+	}
+	fw1 := &fakeWriter{}
+	h.ServeDNS(fw1, q())
+	if fw1.msg == nil {
+		t.Fatal("first query should be allowed and answered")
+	}
+	fw2 := &fakeWriter{}
+	h.ServeDNS(fw2, q())
+	if fw2.msg != nil {
+		t.Fatalf("second query within the same burst window should be dropped, got %v", fw2.msg)
+	}
+}
+
+// TestHandlerRateLimitRefusesConnectionOriented verifies non-UDP protocols
+// get a REFUSED response instead of a silent drop when rate-limited (no
+// amplification risk over a connection-oriented transport).
+func TestHandlerRateLimitRefusesConnectionOriented(t *testing.T) {
+	h := NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, 5*time.Second)
+	h.SetRateLimiter(NewRateLimiter(1, 1))
+
+	q := func() *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("example.com.", dns.TypeA)
+		return m
+	}
+	fw1 := &fakeWriter{}
+	h.ServeDNSWithProto(fw1, q(), "tcp")
+	fw2 := &fakeWriter{}
+	h.ServeDNSWithProto(fw2, q(), "tcp")
+	if fw2.msg == nil || fw2.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("expected REFUSED for a rate-limited TCP query, got %v", fw2.msg)
+	}
+}
+
+// TestHandlerDNSSECRejectsUnauthenticated verifies that with DNSSEC required,
+// an upstream answer lacking the AD bit is rejected as SERVFAIL rather than
+// passed through.
+func TestHandlerDNSSECRejectsUnauthenticated(t *testing.T) {
+	addr := startUDPTestServer(t, "1.1.1.1", 0) // test server never sets AD
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
+	h.SetDNSSEC(true, true)
+
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, m)
+
+	if fw.msg == nil || fw.msg.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("expected SERVFAIL for an unauthenticated answer under require_ad, got %v", fw.msg)
+	}
+}
+
 // TestRaceUpstreamsAllFail verifies an all-failures case returns promptly
 // instead of stalling until the full timeout.
 func TestRaceUpstreamsAllFail(t *testing.T) {

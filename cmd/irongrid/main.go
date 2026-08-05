@@ -146,6 +146,14 @@ func main() {
 		cfg.Filter.BlockResponse, cfg.Filter.BlockTTL,
 		time.Duration(cfg.Server.TimeoutSec)*time.Second,
 	)
+	handler.SetRewriter(dnsserver.BuildRewriter(cfg.Rewrites))
+	handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
+	handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
+	handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
+	// Rebuild per-client-group engines whenever blocklist content changes
+	// (auto-refresh ticker, manual "refresh all lists") — they're built from
+	// the same cached content the global engine uses.
+	lists.OnChange = func() { handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists)) }
 	dnsMgr := dnsserver.NewManager(handler, tlsConf)
 	// webSharesDoH reports whether the dashboard and DoH share one HTTPS port
 	// (server.web_listen == server.listen_doh with web_tls on). In that case
@@ -523,6 +531,10 @@ func main() {
 		handler.SetUpstreams(newUps)
 		handler.SetBlockPolicy(cfg.Filter.BlockResponse, cfg.Filter.BlockTTL)
 		handler.SetTimeout(time.Duration(cfg.Server.TimeoutSec) * time.Second)
+		handler.SetRewriter(dnsserver.BuildRewriter(cfg.Rewrites))
+		handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
+		handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
+		handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
 		apiHandler.Cache = newCache
 		apiHandler.Upstreams = newUps
 		oldCache := dfly
@@ -662,3 +674,7 @@ func hostOnly(addr string) string {
 	}
 	return host
 }
+
+// buildRewriter, buildRateLimiter and buildClientRouter live in the
+// dnsserver package (as BuildRewriter etc.) so the API's live config-apply
+// path can share the exact same logic instead of duplicating it.

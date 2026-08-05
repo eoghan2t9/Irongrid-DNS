@@ -44,13 +44,18 @@ type Handler struct {
 	Cache  *cache.Cache
 	Log    *querylog.Log
 
-	// mu guards the hot-swappable settings below (upstreams, block policy,
-	// timeout) so the API can live-apply config changes without a restart.
-	mu            sync.RWMutex
-	Upstreams     []*upstream.Upstream
-	BlockResponse string
-	BlockTTL      uint32
-	Timeout       time.Duration
+	// mu guards the hot-swappable settings below so the API can live-apply
+	// config changes without a restart.
+	mu              sync.RWMutex
+	Upstreams       []*upstream.Upstream
+	BlockResponse   string
+	BlockTTL        uint32
+	Timeout         time.Duration
+	Rewriter        *filter.Rewriter // local DNS records; never nil, may be empty
+	ClientRouter    *ClientRouter    // per-client policy; never nil, may be empty
+	RateLimiter     *RateLimiter     // nil disables rate limiting
+	DNSSECEnabled   bool
+	DNSSECRequireAD bool
 
 	Stats *Stats
 }
@@ -65,6 +70,8 @@ func NewHandler(engine *filter.Engine, c *cache.Cache, ups []*upstream.Upstream,
 		BlockResponse: blockResp,
 		BlockTTL:      blockTTL,
 		Timeout:       timeout,
+		Rewriter:      filter.NewRewriter(),
+		ClientRouter:  NewClientRouter(),
 		Stats:         newStats(),
 	}
 }
@@ -116,6 +123,37 @@ func (h *Handler) SetTimeout(d time.Duration) {
 	h.Timeout = d
 }
 
+// SetRewriter hot-swaps the local DNS records (config live-apply).
+func (h *Handler) SetRewriter(rw *filter.Rewriter) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.Rewriter = rw
+}
+
+// SetClientRouter hot-swaps the per-client policy routing table.
+func (h *Handler) SetClientRouter(cr *ClientRouter) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.ClientRouter = cr
+}
+
+// SetRateLimiter hot-swaps the rate limiter; nil disables rate limiting.
+func (h *Handler) SetRateLimiter(rl *RateLimiter) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.RateLimiter = rl
+}
+
+// SetDNSSEC hot-swaps DNSSEC enforcement (see DNSSECConfig's doc comment for
+// what "enabled" actually means: trusting an encrypted, validating upstream,
+// not local chain-of-trust validation).
+func (h *Handler) SetDNSSEC(enabled, requireAD bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.DNSSECEnabled = enabled
+	h.DNSSECRequireAD = requireAD
+}
+
 func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) {
 	start := time.Now()
 	h.Stats.Total.Add(1)
@@ -130,6 +168,11 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	blockTTL := h.BlockTTL
 	timeout := h.Timeout
 	cache := h.Cache
+	rewriter := h.Rewriter
+	clientRouter := h.ClientRouter
+	rateLimiter := h.RateLimiter
+	dnssecEnabled := h.DNSSECEnabled
+	dnssecRequireAD := h.DNSSECRequireAD
 	h.mu.RUnlock()
 
 	if r == nil || len(r.Question) == 0 {
@@ -140,14 +183,65 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		return
 	}
 
+	// 0. Rate limit: the cheapest possible check, before any real work. A
+	//    UDP response is simply dropped rather than answered REFUSED —
+	//    answering at all hands a spoofed source IP amplification, however
+	//    small. Connection-oriented protocols (TCP/DoT/DoH/DoQ) already
+	//    required a real handshake, so REFUSED is safe there.
+	if rateLimiter != nil && !rateLimiter.Allow(client) {
+		h.Stats.Errors.Add(1)
+		if proto == "udp" {
+			return
+		}
+		refused := new(dns.Msg)
+		refused.SetReply(r)
+		refused.Rcode = dns.RcodeRefused
+		w.WriteMsg(refused)
+		return
+	}
+
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.RecursionAvailable = true
 	q := r.Question[0]
 	qname := strings.ToLower(strings.TrimSuffix(q.Name, "."))
 
-	// 1. Filtering: whitelist overrides everything; blocklists stop the query.
-	decision := h.Engine.DecideDomain(q.Name)
+	// 1. Local DNS records win over everything else — an explicit config
+	//    entry is a stronger signal of intent than any blocklist or cache,
+	//    and it's global (not per-client-group) so it's checked up front.
+	if rewriter != nil {
+		if rules, ok := rewriter.Lookup(q.Name); ok {
+			if ans := filter.BuildAnswer(r, rules, q.Name, q.Qtype); ans != nil {
+				h.Stats.Allowed.Add(1)
+				h.record(client, qname, q, "rewrite", "local-dns", "", start, ans)
+				w.WriteMsg(ans)
+				return
+			}
+			// The name matched but not this record type: NODATA is the
+			// correct answer for an authoritatively-local name, not a
+			// blocklist/cache/upstream lookup.
+			h.Stats.Allowed.Add(1)
+			h.record(client, qname, q, "rewrite", "local-dns-nodata", "", start, m)
+			w.WriteMsg(m)
+			return
+		}
+	}
+
+	// 2. Per-client policy: a client whose IP falls in a configured group
+	//    uses that group's blocklists/whitelist (and upstreams, if
+	//    overridden) instead of the global ones.
+	engine := h.Engine
+	if clientRouter != nil {
+		if policy := clientRouter.Resolve(client); policy != nil {
+			engine = policy.Engine
+			if len(policy.Upstreams) > 0 {
+				upstreams = policy.Upstreams
+			}
+		}
+	}
+
+	// 3. Filtering: whitelist overrides everything; blocklists stop the query.
+	decision := engine.DecideDomain(q.Name)
 	if decision.Action == filter.Block {
 		blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 		h.Stats.Blocked.Add(1)
@@ -156,7 +250,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		return
 	}
 
-	// 2. Cache lookup (only for standard record types). Cached messages carry
+	// 4. Cache lookup (only for standard record types). Cached messages carry
 	//    the ID of the original query, so rebase to this request's ID.
 	// Lookup hashes the question once and checks positive then negative
 	// entries, instead of two independent Get/GetNegative calls that each
@@ -178,25 +272,33 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		}
 	}
 
-	// 3. Forward to upstreams. Multiple upstreams are raced concurrently so
+	// 5. Forward to upstreams. Multiple upstreams are raced concurrently so
 	//    the fastest healthy one answers; a single upstream is queried
-	//    directly to avoid goroutine overhead.
+	//    directly to avoid goroutine overhead. When DNSSEC is enabled the
+	//    outgoing query carries the DO (DNSSEC OK) bit, asking a validating
+	//    upstream to do the work — see DNSSECConfig's doc comment for why
+	//    this resolver trusts the upstream rather than validating locally.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	upstreamQuery := r
+	if dnssecEnabled {
+		upstreamQuery = r.Copy()
+		upstreamQuery.SetEdns0(4096, true)
+	}
 	var (
 		resp   *dns.Msg
 		usedUp string
 		err    error
 	)
 	if len(upstreams) == 1 {
-		resp, err = upstreams[0].Query(ctx, r)
+		resp, err = upstreams[0].Query(ctx, upstreamQuery)
 		if err == nil && resp != nil {
 			usedUp = upstreams[0].Name()
 		} else if err != nil {
 			log.Printf("[dns] upstream %s failed: %v", upstreams[0].Name(), err)
 		}
 	} else {
-		resp, usedUp, err = raceUpstreams(ctx, upstreams, r)
+		resp, usedUp, err = raceUpstreams(ctx, upstreams, upstreamQuery)
 	}
 	if err != nil || resp == nil {
 		h.Stats.Errors.Add(1)
@@ -210,9 +312,21 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		return
 	}
 
-	// 4. IP-based blocking: if the blocklists contain IP rules, check the
+	// 6. DNSSEC enforcement: reject an answer the upstream didn't mark
+	//    authenticated instead of passing it through unvalidated. Only
+	//    meaningful over an encrypted upstream transport (DoT/DoH/DoQ),
+	//    where the AD bit can't be stripped or forged in flight.
+	if dnssecEnabled && dnssecRequireAD && !resp.AuthenticatedData {
+		h.Stats.Errors.Add(1)
+		m.Rcode = dns.RcodeServerFailure
+		h.record(client, qname, q, "error", "dnssec: upstream did not authenticate the answer", usedUp, start, m)
+		w.WriteMsg(m)
+		return
+	}
+
+	// 7. IP-based blocking: if the blocklists contain IP rules, check the
 	//    answers (A/AAAA) returned by the upstream.
-	if blockedByIP, reason := h.Engine.CheckIPs(answerIPs(resp)); blockedByIP {
+	if blockedByIP, reason := engine.CheckIPs(answerIPs(resp)); blockedByIP {
 		blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 		h.Stats.Blocked.Add(1)
 		h.record(client, qname, q, "blocked", reason, usedUp, start, blocked)
@@ -220,7 +334,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		return
 	}
 
-	// 5. Cache the result (positive or negative) and return. Zero TTLs fall
+	// 8. Cache the result (positive or negative) and return. Zero TTLs fall
 	//    back to the configured Dragonfly cache lifetimes.
 	if cache != nil && !isMetaQuery(q) {
 		cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)

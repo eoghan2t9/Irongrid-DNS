@@ -21,6 +21,11 @@ type ListManager struct {
 	engine *Engine
 	dir    string
 	client *http.Client
+	// OnChange, if set, is invoked after every successful ReloadAll. Used to
+	// rebuild anything else that derives from the same cached list content
+	// (e.g. per-client-group engines), which ReloadAll itself knows nothing
+	// about.
+	OnChange func()
 }
 
 // ListSpec mirrors the config blocklist entry.
@@ -108,6 +113,9 @@ func (m *ListManager) ReloadAll() {
 	}
 	m.mu.Unlock()
 	m.engine.Compile()
+	if m.OnChange != nil {
+		m.OnChange()
+	}
 }
 
 // Fetch downloads every enabled list (or reads local files) and stores the

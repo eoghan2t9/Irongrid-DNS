@@ -19,14 +19,70 @@ import (
 
 // Config is the root configuration document.
 type Config struct {
-	Server    ServerConfig `yaml:"server"`
-	Upstreams []string     `yaml:"upstreams"`
-	Cache     CacheConfig  `yaml:"cache"`
-	TLS       TLSConfig    `yaml:"tls"`
-	Filter    FilterConfig `yaml:"filter"`
-	Log       LogConfig    `yaml:"log"`
-	Web       WebConfig    `yaml:"web"`
-	Tunnel    TunnelConfig `yaml:"tunnel"`
+	Server       ServerConfig    `yaml:"server"`
+	Upstreams    []string        `yaml:"upstreams"`
+	Cache        CacheConfig     `yaml:"cache"`
+	TLS          TLSConfig       `yaml:"tls"`
+	Filter       FilterConfig    `yaml:"filter"`
+	Log          LogConfig       `yaml:"log"`
+	Web          WebConfig       `yaml:"web"`
+	Tunnel       TunnelConfig    `yaml:"tunnel"`
+	Rewrites     []RewriteSpec   `yaml:"rewrites"`      // local DNS records (A/AAAA/CNAME)
+	ClientGroups []ClientGroup   `yaml:"client_groups"` // per-client blocking/upstream policy
+	RateLimit    RateLimitConfig `yaml:"rate_limit"`
+	DNSSEC       DNSSECConfig    `yaml:"dnssec"`
+}
+
+// RewriteSpec is a local DNS record: a domain answered directly by Irongrid
+// instead of being forwarded upstream. Domain may be an exact name or a
+// "*.suffix" wildcard covering the whole subtree.
+type RewriteSpec struct {
+	Domain string `yaml:"domain"`
+	Type   string `yaml:"type"` // "A", "AAAA" or "CNAME"
+	Value  string `yaml:"value"`
+	TTL    uint32 `yaml:"ttl"` // 0 = default (300s)
+}
+
+// ClientGroup applies a different blocking/upstream policy to clients whose
+// source IP falls in one of CIDRs. Groups are evaluated in list order; the
+// first match wins. Clients matching no group use the global Filter/Upstreams.
+type ClientGroup struct {
+	ID      string   `yaml:"id"`
+	Name    string   `yaml:"name"`
+	Enabled bool     `yaml:"enabled"`
+	CIDRs   []string `yaml:"cidrs"` // e.g. "192.168.1.50/32", "10.0.5.0/24"
+	// Blocklists selects a subset of filter.blocklists by ID. Empty means
+	// "every enabled global blocklist" (same as the default policy).
+	Blocklists []string `yaml:"blocklists"`
+	Whitelist  []string `yaml:"whitelist"` // additional to the global whitelist
+	Blacklist  []string `yaml:"blacklist"` // additional to the global blacklist
+	// Upstreams overrides the global forwarders for this group. Empty uses
+	// the global Upstreams list.
+	Upstreams []string `yaml:"upstreams"`
+}
+
+// RateLimitConfig throttles queries per source IP to protect against abuse
+// (e.g. a compromised LAN device, or a misconfigured public listener being
+// used for DNS amplification).
+type RateLimitConfig struct {
+	Enabled bool `yaml:"enabled"`
+	QPS     int  `yaml:"qps"`   // sustained queries/sec allowed per client IP
+	Burst   int  `yaml:"burst"` // short-burst allowance above qps
+}
+
+// DNSSECConfig enables DNSSEC enforcement. Irongrid is a forwarding
+// resolver — like Pi-hole, AdGuard Home and dnsmasq, it does not build its
+// own root-of-trust chain validator. Instead, enabling this sets the DO bit
+// on upstream queries and requires the AD (Authenticated Data) bit in the
+// response, trusting that the encrypted upstream (DoT/DoH/DoQ to e.g.
+// Cloudflare, Google or Quad9) has already validated the signature chain.
+// Plain UDP/TCP upstreams can have the AD bit stripped or forged in transit,
+// so this option is only meaningful with an encrypted upstream.
+type DNSSECConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// RequireAD, when true, treats an answer without the AD bit as bogus and
+	// returns SERVFAIL instead of passing it through unauthenticated.
+	RequireAD bool `yaml:"require_ad"`
 }
 
 // ServerConfig controls every network listener.
@@ -196,6 +252,15 @@ func Default() *Config {
 		Tunnel: TunnelConfig{
 			QuickTunnelURL: "http://localhost:8080",
 		},
+		RateLimit: RateLimitConfig{
+			Enabled: false,
+			QPS:     20,
+			Burst:   40,
+		},
+		DNSSEC: DNSSECConfig{
+			Enabled:   false,
+			RequireAD: true,
+		},
 	}
 }
 
@@ -349,6 +414,52 @@ func (c *Config) validate() error {
 	}
 	if c.Web.Username == "" {
 		return fmt.Errorf("web.username is required")
+	}
+	for i, rw := range c.Rewrites {
+		if rw.Domain == "" {
+			return fmt.Errorf("rewrites[%d]: domain is required", i)
+		}
+		switch strings.ToUpper(rw.Type) {
+		case "A", "AAAA", "CNAME":
+		default:
+			return fmt.Errorf("rewrites[%d]: type must be A, AAAA or CNAME, got %q", i, rw.Type)
+		}
+		if rw.Value == "" {
+			return fmt.Errorf("rewrites[%d]: value is required", i)
+		}
+	}
+	seenGroup := map[string]bool{}
+	for i, g := range c.ClientGroups {
+		if g.ID == "" {
+			return fmt.Errorf("client_groups[%d]: id is required", i)
+		}
+		if seenGroup[g.ID] {
+			return fmt.Errorf("client_groups[%d]: duplicate id %q", i, g.ID)
+		}
+		seenGroup[g.ID] = true
+		if len(g.CIDRs) == 0 {
+			return fmt.Errorf("client_groups[%d] (%s): at least one CIDR is required", i, g.ID)
+		}
+		for _, cidr := range g.CIDRs {
+			if _, _, err := net.ParseCIDR(cidr); err != nil {
+				if net.ParseIP(cidr) == nil {
+					return fmt.Errorf("client_groups[%d] (%s): invalid CIDR/IP %q", i, g.ID, cidr)
+				}
+			}
+		}
+		for _, spec := range g.Upstreams {
+			if spec == "" {
+				return fmt.Errorf("client_groups[%d] (%s): empty upstream entry", i, g.ID)
+			}
+		}
+	}
+	if c.RateLimit.Enabled {
+		if c.RateLimit.QPS < 1 {
+			return fmt.Errorf("rate_limit.qps must be >= 1 when rate_limit is enabled")
+		}
+		if c.RateLimit.Burst < c.RateLimit.QPS {
+			return fmt.Errorf("rate_limit.burst must be >= rate_limit.qps")
+		}
 	}
 	return nil
 }
