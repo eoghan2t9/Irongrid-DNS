@@ -130,7 +130,7 @@ export default function Dashboard({ onNavigate }) {
         </div>
       </div>
 
-      <AcmeCard acme={tls?.acme} onNavigate={onNavigate} />
+      <AcmeCard acme={tls?.acme} onNavigate={onNavigate} onRenewed={load} />
     </div>
   )
 }
@@ -141,11 +141,35 @@ function daysBetween(a, b) {
 }
 
 // AcmeCard summarises the Let's Encrypt manager state on the dashboard.
-function AcmeCard({ acme, onNavigate }) {
+function AcmeCard({ acme, onNavigate, onRenewed }) {
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState(null) // { ok, text }
   if (!acme || !acme.enabled) return null
   const ok = !acme.last_error
   const days = daysBetween(new Date(), acme.next_renewal)
   const since = daysBetween(acme.last_success, new Date())
+
+  const renew = async (e) => {
+    e.stopPropagation()
+    if (busy) return
+    setBusy(true)
+    setMsg(null)
+    try {
+      const r = await api.tlsAcmeIssue()
+      setMsg({
+        ok: true,
+        text: r.apply_error
+          ? `Certificate issued but not hot-applied: ${r.apply_error}`
+          : 'Certificate issued and applied to the listeners.',
+      })
+      onRenewed && onRenewed()
+    } catch (err) {
+      setMsg({ ok: false, text: err.message || 'Renewal failed' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className={`card acme-card ${ok ? '' : 'acme-error'}`} role="button" tabIndex={0}
       onClick={() => onNavigate('tls')} onKeyDown={(e) => e.key === 'Enter' && onNavigate('tls')}
@@ -191,6 +215,20 @@ function AcmeCard({ acme, onNavigate }) {
           ⚠ {acme.last_error} — click to fix on the SSL / TLS page.
         </div>
       )}
+      <div className="row-between" style={{ marginTop: 12 }}>
+        <button
+          className="btn primary small"
+          onClick={renew}
+          onKeyDown={(e) => e.stopPropagation()}
+          disabled={busy}
+          title="Trigger an immediate Let's Encrypt issuance / renewal"
+        >
+          {busy ? 'Renewing…' : 'Renew now'}
+        </button>
+        <span className={`small ${msg ? (msg.ok ? 'text-ok' : 'error-text') : 'dim'}`}>
+          {msg ? msg.text : 'Renews automatically before expiry'}
+        </span>
+      </div>
     </div>
   )
 }

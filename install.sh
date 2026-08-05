@@ -20,9 +20,15 @@
 #   --config <path>     config file to create (default: ./irongrid.yaml)
 #   --data <dir>        runtime data directory (default: ./data)
 #   --no-service        do not install Irongrid as a startup service
+#   --no-wizard         skip the interactive setup wizard (TUI)
 #   --skip-verify       skip checksum verification (not recommended)
 #   --skip-dragonfly    do not install/start Dragonfly
 #   -h, --help          show this help
+#
+# After installing, the script launches the interactive TUI setup wizard
+# (`irongrid install`) so you can configure upstreams, blocklists, dashboard
+# login, TLS, etc. — unless --no-wizard is given or no terminal is available
+# (e.g. a piped curl|bash in CI, where it keeps the default config).
 #
 set -euo pipefail
 
@@ -36,6 +42,7 @@ DATA_DIR="data"
 SKIP_VERIFY=0
 SKIP_DRAGONFLY=0
 INSTALL_SERVICE=1
+SKIP_WIZARD=0
 
 die() { echo "error: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required tool missing: $1"; }
@@ -60,6 +67,7 @@ Options:
   --config <path>     config file to create (default: ./irongrid.yaml)
   --data <dir>        runtime data directory (default: ./data)
   --no-service        do not install Irongrid as a startup service
+  --no-wizard         skip the interactive setup wizard (TUI)
   --skip-verify       skip checksum verification (not recommended)
   --skip-dragonfly    do not install/start Dragonfly
   -h, --help          show this help
@@ -77,6 +85,7 @@ while [ $# -gt 0 ]; do
     --data)
       [ $# -ge 2 ] || die "--data requires a value"; DATA_DIR="$2"; shift 2 ;;
     --no-service) INSTALL_SERVICE=0; shift ;;
+    --no-wizard) SKIP_WIZARD=1; shift ;;
     --skip-verify) SKIP_VERIFY=1; shift ;;
     --skip-dragonfly) SKIP_DRAGONFLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -112,6 +121,12 @@ if [ "$(id -u)" != 0 ]; then
 fi
 run_root() { if [ "${#ROOT[@]}" -gt 0 ]; then "${ROOT[@]}" "$@"; else "$@"; fi }
 has_root() { [ "$(id -u)" = 0 ] || [ "${#ROOT[@]}" -gt 0 ]; }
+# 1 if an interactive terminal is reachable: stdin is a tty, or /dev/tty can
+# be opened (covers `curl ... | bash`, where stdin is the pipe, not the tty).
+has_tty() {
+  [ -t 0 ] && return 0
+  (exec </dev/tty) 2>/dev/null
+}
 
 abs_path() {
   case "$1" in
@@ -338,7 +353,10 @@ install_dragonfly
 # ---- default config ----
 # Write a ready-to-run default config when none exists, so the server can be
 # started straight after installing. cache.addr always points at localhost:6379
-# (where the Dragonfly above is served).
+# (where the Dragonfly above is served). Remember whether one already existed
+# so the wizard below can avoid overwriting a user's config.
+CONFIG_EXISTED=0
+[ -f "$CONFIG_ABS" ] && CONFIG_EXISTED=1
 if [ ! -f "$CONFIG_ABS" ]; then
   echo "==> writing default config to $CONFIG_ABS"
   mkdir -p "$(dirname "$CONFIG_ABS")"
@@ -493,6 +511,58 @@ EOF
 
 install_irongrid_service
 
+# ---- interactive setup wizard (TUI) ----
+# Launch `irongrid install` so the user can configure upstreams, blocklists,
+# dashboard login, TLS, etc. straight after installing. This needs a real
+# terminal: when piped via `curl | bash` stdin is the (already drained) pipe,
+# so we re-open /dev/tty for the wizard — and when no terminal exists at all
+# (CI, Docker, etc.) we skip it and keep the default config written above.
+run_wizard() {
+  if [ "$SKIP_WIZARD" -eq 1 ]; then
+    echo "==> setup wizard skipped (--no-wizard)"
+    return 0
+  fi
+  if [ "$CONFIG_EXISTED" -eq 1 ]; then
+    echo "==> config already existed - wizard skipped to leave it untouched"
+    echo "    (re-run it anytime with: $DEST/irongrid${EXT} install)"
+    return 0
+  fi
+  if ! has_tty; then
+    echo "==> no interactive terminal detected - keeping the default config"
+    echo "    (re-run the wizard anytime with: $DEST/irongrid${EXT} install)"
+    return 0
+  fi
+  echo
+  echo "==> launching the interactive setup wizard ..."
+  echo "    configure upstreams, blocklists, dashboard login, TLS & more"
+  # Re-open stdin from the terminal so the wizard works even when this script
+  # was piped via `curl ... | bash`. IMPORTANT: no stderr redirect on this
+  # exec — an exec redirection persists for the whole shell, so 2>/dev/null
+  # here would also hide the wizard's own error output.
+  if ! exec </dev/tty; then
+    echo "!! could not open the terminal - keeping the default config"
+    return 0
+  fi
+  # Dragonfly was already installed/started above, so --with-dragonfly is not
+  # needed here (older release binaries don't define that flag).
+  if ! "$DEST/irongrid${EXT}" install --config "$CONFIG_ABS" --data "$DATA_ABS"; then
+    echo "   (wizard exited non-zero - config left as-is; re-run with: $DEST/irongrid${EXT} install)"
+  fi
+  # Restart a startup service so the wizard's config takes effect right away.
+  if [ "$INSTALL_SERVICE" -eq 1 ]; then
+    if [ "$OS" = linux ] && has_root && systemd_available; then
+      run_root systemctl restart irongrid >/dev/null 2>&1 \
+        && echo "==> Irongrid service restarted with the new config" \
+        || echo "   restart the Irongrid service to apply the new config"
+    elif [ "$OS" = darwin ] && command -v launchctl >/dev/null 2>&1; then
+      launchctl kickstart -k "gui/$(id -u)/com.irongrid.dns" >/dev/null 2>&1 \
+        && echo "==> Irongrid launchd agent restarted with the new config" \
+        || echo "   reload the launchd agent to apply the new config (launchctl unload/load com.irongrid.dns)"
+    fi
+  fi
+}
+run_wizard
+
 echo
 echo "Next steps:"
 if [ "$DFLY_STARTED" -eq 1 ]; then
@@ -503,6 +573,6 @@ fi
 echo "  ✓ Config: $CONFIG_ABS"
 echo "  1. If the service above is not running, start it:"
 echo "       $DEST/irongrid -config $CONFIG_ABS -data $DATA_ABS"
-echo "  2. (Optional) customise setup with the wizard: $DEST/irongrid install"
+echo "  2. Customise setup anytime with the wizard: $DEST/irongrid${EXT} install"
 echo "  3. Dashboard:      http://localhost:8080  (default login: admin / irongrid)"
 echo "  4. Point devices at this machine's port 53 (UDP/TCP)"

@@ -7,18 +7,27 @@ commercial ad-blocking DNS with sub-millisecond local responses.
 ## Install in one line
 
 **Linux / macOS** (amd64 & arm64 — downloads the latest release, verifies the
-SHA-256 checksum, installs to `/usr/local/bin`, and installs + starts
-**Dragonfly** — the required cache — for you):
+SHA-256 checksum, installs to `/usr/local/bin`, installs + starts
+**Dragonfly** — the required cache — for you, and then **launches the
+interactive setup wizard** so you can configure upstreams, blocklists,
+dashboard login, TLS, and more):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.sh | bash
 ```
 
-**Windows** (PowerShell — same checksum-verified install, added to your PATH):
+**Windows** (PowerShell — same checksum-verified install, added to your PATH,
+followed by the interactive setup wizard):
 
 ```powershell
 irm https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.ps1 | iex
 ```
+
+The wizard launches automatically whenever an interactive terminal is
+detected (it re-opens `/dev/tty`, so it also works when piped via
+`curl … | bash` from a terminal). In non-interactive contexts (CI, Docker)
+— or with `--no-wizard` / `-NoWizard` — it is skipped and the default config
+is used instead.
 
 **Docker** (compose bundle with Dragonfly included):
 
@@ -64,6 +73,10 @@ server — a live Redis/KeyDB/Dragonfly on 6379 is detected and used as-is.
    launchd on macOS, an elevated logon scheduled task on Windows
    (it runs while a user is logged in; Linux needs root; use
    `--no-service` to skip).
+5. Launches the **interactive setup wizard** (`irongrid install
+   --with-dragonfly`) so you can configure everything in the TUI — skipped
+   automatically when no terminal is available, or with `--no-wizard`
+   (`-NoWizard` on Windows).
 
 ```bash
 # Customise the locations:
@@ -75,7 +88,9 @@ curl -fsSL https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install
 
 1. **Dragonfly and the service are already running** — the dashboard is at
    **http://localhost:8080** (default login `admin` / `irongrid`).
-2. (Optional) customise everything with the wizard: `irongrid install`.
+2. If you finished the wizard, your chosen config is already in place and the
+   service was restarted to apply it. Re-run the wizard anytime with
+   `irongrid install` to change things.
 
 The wizard writes a ready-to-use config and installs the service for your
 platform (systemd / launchd / Windows service / Docker).

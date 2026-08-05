@@ -3,14 +3,20 @@
 #   irm https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.ps1 | iex
 #
 # Downloads the latest release binary for your architecture, verifies its
-# SHA-256 checksum, and installs it. Optional parameters:
+# SHA-256 checksum, and installs it. After installing, the interactive TUI
+# setup wizard (`irongrid install`) is launched so you can configure
+# upstreams, blocklists, dashboard login, TLS, etc. - unless -NoWizard is
+# given or no interactive console is available (e.g. `irm ... | iex` in CI).
+# Optional parameters:
 #
 #   -Version "v1.0.1"   install a specific release tag (default: latest)
 #   -Dir "C:\Tools"     install into a custom directory (default: %LOCALAPPDATA%\Irongrid)
+#   -NoWizard           skip the interactive setup wizard (TUI)
 #
 param(
   [string]$Version = "",
-  [string]$Dir = ""
+  [string]$Dir = "",
+  [switch]$NoWizard
 )
 
 $ErrorActionPreference = "Stop"
@@ -130,6 +136,29 @@ try {
   Remove-Item $batFile -Force -ErrorAction SilentlyContinue
 }
 
+# ---- Interactive setup wizard (TUI) -------------------------
+# Launch `irongrid install` so the user can configure upstreams, blocklists,
+# dashboard login, TLS, etc. This needs a real console: when run via
+# `irm ... | iex` stdin is redirected (a pipe), so the wizard is skipped.
+# The config path is double-quoted explicitly for PowerShell 5.1's native
+# argument passing (paths under %LOCALAPPDATA% can contain spaces).
+Write-Host ""
+if ($NoWizard) {
+  Write-Host "==> setup wizard skipped (-NoWizard)"
+} elseif ([Console]::IsInputRedirected) {
+  Write-Host "==> no interactive console detected - install finished with defaults"
+  Write-Host "    (re-run the wizard anytime with: $exe install)"
+} else {
+  Write-Host "==> launching the interactive setup wizard ..."
+  Write-Host "    configure upstreams, blocklists, dashboard login, TLS & more"
+  # Dragonfly was already started above, so --with-dragonfly is not needed
+  # (older release binaries don't define that flag).
+  & $exe install --config "`"$configFile`"" --data "`"$dataDir`""
+  if ($LASTEXITCODE -ne 0) {
+    Write-Host "!! wizard did not complete - the config at $configFile may be incomplete" -ForegroundColor Yellow
+  }
+}
+
 Write-Host ""
 Write-Host "Next steps:"
 if ($dflyStarted) {
@@ -138,5 +167,5 @@ if ($dflyStarted) {
   Write-Host "  1. Start Dragonfly (required cache) - see the notes above"
 }
 Write-Host "  2. Edit the config:       $configFile"
-Write-Host "  3. (Optional) run the setup wizard:  $exe install"
+Write-Host "  3. Re-run the setup wizard anytime:  $exe install"
 Write-Host "  4. Dashboard:              http://localhost:8080  (default login: admin / irongrid)"
