@@ -6,7 +6,7 @@ const fmtTime = (iso) => {
   return d.toLocaleTimeString([], { hour12: false }) + ' ' + d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
-const ACTION_LABEL = { allowed: 'Allowed', blocked: 'Blocked', cached: 'Cached', error: 'Error' }
+const ACTION_LABEL = { allowed: 'Allowed', blocked: 'Blocked', cached: 'Cached', error: 'Error', rewrite: 'Local DNS' }
 
 export default function QueryLog() {
   const [entries, setEntries] = useState([])
@@ -54,6 +54,7 @@ export default function QueryLog() {
             <option value="blocked">Blocked</option>
             <option value="cached">Cached</option>
             <option value="error">Errors</option>
+            <option value="rewrite">Local DNS</option>
           </select>
           <input
             className="input"

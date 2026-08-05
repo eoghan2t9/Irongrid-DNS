@@ -13,6 +13,10 @@ const empty = () => ({
   log: { query_log_file: '', retention_days: 30, verbose: true },
   web: { username: 'admin', password: '' },
   tunnel: { enabled: false, token: '', config_file: '', quick_tunnel: false, quick_tunnel_url: '', hostname: '' },
+  rewrites: [],
+  client_groups: [],
+  rate_limit: { enabled: false, qps: 20, burst: 40 },
+  dnssec: { enabled: false, require_ad: true },
 })
 
 export default function Settings({ onSessionInvalidated }) {
@@ -255,6 +259,62 @@ export default function Settings({ onSessionInvalidated }) {
     setDirty(true)
   }
 
+  const setRewrite = (i, patch) => {
+    setCfg((prev) => {
+      const next = JSON.parse(JSON.stringify(prev))
+      next.rewrites[i] = { ...next.rewrites[i], ...patch }
+      return next
+    })
+    setDirty(true)
+  }
+  const addRewrite = () => {
+    setCfg((prev) => {
+      const next = JSON.parse(JSON.stringify(prev))
+      next.rewrites = [...(next.rewrites || []), { domain: '', type: 'A', value: '', ttl: 300 }]
+      return next
+    })
+    setDirty(true)
+  }
+  const removeRewrite = (i) => {
+    setCfg((prev) => {
+      const next = JSON.parse(JSON.stringify(prev))
+      next.rewrites = next.rewrites.filter((_, x) => x !== i)
+      return next
+    })
+    setDirty(true)
+  }
+
+  const linesOf = (v) => (v || []).join('\n')
+  const parseLines = (s) => s.split('\n').map((x) => x.trim()).filter(Boolean)
+
+  const setGroup = (i, patch) => {
+    setCfg((prev) => {
+      const next = JSON.parse(JSON.stringify(prev))
+      next.client_groups[i] = { ...next.client_groups[i], ...patch }
+      return next
+    })
+    setDirty(true)
+  }
+  const addGroup = () => {
+    setCfg((prev) => {
+      const next = JSON.parse(JSON.stringify(prev))
+      next.client_groups = [
+        ...(next.client_groups || []),
+        { id: '', name: '', enabled: true, cidrs: [], blocklists: [], whitelist: [], blacklist: [], upstreams: [] },
+      ]
+      return next
+    })
+    setDirty(true)
+  }
+  const removeGroup = (i) => {
+    setCfg((prev) => {
+      const next = JSON.parse(JSON.stringify(prev))
+      next.client_groups = next.client_groups.filter((_, x) => x !== i)
+      return next
+    })
+    setDirty(true)
+  }
+
   return (
     <div className="stack">
       {msg && <div className="info-banner">{msg}</div>}
@@ -302,6 +362,35 @@ export default function Settings({ onSessionInvalidated }) {
       <div className="card">
         <h3>Upstreams</h3>
         {listEditor('upstreams', 'upstreams', 'udp://, tcp://, tls://, https://, quic:// — tried in order')}
+      </div>
+
+      <div className="card">
+        <h3>DNSSEC</h3>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          Irongrid forwards queries rather than validating the signature chain itself — like Pi-hole, AdGuard Home
+          and dnsmasq, it trusts an upstream that already validates. Enabling this sets the DO bit on upstream
+          queries and (optionally) rejects answers the upstream didn't mark authenticated. This is only meaningful
+          with an <strong>encrypted upstream</strong> (DoT/DoH/QUIC to e.g. Cloudflare, Google or Quad9) — over
+          plain UDP/TCP the authentication flag can be stripped or forged in transit.
+        </p>
+        <div className="form-grid">
+          {toggle('Enable DNSSEC (trust upstream validation)', 'dnssec.enabled')}
+          {toggle('Reject unauthenticated answers (SERVFAIL)', 'dnssec.require_ad')}
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>Rate limiting</h3>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          Throttles queries per client IP — a defense against a compromised LAN device or a public listener being
+          abused for DNS amplification. UDP queries over the limit are dropped silently (answering at all would
+          still amplify toward a spoofed source); TCP/DoT/DoH/DoQ get REFUSED.
+        </p>
+        <div className="form-grid">
+          {toggle('Enable rate limiting', 'rate_limit.enabled')}
+          {number('Sustained queries/sec per client', 'rate_limit.qps')}
+          {number('Burst allowance per client', 'rate_limit.burst')}
+        </div>
       </div>
 
       <div className="card">
@@ -412,6 +501,78 @@ export default function Settings({ onSessionInvalidated }) {
         ))}
         <div className="quick-actions" style={{ marginTop: 12 }}>
           <button className="btn small" type="button" onClick={addBlocklist}>+ Add blocklist</button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>Local DNS records</h3>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          Answer a domain yourself instead of forwarding it — e.g. <code>nas.home</code> → <code>192.168.1.10</code>.
+          Takes priority over blocklists and the cache. Domain may start with <code>*.</code> to cover a whole
+          subtree; a CNAME rule answers any query type.
+        </p>
+        {(cfg.rewrites || []).map((rw, i) => (
+          <div className="blocklist-row" key={i}>
+            <div className="list-row">
+              <input className="input mono" placeholder="domain (e.g. nas.home or *.internal.example.com)" value={rw.domain || ''} onChange={(e) => setRewrite(i, { domain: e.target.value })} />
+              <select className="input" value={rw.type || 'A'} onChange={(e) => setRewrite(i, { type: e.target.value })}>
+                <option value="A">A</option>
+                <option value="AAAA">AAAA</option>
+                <option value="CNAME">CNAME</option>
+              </select>
+            </div>
+            <div className="list-row">
+              <input className="input mono" placeholder="value (IP or hostname)" value={rw.value || ''} onChange={(e) => setRewrite(i, { value: e.target.value })} />
+              <input className="input" type="number" placeholder="TTL (s)" value={rw.ttl || 300} onChange={(e) => setRewrite(i, { ttl: Number(e.target.value) })} />
+              <button className="btn small danger" type="button" onClick={() => removeRewrite(i)}>✕</button>
+            </div>
+          </div>
+        ))}
+        <div className="quick-actions" style={{ marginTop: 12 }}>
+          <button className="btn small" type="button" onClick={addRewrite}>+ Add record</button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>Client groups</h3>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          Apply a different policy to specific devices/subnets — e.g. a kids' device group with stricter
+          blocklists, or an IoT VLAN pinned to specific upstreams. The first matching group wins; clients matching
+          none use the global filtering and upstreams above. Leave "Blocklists" empty to use every enabled global
+          blocklist.
+        </p>
+        {(cfg.client_groups || []).map((g, i) => (
+          <div className="blocklist-row" key={i}>
+            <div className="list-row">
+              <input className="input" placeholder="id (e.g. kids)" value={g.id || ''} onChange={(e) => setGroup(i, { id: e.target.value })} />
+              <input className="input" placeholder="Name" value={g.name || ''} onChange={(e) => setGroup(i, { name: e.target.value })} />
+              <label className="switch" title="Enabled">
+                <input type="checkbox" checked={!!g.enabled} onChange={(e) => setGroup(i, { enabled: e.target.checked })} />
+                <span className="slider" />
+              </label>
+              <button className="btn small danger" type="button" onClick={() => removeGroup(i)}>✕</button>
+            </div>
+            <div className="form-grid">
+              {field('Client CIDRs / IPs', 'one per line, e.g. 192.168.1.50 or 10.0.5.0/24', (
+                <textarea className="input mono" rows={2} value={linesOf(g.cidrs)} onChange={(e) => setGroup(i, { cidrs: parseLines(e.target.value) })} />
+              ))}
+              {field('Blocklist IDs', 'one per line; empty = all enabled global blocklists', (
+                <textarea className="input mono" rows={2} value={linesOf(g.blocklists)} onChange={(e) => setGroup(i, { blocklists: parseLines(e.target.value) })} />
+              ))}
+              {field('Extra whitelist', 'one per line, added to the global whitelist', (
+                <textarea className="input mono" rows={2} value={linesOf(g.whitelist)} onChange={(e) => setGroup(i, { whitelist: parseLines(e.target.value) })} />
+              ))}
+              {field('Extra blacklist', 'one per line, added to the global blacklist', (
+                <textarea className="input mono" rows={2} value={linesOf(g.blacklist)} onChange={(e) => setGroup(i, { blacklist: parseLines(e.target.value) })} />
+              ))}
+              {field('Upstream override', 'one per line; empty = use the global upstreams above', (
+                <textarea className="input mono" rows={2} value={linesOf(g.upstreams)} onChange={(e) => setGroup(i, { upstreams: parseLines(e.target.value) })} />
+              ))}
+            </div>
+          </div>
+        ))}
+        <div className="quick-actions" style={{ marginTop: 12 }}>
+          <button className="btn small" type="button" onClick={addGroup}>+ Add group</button>
         </div>
       </div>
 
