@@ -13,25 +13,25 @@ func normalizeDomain(d string) string {
 	d = strings.TrimSpace(d)
 	d = strings.TrimSuffix(d, ".")
 	d = strings.ToLower(d)
-	if ascii, err := idna.Lookup.ToASCII(d); err == nil {
-		d = ascii
+	// idna.ToASCII only has work to do on non-ASCII labels; skipping it for
+	// the (vast majority) plain-ASCII case avoids a Unicode table lookup on
+	// every single query.
+	if !isASCII(d) {
+		if ascii, err := idna.Lookup.ToASCII(d); err == nil {
+			d = ascii
+		}
 	}
 	return d
 }
 
-// domainMatch reports whether qname matches the rule rooted at rule.
-// A rule matches the exact domain AND all of its subdomains unless exactOnly
-// is set, in which case it matches the bare domain only.
-func domainMatch(qname, rule string, exactOnly bool) bool {
-	qname = strings.TrimSuffix(qname, ".")
-	rule = strings.TrimSuffix(rule, ".")
-	if qname == rule {
-		return true
+// isASCII reports whether s contains only ASCII bytes.
+func isASCII(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] > 0x7f {
+			return false
+		}
 	}
-	if exactOnly {
-		return false
-	}
-	return strings.HasSuffix(qname, "."+rule)
+	return true
 }
 
 // splitRule normalizes a raw rule line into (domain, exactOnly).

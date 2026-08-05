@@ -164,22 +164,30 @@ func (e *Engine) DecideDomain(qname string) Decision {
 	}
 	e.mu.RLock()
 	defer e.mu.RUnlock()
+	labels := strings.Split(qname, ".")
 
-	// Whitelist (exact first, then subtree).
+	// Whitelist (exact first, then subtree). Walks ancestor domains with map
+	// lookups — same shape as the blocklist walk below — instead of scanning
+	// every whitelist entry with domainMatch, which used to cost O(len(allowDomains))
+	// per query regardless of whether it hit.
 	if _, ok := e.allowExact[qname]; ok {
 		return Decision{Action: Allow, Reason: "whitelist:" + qname}
 	}
-	for d := range e.allowDomains {
-		if domainMatch(qname, d, false) {
-			return Decision{Action: Allow, Reason: "whitelist:" + d}
+	for i := 0; i < len(labels)-1; i++ {
+		parent := strings.Join(labels[i:], ".")
+		if _, ok := e.allowDomains[parent]; ok {
+			return Decision{Action: Allow, Reason: "whitelist:" + parent}
 		}
 	}
+	if _, ok := e.allowDomains[qname]; ok {
+		return Decision{Action: Allow, Reason: "whitelist:" + qname}
+	}
+
 	// Block exact matches.
 	if _, ok := e.blockExact[qname]; ok {
 		return Decision{Action: Block, Reason: "blocklist:exact", ListName: e.listNames[e.domainList[qname]]}
 	}
 	// Block subtree matches. Iterate over parents for better reasons.
-	labels := strings.Split(qname, ".")
 	for i := 0; i < len(labels)-1; i++ {
 		parent := strings.Join(labels[i:], ".")
 		if _, ok := e.blockDomains[parent]; ok {

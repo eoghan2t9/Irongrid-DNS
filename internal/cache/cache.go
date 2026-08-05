@@ -5,9 +5,7 @@ package cache
 
 import (
 	"context"
-	"crypto/sha256"
 	"encoding/binary"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"strconv"
@@ -104,14 +102,38 @@ func (c *Cache) Stats(ctx context.Context) (map[string]string, error) {
 
 // ---- key handling ----
 
-func (c *Cache) msgKey(q dns.Question) string {
-	h := sha256.Sum256([]byte(strings.ToLower(q.Name) + "|" + strconv.Itoa(int(q.Qtype)) + "|" + strconv.Itoa(int(q.Qclass))))
-	return c.prefix + "ans:" + hex.EncodeToString(h[:])
+// keyHash is a fast, deterministic 64-bit fingerprint of a question. It must
+// stay deterministic across processes and restarts since Dragonfly is a
+// shared L2 cache for the whole fleet — unlike hash/maphash's per-process
+// random seed, FNV-1a gives every instance the same key for the same query.
+// SHA-256 bought nothing here (this is a private cache namespace, not
+// adversarial input) and cost real CPU on every single query; hashing the
+// name byte-by-byte also skips the strings.ToLower + concatenation
+// allocations the old key built on every call.
+func keyHash(q dns.Question) uint64 {
+	const (
+		offset64 = 14695981039346656037
+		prime64  = 1099511628211
+	)
+	h := uint64(offset64)
+	for i := 0; i < len(q.Name); i++ {
+		b := q.Name[i]
+		if b >= 'A' && b <= 'Z' {
+			b += 'a' - 'A'
+		}
+		h = (h ^ uint64(b)) * prime64
+	}
+	h = (h ^ uint64(q.Qtype)) * prime64
+	h = (h ^ uint64(q.Qclass)) * prime64
+	return h
 }
 
-func (c *Cache) negKey(q dns.Question) string {
-	h := sha256.Sum256([]byte(strings.ToLower(q.Name) + "|" + strconv.Itoa(int(q.Qtype)) + "|" + strconv.Itoa(int(q.Qclass))))
-	return c.prefix + "neg:" + hex.EncodeToString(h[:])
+func (c *Cache) msgKey(h uint64) string {
+	return c.prefix + "ans:" + strconv.FormatUint(h, 16)
+}
+
+func (c *Cache) negKey(h uint64) string {
+	return c.prefix + "neg:" + strconv.FormatUint(h, 16)
 }
 
 // ---- positive answers ----
@@ -125,7 +147,11 @@ const cacheEntryPrefixLen = 8
 // memory cache is consulted first; L2 (Dragonfly) only on an L1 miss, and a
 // hit is then re-warmed into L1.
 func (c *Cache) Get(ctx context.Context, q dns.Question) *dns.Msg {
-	key := c.msgKey(q)
+	return c.getPositive(ctx, keyHash(q))
+}
+
+func (c *Cache) getPositive(ctx context.Context, h uint64) *dns.Msg {
+	key := c.msgKey(h)
 	if c.l1 == nil {
 		if raw, ok := c.l2Get(ctx, key); ok {
 			return unpackEntry(raw)
@@ -142,6 +168,21 @@ func (c *Cache) Get(ctx context.Context, q dns.Question) *dns.Msg {
 	}
 	c.l1.set(key, raw, c.ttl, now)
 	return unpackEntry(raw)
+}
+
+// Lookup checks both the positive and negative entries for q, hashing the
+// question once and reusing it for both — the DNS hot path used to call Get
+// then GetNegative separately, each re-deriving the same key from scratch.
+// negative reports which kind of entry matched when msg is non-nil.
+func (c *Cache) Lookup(ctx context.Context, q dns.Question) (msg *dns.Msg, negative bool) {
+	h := keyHash(q)
+	if m := c.getPositive(ctx, h); m != nil {
+		return m, false
+	}
+	if m := c.getNegative(ctx, h); m != nil {
+		return m, true
+	}
+	return nil, false
 }
 
 // l2Get fetches raw bytes from Dragonfly/Redis. A nil client (unit tests)
@@ -212,7 +253,7 @@ func (c *Cache) Set(ctx context.Context, q dns.Question, m *dns.Msg, capTTL time
 	now := time.Now()
 	binary.BigEndian.PutUint64(buf[:cacheEntryPrefixLen], uint64(now.Unix()))
 	copy(buf[cacheEntryPrefixLen:], packed)
-	key := c.msgKey(q)
+	key := c.msgKey(keyHash(q))
 	if c.l1 != nil {
 		c.l1.set(key, buf, ttl, now)
 	}
@@ -240,7 +281,7 @@ func (c *Cache) SetNegative(ctx context.Context, q dns.Question, m *dns.Msg, ttl
 	if err != nil {
 		return
 	}
-	key := c.negKey(q)
+	key := c.negKey(keyHash(q))
 	now := time.Now()
 	if c.l1 != nil {
 		c.l1.set(key, raw, ttl, now)
@@ -252,7 +293,11 @@ func (c *Cache) SetNegative(ctx context.Context, q dns.Question, m *dns.Msg, ttl
 
 // GetNegative returns a cached empty response, if any (L1 first, then L2).
 func (c *Cache) GetNegative(ctx context.Context, q dns.Question) *dns.Msg {
-	key := c.negKey(q)
+	return c.getNegative(ctx, keyHash(q))
+}
+
+func (c *Cache) getNegative(ctx context.Context, h uint64) *dns.Msg {
+	key := c.negKey(h)
 	if c.l1 == nil {
 		if raw, ok := c.l2Get(ctx, key); ok {
 			return unpackNegative(raw)

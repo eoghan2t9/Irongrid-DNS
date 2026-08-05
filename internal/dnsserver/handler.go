@@ -158,25 +158,24 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 
 	// 2. Cache lookup (only for standard record types). Cached messages carry
 	//    the ID of the original query, so rebase to this request's ID.
+	// Lookup hashes the question once and checks positive then negative
+	// entries, instead of two independent Get/GetNegative calls that each
+	// re-derived the same key.
 	if cache != nil && !isMetaQuery(q) {
 		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		if cached := cache.Get(ctx, q); cached != nil {
-			cancel()
+		cached, negative := cache.Lookup(ctx, q)
+		cancel()
+		if cached != nil {
 			cached.Id = r.Id
 			h.Stats.Cached.Add(1)
-			h.record(client, qname, q, "cached", "cache", "", start, cached)
+			reason := "cache"
+			if negative {
+				reason = "cache-negative"
+			}
+			h.record(client, qname, q, "cached", reason, "", start, cached)
 			w.WriteMsg(cached)
 			return
 		}
-		if neg := cache.GetNegative(ctx, q); neg != nil {
-			cancel()
-			neg.Id = r.Id
-			h.Stats.Cached.Add(1)
-			h.record(client, qname, q, "cached", "cache-negative", "", start, neg)
-			w.WriteMsg(neg)
-			return
-		}
-		cancel()
 	}
 
 	// 3. Forward to upstreams. Multiple upstreams are raced concurrently so

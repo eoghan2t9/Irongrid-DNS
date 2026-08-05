@@ -1,6 +1,7 @@
 package filter
 
 import (
+	"fmt"
 	"net"
 	"testing"
 )
@@ -89,6 +90,48 @@ func TestIPRules(t *testing.T) {
 	blocked, _ = e.CheckIPs([]net.IP{net.ParseIP("9.9.9.9")})
 	if blocked {
 		t.Errorf("9.9.9.9 should not be blocked")
+	}
+}
+
+// TestWhitelistLargeSubtree guards the ancestor-walk whitelist match against
+// regressing back to a linear scan: it must still find a match sitting deep
+// in a large allow-list, and correctly miss for a domain absent from it.
+func TestWhitelistLargeSubtree(t *testing.T) {
+	e := NewEngine()
+	if _, err := e.LoadList("test", "test", []byte("evil.example\n")); err != nil {
+		t.Fatal(err)
+	}
+	whitelist := make([]string, 0, 500)
+	for i := 0; i < 500; i++ {
+		whitelist = append(whitelist, fmt.Sprintf("allowed-%d.example", i))
+	}
+	whitelist = append(whitelist, "target.example")
+	e.SetUserLists(nil, whitelist)
+	e.Compile()
+
+	if d := e.DecideDomain("sub.target.example."); d.Action != Allow {
+		t.Errorf("sub.target.example should be allowed via whitelist subtree, got %v (%s)", d.Action, d.Reason)
+	}
+	if d := e.DecideDomain("evil.example."); d.Action != Block {
+		t.Errorf("evil.example should still be blocked, got %v", d.Action)
+	}
+}
+
+// BenchmarkDecideDomainLargeWhitelist measures DecideDomain's cost with a
+// sizeable whitelist (comparable to the built-in allow-list presets) on a
+// query that isn't whitelisted — the case that used to force a full linear
+// scan of every whitelist entry.
+func BenchmarkDecideDomainLargeWhitelist(b *testing.B) {
+	e := NewEngine()
+	whitelist := make([]string, 0, 500)
+	for i := 0; i < 500; i++ {
+		whitelist = append(whitelist, fmt.Sprintf("allowed-%d.example", i))
+	}
+	e.SetUserLists(nil, whitelist)
+	e.Compile()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		e.DecideDomain("not-whitelisted.example.com.")
 	}
 }
 
