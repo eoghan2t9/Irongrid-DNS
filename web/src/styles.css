@@ -478,3 +478,6 @@ code { background: var(--bg2); padding: 2px 7px; border-radius: 6px; font-family
 }
 .login-card h1 { margin: 0; font-size: 21px; }
 .login-sub { color: var(--dim); margin: -4px 0 6px; font-size: 13.5px; }
+.login-card.splash-card { animation: fade-in 0.2s ease; }
+.login-logo.logo-spin { animation: logo-spin 2.4s linear infinite; }
+@keyframes logo-spin { to { transform: rotate(360deg); } }

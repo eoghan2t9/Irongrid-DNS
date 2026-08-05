@@ -37,6 +37,10 @@ export default function App() {
   const [showLogin, setShowLogin] = useState(!hasCredentials())
   const [navOpen, setNavOpen] = useState(false)
   const [loginNotice, setLoginNotice] = useState('')
+  // True while the saved session is being verified on mount. Until it
+  // resolves we render a branded splash instead of the login form or the
+  // dashboard, so a refresh never flashes one over the other.
+  const [initializing, setInitializing] = useState(true)
 
   const navigate = (id) => {
     setView(id)
@@ -68,9 +72,23 @@ export default function App() {
   }, [])
 
   useEffect(() => {
-    setAuthHandler(() => setShowLogin(true))
+    setAuthHandler(() => {
+      setShowLogin(true)
+      setInitializing(false)
+    })
     restoreCredentials()
-    if (hasCredentials()) refreshStatus()
+    if (hasCredentials()) {
+      // Verify the saved session before revealing the app; the splash stays
+      // up until the check resolves (or the 401 handler flips to login).
+      refreshStatus().finally(() => setInitializing(false))
+      // Bound the check: fetch has no timeout, so if the API stalls the
+      // splash must still settle (revealing the app; a later 401 still
+      // flips to login via the auth handler) instead of spinning forever.
+      const t = setTimeout(() => setInitializing(false), 10000)
+      return () => clearTimeout(t)
+    }
+    // No saved credentials: showLogin is already true from the initial state.
+    setInitializing(false)
   }, [refreshStatus])
 
   const handleLogin = async (user, pass) => {
@@ -105,6 +123,7 @@ export default function App() {
     setShowLogin(true)
   }
 
+  if (initializing) return <Splash />
   if (showLogin) return <Login onLogin={handleLogin} notice={loginNotice} />
 
   return (
@@ -183,6 +202,18 @@ export default function App() {
           {view === 'settings' && <Settings onSessionInvalidated={handleSessionInvalidated} />}
         </div>
       </main>
+    </div>
+  )
+}
+
+function Splash() {
+  return (
+    <div className="login-wrap">
+      <div className="login-card splash-card" role="status" aria-live="polite">
+        <div className="login-logo logo-spin">◈</div>
+        <h1>Irongrid DNS</h1>
+        <p className="login-sub">Loading…</p>
+      </div>
     </div>
   )
 }
