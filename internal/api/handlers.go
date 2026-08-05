@@ -680,6 +680,14 @@ func durationOrEmpty(d time.Duration) string {
 	if d <= 0 {
 		return ""
 	}
+	// Whole-hour durations render as "24h", not Go's default "24h0m0s" —
+	// the frontend's auto-update dropdown matches by exact string against
+	// its hour-based presets ("6h"/"24h"/"168h"), so the verbose form would
+	// never match any of them and the select would silently fall back to
+	// its first option ("Never") even though the value saved correctly.
+	if d%time.Hour == 0 {
+		return fmt.Sprintf("%dh", int64(d/time.Hour))
+	}
 	return d.String()
 }
 
