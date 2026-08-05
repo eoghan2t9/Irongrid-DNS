@@ -62,6 +62,7 @@ export default function Lists() {
   const [whitelist, setWhitelist] = useState([])
   const [blacklist, setBlacklist] = useState([])
   const [whitelistPresets, setWhitelistPresets] = useState([])
+  const [presetSearch, setPresetSearch] = useState('')
   const [entry, setEntry] = useState('')
   const [kind, setKind] = useState('whitelist')
   const [checkName, setCheckName] = useState('')
@@ -138,19 +139,48 @@ export default function Lists() {
         </form>
       </div>
 
-      {whitelistPresets.length > 0 && (
-        <div className="card">
-          <h3>Pre-made allow lists</h3>
-          <p className="dim small">One click adds a curated set of domains to the Allow list (they override every blocklist).</p>
-          <div className="presets">
-            {whitelistPresets.map((p) => (
-              <button key={p.id} className="btn ghost small" title={`${p.domains?.length || 0} domains — ${p.description}`} onClick={() => addPreset(p)}>
-                {p.name} <span className="dim">({p.domains?.length || 0})</span>
-              </button>
-            ))}
+      {whitelistPresets.length > 0 && (() => {
+        const q = presetSearch.trim().toLowerCase()
+        const filtered = whitelistPresets.filter((p) => {
+          if (!q) return true
+          return p.name.toLowerCase().includes(q) || (p.description || '').toLowerCase().includes(q)
+        })
+        return (
+          <div className="card">
+            <h3>Pre-made allow lists</h3>
+            <p className="dim small">One click adds a curated set of domains to the Allow list (they override every blocklist).</p>
+            <div className="preset-filters">
+              <input
+                className="input"
+                placeholder="Search name or description…"
+                value={presetSearch}
+                onChange={(e) => setPresetSearch(e.target.value)}
+              />
+            </div>
+            <div className="preset-list">
+              {filtered.map((p) => {
+                const domains = p.domains || []
+                const allAdded = domains.length > 0 && domains.every((d) => whitelist.includes(d))
+                return (
+                  <div className={`preset-row ${allAdded ? 'added' : ''}`} key={p.id}>
+                    <div className="preset-info">
+                      <div className="preset-name">
+                        {p.name}
+                        <span className="chip">{domains.length} domains</span>
+                      </div>
+                      {p.description && <div className="preset-desc">{p.description}</div>}
+                    </div>
+                    <button className="btn small" disabled={allAdded} onClick={() => addPreset(p)}>
+                      {allAdded ? '✓ Added' : '+ Add'}
+                    </button>
+                  </div>
+                )
+              })}
+              {filtered.length === 0 && <div className="empty">No presets match "{presetSearch}".</div>}
+            </div>
           </div>
-        </div>
-      )}
+        )
+      })()}
 
       <div className="card">
         <h3>Test a domain or IP</h3>

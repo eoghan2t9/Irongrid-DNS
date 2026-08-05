@@ -485,6 +485,27 @@ body {
 
 /* ---------- presets / banners / empty ---------- */
 .presets { margin-top: 14px; display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+
+.preset-filters { display: flex; flex-direction: column; gap: 8px; margin-top: 12px; }
+.filter-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.filter-chips .btn { text-transform: capitalize; }
+.filter-chips .btn.active { border-color: var(--cyan); color: var(--cyan); background: rgba(74, 144, 226, 0.1); }
+
+.preset-list {
+  display: flex; flex-direction: column; gap: 6px;
+  margin-top: 12px; max-height: 400px; overflow-y: auto;
+  padding-right: 2px;
+}
+.preset-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--bg2);
+}
+.preset-row.added { opacity: 0.55; }
+.preset-info { min-width: 0; }
+.preset-name { font-weight: 600; font-size: 13.5px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.preset-desc { color: var(--dim); font-size: 12px; margin-top: 3px; line-height: 1.4; }
+.preset-row .btn { flex-shrink: 0; }
 .info-banner, .error-banner {
   padding: 10px 14px; border-radius: var(--radius); font-size: 13px;
   border: 1px solid var(--border);

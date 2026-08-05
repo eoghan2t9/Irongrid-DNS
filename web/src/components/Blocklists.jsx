@@ -17,6 +17,8 @@ export default function Blocklists() {
   const [adding, setAdding] = useState(false)
   const [form, setForm] = useState({ id: '', name: '', url: '', enabled: true, auto_update_hours: 24 })
   const [msg, setMsg] = useState('')
+  const [search, setSearch] = useState('')
+  const [category, setCategory] = useState('all')
 
   const load = useCallback(async () => {
     const res = await api.lists()
@@ -136,29 +138,68 @@ export default function Blocklists() {
         </div>
       )}
 
-      {(presets.length ? presets : PRESETS).length > 0 && (
-        <div className="card">
-          <h3>Pre-made blocklists</h3>
-          <p className="dim small">One click adds a curated blocklist and starts fetching it. Already-added lists are skipped.</p>
-          <div className="presets">
-            {(presets.length ? presets : PRESETS).map((p) => {
-              const id = p.id || slug(p.name)
-              const added = lists.some((l) => l.spec.id === id)
-              return (
-                <button
-                  key={p.url}
-                  className={`btn ghost small ${added ? 'dim' : ''}`}
-                  title={p.description || p.name}
-                  disabled={added}
-                  onClick={() => addPreset({ ...p, id })}
-                >
-                  {added ? '✓ ' : '+ '}{p.name}
-                </button>
-              )
-            })}
+      {(presets.length ? presets : PRESETS).length > 0 && (() => {
+        const all = presets.length ? presets : PRESETS
+        const categories = ['all', ...Array.from(new Set(all.map((p) => p.category).filter(Boolean))).sort()]
+        const q = search.trim().toLowerCase()
+        const filtered = all.filter((p) => {
+          if (category !== 'all' && p.category !== category) return false
+          if (!q) return true
+          return p.name.toLowerCase().includes(q) || (p.description || '').toLowerCase().includes(q)
+        })
+        return (
+          <div className="card">
+            <h3>Pre-made blocklists</h3>
+            <p className="dim small">One click adds a curated blocklist and starts fetching it. Already-added lists are skipped.</p>
+            <div className="preset-filters">
+              <input
+                className="input"
+                placeholder="Search name or description…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+              {categories.length > 1 && (
+                <div className="filter-chips">
+                  {categories.map((c) => (
+                    <button
+                      key={c}
+                      className={`btn small ghost ${category === c ? 'active' : ''}`}
+                      onClick={() => setCategory(c)}
+                    >
+                      {c}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div className="preset-list">
+              {filtered.map((p) => {
+                const id = p.id || slug(p.name)
+                const added = lists.some((l) => l.spec.id === id)
+                return (
+                  <div className={`preset-row ${added ? 'added' : ''}`} key={p.url}>
+                    <div className="preset-info">
+                      <div className="preset-name">
+                        {p.name}
+                        {p.category && <span className="chip">{p.category}</span>}
+                      </div>
+                      {p.description && <div className="preset-desc">{p.description}</div>}
+                    </div>
+                    <button
+                      className="btn small"
+                      disabled={added}
+                      onClick={() => addPreset({ ...p, id })}
+                    >
+                      {added ? '✓ Added' : '+ Add'}
+                    </button>
+                  </div>
+                )
+              })}
+              {filtered.length === 0 && <div className="empty">No presets match "{search}".</div>}
+            </div>
           </div>
-        </div>
-      )}
+        )
+      })()}
 
       <div className="card table-card">
         <table className="table">
