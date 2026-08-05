@@ -107,7 +107,11 @@ func (a *App) authorize(w http.ResponseWriter, r *http.Request) bool {
 		a.issueSessionWith(w, user, secret, secure)
 		return true
 	}
-	w.Header().Set("WWW-Authenticate", `Basic realm="Irongrid DNS"`)
+	// No WWW-Authenticate header on purpose: the dashboard has its own login
+	// form (Basic auth + signed cookie) and never relies on the browser's
+	// native prompt. Emitting the header makes some mobile browsers pop their
+	// built-in HTTP-auth dialog over the page instead of letting the user use
+	// the login form.
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
 	return false
 }

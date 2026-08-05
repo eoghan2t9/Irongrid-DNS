@@ -94,6 +94,7 @@ body {
 .topbar-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .topbar-title { font-size: 19px; font-weight: 700; }
 .topbar-actions { display: flex; align-items: center; gap: 10px; }
+.topbar-actions .btn { display: inline-flex; align-items: center; gap: 6px; }
 .menu-btn {
   display: none;
   background: var(--surface2); color: var(--text);
@@ -105,7 +106,7 @@ body {
 .sidebar-backdrop { display: none; }
 
 /* ---------- updater ---------- */
-.updater-btn { position: relative; }
+.updater-btn { position: relative; white-space: nowrap; }
 .updater-dot {
   position: absolute; top: 4px; right: 5px;
   width: 8px; height: 8px; border-radius: 50%;
@@ -218,7 +219,9 @@ body {
   .input, select.input { font-size: 16px; } /* prevents iOS zoom on focus */
   .modal-overlay { padding: 12px; align-items: end; }
   .modal { max-height: 90dvh; border-radius: 16px 16px 0 0; }
-  .updater-btn { width: 40px; height: 40px; }
+  /* Let the label size the button — a fixed 40px square made the "Updates"
+     text overflow on small screens. */
+  .updater-btn { width: auto; padding: 0 12px; }
 }
 
 @media (max-width: 480px) {

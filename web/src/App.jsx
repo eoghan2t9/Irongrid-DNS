@@ -21,8 +21,17 @@ const NAV = [
   { id: 'settings', label: 'Settings', icon: '⚙' },
 ]
 
+// Each view maps to a real URL path (/blocklists, /tls, …) so the browser
+// back/forward buttons work and links are shareable. The web server serves
+// index.html as the SPA fallback for these paths.
+const VALID_VIEWS = NAV.map((n) => n.id)
+const viewFromPath = () => {
+  const p = window.location.pathname.replace(/^\/+|\/+$/g, '')
+  return VALID_VIEWS.includes(p) ? p : 'dashboard'
+}
+
 export default function App() {
-  const [view, setView] = useState('dashboard')
+  const [view, setView] = useState(viewFromPath)
   const [status, setStatus] = useState(null)
   const [authed, setAuthed] = useState(hasCredentials())
   const [showLogin, setShowLogin] = useState(!hasCredentials())
@@ -32,7 +41,21 @@ export default function App() {
   const navigate = (id) => {
     setView(id)
     setNavOpen(false)
+    // Keep the URL in sync so back/forward navigate between views. Avoid
+    // pushing a duplicate entry when the path already matches (e.g. the
+    // topbar title click on the same view).
+    const path = id === 'dashboard' ? '/' : '/' + id
+    if (window.location.pathname !== path) {
+      window.history.pushState(null, '', path)
+    }
   }
+
+  // Back/forward: the URL changed without a pushState from us.
+  useEffect(() => {
+    const onPop = () => setView(viewFromPath())
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -139,8 +162,13 @@ export default function App() {
             <button className="btn ghost small" onClick={refreshStatus}>
               ⟳ Refresh
             </button>
-            <button className="btn ghost small danger" onClick={handleLogout} title="Sign out">
-              ⏻ Log out
+            <button className="btn ghost small danger icon" onClick={handleLogout} title="Sign out">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+                <polyline points="16 17 21 12 16 7" />
+                <line x1="21" y1="12" x2="9" y2="12" />
+              </svg>
+              Log out
             </button>
           </div>
         </header>
@@ -183,6 +211,11 @@ function Login({ onLogin, notice }) {
         <input
           className="input"
           placeholder="Username"
+          name="username"
+          autoComplete="username"
+          autoCapitalize="none"
+          autoCorrect="off"
+          spellCheck={false}
           value={user}
           onChange={(e) => setUser(e.target.value)}
           autoFocus
@@ -191,6 +224,8 @@ function Login({ onLogin, notice }) {
           className="input"
           placeholder="Password"
           type="password"
+          name="password"
+          autoComplete="current-password"
           value={pass}
           onChange={(e) => setPass(e.target.value)}
         />

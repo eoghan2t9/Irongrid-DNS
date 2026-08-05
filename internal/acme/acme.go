@@ -72,18 +72,21 @@ type Manager struct {
 
 // Status is the public state of the ACME manager.
 type Status struct {
-	Enabled       bool      `json:"enabled"`
-	Email         string    `json:"email"`
-	Domains       []string  `json:"domains"`
-	Staging       bool      `json:"staging"`
-	Challenge     string    `json:"challenge"`     // "http-01" or "dns-01"
-	DNSProvider   string    `json:"dns_provider"`  // e.g. "cloudflare" when dns-01
-	LastAttempt   time.Time `json:"last_attempt"`
-	LastSuccess   time.Time `json:"last_success"`
-	LastError     string    `json:"last_error,omitempty"`
-	NextRenewal   time.Time `json:"next_renewal,omitempty"`
-	ChallengePort int       `json:"challenge_port"`
-	Running       bool      `json:"running"`
+	Enabled       bool       `json:"enabled"`
+	Email         string     `json:"email"`
+	Domains       []string   `json:"domains"`
+	Staging       bool       `json:"staging"`
+	Challenge     string     `json:"challenge"`     // "http-01" or "dns-01"
+	DNSProvider   string     `json:"dns_provider"`  // e.g. "cloudflare" when dns-01
+	// The timestamps are pointers so a manager that has never issued serializes
+	// them as null instead of Go's zero time ("0001-01-01T00:00:00Z"), which
+	// the dashboard rendered as "31/12/1" with absurd day counts.
+	LastAttempt   *time.Time `json:"last_attempt"`
+	LastSuccess   *time.Time `json:"last_success"`
+	LastError     string     `json:"last_error,omitempty"`
+	NextRenewal   *time.Time `json:"next_renewal"`
+	ChallengePort int        `json:"challenge_port"`
+	Running       bool       `json:"running"`
 }
 
 // Options configures a Manager.
@@ -225,7 +228,8 @@ func (m *Manager) clearTokens() {
 // to call repeatedly (renewal does the same thing).
 func (m *Manager) Issue(ctx context.Context) error {
 	m.mu.Lock()
-	m.Status.LastAttempt = time.Now()
+	attempt := time.Now()
+	m.Status.LastAttempt = &attempt
 	m.Status.LastError = ""
 	m.mu.Unlock()
 
@@ -372,9 +376,11 @@ func (m *Manager) Issue(ctx context.Context) error {
 	}
 
 	m.mu.Lock()
-	m.Status.LastSuccess = time.Now()
+	issued := time.Now()
+	m.Status.LastSuccess = &issued
 	m.Status.LastError = ""
-	m.Status.NextRenewal = time.Now().Add(m.renewIn)
+	next := issued.Add(m.renewIn)
+	m.Status.NextRenewal = &next
 	m.mu.Unlock()
 	log.Printf("[acme] certificate issued for %v -> %s", m.domains, m.dir)
 	return nil

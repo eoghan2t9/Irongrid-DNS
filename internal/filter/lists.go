@@ -25,20 +25,29 @@ type ListManager struct {
 
 // ListSpec mirrors the config blocklist entry.
 type ListSpec struct {
-	ID         string
-	Name       string
-	URL        string
-	Enabled    bool
-	AutoUpdate time.Duration
+	ID         string        `json:"id"`
+	Name       string        `json:"name"`
+	URL        string        `json:"url"`
+	Enabled    bool          `json:"enabled"`
+	AutoUpdate time.Duration `json:"auto_update"`
 }
 
 // StoredList holds the last known good content of a list.
+//
+// Content is excluded from JSON on purpose: a large list (millions of
+// domains) would balloon GET /api/lists into a multi-megabyte payload and
+// stall the dashboard. The raw content is served separately via the
+// /api/lists/<id>/content endpoint.
+//
+// LastFetched is a pointer so a never-fetched list serializes as null rather
+// than Go's zero time ("0001-01-01T00:00:00Z"), which the dashboard would
+// render as a year-1 date.
 type StoredList struct {
-	Spec        ListSpec
-	Content     []byte
-	LastFetched time.Time
-	LastError   string
-	RuleCount   int
+	Spec        ListSpec   `json:"spec"`
+	Content     []byte     `json:"-"`
+	LastFetched *time.Time `json:"last_fetched"`
+	LastError   string     `json:"last_error"`
+	RuleCount   int        `json:"rule_count"`
 }
 
 // NewListManager creates a manager that persists cached list content under
@@ -152,8 +161,9 @@ func (m *ListManager) FetchOne(ctx context.Context, id string) error {
 	}
 
 	m.mu.Lock()
+	now := time.Now()
 	stored.Content = content
-	stored.LastFetched = time.Now()
+	stored.LastFetched = &now
 	stored.LastError = ""
 	m.mu.Unlock()
 	return m.persist(id, content)
@@ -197,8 +207,9 @@ func (m *ListManager) LoadCached() {
 		path := filepath.Join(m.dir, id+".txt")
 		if content, err := os.ReadFile(path); err == nil {
 			if stored.Content == nil {
+				now := time.Now()
 				stored.Content = content
-				stored.LastFetched = time.Now()
+				stored.LastFetched = &now
 			}
 		}
 	}
@@ -222,7 +233,7 @@ func (m *ListManager) StartRefresh(ctx context.Context) {
 					if !s.Enabled || s.AutoUpdate <= 0 {
 						continue
 					}
-					if stored.LastFetched.IsZero() || now.Sub(stored.LastFetched) >= s.AutoUpdate {
+					if stored.LastFetched == nil || now.Sub(*stored.LastFetched) >= s.AutoUpdate {
 						due = append(due, id)
 					}
 				}

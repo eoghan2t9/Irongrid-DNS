@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"io"
 	"math/big"
@@ -14,6 +15,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -175,5 +177,46 @@ func TestServePortConflict(t *testing.T) {
 		t.Logf("Serve on occupied port returned expected error: %v", err)
 	} else {
 		m.Stop()
+	}
+}
+
+// TestStatusZeroTimesMarshalsNull guards the dashboard date bug: before any
+// issuance the status timestamps used to serialize as Go's zero time
+// ("0001-01-01T00:00:00Z"), which the frontend rendered as "31/12/1" with
+// absurd day counts. They must serialize as null instead.
+func TestStatusZeroTimesMarshalsNull(t *testing.T) {
+	m := New(Options{Email: "a@b.c", Domains: []string{"dns.example.com"}})
+	b, err := json.Marshal(m.GetStatus())
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	s := string(b)
+	for _, field := range []string{"last_attempt", "last_success", "next_renewal"} {
+		if !strings.Contains(s, `"`+field+`":null`) {
+			t.Errorf("expected %q to be null in %s", field, s)
+		}
+	}
+}
+
+// TestStatusTimesPointersSet verifies the pointer fields serialize as real
+// timestamps once populated (the Issue path sets them; this only checks the
+// plumbing used there, without hitting the network).
+func TestStatusTimesPointersSet(t *testing.T) {
+	m := New(Options{Email: "a@b.c", Domains: []string{"dns.example.com"}})
+	issued := time.Now()
+	next := issued.Add(30 * 24 * time.Hour)
+	m.Status.LastSuccess = &issued
+	m.Status.NextRenewal = &next
+
+	b, err := json.Marshal(m.GetStatus())
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	s := string(b)
+	if strings.Contains(s, `"last_success":null`) {
+		t.Errorf("last_success should not be null after issuance: %s", s)
+	}
+	if !strings.Contains(s, `"next_renewal":"`) {
+		t.Errorf("next_renewal should be a timestamp after issuance: %s", s)
 	}
 }
