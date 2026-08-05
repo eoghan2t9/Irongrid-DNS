@@ -542,14 +542,47 @@ func (h *Handler) tunnelLog(w http.ResponseWriter) {
 // the web UI. Durations are human strings ("6h") and the web password is a
 // plaintext field that is empty unless the user wants to change it.
 type configPayload struct {
-	Server    serverPayload `json:"server"`
-	Upstreams []string      `json:"upstreams"`
-	Cache     cachePayload  `json:"cache"`
-	TLS       tlsPayload    `json:"tls"`
-	Filter    filterPayload `json:"filter"`
-	Log       logPayload    `json:"log"`
-	Web       webPayload    `json:"web"`
-	Tunnel    tunnelPayload `json:"tunnel"`
+	Server       serverPayload        `json:"server"`
+	Upstreams    []string             `json:"upstreams"`
+	Cache        cachePayload         `json:"cache"`
+	TLS          tlsPayload           `json:"tls"`
+	Filter       filterPayload        `json:"filter"`
+	Log          logPayload           `json:"log"`
+	Web          webPayload           `json:"web"`
+	Tunnel       tunnelPayload        `json:"tunnel"`
+	Rewrites     []rewritePayload     `json:"rewrites"`
+	ClientGroups []clientGroupPayload `json:"client_groups"`
+	RateLimit    rateLimitPayload     `json:"rate_limit"`
+	DNSSEC       dnssecPayload        `json:"dnssec"`
+}
+
+type rewritePayload struct {
+	Domain string `json:"domain"`
+	Type   string `json:"type"`
+	Value  string `json:"value"`
+	TTL    uint32 `json:"ttl"`
+}
+
+type clientGroupPayload struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Enabled    bool     `json:"enabled"`
+	CIDRs      []string `json:"cidrs"`
+	Blocklists []string `json:"blocklists"`
+	Whitelist  []string `json:"whitelist"`
+	Blacklist  []string `json:"blacklist"`
+	Upstreams  []string `json:"upstreams"`
+}
+
+type rateLimitPayload struct {
+	Enabled bool `json:"enabled"`
+	QPS     int  `json:"qps"`
+	Burst   int  `json:"burst"`
+}
+
+type dnssecPayload struct {
+	Enabled   bool `json:"enabled"`
+	RequireAD bool `json:"require_ad"`
 }
 
 type serverPayload struct {
@@ -726,6 +759,19 @@ func payloadFromConfig(c *config.Config) configPayload {
 			ID: bl.ID, Name: bl.Name, URL: bl.URL, Enabled: bl.Enabled, AutoUpdate: auto,
 		})
 	}
+	p.Rewrites = make([]rewritePayload, 0, len(c.Rewrites))
+	for _, rw := range c.Rewrites {
+		p.Rewrites = append(p.Rewrites, rewritePayload{Domain: rw.Domain, Type: rw.Type, Value: rw.Value, TTL: rw.TTL})
+	}
+	p.ClientGroups = make([]clientGroupPayload, 0, len(c.ClientGroups))
+	for _, g := range c.ClientGroups {
+		p.ClientGroups = append(p.ClientGroups, clientGroupPayload{
+			ID: g.ID, Name: g.Name, Enabled: g.Enabled, CIDRs: g.CIDRs,
+			Blocklists: g.Blocklists, Whitelist: g.Whitelist, Blacklist: g.Blacklist, Upstreams: g.Upstreams,
+		})
+	}
+	p.RateLimit = rateLimitPayload{Enabled: c.RateLimit.Enabled, QPS: c.RateLimit.QPS, Burst: c.RateLimit.Burst}
+	p.DNSSEC = dnssecPayload{Enabled: c.DNSSEC.Enabled, RequireAD: c.DNSSEC.RequireAD}
 	return p
 }
 
@@ -826,6 +872,24 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			QuickTunnelURL: p.Tunnel.QuickTunnelURL,
 			Hostname:       p.Tunnel.Hostname,
 		},
+		RateLimit: config.RateLimitConfig{
+			Enabled: p.RateLimit.Enabled,
+			QPS:     p.RateLimit.QPS,
+			Burst:   p.RateLimit.Burst,
+		},
+		DNSSEC: config.DNSSECConfig{
+			Enabled:   p.DNSSEC.Enabled,
+			RequireAD: p.DNSSEC.RequireAD,
+		},
+	}
+	for _, rw := range p.Rewrites {
+		cfg.Rewrites = append(cfg.Rewrites, config.RewriteSpec{Domain: rw.Domain, Type: rw.Type, Value: rw.Value, TTL: rw.TTL})
+	}
+	for _, g := range p.ClientGroups {
+		cfg.ClientGroups = append(cfg.ClientGroups, config.ClientGroup{
+			ID: g.ID, Name: g.Name, Enabled: g.Enabled, CIDRs: g.CIDRs,
+			Blocklists: g.Blocklists, Whitelist: g.Whitelist, Blacklist: g.Blacklist, Upstreams: g.Upstreams,
+		})
 	}
 	for _, bl := range p.Filter.Blocklists {
 		auto, err := parseDur(bl.AutoUpdate)
@@ -898,6 +962,14 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	h.applyUserLists()
 	h.Cfg.Filter.Blocklists = cfg.Filter.Blocklists
 	h.applyLists()
+	// Rewrites, client groups, rate limiting and DNSSEC are all cheap,
+	// side-effect-free hot-swaps — unlike Server/Cache/TLS there's no
+	// listener rebind risk, so just reapply them unconditionally rather than
+	// diffing first.
+	h.DNS.SetRewriter(dnsserver.BuildRewriter(cfg.Rewrites))
+	h.DNS.SetClientRouter(dnsserver.BuildClientRouter(cfg, h.Lists))
+	h.DNS.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
+	h.DNS.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
 
 	oldSecret := h.Cfg.Web.SessionSecret
 	*h.Cfg = *cfg
