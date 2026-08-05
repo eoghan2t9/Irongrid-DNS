@@ -25,10 +25,12 @@
 #   --skip-dragonfly    do not install/start Dragonfly
 #   -h, --help          show this help
 #
-# After installing, the script launches the interactive TUI setup wizard
-# (`irongrid install`) so you can configure upstreams, blocklists, dashboard
-# login, TLS, etc. — unless --no-wizard is given or no terminal is available
-# (e.g. a piped curl|bash in CI, where it keeps the default config).
+# In an interactive terminal the script launches the interactive TUI setup
+# wizard (`irongrid install`), which now handles the whole install itself:
+# Dragonfly, the config, binary placement and the startup service. In
+# non-interactive contexts (piped curl|bash in CI, --no-wizard, or an existing
+# config) the script keeps its built-in Dragonfly + default-config + service
+# steps instead.
 #
 set -euo pipefail
 
@@ -136,6 +138,16 @@ abs_path() {
 }
 CONFIG_ABS="$(abs_path "$CONFIG_PATH")"
 DATA_ABS="$(abs_path "$DATA_DIR")"
+
+# If the interactive wizard is going to run, it owns Dragonfly, the config and
+# the startup service — the script only has to install the binary. Existing
+# configs are always left untouched (the wizard is skipped for them).
+CONFIG_EXISTED=0
+[ -f "$CONFIG_ABS" ] && CONFIG_EXISTED=1
+WIZARD_WILL_RUN=0
+if [ "$SKIP_WIZARD" -eq 0 ] && [ "$CONFIG_EXISTED" -eq 0 ] && has_tty; then
+  WIZARD_WILL_RUN=1
+fi
 
 EXT=""
 [ "$OS" = windows ] && EXT=".exe"
@@ -348,16 +360,20 @@ wait_for_dragonfly() {
   return 1
 }
 
-install_dragonfly
+if [ "$WIZARD_WILL_RUN" -eq 1 ]; then
+  echo "==> Dragonfly install deferred to the interactive wizard"
+else
+  install_dragonfly
+fi
 
 # ---- default config ----
 # Write a ready-to-run default config when none exists, so the server can be
 # started straight after installing. cache.addr always points at localhost:6379
-# (where the Dragonfly above is served). Remember whether one already existed
-# so the wizard below can avoid overwriting a user's config.
-CONFIG_EXISTED=0
-[ -f "$CONFIG_ABS" ] && CONFIG_EXISTED=1
-if [ ! -f "$CONFIG_ABS" ]; then
+# (where the Dragonfly above is served). When the interactive wizard is about
+# to run, it writes the config itself.
+if [ "$WIZARD_WILL_RUN" -eq 1 ]; then
+  echo "==> config will be written by the interactive wizard"
+elif [ ! -f "$CONFIG_ABS" ]; then
   echo "==> writing default config to $CONFIG_ABS"
   mkdir -p "$(dirname "$CONFIG_ABS")"
   cat >"$CONFIG_ABS" <<EOF
@@ -509,11 +525,15 @@ EOF
   fi
 }
 
-install_irongrid_service
+if [ "$WIZARD_WILL_RUN" -eq 1 ]; then
+  echo "==> startup service install deferred to the interactive wizard"
+else
+  install_irongrid_service
+fi
 
 # ---- interactive setup wizard (TUI) ----
-# Launch `irongrid install` so the user can configure upstreams, blocklists,
-# dashboard login, TLS, etc. straight after installing. This needs a real
+# Launch `irongrid install`, which handles the whole install (Dragonfly, the
+# config, binary placement and the startup service). This needs a real
 # terminal: when piped via `curl | bash` stdin is the (already drained) pipe,
 # so we re-open /dev/tty for the wizard — and when no terminal exists at all
 # (CI, Docker, etc.) we skip it and keep the default config written above.
@@ -534,7 +554,7 @@ run_wizard() {
   fi
   echo
   echo "==> launching the interactive setup wizard ..."
-  echo "    configure upstreams, blocklists, dashboard login, TLS & more"
+  echo "    it handles Dragonfly, the config, and the startup service"
   # Re-open stdin from the terminal so the wizard works even when this script
   # was piped via `curl ... | bash`. IMPORTANT: no stderr redirect on this
   # exec — an exec redirection persists for the whole shell, so 2>/dev/null
@@ -543,10 +563,14 @@ run_wizard() {
     echo "!! could not open the terminal - keeping the default config"
     return 0
   fi
-  # Dragonfly was already installed/started above, so --with-dragonfly is not
-  # needed here (older release binaries don't define that flag).
+  # The wizard installs Dragonfly itself when asked, so --with-dragonfly is not
+  # passed here (older release binaries don't define that flag anyway).
+  # Propagate the script's skip flags into the wizard.
+  export IRONGRID_SKIP_DRAGONFLY=0 IRONGRID_NO_SERVICE=0
+  [ "$SKIP_DRAGONFLY" -eq 1 ] && export IRONGRID_SKIP_DRAGONFLY=1
+  [ "$INSTALL_SERVICE" -eq 0 ] && export IRONGRID_NO_SERVICE=1
   if ! "$DEST/irongrid${EXT}" install --config "$CONFIG_ABS" --data "$DATA_ABS"; then
-    echo "   (wizard exited non-zero - config left as-is; re-run with: $DEST/irongrid${EXT} install)"
+    echo "   (wizard did not complete - no config was written; re-run it, or use --no-wizard for the default setup)"
   fi
   # Restart a startup service so the wizard's config takes effect right away.
   if [ "$INSTALL_SERVICE" -eq 1 ]; then
@@ -563,6 +587,11 @@ run_wizard() {
 }
 run_wizard
 
+# If the wizard just ran, reflect whether it left a cache running at 6379.
+if [ "$WIZARD_WILL_RUN" -eq 1 ] && port_answers_redis 6379; then
+  DFLY_STARTED=1
+fi
+
 echo
 echo "Next steps:"
 if [ "$DFLY_STARTED" -eq 1 ]; then
@@ -570,7 +599,11 @@ if [ "$DFLY_STARTED" -eq 1 ]; then
 else
   echo "  ! Start Dragonfly (required cache) - see the notes above or docker-compose.yml"
 fi
-echo "  ✓ Config: $CONFIG_ABS"
+if [ -f "$CONFIG_ABS" ]; then
+  echo "  ✓ Config: $CONFIG_ABS"
+else
+  echo "  ! Config not written yet - run the wizard: $DEST/irongrid${EXT} install"
+fi
 echo "  1. If the service above is not running, start it:"
 echo "       $DEST/irongrid -config $CONFIG_ABS -data $DATA_ABS"
 echo "  2. Customise setup anytime with the wizard: $DEST/irongrid${EXT} install"

@@ -3,6 +3,7 @@ package installer
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -36,6 +37,98 @@ func writeServiceFiles(w *wizard, configPath, dataDir string) ([]string, error) 
 		return nil, err
 	}
 	return files, nil
+}
+
+// installService installs and starts the startup service chosen during the
+// wizard, using the files already written to deploy/ by writeServiceFiles.
+// Best-effort: failures print the manual commands and never fail the wizard.
+func installService(w *wizard, configPath, dataDir string) {
+	a := w.a
+	if a.service == "none" || a.service == "docker" {
+		return
+	}
+	deployDir := filepath.Join(filepath.Dir(configPath), "deploy")
+	switch a.service {
+	case "systemd":
+		installSystemd(w, deployDir)
+	case "launchd":
+		installLaunchd(w, deployDir)
+	case "windows":
+		installWindowsService(w, deployDir)
+	}
+}
+
+// installSystemd copies the unit into place, reloads and enables+starts it.
+func installSystemd(w *wizard, deployDir string) {
+	src := filepath.Join(deployDir, "irongrid.service")
+	if _, err := os.Stat(src); err != nil {
+		fmt.Fprintf(w.out, "  ⚠ systemd unit missing (%s)\n", src)
+		return
+	}
+	fmt.Fprintln(w.out)
+	fmt.Fprintln(w.out, "  Installing the systemd service …")
+	steps := [][]string{
+		{"cp", src, "/etc/systemd/system/"},
+		{"systemctl", "daemon-reload"},
+		{"systemctl", "enable", "--now", "irongrid"},
+	}
+	for _, s := range steps {
+		if err := runPrivileged(s...); err != nil {
+			fmt.Fprintf(w.out, "  ⚠ %s failed: %v\n", strings.Join(s, " "), err)
+			fmt.Fprintln(w.out, "    run the deploy/ commands manually:")
+			fmt.Fprintf(w.out, "      sudo cp %s /etc/systemd/system/\n", src)
+			fmt.Fprintln(w.out, "      sudo systemctl daemon-reload && sudo systemctl enable --now irongrid")
+			return
+		}
+	}
+	fmt.Fprintln(w.out, "  ✓ systemd service installed and started (systemctl status irongrid)")
+}
+
+// installLaunchd copies the plist into ~/Library/LaunchAgents and loads it.
+func installLaunchd(w *wizard, deployDir string) {
+	src := filepath.Join(deployDir, "com.irongrid.dns.plist")
+	if _, err := os.Stat(src); err != nil {
+		fmt.Fprintf(w.out, "  ⚠ launchd plist missing (%s)\n", src)
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = "."
+	}
+	dst := filepath.Join(home, "Library", "LaunchAgents", "com.irongrid.dns.plist")
+	if err := copyFile(src, dst); err != nil {
+		fmt.Fprintf(w.out, "  ⚠ could not copy the launchd plist: %v\n", err)
+		fmt.Fprintf(w.out, "    do it manually: cp %s %s && launchctl load %s\n", src, dst, dst)
+		return
+	}
+	_ = exec.Command("launchctl", "unload", dst).Run() // ignore if not loaded yet
+	if err := exec.Command("launchctl", "load", dst).Run(); err != nil {
+		fmt.Fprintf(w.out, "  ⚠ launchctl load failed: %v\n", err)
+		fmt.Fprintf(w.out, "    do it manually: launchctl load %s\n", dst)
+		return
+	}
+	fmt.Fprintln(w.out, "  ✓ launchd agent installed and loaded (com.irongrid.dns)")
+}
+
+// installWindowsService runs the generated schtasks .bat (needs Administrator;
+// failures fall back to printing the path).
+func installWindowsService(w *wizard, deployDir string) {
+	bat := filepath.Join(deployDir, "install-irongrid-service.bat")
+	if _, err := os.Stat(bat); err != nil {
+		fmt.Fprintf(w.out, "  ⚠ service script missing (%s)\n", bat)
+		return
+	}
+	fmt.Fprintln(w.out)
+	fmt.Fprintln(w.out, "  Installing the Windows startup task (needs Administrator) …")
+	cmd := exec.Command("cmd", "/c", bat)
+	cmd.Stdout = w.out
+	cmd.Stderr = w.out
+	if err := cmd.Run(); err != nil {
+		fmt.Fprintf(w.out, "  ⚠ task install failed: %v\n", err)
+		fmt.Fprintf(w.out, "    re-run as Administrator: %s\n", bat)
+		return
+	}
+	fmt.Fprintln(w.out, "  ✓ Windows startup task installed and started")
 }
 
 // binaryPath is where the installer expects the irongrid binary to land.
@@ -212,21 +305,30 @@ func (w *wizard) printNextSteps(configPath, dataDir string) {
 
 	switch runtime.GOOS {
 	case "windows":
-		fmt.Fprintf(w.out, "  1. Copy the binary to %s\n", binaryPath())
-		fmt.Fprintln(w.out, "  2. Run install-irongrid-service.bat as Administrator")
-		fmt.Fprintln(w.out, "     (installs a logon task — runs while you are logged in)")
+		fmt.Fprintf(w.out, "  1. Binary: %s\n", binaryPath())
+		if a.service == "windows" {
+			fmt.Fprintln(w.out, "  2. Startup task attempted (re-run install-irongrid-service.bat as Administrator if it failed)")
+		} else {
+			fmt.Fprintf(w.out, "  2. Run it manually: %s -config %s -data %s\n", binaryPath(), configPath, dataDir)
+		}
 	default:
-		fmt.Fprintf(w.out, "  1. Copy the binary: sudo cp irongrid %s\n", binaryPath())
-		fmt.Fprintln(w.out, "  2. Start Dragonfly: docker run -d --name dragonfly -p 6379:6379 docker.dragonflydb.io/dragonfly/dragonfly")
+		if w.dflyStarted {
+			fmt.Fprintf(w.out, "  1. ✓ Dragonfly cache running at %s\n", a.cacheAddr)
+		} else if a.deploy == "native" && a.installDragonfly {
+			fmt.Fprintln(w.out, "  1. Dragonfly did not start automatically — run:")
+			fmt.Fprintln(w.out, "       docker run -d --name dragonfly -p 6379:6379 docker.dragonflydb.io/dragonfly/dragonfly")
+		} else {
+			fmt.Fprintf(w.out, "  1. Make sure a Redis-compatible server (e.g. Dragonfly) answers at %s\n", a.cacheAddr)
+		}
+		if a.service != "none" {
+			fmt.Fprintf(w.out, "  2. Service install attempted (see deploy/ for manual steps if it did not start)\n")
+		} else {
+			fmt.Fprintf(w.out, "  2. Run it manually: %s -config %s -data %s\n", binaryPath(), configPath, dataDir)
+		}
 	}
 
-	if a.service != "none" && a.service != "docker" {
-		fmt.Fprintln(w.out, "  3. Install the service (see deploy/ above)")
-	} else {
-		fmt.Fprintf(w.out, "  3. Run it manually: %s -config %s -data %s\n", binaryPath(), configPath, dataDir)
-	}
 	if len(a.protos) > 0 {
-		fmt.Fprintln(w.out, "  4. Point your router at this machine's port 53 (UDP/TCP)")
+		fmt.Fprintln(w.out, "  3. Point your router at this machine's port 53 (UDP/TCP)")
 	}
 	fmt.Fprintln(w.out)
 

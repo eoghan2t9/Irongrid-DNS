@@ -3,10 +3,11 @@
 #   irm https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.ps1 | iex
 #
 # Downloads the latest release binary for your architecture, verifies its
-# SHA-256 checksum, and installs it. After installing, the interactive TUI
-# setup wizard (`irongrid install`) is launched so you can configure
-# upstreams, blocklists, dashboard login, TLS, etc. - unless -NoWizard is
-# given or no interactive console is available (e.g. `irm ... | iex` in CI).
+# SHA-256 checksum, and installs it. In an interactive console the TUI setup
+# wizard (`irongrid install`) is then launched and handles the whole install
+# itself: Dragonfly, the config, and the startup task. Non-interactive runs
+# (e.g. `irm ... | iex` in CI), -NoWizard, or an existing config keep the
+# script's built-in Dragonfly + startup-task steps instead.
 # Optional parameters:
 #
 #   -Version "v1.0.1"   install a specific release tag (default: latest)
@@ -35,6 +36,13 @@ $arch = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture
 $Asset = "irongrid-windows-$arch.exe"
 $base = "https://github.com/$Repo/releases/download/$Version"
 $exe = Join-Path $Dir "irongrid.exe"
+$configFile = Join-Path $Dir "irongrid.yaml"
+$dataDir = Join-Path $Dir "data"
+$configExists = Test-Path $configFile
+# The interactive wizard handles the whole install: Dragonfly, the config and
+# the startup task. It only runs in a real console with no existing config
+# (an existing config is always left untouched).
+$wizardRuns = (-not $NoWizard) -and (-not [Console]::IsInputRedirected) -and (-not $configExists)
 
 Write-Host "==> installing Irongrid DNS $Version ($arch) to $Dir"
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
@@ -65,6 +73,11 @@ Write-Host "Installed: $exe"
 
 # ---- Dragonfly: the cache Irongrid requires ----------------
 # Dragonfly has no native Windows build; it runs in Docker (WSL2 backend).
+# When the interactive wizard is about to run, it installs Dragonfly itself.
+if ($wizardRuns) {
+  Write-Host ""
+  Write-Host "==> Dragonfly install deferred to the interactive wizard"
+} else {
 Write-Host ""
 Write-Host "==> installing Dragonfly (required cache) ..."
 
@@ -103,6 +116,7 @@ if ($existing) {
     Write-Host "!! Docker failed to start Dragonfly - check that Docker Desktop is running." -ForegroundColor Yellow
   }
 }
+}
 
 # ---- Install Irongrid as a Windows scheduled task ---------------
 # A plain Go binary does not speak the Windows Service Control Manager
@@ -112,10 +126,13 @@ if ($existing) {
 # LIMITED (filtered-token) task cannot do. The /TR quoting is written to a
 # temp .bat and run via cmd /c — PowerShell's native-argument marshalling
 # does not reliably preserve schtasks' doubled-quote convention.
+# The startup task is also handled by the wizard when it is about to run.
+if ($wizardRuns) {
+  Write-Host ""
+  Write-Host "==> startup task install deferred to the interactive wizard"
+} else {
 Write-Host ""
 Write-Host "==> installing Irongrid as a startup task ..."
-$configFile = Join-Path $Dir "irongrid.yaml"
-$dataDir = Join-Path $Dir "data"
 New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
 $taskName = "IrongridDNS"
 $esc = '\"'
@@ -135,24 +152,28 @@ try {
 } finally {
   Remove-Item $batFile -Force -ErrorAction SilentlyContinue
 }
+}
 
 # ---- Interactive setup wizard (TUI) -------------------------
-# Launch `irongrid install` so the user can configure upstreams, blocklists,
-# dashboard login, TLS, etc. This needs a real console: when run via
-# `irm ... | iex` stdin is redirected (a pipe), so the wizard is skipped.
-# The config path is double-quoted explicitly for PowerShell 5.1's native
-# argument passing (paths under %LOCALAPPDATA% can contain spaces).
+# Launch `irongrid install`, which handles the whole install: Dragonfly, the
+# config, binary placement and the startup task. It needs a real console:
+# when run via `irm ... | iex` stdin is redirected (a pipe), so it is
+# skipped. The config path is double-quoted explicitly for PowerShell 5.1's
+# native argument passing (paths under %LOCALAPPDATA% can contain spaces).
 Write-Host ""
 if ($NoWizard) {
   Write-Host "==> setup wizard skipped (-NoWizard)"
 } elseif ([Console]::IsInputRedirected) {
   Write-Host "==> no interactive console detected - install finished with defaults"
   Write-Host "    (re-run the wizard anytime with: $exe install)"
+} elseif ($configExists) {
+  Write-Host "==> config already exists at $configFile - wizard skipped to leave it untouched"
+  Write-Host "    (re-run it anytime with: $exe install)"
 } else {
   Write-Host "==> launching the interactive setup wizard ..."
-  Write-Host "    configure upstreams, blocklists, dashboard login, TLS & more"
-  # Dragonfly was already started above, so --with-dragonfly is not needed
-  # (older release binaries don't define that flag).
+  Write-Host "    it handles Dragonfly, the config, and the startup task"
+  # The wizard installs Dragonfly itself when asked, so --with-dragonfly is
+  # not passed here (older release binaries don't define that flag anyway).
   & $exe install --config "`"$configFile`"" --data "`"$dataDir`""
   if ($LASTEXITCODE -ne 0) {
     Write-Host "!! wizard did not complete - the config at $configFile may be incomplete" -ForegroundColor Yellow
@@ -163,6 +184,8 @@ Write-Host ""
 Write-Host "Next steps:"
 if ($dflyStarted) {
   Write-Host "  - Dragonfly cache is running on 127.0.0.1:6379"
+} elseif ($wizardRuns) {
+  Write-Host "  - Dragonfly + startup task were handled by the wizard"
 } else {
   Write-Host "  1. Start Dragonfly (required cache) - see the notes above"
 }

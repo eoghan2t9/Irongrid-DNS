@@ -1,6 +1,6 @@
 //go:build !windows
 
-// The E2E wizard test drives a real PTY via github.com/creack/pty, which is
+// The E2E wizard tests drive a real PTY via github.com/creack/pty, which is
 // Unix-only. Windows builds of the package skip this file entirely.
 
 package installer
@@ -18,11 +18,26 @@ import (
 )
 
 // TestRunEndToEnd drives the full wizard in accessible mode over a real PTY
-// with scripted answers, then verifies the written config and service files.
-// IRONGRID_ACCESSIBLE=1 forces line-based rendering even though stdin is a TTY,
-// which is exactly how CI/non-interactive installs run. The PTY is required so
-// the password fields can read from a real terminal fd.
+// with scripted answers, declining the Dragonfly install (offline), then
+// verifies the written config and service files.
 func TestRunEndToEnd(t *testing.T) {
+	runEndToEnd(t, false)
+}
+
+// TestRunEndToEndWithDragonfly is the same flow but answers "yes" to the
+// "Install and start Dragonfly now?" question. A fake Redis (the same one
+// the dragonfly tests use) answers PING on the configured address, so
+// EnsureDragonfly takes its reuse path — no downloads, no side effects.
+func TestRunEndToEndWithDragonfly(t *testing.T) {
+	runEndToEnd(t, true)
+}
+
+// runEndToEnd drives the wizard once. IRONGRID_ACCESSIBLE=1 forces line-based
+// rendering even though stdin is a TTY, which is exactly how CI/non-interactive
+// installs run. The PTY is required so the password fields can read from a
+// real terminal fd. IRONGRID_SKIP_PRIVILEGED=1 keeps the run offline and side
+// effect free (no binary placement, no system service).
+func runEndToEnd(t *testing.T, withDragonfly bool) {
 	if testing.Short() {
 		t.Skip("skipping interactive wizard E2E in -short mode")
 	}
@@ -30,6 +45,15 @@ func TestRunEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Unsetenv("IRONGRID_ACCESSIBLE") })
+	if err := os.Setenv("IRONGRID_SKIP_PRIVILEGED", "1"); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Unsetenv("IRONGRID_SKIP_PRIVILEGED") })
+
+	dragonflyAddr := "localhost:6379"
+	if withDragonfly {
+		dragonflyAddr = fakeRedis(t)
+	}
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "irongrid.yaml")
@@ -106,22 +130,28 @@ func TestRunEndToEnd(t *testing.T) {
 	// 6. Custom upstreams (empty).
 	expect("Custom upstreams", "")
 	// 7. Dragonfly address.
-	expect("Dragonfly address", "localhost:6379")
+	expect("Dragonfly address", dragonflyAddr)
 	// 8. Dragonfly password (empty).
 	expect("Dragonfly password", "")
-	// 9. Blocklists: toggle OISD Big (1), then confirm (0).
+	// 9. Install Dragonfly now? -> yes (offline path answers no).
+	answer := "n"
+	if withDragonfly {
+		answer = "y"
+	}
+	expect("Install and start Dragonfly now?", answer)
+	// 10. Blocklists: toggle OISD Big (1), then confirm (0).
 	expect("Blocklists", "1", "0")
-	// 10. Whitelist presets: toggle OS updates (1), then confirm (0).
+	// 11. Whitelist presets: toggle OS updates (1), then confirm (0).
 	expect("Always-allow presets", "1", "0")
-	// 11. Username.
+	// 12. Username.
 	expect("Username", "admin")
-	// 12. Password.
+	// 13. Password.
 	expect("Password", "testpass123")
-	// 13. Confirm password.
+	// 14. Confirm password.
 	expect("Confirm password", "testpass123")
-	// 14. TLS hosts.
+	// 15. TLS hosts.
 	expect("Self-signed certificate hosts", "localhost, dns.example.com")
-	// 15. Final confirm -> Install (y).
+	// 16. Final confirm -> Install (y).
 	expect("Write configuration and service files?", "y")
 
 	select {
@@ -152,12 +182,19 @@ func TestRunEndToEnd(t *testing.T) {
 			t.Errorf("config missing %q:\n%s", want, cfg)
 		}
 	}
+	if !strings.Contains(cfg, dragonflyAddr) {
+		t.Errorf("config cache addr should be %q:\n%s", dragonflyAddr, cfg)
+	}
 
 	// systemd service file was generated next to the config.
 	svc := filepath.Join(dir, "deploy", "irongrid.service")
 	if _, err := os.Stat(svc); err != nil {
 		t.Errorf("systemd unit not written: %v", err)
 	}
+	// The "already running" reuse logic itself is covered by
+	// TestEnsureDragonflyAlreadyRunning in dragonfly_test.go; here we only
+	// verify the wizard accepts the Dragonfly install step and writes the
+	// chosen cache address into the config.
 }
 
 // stripANSI removes ANSI escape sequences from captured output so prompts can
