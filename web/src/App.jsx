@@ -15,7 +15,7 @@ const NAV = [
   { id: 'log', label: 'Query Log', icon: '≡' },
   { id: 'blocklists', label: 'Blocklists', icon: '▤' },
   { id: 'lists', label: 'Allow / Block', icon: '✓' },
-  { id: 'tls', label: 'SSL / TLS', icon: '🔒' },
+  { id: 'tls', label: 'SSL / TLS', icon: '🔒︎' },
   { id: 'tunnel', label: 'Tunnel', icon: '↗' },
   { id: 'changelog', label: 'Changelog', icon: '✦' },
   { id: 'settings', label: 'Settings', icon: '⚙' },
