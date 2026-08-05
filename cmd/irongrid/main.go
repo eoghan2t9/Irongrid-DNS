@@ -198,6 +198,14 @@ func main() {
 	// ---- ACME (Let's Encrypt) auto-issuance ----
 	var acmeMgr *acme.Manager
 	if cfg.TLS.ACME.Enabled {
+		dnsProvider, err := acme.NewDNSProvider(
+			cfg.TLS.ACME.DNS01.Provider,
+			cfg.TLS.ACME.DNS01.CloudflareToken,
+			time.Duration(cfg.TLS.ACME.DNS01.PropagationWait)*time.Second,
+		)
+		if err != nil {
+			log.Fatalf("acme: %v", err)
+		}
 		acmeMgr = acme.New(acme.Options{
 			Email:           cfg.TLS.ACME.Email,
 			Domains:         cfg.TLS.ACME.Domains,
@@ -205,6 +213,8 @@ func main() {
 			Staging:         cfg.TLS.ACME.Staging,
 			HTTP01Port:      cfg.TLS.ACME.HTTP01Port,
 			RenewBeforeDays: cfg.TLS.ACME.RenewBeforeDays,
+			DNS:             dnsProvider,
+			DNSProvider:     cfg.TLS.ACME.DNS01.Provider,
 		})
 		apiHandler.ACME = acmeMgr
 		if cfg.TLS.CertDir == "" {
@@ -255,6 +265,50 @@ func main() {
 	}
 	startWebServer(webSrv, webTLSServing)
 
+	// ---- optional HTTP->HTTPS redirect (web_redirect) ----
+	// When the dashboard runs on HTTPS, a small plain-HTTP listener 301s
+	// every request to https://<host>/. It is re-evaluated on every reload
+	// so toggling web_tls / web_redirect / web_listen takes effect without
+	// a process restart.
+	var redirectSrv *http.Server
+	startRedirect := func() {
+		want := cfg.Server.WebTLS && cfg.Server.WebRedirect
+		port := cfg.Server.WebRedirectPort
+		if port == 0 {
+			port = 80
+		}
+		addr := fmt.Sprintf(":%d", port)
+		// Already serving the right thing — nothing to do.
+		if want && redirectSrv != nil && redirectSrv.Addr == addr {
+			return
+		}
+		// Tear down the old listener if there is one. Shutdown runs in a
+		// goroutine so the reload response flushes first; the replacement
+		// waits a beat so the old listener's port is actually free.
+		if redirectSrv != nil {
+			old := redirectSrv
+			redirectSrv = nil
+			go func() { _ = old.Shutdown(context.Background()) }()
+		}
+		if !want {
+			return
+		}
+		host, httpsPort := hostOnly(cfg.Server.WebListen), webTLSPort(cfg.Server.WebListen)
+		ns := &http.Server{
+			Addr:    addr,
+			Handler: http.HandlerFunc(httpsRedirect(httpsPort)),
+		}
+		redirectSrv = ns
+		go func() {
+			time.Sleep(200 * time.Millisecond) // let an old listener release the port
+			log.Printf("[web] plain HTTP on %s redirecting to https://%s", addr, host)
+			if err := ns.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("[web] redirect listener on %s stopped: %v", addr, err)
+			}
+		}()
+	}
+	startRedirect()
+
 	// ---- TLS-only reload: used after the dashboard generates/uploads a
 	// certificate. Rebinds the DNS listeners with the new cert; leaves the
 	// cache and upstreams untouched so it works even while Dragonfly is down.
@@ -299,6 +353,7 @@ func main() {
 					_ = oldWeb.Shutdown(context.Background())
 					startWebServer(newWeb, true)
 				}()
+				startRedirect()
 			}
 			return nil
 		}
@@ -379,6 +434,9 @@ func main() {
 				startWebServer(newWeb, useTLS)
 			}()
 		}
+		// Re-evaluate the HTTP->HTTPS redirect listener on every reload: it
+		// starts/stops/keeps itself based on the new web_tls/web_redirect config.
+		startRedirect()
 		log.Printf("[config] reload applied: listeners, cache, TLS, upstreams")
 		return nil
 	}
@@ -408,4 +466,43 @@ func main() {
 	_ = webSrv.Shutdown(shutdownCtx)
 	ql.Close()
 	log.Printf("bye")
+}
+
+// httpsRedirect returns a handler that 301s a plain-HTTP request to the same
+// path over HTTPS. The hostname is taken from the request (so real domains
+// and proxies work); the port is the HTTPS web server's port, with the
+// default 443 omitted for clean URLs.
+func httpsRedirect(httpsPort string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		host := r.Host
+		if h, _, err := net.SplitHostPort(r.Host); err == nil {
+			host = h
+		}
+		target := "https://" + host
+		if httpsPort != "443" && httpsPort != "" {
+			target += ":" + httpsPort
+		}
+		target += r.URL.RequestURI()
+		http.Redirect(w, r, target, http.StatusMovedPermanently)
+	}
+}
+
+// webTLSPort extracts the port of the HTTPS web server address
+// ("0.0.0.0:8443" -> "8443", "0.0.0.0" -> "").
+func webTLSPort(addr string) string {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return ""
+	}
+	return port
+}
+
+// hostOnly strips the port from a listen address ("0.0.0.0:8443" ->
+// "0.0.0.0") so it can be displayed in logs.
+func hostOnly(addr string) string {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return addr
+	}
+	return host
 }

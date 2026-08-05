@@ -4,8 +4,10 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,7 +37,11 @@ type ServerConfig struct {
 	DoHPath    string `yaml:"doh_path"`    // HTTP path served for DoH (RFC 8484)
 	WebListen  string `yaml:"web_listen"`  // management web UI + REST API
 	WebTLS     bool   `yaml:"web_tls"`     // serve the web UI + API over HTTPS (uses the TLS cert)
-	TimeoutSec int    `yaml:"timeout_sec"` // per-query timeout
+	// WebRedirect serves a plain-HTTP listener on WebRedirectPort that 301s
+	// to https://<host>/ — a convenience when web_tls is enabled.
+	WebRedirect     bool `yaml:"web_redirect"`
+	WebRedirectPort int  `yaml:"web_redirect_port"` // default 80
+	TimeoutSec      int  `yaml:"timeout_sec"`       // per-query timeout
 }
 
 // CacheConfig points at the Dragonfly instance that is the authoritative
@@ -60,7 +66,9 @@ type TLSConfig struct {
 }
 
 // ACMEConfig enables automatic certificate issuance from Let's Encrypt using
-// the HTTP-01 challenge (needs the domains to answer on port 80).
+// the HTTP-01 challenge (needs the domains to answer on port 80) or, when
+// tls.acme.dns01.provider is set, the DNS-01 challenge (needs DNS API access
+// but no inbound port).
 type ACMEConfig struct {
 	Enabled    bool     `yaml:"enabled"`
 	Email      string   `yaml:"email"`      // account contact (required)
@@ -68,6 +76,14 @@ type ACMEConfig struct {
 	Staging    bool     `yaml:"staging"`    // use Let's Encrypt staging CA (untrusted, for testing)
 	HTTP01Port int      `yaml:"http01_port"` // port for the HTTP-01 challenge, default 80
 	RenewBeforeDays int `yaml:"renew_before_days"` // renew when fewer days remain, default 30
+	DNS01      DNS01Config `yaml:"dns01"`   // optional: issue via DNS TXT records instead of HTTP-01
+}
+
+// DNS01Config configures DNS-01 challenge issuance through a DNS provider API.
+type DNS01Config struct {
+	Provider        string `yaml:"provider"`            // "cloudflare" ("" = HTTP-01)
+	CloudflareToken string `yaml:"cloudflare_token"`    // Cloudflare API token with DNS:Edit
+	PropagationWait int    `yaml:"propagation_wait_sec"` // seconds to wait for TXT propagation, default 60
 }
 
 // FilterConfig configures blocking behaviour and lists.
@@ -226,11 +242,39 @@ func (c *Config) validate() error {
 		if c.TLS.ACME.RenewBeforeDays <= 0 {
 			c.TLS.ACME.RenewBeforeDays = 30
 		}
+		if c.TLS.ACME.DNS01.Provider != "" && c.TLS.ACME.DNS01.Provider != "cloudflare" {
+			return fmt.Errorf("tls.acme.dns01.provider: unsupported provider %q (supported: cloudflare)", c.TLS.ACME.DNS01.Provider)
+		}
+		if c.TLS.ACME.DNS01.Provider == "cloudflare" && c.TLS.ACME.DNS01.CloudflareToken == "" {
+			return fmt.Errorf("tls.acme.dns01.cloudflare_token is required when using the cloudflare provider")
+		}
+		if c.TLS.ACME.DNS01.PropagationWait == 0 {
+			c.TLS.ACME.DNS01.PropagationWait = 60
+		}
+	}
+	if c.Server.WebRedirect && !c.Server.WebTLS {
+		return fmt.Errorf("server.web_redirect requires server.web_tls to be enabled")
+	}
+	if c.Server.WebRedirect && c.Server.WebRedirectPort == 0 {
+		c.Server.WebRedirectPort = 80
+	}
+	if c.Server.WebRedirect && c.Server.WebRedirectPort == webPort(c.Server.WebListen) {
+		return fmt.Errorf("server.web_redirect_port %d collides with the HTTPS web server port", c.Server.WebRedirectPort)
 	}
 	if c.Web.Username == "" {
 		return fmt.Errorf("web.username is required")
 	}
 	return nil
+}
+
+// webPort returns the port of a host:port listen address (0 when absent).
+func webPort(addr string) int {
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(port)
+	return n
 }
 
 // Save writes the config to path, creating parent directories. Plaintext web

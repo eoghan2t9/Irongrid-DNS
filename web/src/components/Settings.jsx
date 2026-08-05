@@ -4,11 +4,11 @@ import { api } from '../api'
 const empty = () => ({
   server: {
     listen_udp: '', listen_tcp: '', listen_dot: '', listen_doh: '', listen_doq: '',
-    doh_path: '/dns-query', web_listen: '', web_tls: false, timeout_sec: 5,
+    doh_path: '/dns-query', web_listen: '', web_tls: false, web_redirect: false, web_redirect_port: 80, timeout_sec: 5,
   },
   upstreams: [],
   cache: { addr: '', password: '', db: 0, ttl: '6h', negative_ttl: '1m' },
-  tls: { cert_file: '', key_file: '', generate_self_signed: true, self_signed_hosts: [], cert_dir: '', acme: { enabled: false, email: '', domains: [], staging: false, http01_port: 80, renew_before_days: 30 } },
+  tls: { cert_file: '', key_file: '', generate_self_signed: true, self_signed_hosts: [], cert_dir: '', acme: { enabled: false, email: '', domains: [], staging: false, http01_port: 80, renew_before_days: 30, dns01: { provider: '', cloudflare_token: '', propagation_wait_sec: 60 } } },
   filter: { block_response: 'nxdomain', block_ttl: 600, blocklists: [], whitelist: [], blacklist: [] },
   log: { query_log_file: '', retention_days: 30, verbose: true },
   web: { username: 'admin', password: '' },
@@ -264,6 +264,8 @@ export default function Settings() {
           {text('DoH path', 'server.doh_path', null, '/dns-query')}
           {text('Web dashboard', 'server.web_listen', null, '0.0.0.0:8080')}
           {toggle('Serve dashboard over HTTPS (web_tls)', 'server.web_tls')}
+          {toggle('Redirect plain HTTP to HTTPS (web_redirect)', 'server.web_redirect')}
+          {number('Redirect listener port', 'server.web_redirect_port')}
           {number('Upstream timeout (s)', 'server.timeout_sec')}
         </div>
       </div>
@@ -301,8 +303,11 @@ export default function Settings() {
         <div className="form-grid">
           {toggle('Enable ACME auto-issuance', 'tls.acme.enabled')}
           {text('Email (account contact)', 'tls.acme.email', 'required when enabled', 'you@example.com')}
-          {textarea('Domains', 'tls.acme.domains', 'public hostnames, one per line — must answer on port 80')}
+          {textarea('Domains', 'tls.acme.domains', 'public hostnames, one per line')}
           {toggle('Use staging CA (test certificates)', 'tls.acme.staging')}
+          {text('DNS-01 provider', 'tls.acme.dns01.provider', '"cloudflare" for DNS TXT issuance (no open port), empty for HTTP-01', 'cloudflare')}
+          {text('Cloudflare API token', 'tls.acme.dns01.cloudflare_token', 'Zone:DNS:Edit permission — only needed for DNS-01', '••••')}
+          {number('DNS-01 propagation wait (s)', 'tls.acme.dns01.propagation_wait_sec')}
           {number('HTTP-01 challenge port', 'tls.acme.http01_port')}
           {number('Renew when < N days left', 'tls.acme.renew_before_days')}
         </div>

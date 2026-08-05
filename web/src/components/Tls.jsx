@@ -272,14 +272,16 @@ export default function Tls() {
           <h3 style={{ margin: 0 }}>Let's Encrypt (ACME) auto-issuance</h3>
           {status.acme?.enabled && (
             <span className={`badge ${status.acme.last_error ? 'badge-error' : 'badge-allowed'}`}>
-              {status.acme.running ? 'challenge server on' : 'configured'}
+              {status.acme.challenge === 'dns-01' ? 'dns-01 (no open port)' : status.acme.running ? 'challenge server on' : 'configured'}
             </span>
           )}
         </div>
         <p className="dim small" style={{ marginTop: 6 }}>
-          Automatically issues and renews a trusted certificate for a public hostname via the
-          HTTP-01 challenge — your domains must answer on port 80. Route the hostname to this
-          machine (or through the Cloudflare Tunnel) first.
+          Automatically issues and renews a trusted certificate for a public hostname. By default
+          it uses the <strong>HTTP-01</strong> challenge (domains must answer on port 80); set{' '}
+          <code>tls.acme.dns01.provider: cloudflare</code> in the config to issue via{' '}
+          <strong>DNS-01</strong> TXT records instead — no inbound port needed. Route the hostname
+          to this machine (or through the Cloudflare Tunnel) first.
         </p>
         {!status.acme?.enabled ? (
           <div className="empty">
@@ -301,9 +303,18 @@ export default function Tls() {
               <span className="kv-value">{status.acme.staging ? 'Let\'s Encrypt staging (test)' : 'Let\'s Encrypt production'}</span>
             </div>
             <div className="kv-row">
-              <span className="kv-label">Challenge port</span>
-              <span className="kv-value">:{status.acme.challenge_port}</span>
+              <span className="kv-label">Challenge</span>
+              <span className="kv-value">
+                {status.acme.challenge || 'http-01'}
+                {status.acme.dns_provider ? ` (${status.acme.dns_provider})` : ''}
+              </span>
             </div>
+            {status.acme.challenge !== 'dns-01' && (
+              <div className="kv-row">
+                <span className="kv-label">Challenge port</span>
+                <span className="kv-value">:{status.acme.challenge_port}</span>
+              </div>
+            )}
             {status.acme.last_success && (
               <div className="kv-row">
                 <span className="kv-label">Last issued</span>

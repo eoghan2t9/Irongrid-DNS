@@ -535,15 +535,17 @@ type configPayload struct {
 }
 
 type serverPayload struct {
-	ListenUDP  string `json:"listen_udp"`
-	ListenTCP  string `json:"listen_tcp"`
-	ListenDoT  string `json:"listen_dot"`
-	ListenDoH  string `json:"listen_doh"`
-	ListenDoQ  string `json:"listen_doq"`
-	DoHPath    string `json:"doh_path"`
-	WebListen  string `json:"web_listen"`
-	WebTLS     bool   `json:"web_tls"`
-	TimeoutSec int    `json:"timeout_sec"`
+	ListenUDP       string `json:"listen_udp"`
+	ListenTCP       string `json:"listen_tcp"`
+	ListenDoT       string `json:"listen_dot"`
+	ListenDoH       string `json:"listen_doh"`
+	ListenDoQ       string `json:"listen_doq"`
+	DoHPath         string `json:"doh_path"`
+	WebListen       string `json:"web_listen"`
+	WebTLS          bool   `json:"web_tls"`
+	WebRedirect     bool   `json:"web_redirect"`
+	WebRedirectPort int    `json:"web_redirect_port"`
+	TimeoutSec      int    `json:"timeout_sec"`
 }
 
 type cachePayload struct {
@@ -564,12 +566,19 @@ type tlsPayload struct {
 }
 
 type acmePayload struct {
-	Enabled         bool     `json:"enabled"`
-	Email           string   `json:"email"`
-	Domains         []string `json:"domains"`
-	Staging         bool     `json:"staging"`
-	HTTP01Port      int      `json:"http01_port"`
-	RenewBeforeDays int      `json:"renew_before_days"`
+	Enabled         bool        `json:"enabled"`
+	Email           string      `json:"email"`
+	Domains         []string    `json:"domains"`
+	Staging         bool        `json:"staging"`
+	HTTP01Port      int         `json:"http01_port"`
+	RenewBeforeDays int         `json:"renew_before_days"`
+	DNS01           dns01Payload `json:"dns01"`
+}
+
+type dns01Payload struct {
+	Provider        string `json:"provider"`
+	CloudflareToken string `json:"cloudflare_token"`
+	PropagationWait int    `json:"propagation_wait_sec"`
 }
 
 type filterPayload struct {
@@ -612,15 +621,17 @@ type tunnelPayload struct {
 func payloadFromConfig(c *config.Config) configPayload {
 	p := configPayload{
 		Server: serverPayload{
-			ListenUDP:  c.Server.ListenUDP,
-			ListenTCP:  c.Server.ListenTCP,
-			ListenDoT:  c.Server.ListenDoT,
-			ListenDoH:  c.Server.ListenDoH,
-			ListenDoQ:  c.Server.ListenDoQ,
-			DoHPath:    c.Server.DoHPath,
-			WebListen:  c.Server.WebListen,
-			WebTLS:     c.Server.WebTLS,
-			TimeoutSec: c.Server.TimeoutSec,
+			ListenUDP:       c.Server.ListenUDP,
+			ListenTCP:       c.Server.ListenTCP,
+			ListenDoT:       c.Server.ListenDoT,
+			ListenDoH:       c.Server.ListenDoH,
+			ListenDoQ:       c.Server.ListenDoQ,
+			DoHPath:         c.Server.DoHPath,
+			WebListen:       c.Server.WebListen,
+			WebTLS:          c.Server.WebTLS,
+			WebRedirect:     c.Server.WebRedirect,
+			WebRedirectPort: c.Server.WebRedirectPort,
+			TimeoutSec:      c.Server.TimeoutSec,
 		},
 		Upstreams: c.Upstreams,
 		Cache: cachePayload{
@@ -643,6 +654,11 @@ func payloadFromConfig(c *config.Config) configPayload {
 				Staging:         c.TLS.ACME.Staging,
 				HTTP01Port:      c.TLS.ACME.HTTP01Port,
 				RenewBeforeDays: c.TLS.ACME.RenewBeforeDays,
+				DNS01: dns01Payload{
+					Provider:        c.TLS.ACME.DNS01.Provider,
+					CloudflareToken: c.TLS.ACME.DNS01.CloudflareToken,
+					PropagationWait: c.TLS.ACME.DNS01.PropagationWait,
+				},
 			},
 		},
 		Filter: filterPayload{
@@ -704,15 +720,17 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			ListenUDP:  p.Server.ListenUDP,
-			ListenTCP:  p.Server.ListenTCP,
-			ListenDoT:  p.Server.ListenDoT,
-			ListenDoH:  p.Server.ListenDoH,
-			ListenDoQ:  p.Server.ListenDoQ,
-			DoHPath:    p.Server.DoHPath,
-			WebListen:  p.Server.WebListen,
-			WebTLS:     p.Server.WebTLS,
-			TimeoutSec: p.Server.TimeoutSec,
+			ListenUDP:       p.Server.ListenUDP,
+			ListenTCP:       p.Server.ListenTCP,
+			ListenDoT:       p.Server.ListenDoT,
+			ListenDoH:       p.Server.ListenDoH,
+			ListenDoQ:       p.Server.ListenDoQ,
+			DoHPath:         p.Server.DoHPath,
+			WebListen:       p.Server.WebListen,
+			WebTLS:          p.Server.WebTLS,
+			WebRedirect:     p.Server.WebRedirect,
+			WebRedirectPort: p.Server.WebRedirectPort,
+			TimeoutSec:      p.Server.TimeoutSec,
 		},
 		Upstreams: p.Upstreams,
 		Cache: config.CacheConfig{
@@ -735,6 +753,11 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 				Staging:         p.TLS.ACME.Staging,
 				HTTP01Port:      p.TLS.ACME.HTTP01Port,
 				RenewBeforeDays: p.TLS.ACME.RenewBeforeDays,
+				DNS01: config.DNS01Config{
+					Provider:        p.TLS.ACME.DNS01.Provider,
+					CloudflareToken: p.TLS.ACME.DNS01.CloudflareToken,
+					PropagationWait: p.TLS.ACME.DNS01.PropagationWait,
+				},
 			},
 		},
 		Filter: config.FilterConfig{

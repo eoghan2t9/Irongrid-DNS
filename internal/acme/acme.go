@@ -49,6 +49,10 @@ type Manager struct {
 	srv      *http.Server
 	ln       net.Listener
 
+	// dns is the optional DNS-01 provider. When set, issuance uses TXT
+	// records instead of the HTTP-01 challenge server.
+	dns DNSProvider
+
 	// Status mirrors the last issuance/renewal attempt for the dashboard.
 	Status Status
 }
@@ -59,6 +63,8 @@ type Status struct {
 	Email         string    `json:"email"`
 	Domains       []string  `json:"domains"`
 	Staging       bool      `json:"staging"`
+	Challenge     string    `json:"challenge"`     // "http-01" or "dns-01"
+	DNSProvider   string    `json:"dns_provider"`  // e.g. "cloudflare" when dns-01
 	LastAttempt   time.Time `json:"last_attempt"`
 	LastSuccess   time.Time `json:"last_success"`
 	LastError     string    `json:"last_error,omitempty"`
@@ -69,12 +75,14 @@ type Status struct {
 
 // Options configures a Manager.
 type Options struct {
-	Email      string
-	Domains    []string
-	CertDir    string
-	Staging    bool
-	HTTP01Port int
+	Email           string
+	Domains         []string
+	CertDir         string
+	Staging         bool
+	HTTP01Port      int
 	RenewBeforeDays int
+	DNS             DNSProvider   // optional DNS-01 provider
+	DNSProvider     string        // provider name for status, e.g. "cloudflare"
 }
 
 // New creates a Manager. The HTTP-01 challenge server is not started until
@@ -94,6 +102,7 @@ func New(o Options) *Manager {
 		staging:  o.Staging,
 		httpPort: o.HTTP01Port,
 		renewIn:  renewIn,
+		dns:      o.DNS,
 		tokens:   map[string]string{},
 	}
 	m.Status.Enabled = true
@@ -101,6 +110,12 @@ func New(o Options) *Manager {
 	m.Status.Domains = m.domains
 	m.Status.Staging = o.Staging
 	m.Status.ChallengePort = o.HTTP01Port
+	if m.dns != nil {
+		m.Status.Challenge = "dns-01"
+		m.Status.DNSProvider = o.DNSProvider
+	} else {
+		m.Status.Challenge = "http-01"
+	}
 	return m
 }
 
@@ -186,9 +201,12 @@ func (m *Manager) Issue(ctx context.Context) error {
 	m.Status.LastError = ""
 	m.mu.Unlock()
 
-	if err := m.Serve(); err != nil {
-		m.noteErr(err)
-		return err
+	// DNS-01 needs no inbound listener; HTTP-01 needs the challenge server.
+	if m.dns == nil {
+		if err := m.Serve(); err != nil {
+			m.noteErr(err)
+			return err
+		}
 	}
 
 	dirURL := LetsEncryptProd
@@ -218,7 +236,7 @@ func (m *Manager) Issue(ctx context.Context) error {
 		return fmt.Errorf("acme: create order: %w", err)
 	}
 
-	// 3. Fulfil the http-01 challenge for each pending authorization.
+	// 3. Fulfil the http-01 or dns-01 challenge for each pending authorization.
 	m.clearTokens()
 	for _, authzURL := range order.AuthzURLs {
 		authz, err := client.GetAuthorization(ctx, authzURL)
@@ -229,16 +247,49 @@ func (m *Manager) Issue(ctx context.Context) error {
 		if authz.Status == acme.StatusValid {
 			continue // already validated (renewal)
 		}
+		domain := authz.Identifier.Value
 		var chal *acme.Challenge
+		want := "http-01"
+		if m.dns != nil {
+			want = "dns-01"
+		}
 		for _, c := range authz.Challenges {
-			if c.Type == "http-01" {
+			if c.Type == want {
 				chal = c
 				break
 			}
 		}
 		if chal == nil {
-			m.noteErr(fmt.Errorf("no http-01 challenge offered for %s", authz.Identifier.Value))
-			return fmt.Errorf("acme: CA did not offer http-01 challenge for %s", authz.Identifier.Value)
+			m.noteErr(fmt.Errorf("no %s challenge offered for %s", want, domain))
+			return fmt.Errorf("acme: CA did not offer %s challenge for %s", want, domain)
+		}
+		if m.dns != nil {
+			// DNS-01: publish the TXT record, then accept and wait. The record
+			// is removed on every exit path so a failed order never leaks a
+			// stale _acme-challenge record.
+			val, err := client.DNS01ChallengeRecord(chal.Token)
+			if err != nil {
+				m.noteErr(err)
+				return err
+			}
+			if err := m.dns.Present(ctx, domain, val); err != nil {
+				m.noteErr(fmt.Errorf("present dns-01 record for %s: %w", domain, err))
+				return err
+			}
+			defer func() {
+				if err := m.dns.CleanUp(ctx, domain, val); err != nil {
+					log.Printf("[acme] cleanup of %s TXT record: %v", domain, err)
+				}
+			}()
+			if _, err := client.Accept(ctx, chal); err != nil {
+				m.noteErr(fmt.Errorf("accept challenge: %w", err))
+				return err
+			}
+			if _, err := client.WaitAuthorization(ctx, authzURL); err != nil {
+				m.noteErr(fmt.Errorf("wait for authorization of %s: %w", domain, err))
+				return err
+			}
+			continue
 		}
 		resp, err := client.HTTP01ChallengeResponse(chal.Token)
 		if err != nil {
@@ -251,7 +302,7 @@ func (m *Manager) Issue(ctx context.Context) error {
 			return err
 		}
 		if _, err := client.WaitAuthorization(ctx, authzURL); err != nil {
-			m.noteErr(fmt.Errorf("wait for authorization of %s: %w", authz.Identifier.Value, err))
+			m.noteErr(fmt.Errorf("wait for authorization of %s: %w", domain, err))
 			return err
 		}
 	}
@@ -298,6 +349,8 @@ func (m *Manager) Issue(ctx context.Context) error {
 	log.Printf("[acme] certificate issued for %v -> %s", m.domains, m.dir)
 	return nil
 }
+
+
 
 // NeedsRenewal reports whether the current certificate is missing, expired,
 // within the renewal window, or does not cover every configured ACME domain

@@ -289,8 +289,9 @@ written automatically on first launch. Key options:
 | `filter.whitelist` | Always-allow entries (override blocklists, incl. IPs) |
 | `filter.block_response` | `nxdomain`, `refused`, or a blackhole IP like `0.0.0.0` |
 | `tls.cert_file/key_file` | Your Let's Encrypt / CA cert for DoT/DoH/DoQ (else self-signed) |
-| `tls.acme` | Automatic Let's Encrypt issuance: `enabled`, `email`, `domains`, `staging`, `http01_port` |
+| `tls.acme` | Automatic Let's Encrypt issuance: `enabled`, `email`, `domains`, `staging`, `http01_port`, and `dns01` (Cloudflare DNS TXT issuance — no open port needed) |
 | `server.web_tls` | Serve the dashboard + API over HTTPS using the same TLS certificate |
+| `server.web_redirect` | With `web_tls`, also serve plain HTTP on `web_redirect_port` that 301s to HTTPS |
 | `tunnel` | Baked-in cloudflared settings |
 
 ## Cloudflare Tunnel (baked in)
@@ -344,7 +345,7 @@ GET  /api/tls               current certificate details (subject, SANs, expiry, 
 POST /api/tls/generate      generate a self-signed cert (hosts, key type/bits, validity) and apply it
 POST /api/tls/upload        upload a CA-signed cert + key pair and apply it
 GET  /api/tls/cert          download the active certificate (for clients to trust)
-POST /api/tls/acme/issue    trigger an immediate Let's Encrypt issuance/renewal (HTTP-01)
+POST /api/tls/acme/issue    trigger an immediate Let's Encrypt issuance/renewal (HTTP-01 or DNS-01)
 ```
 
 ### TLS config reference
@@ -362,11 +363,20 @@ tls:
   acme:
     enabled: false
     email: "you@example.com"       # required for Let's Encrypt registration
-    domains: ["dns.example.com"]   # must point at this server (HTTP-01 on port 80)
+    domains: ["dns.example.com"]   # public hostnames to cover
     staging: false                  # true = test with the Let's Encrypt staging CA
     http01_port: 80                 # port the HTTP-01 challenge listener binds
     renew_before_days: 30           # renew when < 30 days remain
+    dns01:                          # optional: issue via DNS TXT instead of HTTP-01
+      provider: cloudflare          #   "cloudflare" — no inbound port required
+      cloudflare_token: ""         #   Cloudflare API token with Zone:DNS:Edit
+      propagation_wait_sec: 60      #   wait for TXT records to propagate
 ```
+
+**HTTP-01 vs DNS-01:** HTTP-01 needs the domain to answer on port 80 at this server. DNS-01
+needs a Cloudflare API token (Zone:DNS:Edit) and works anywhere — ideal behind a tunnel or NAT.
+When `server.web_tls` is on, `server.web_redirect: true` adds a plain-HTTP listener
+(`web_redirect_port`, default 80) that 301s every request to `https://<host>/`.
 
 The **TLS** page in the dashboard wraps all of this: view the current certificate (SANs, expiry,
 fingerprint), generate or upload one, trigger ACME issuance, and download the cert for clients. When

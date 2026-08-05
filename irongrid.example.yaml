@@ -10,6 +10,9 @@ server:
   listen_doq: "0.0.0.0:853"    # DNS over QUIC
   doh_path: "/dns-query"       # RFC 8484 path
   web_listen: "0.0.0.0:8080"   # dashboard + REST API
+  # web_tls: true              # serve the dashboard over HTTPS (uses the TLS cert)
+  # web_redirect: true         # with web_tls: plain HTTP on web_redirect_port 301s to HTTPS
+  # web_redirect_port: 80
   timeout_sec: 5               # per-query upstream timeout
 
 # Upstream DNS servers to forward to (udp, tcp, tls, https, quic supported).
@@ -35,6 +38,15 @@ tls:
     - "localhost"
     - "dns.example.com"        # use your real hostname for Android Private DNS
   cert_dir: "data/certs"
+  # acme:                      # Let's Encrypt auto-issuance (see README)
+  #   enabled: false
+  #   email: "you@example.com"
+  #   domains: ["dns.example.com"]
+  #   http01_port: 80
+  #   dns01:                    # optional: issue via DNS TXT (Cloudflare), no open port
+  #     provider: cloudflare
+  #     cloudflare_token: ""
+  #     propagation_wait_sec: 60
 
 filter:
   # What blocked queries receive: "nxdomain", "refused", or an IP like "0.0.0.0".
