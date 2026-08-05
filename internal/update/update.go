@@ -257,10 +257,16 @@ func (c *Client) Install(ctx context.Context, executable string) (*InstallResult
 	}
 
 	// Download into the same directory as the binary so the final rename is
-	// atomic (a rename across filesystems would fail with EXDEV).
-	tmp, err := os.CreateTemp(filepath.Dir(execPath), ".irongrid-update-*")
+	// atomic (a rename across filesystems would fail with EXDEV). Fail fast
+	// with a clear message when the directory is not writable instead of
+	// surfacing a confusing temp-file error.
+	dir := filepath.Dir(execPath)
+	if runtime.GOOS != "windows" && os.Geteuid() != 0 && !isWritableDir(dir) {
+		return nil, fmt.Errorf("cannot write to %s — run as root (or the user owning the install) to update in place", dir)
+	}
+	tmp, err := os.CreateTemp(dir, ".irongrid-update-*")
 	if err != nil {
-		return nil, fmt.Errorf("create temp file: %w", err)
+		return nil, fmt.Errorf("create temp file in %s: %w", dir, err)
 	}
 	tmpName := tmp.Name()
 	defer os.Remove(tmpName)
@@ -275,19 +281,19 @@ func (c *Client) Install(ctx context.Context, executable string) (*InstallResult
 		return nil, err
 	}
 
-	// Verify against the SHA256SUMS.txt published with the release.
+	// Verify against the SHA256SUMS.txt published with the release. The
+	// checksum file is mandatory: a release without it is treated as
+	// untrusted and the install is refused.
 	sum, err := c.checksumFor(ctx, rel, asset.Name)
 	if err != nil {
 		return nil, err
 	}
-	if sum != "" {
-		have, err := sha256File(tmpName)
-		if err != nil {
-			return nil, err
-		}
-		if !strings.EqualFold(have, sum) {
-			return nil, fmt.Errorf("checksum mismatch for %s (want %s, got %s)", asset.Name, sum, have)
-		}
+	have, err := sha256File(tmpName)
+	if err != nil {
+		return nil, err
+	}
+	if !strings.EqualFold(have, sum) {
+		return nil, fmt.Errorf("checksum mismatch for %s (want %s, got %s)", asset.Name, sum, have)
 	}
 
 	// Atomic swap with a rollback copy.
@@ -333,8 +339,8 @@ func (c *Client) downloadTo(ctx context.Context, url string, w io.Writer) error 
 }
 
 // checksumFor finds the sha256 of the named asset in the release's
-// SHA256SUMS.txt. An empty sum means no checksum file was published (the
-// install then skips verification).
+// SHA256SUMS.txt. A release without a checksum file is an error — every
+// published release must ship one.
 func (c *Client) checksumFor(ctx context.Context, rel *release, asset string) (string, error) {
 	var sumsURL string
 	for _, a := range rel.Assets {
@@ -344,7 +350,7 @@ func (c *Client) checksumFor(ctx context.Context, rel *release, asset string) (s
 		}
 	}
 	if sumsURL == "" {
-		return "", nil
+		return "", fmt.Errorf("release %s has no SHA256SUMS.txt — refusing unverified install", rel.TagName)
 	}
 	client := c.HTTPClient
 	if client == nil {
@@ -375,6 +381,56 @@ func (c *Client) checksumFor(ctx context.Context, rel *release, asset string) (s
 		}
 	}
 	return "", fmt.Errorf("no checksum entry for %s in SHA256SUMS.txt", asset)
+}
+
+// isWritableDir reports whether the current user may create files in dir.
+// The real create test happens later; this is a cheap pre-check for a clear
+// error message.
+func isWritableDir(dir string) bool {
+	tmp, err := os.CreateTemp(dir, ".irongrid-write-test-*")
+	if err != nil {
+		return false
+	}
+	name := tmp.Name()
+	tmp.Close()
+	os.Remove(name)
+	return true
+}
+
+// UnitName discovers the systemd unit that manages the current process,
+// used to restart the service after an in-place update. It reads the
+// process cgroup (/proc/self/cgroup), falling back to the executable's
+// basename and finally a fixed candidate list. An empty result means the
+// process is not (obviously) systemd-managed — callers should treat the
+// service as manually restarted.
+func UnitName() string {
+	// 1. cgroup: the unit is the *.service component of the slice path.
+	if data, err := os.ReadFile("/proc/self/cgroup"); err == nil {
+		for _, line := range strings.Split(string(data), "\n") {
+			for _, part := range strings.Split(line, ":") {
+				p := strings.TrimSpace(part)
+				if i := strings.Index(p, ".service"); i >= 0 {
+					unit := p[strings.LastIndex(p, "/")+1:]
+					unit = unit[:i+len(".service")]
+					if strings.HasSuffix(unit, ".service") {
+						return unit
+					}
+				}
+			}
+		}
+	}
+	// 2. Executable basename ("irongrid" → "irongrid.service").
+	if exe, err := os.Executable(); err == nil {
+		base := strings.TrimSuffix(filepath.Base(exe), ".exe")
+		if base != "" {
+			return base + ".service"
+		}
+	}
+	// 3. Fixed candidates (the unit name used by the official installer).
+	if _, err := os.Stat("/etc/systemd/system/irongrid.service"); err == nil {
+		return "irongrid.service"
+	}
+	return ""
 }
 
 // sha256File returns the hex sha256 of a file.

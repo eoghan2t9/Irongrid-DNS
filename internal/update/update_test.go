@@ -267,6 +267,59 @@ func TestInstall(t *testing.T) {
 	}
 }
 
+// releaseWithoutSums serves a release whose assets lack SHA256SUMS.txt —
+// such releases must be refused as unverified.
+func releaseWithoutSums(t *testing.T, bin []byte) *httptest.Server {
+	t.Helper()
+	name := assetName(runtime.GOOS, runtime.GOARCH)
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/release", func(w http.ResponseWriter, r *http.Request) {
+		body := fmt.Sprintf(`{"tag_name":"v9.9.9","assets":[{"name":%q,"browser_download_url":%q,"size":%d}]}`,
+			name, srv.URL+"/binary", len(bin))
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(body))
+	})
+	mux.HandleFunc("/binary", func(w http.ResponseWriter, r *http.Request) { w.Write(bin) })
+	srv = httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestInstallRefusesReleaseWithoutChecksums(t *testing.T) {
+	bin := []byte("new binary")
+	srv := releaseWithoutSums(t, bin)
+
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, "irongrid")
+	if err := os.WriteFile(execPath, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL + "/release"}
+	if _, err := c.Install(context.Background(), execPath); err == nil || !strings.Contains(err.Error(), "SHA256SUMS.txt") {
+		t.Fatalf("expected refusal for release without checksums, got %v", err)
+	}
+	// The old binary must be untouched.
+	got, _ := os.ReadFile(execPath)
+	if string(got) != "old binary" {
+		t.Error("binary changed despite failed install")
+	}
+}
+
+func TestUnitName(t *testing.T) {
+	// On a systemd host the cgroup or executable name always yields a
+	// *.service; otherwise it falls back to the executable basename, which
+	// is never empty for a running test binary.
+	name := UnitName()
+	if name == "" {
+		t.Fatal("UnitName returned empty")
+	}
+	if !strings.HasSuffix(name, ".service") {
+		t.Errorf("UnitName = %q, want a *.service unit name", name)
+	}
+}
+
 func TestInstallChecksumMismatch(t *testing.T) {
 	bin := []byte("new binary")
 	srv := installTestServer(t, bin, false) // wrong checksum served

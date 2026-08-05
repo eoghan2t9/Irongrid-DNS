@@ -62,8 +62,10 @@ export default function UpdateChecker({ onNavigate }) {
   }
 
   // In-place update: the server downloads the release, verifies its checksum
-  // and swaps its own binary, then restarts the service. The page reloads
-  // once the service is back (the session cookie keeps us logged in).
+  // and swaps its own binary, then restarts the service. Once the install
+  // response arrives we poll /api/status until the service answers again and
+  // then reload — the HMAC session cookie survives the restart, so we stay
+  // logged in.
   const install = async () => {
     if (installing !== 'idle' || !info) return
     setInstallNotice('')
@@ -73,7 +75,26 @@ export default function UpdateChecker({ onNavigate }) {
       if (res && res.restarting) {
         setInstalling('restarting')
         setInstallNotice('Installed — restarting the service…')
-        setTimeout(() => window.location.reload(), 6000)
+        // Poll /api/status every 1.5s (up to 45s); reload once it answers.
+        const deadline = Date.now() + 45000
+        const tick = async () => {
+          try {
+            const st = await api.status()
+            if (st && st.version) {
+              window.location.reload()
+              return
+            }
+          } catch (e) {
+            // service still down — keep polling
+          }
+          if (Date.now() < deadline) {
+            setTimeout(tick, 1500)
+          } else {
+            setInstalling('idle')
+            setInstallNotice('The service restarted slowly — click reload to continue.')
+          }
+        }
+        setTimeout(tick, 1500)
       } else {
         setInstalling('idle')
         setInstallNotice((res && res.note) || 'Update installed. Restart Irongrid manually to apply it.')

@@ -65,6 +65,11 @@ type Handler struct {
 	Catalog   *catalog.Catalog
 	StartedAt time.Time
 	Version   string
+
+	// lastInstalledVersion is set after a successful in-place update and
+	// cleared on restart (process exit). It guards against installing twice
+	// before the restart, which would clobber the .prev rollback copy.
+	lastInstalledVersion string
 }
 
 // ConfigMu exposes the mutex that guards Cfg mutations so the App's auth
@@ -1222,11 +1227,22 @@ var installUpdateMu sync.Mutex
 
 // installUpdate downloads the release asset for this platform, verifies it
 // against SHA256SUMS.txt, atomically swaps the running binary and — when the
-// service is systemd-managed — schedules a restart after the response has
-// flushed so the client sees a clean result before the process goes away.
+// service is systemd-managed — schedules a restart via a detached systemd-run
+// transient unit, so the restart outlives this process and the HTTP response
+// is guaranteed to flush first.
 func (h *Handler) installUpdate(ctx context.Context, w http.ResponseWriter) {
 	installUpdateMu.Lock()
 	defer installUpdateMu.Unlock()
+
+	// h.Version is the version the process started with. Once a swap has
+	// happened it is stale, so refuse a second install until the restart —
+	// this also preserves the .prev rollback copy from being overwritten.
+	if h.lastInstalledVersion != "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{
+			"error": fmt.Sprintf("v%s was already installed and is pending a restart", h.lastInstalledVersion),
+		})
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
@@ -1241,25 +1257,30 @@ func (h *Handler) installUpdate(ctx context.Context, w http.ResponseWriter) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
+	h.lastInstalledVersion = res.NewVersion
 
 	payload := map[string]any{
 		"previous_version": res.PreviousVersion,
 		"new_version":      res.NewVersion,
 		"installed_to":     res.InstalledTo,
+		"rollback_path":    res.InstalledTo + ".prev",
 		"asset_name":       res.AssetName,
 		"asset_size":       res.AssetSize,
 	}
-	if _, err := os.Stat("/run/systemd/system"); err == nil {
+	unit := update.UnitName()
+	_, systemdRunOK := exec.LookPath("systemd-run")
+	if unit != "" && systemdRunOK == nil {
 		payload["restarting"] = true
-		payload["restart_cmd"] = "systemctl restart irongrid"
-		go func() {
-			// Let the HTTP response flush before the service (and this
-			// process) is restarted.
-			time.Sleep(500 * time.Millisecond)
-			if out, err := exec.Command("systemctl", "restart", "irongrid").CombinedOutput(); err != nil {
-				log.Printf("[update] restart failed: %v: %s", err, out)
+		payload["unit"] = unit
+		go func(unit string) {
+			// Detached transient unit: fires once after 1s and is not a
+			// child of this process, so the response always flushes and the
+			// restart survives even if the service is killed instantly.
+			cmd := exec.Command("systemd-run", "--unit=irongrid-update", "--on-active=1", "systemctl", "restart", unit)
+			if out, err := cmd.CombinedOutput(); err != nil {
+				log.Printf("[update] schedule restart failed: %v: %s", err, out)
 			}
-		}()
+		}(unit)
 	} else {
 		payload["restarting"] = false
 		payload["note"] = "Binary updated. Restart Irongrid manually to run the new version."
