@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
+import { useToast } from '../toast'
 
 const PRESETS = [
   { name: 'OISD Big (comprehensive)', url: 'https://big.oisd.nl/', enabled: true, auto_update_hours: 24 },
@@ -11,12 +12,12 @@ const PRESETS = [
 const fmtWhen = (t) => (t ? new Date(t).toLocaleString([], { hour12: false }) : 'never')
 
 export default function Blocklists() {
+  const toast = useToast()
   const [lists, setLists] = useState([])
   const [presets, setPresets] = useState([])
   const [busy, setBusy] = useState(false)
   const [adding, setAdding] = useState(false)
   const [form, setForm] = useState({ id: '', name: '', url: '', enabled: true, auto_update_hours: 24 })
-  const [msg, setMsg] = useState('')
   const [search, setSearch] = useState('')
   const [category, setCategory] = useState('all')
 
@@ -35,62 +36,72 @@ export default function Blocklists() {
 
   const toggle = async (id, enabled) => {
     const l = lists.find((x) => x.spec.id === id)
-    await api.updateList(id, { id: l.spec.id, name: l.spec.name, url: l.spec.url, enabled, auto_update_hours: hoursOf(l.spec.auto_update) })
-    load()
+    try {
+      await api.updateList(id, { id: l.spec.id, name: l.spec.name, url: l.spec.url, enabled, auto_update_hours: hoursOf(l.spec.auto_update) })
+      load()
+    } catch (e) {
+      toast('Failed to update: ' + e.message, 'error')
+    }
   }
 
   const remove = async (id) => {
     if (!confirm('Remove this blocklist?')) return
-    await api.deleteList(id)
-    load()
+    try {
+      await api.deleteList(id)
+      load()
+    } catch (e) {
+      toast('Failed to remove: ' + e.message, 'error')
+    }
   }
 
   const refreshAll = async () => {
-    setBusy(true); setMsg('Updating lists…')
+    setBusy(true)
     try {
       await api.refreshLists()
-      setMsg('All lists updated')
-    } catch (e) { setMsg('Update failed: ' + e.message) }
+      toast('All lists updated')
+    } catch (e) {
+      toast('Update failed: ' + e.message, 'error')
+    }
     setBusy(false)
     load()
   }
 
   const addPreset = async (p) => {
     if (lists.some((l) => l.spec.id === p.id)) return
-    setBusy(true); setMsg(`Adding "${p.name}" — fetching content…`)
+    setBusy(true)
     try {
       await api.addList({ id: p.id, name: p.name, url: p.url, enabled: true, auto_update_hours: presetHours(p) })
-      setMsg('Fetching list content…')
       await api.refreshList(p.id)
-      setMsg(`Added "${p.name}"`)
+      toast(`Added "${p.name}"`)
       load()
-    } catch (e) { setMsg('Failed: ' + e.message) }
+    } catch (e) {
+      toast('Failed: ' + e.message, 'error')
+    }
     setBusy(false)
   }
 
   const submit = async (e) => {
     e.preventDefault()
-    if (!form.id || !form.url) { setMsg('ID and URL are required'); return }
+    if (!form.id || !form.url) { toast('ID and URL are required', 'error'); return }
     try {
       await api.addList(form)
       setAdding(false)
       setForm({ id: '', name: '', url: '', enabled: true, auto_update_hours: 24 })
-      setMsg('List added — fetching content…')
       await api.refreshList(form.id)
-      setMsg('List added and loaded')
+      toast('List added and loaded')
       load()
-    } catch (err) { setMsg('Failed: ' + err.message) }
+    } catch (err) {
+      toast('Failed: ' + err.message, 'error')
+    }
   }
 
   return (
     <div className="stack">
-      {msg && <div className="info-banner">{msg}</div>}
-
       <div className="card">
         <div className="row-between">
           <h3>Active blocklists ({lists.filter((l) => l.spec.enabled).length}/{lists.length})</h3>
           <div className="row">
-            <button className="btn ghost" onClick={load}>⟳</button>
+            <button className="btn ghost" onClick={load} aria-label="Refresh blocklist status">⟳</button>
             <button className="btn" onClick={refreshAll} disabled={busy}>{busy ? 'Updating…' : 'Update all'}</button>
             <button className="btn primary" onClick={() => setAdding(!adding)}>
               {adding ? 'Cancel' : '+ Add list'}
@@ -221,7 +232,12 @@ export default function Blocklists() {
                 <tr key={s.id} className={s.enabled ? '' : 'row-dim'}>
                   <td>
                     <label className="switch">
-                      <input type="checkbox" checked={s.enabled} onChange={(e) => toggle(s.id, e.target.checked)} />
+                      <input
+                        type="checkbox"
+                        checked={s.enabled}
+                        onChange={(e) => toggle(s.id, e.target.checked)}
+                        aria-label={`Enable ${s.name || s.id}`}
+                      />
                       <span className="slider" />
                     </label>
                   </td>
@@ -235,8 +251,13 @@ export default function Blocklists() {
                   <td>{s.auto_update > 0 ? `${hoursOf(s.auto_update)}h` : '—'}</td>
                   <td>
                     <div className="row">
-                      <button className="btn ghost small" onClick={() => api.refreshList(s.id).then(load)}>Update</button>
-                      <button className="btn danger ghost small" onClick={() => remove(s.id)}>✕</button>
+                      <button
+                        className="btn ghost small"
+                        onClick={() => api.refreshList(s.id).then(load).catch((e) => toast(`Failed to update "${s.name || s.id}": ` + e.message, 'error'))}
+                      >
+                        Update
+                      </button>
+                      <button className="btn danger ghost small" onClick={() => remove(s.id)} aria-label={`Remove ${s.name || s.id}`}>✕</button>
                     </div>
                   </td>
                 </tr>

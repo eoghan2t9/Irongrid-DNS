@@ -1,14 +1,15 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
+import { useToast } from '../toast'
 
 export default function Tunnel() {
+  const toast = useToast()
   const [status, setStatus] = useState(null)
   const [mode, setMode] = useState('quick')
   const [token, setToken] = useState('')
   const [configFile, setConfigFile] = useState('')
   const [origin, setOrigin] = useState('http://localhost:8080')
   const [logLines, setLogLines] = useState([])
-  const [msg, setMsg] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -28,7 +29,6 @@ export default function Tunnel() {
 
   const start = async (e) => {
     e.preventDefault()
-    setMsg('Starting tunnel…')
     try {
       await api.tunnelStart({
         mode,
@@ -37,23 +37,25 @@ export default function Tunnel() {
         origin,
         hostname: '',
       })
-      setMsg('Tunnel started')
+      toast('Tunnel started')
       load()
     } catch (err) {
-      setMsg('Failed: ' + err.message)
+      toast('Failed: ' + err.message, 'error')
     }
   }
 
   const stop = async () => {
-    await api.tunnelStop()
-    setMsg('Tunnel stopped')
-    load()
+    try {
+      await api.tunnelStop()
+      toast('Tunnel stopped')
+      load()
+    } catch (e) {
+      toast('Failed to stop: ' + e.message, 'error')
+    }
   }
 
   return (
     <div className="stack">
-      {msg && <div className="info-banner">{msg}</div>}
-
       <div className="card">
         <div className="row-between">
           <h3>Cloudflare Tunnel (cloudflared baked in)</h3>

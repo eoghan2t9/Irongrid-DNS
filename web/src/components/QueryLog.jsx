@@ -72,7 +72,7 @@ export default function QueryLog() {
             <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
             Live
           </label>
-          <button className="btn ghost" onClick={load}>⟳</button>
+          <button className="btn ghost" onClick={load} aria-label="Refresh query log">⟳</button>
           <button className="btn danger ghost" onClick={clearLog}>Clear</button>
         </div>
       </div>

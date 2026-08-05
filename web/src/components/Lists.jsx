@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
+import { useToast } from '../toast'
 
 const PAGE_SIZE = 50
 
@@ -37,7 +38,7 @@ function ListCard({ k, items, onRemove }) {
             {slice.map((it) => (
               <li className="tag" key={it}>
                 <span className="mono">{it}</span>
-                <button className="tag-x" onClick={() => onRemove(k, it)} title="Remove">✕</button>
+                <button className="tag-x" onClick={() => onRemove(k, it)} title="Remove" aria-label={`Remove ${it}`}>✕</button>
               </li>
             ))}
           </ul>
@@ -59,6 +60,7 @@ function ListCard({ k, items, onRemove }) {
 }
 
 export default function Lists() {
+  const toast = useToast()
   const [whitelist, setWhitelist] = useState([])
   const [blacklist, setBlacklist] = useState([])
   const [whitelistPresets, setWhitelistPresets] = useState([])
@@ -67,7 +69,6 @@ export default function Lists() {
   const [kind, setKind] = useState('whitelist')
   const [checkName, setCheckName] = useState('')
   const [checkResult, setCheckResult] = useState(null)
-  const [msg, setMsg] = useState('')
 
   const load = useCallback(async () => {
     const [w, b] = await Promise.all([api.getFilterList('whitelist'), api.getFilterList('blacklist')])
@@ -86,25 +87,37 @@ export default function Lists() {
   const addPreset = async (p) => {
     const existing = new Set(whitelist)
     const fresh = (p.domains || []).filter((d) => !existing.has(d))
-    if (fresh.length === 0) { setMsg(`"${p.name}" domains are already on the allow list.`); return }
-    for (const d of fresh) await api.addFilterEntry('whitelist', d)
-    setMsg(`Added ${fresh.length} domains from "${p.name}" to the allow list.`)
-    load()
+    if (fresh.length === 0) { toast(`"${p.name}" domains are already on the allow list.`); return }
+    try {
+      for (const d of fresh) await api.addFilterEntry('whitelist', d)
+      toast(`Added ${fresh.length} domains from "${p.name}" to the allow list.`)
+      load()
+    } catch (e) {
+      toast('Failed to add preset: ' + e.message, 'error')
+    }
   }
 
   const add = async (e) => {
     e.preventDefault()
     const value = entry.trim()
     if (!value) return
-    await api.addFilterEntry(kind, value)
-    setEntry('')
-    setMsg(`Added "${value}" to ${kind}`)
-    load()
+    try {
+      await api.addFilterEntry(kind, value)
+      setEntry('')
+      toast(`Added "${value}" to ${kind}`)
+      load()
+    } catch (err) {
+      toast('Failed to add: ' + err.message, 'error')
+    }
   }
 
   const remove = async (k, value) => {
-    await api.deleteFilterEntry(k, value)
-    load()
+    try {
+      await api.deleteFilterEntry(k, value)
+      load()
+    } catch (e) {
+      toast('Failed to remove: ' + e.message, 'error')
+    }
   }
 
   const check = async (e) => {
@@ -120,8 +133,6 @@ export default function Lists() {
 
   return (
     <div className="stack">
-      {msg && <div className="info-banner">{msg}</div>}
-
       <div className="card">
         <h3>Add entry</h3>
         <form onSubmit={add} className="form-grid">

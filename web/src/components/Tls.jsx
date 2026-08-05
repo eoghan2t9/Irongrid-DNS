@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
+import { useToast } from '../toast'
 
 const fmtDate = (iso) => {
   if (!iso) return '—'
@@ -15,10 +16,9 @@ const TRUST_STEPS = [
 ]
 
 export default function Tls() {
+  const toast = useToast()
   const [status, setStatus] = useState(null)
   const [busy, setBusy] = useState(false)
-  const [msg, setMsg] = useState('')
-  const [err, setErr] = useState('')
   const [showTrust, setShowTrust] = useState(false)
 
   // generate form
@@ -35,29 +35,28 @@ export default function Tls() {
     try {
       setStatus(await api.tlsStatus())
     } catch (e) {
-      setErr(e.message)
+      toast(e.message, 'error')
     }
-  }, [])
+  }, [toast])
 
   useEffect(() => { load() }, [load])
 
   const generate = async (e) => {
     e.preventDefault()
     setBusy(true)
-    setErr('')
-    setMsg('')
     try {
       const hostList = hosts.split('\n').map((s) => s.trim()).filter(Boolean)
       if (!hostList.length) throw new Error('enter at least one host')
       const r = await api.tlsGenerate({ hosts: hostList, key_type: keyType, key_bits: Number(keyBits), days: Number(days) })
       setStatus(r.status)
-      setMsg(
+      toast(
         r.applied
           ? 'Certificate generated and applied to the DoT/DoH/DoQ listeners.'
-          : `Certificate saved but could not be applied in place: ${r.apply_error || 'reload hook unavailable'}.`
+          : `Certificate saved but could not be applied in place: ${r.apply_error || 'reload hook unavailable'}.`,
+        r.applied ? 'info' : 'error'
       )
     } catch (e) {
-      setErr(e.message)
+      toast(e.message, 'error')
     } finally {
       setBusy(false)
     }
@@ -66,18 +65,17 @@ export default function Tls() {
   const upload = async (e) => {
     e.preventDefault()
     setBusy(true)
-    setErr('')
-    setMsg('')
     try {
       const r = await api.tlsUpload({ cert_pem: certPEM, key_pem: keyPEM })
       setStatus(r.status)
-      setMsg(
+      toast(
         r.applied
           ? 'Certificate uploaded and applied to the DoT/DoH/DoQ listeners.'
-          : `Certificate saved but could not be applied in place: ${r.apply_error || 'reload hook unavailable'}.`
+          : `Certificate saved but could not be applied in place: ${r.apply_error || 'reload hook unavailable'}.`,
+        r.applied ? 'info' : 'error'
       )
     } catch (e) {
-      setErr(e.message)
+      toast(e.message, 'error')
     } finally {
       setBusy(false)
     }
@@ -92,26 +90,25 @@ export default function Tls() {
       a.download = 'irongrid-cert.pem'
       a.click()
       URL.revokeObjectURL(url)
-      setMsg('Certificate downloaded — install it as a trusted CA on your clients.')
+      toast('Certificate downloaded — install it as a trusted CA on your clients.')
     } catch (e) {
-      setErr(e.message)
+      toast(e.message, 'error')
     }
   }
 
   const issueAcme = async () => {
     setBusy(true)
-    setErr('')
-    setMsg('')
     try {
       const r = await api.tlsAcmeIssue()
       setStatus(r.status)
-      setMsg(
+      toast(
         r.applied
           ? 'Let\'s Encrypt certificate issued and applied to the listeners.'
-          : `Certificate issued but could not be applied in place: ${r.apply_error || 'reload hook unavailable'}.`
+          : `Certificate issued but could not be applied in place: ${r.apply_error || 'reload hook unavailable'}.`,
+        r.applied ? 'info' : 'error'
       )
     } catch (e) {
-      setErr('ACME issuance failed: ' + e.message)
+      toast('ACME issuance failed: ' + e.message, 'error')
     } finally {
       setBusy(false)
     }
@@ -133,9 +130,6 @@ export default function Tls() {
 
   return (
     <div className="stack">
-      {msg && <div className="info-banner">{msg}</div>}
-      {err && <div className="error-banner">{err}</div>}
-
       <div className="card">
         <div className="row-between">
           <h3 style={{ margin: 0 }}>SSL / TLS certificate</h3>
@@ -371,7 +365,7 @@ export default function Tls() {
                   <span className="modal-date">install as a trusted CA on each client</span>
                 </div>
               </div>
-              <button className="modal-x" onClick={() => setShowTrust(false)}>✕</button>
+              <button className="modal-x" onClick={() => setShowTrust(false)} aria-label="Close">✕</button>
             </div>
             <div className="modal-body changelog">
               {TRUST_STEPS.map((t) => (
