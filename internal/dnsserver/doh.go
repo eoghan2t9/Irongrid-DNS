@@ -18,6 +18,16 @@ import (
 
 const dnsMessageContentType = "application/dns-message"
 
+// DoHHandler returns an http.Handler serving RFC 8484 DNS-over-HTTPS
+// requests. It is used when the web server shares its HTTPS listener with
+// DoH (server.web_listen and server.listen_doh on the same port), so the
+// dashboard and /dns-query are served from one port.
+func (m *Manager) DoHHandler() http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		m.handleDoH(w, r)
+	})
+}
+
 // startDoH launches the RFC 8484 DNS-over-HTTPS server.
 func (m *Manager) startDoH(addr, path string) error {
 	mux := http.NewServeMux()

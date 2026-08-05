@@ -289,6 +289,18 @@ func (c *Config) validate() error {
 	if c.Server.WebRedirect && c.Server.WebRedirectPort == webPort(c.Server.WebListen) {
 		return fmt.Errorf("server.web_redirect_port %d collides with the HTTPS web server port", c.Server.WebRedirectPort)
 	}
+	// When the dashboard shares the DoH port, it must serve HTTPS so the
+	// merged listener can carry /dns-query (RFC 8484 requires TLS), and the
+	// DoH path must be a valid non-root path for the shared mux.
+	if c.Server.ListenDoH != "" && c.Server.WebListen != "" &&
+		webPort(c.Server.ListenDoH) == webPort(c.Server.WebListen) {
+		if !c.Server.WebTLS {
+			return fmt.Errorf("server.web_listen %s shares port with listen_doh %s — enable server.web_tls to serve the dashboard and DoH on one HTTPS port", c.Server.WebListen, c.Server.ListenDoH)
+		}
+		if c.Server.DoHPath == "" {
+			return fmt.Errorf("server.doh_path is required when web_listen shares the DoH port")
+		}
+	}
 	if c.Web.Username == "" {
 		return fmt.Errorf("web.username is required")
 	}

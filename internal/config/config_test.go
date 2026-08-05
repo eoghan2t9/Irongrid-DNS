@@ -40,6 +40,41 @@ func TestValidateWebRedirectRequiresWebTLS(t *testing.T) {
 	}
 }
 
+func TestValidateWebSharesDoHPort(t *testing.T) {
+	c := validBase()
+	c.Server.WebListen = "0.0.0.0:443"
+	c.Server.ListenDoH = "0.0.0.0:443"
+	c.Server.DoHPath = "/dns-query"
+	c.Server.WebTLS = true
+	if err := c.Validate(); err != nil {
+		t.Fatalf("dashboard sharing the DoH port with web_tls rejected: %v", err)
+	}
+}
+
+func TestValidateWebSharesDoHRequiresWebTLS(t *testing.T) {
+	c := validBase()
+	c.Server.WebListen = "0.0.0.0:443"
+	c.Server.ListenDoH = "0.0.0.0:443"
+	c.Server.DoHPath = "/dns-query"
+	c.Server.WebTLS = false // DoH needs TLS on the merged listener
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "web_tls") {
+		t.Fatalf("err = %v, want web_tls-required error when sharing the DoH port", err)
+	}
+}
+
+func TestValidateWebSharesDoHRequiresDoHPath(t *testing.T) {
+	c := validBase()
+	c.Server.WebListen = "0.0.0.0:443"
+	c.Server.ListenDoH = "0.0.0.0:443"
+	c.Server.DoHPath = "" // shared mux needs a non-empty path
+	c.Server.WebTLS = true
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "doh_path") {
+		t.Fatalf("err = %v, want doh_path-required error when sharing the DoH port", err)
+	}
+}
+
 func TestValidateWebRedirectPortCollision(t *testing.T) {
 	c := validBase()
 	c.Server.WebTLS = true

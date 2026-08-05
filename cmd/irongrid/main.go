@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/net/http2"
+
 	"github.com/eoghan2t9/Irongrid-DNS/internal/acme"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/api"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
@@ -145,9 +147,28 @@ func main() {
 		time.Duration(cfg.Server.TimeoutSec)*time.Second,
 	)
 	dnsMgr := dnsserver.NewManager(handler, tlsConf)
+	// webSharesDoH reports whether the dashboard and DoH share one HTTPS port
+	// (server.web_listen == server.listen_doh with web_tls on). In that case
+	// the web server also serves /dns-query and no standalone DoH listener is
+	// started. Computed from cfg at call time so reloads pick up changes.
+	webSharesDoH := func() bool {
+		return cfg.Server.WebTLS && cfg.Server.ListenDoH != "" && cfg.Server.WebListen != "" &&
+			webTLSPort(cfg.Server.ListenDoH) == webTLSPort(cfg.Server.WebListen)
+	}
+	// dohAddr is the address the DNS manager should bind DoH on: empty when
+	// the web server serves /dns-query on the shared HTTPS port.
+	dohAddr := func() string {
+		if webSharesDoH() {
+			return ""
+		}
+		return cfg.Server.ListenDoH
+	}
+	if webSharesDoH() {
+		log.Printf("[web] dashboard and DoH share %s — serving /dns-query on the dashboard HTTPS listener", cfg.Server.WebListen)
+	}
 	results, err := dnsMgr.Start(
 		cfg.Server.ListenUDP, cfg.Server.ListenTCP,
-		cfg.Server.ListenDoT, cfg.Server.ListenDoH, cfg.Server.ListenDoQ,
+		cfg.Server.ListenDoT, dohAddr(), cfg.Server.ListenDoQ,
 		cfg.Server.DoHPath,
 	)
 	if err != nil {
@@ -267,10 +288,24 @@ func main() {
 	}
 	startACME()
 
+	// webHandler returns the web-server handler: the dashboard + API router,
+	// wrapped so the DoH endpoint is served from the same listener when the
+	// dashboard shares its HTTPS port with DoH.
+	webHandler := func() http.Handler {
+		router := api.NewRouter(apiApp)
+		if !webSharesDoH() {
+			return router
+		}
+		mux := http.NewServeMux()
+		mux.Handle(cfg.Server.DoHPath, dnsMgr.DoHHandler())
+		mux.Handle("/", router)
+		return mux
+	}
+
 	// ---- web server (dashboard + API) ----
 	webSrv := &http.Server{
 		Addr:         cfg.Server.WebListen,
-		Handler:      api.NewRouter(apiApp),
+		Handler:      webHandler(),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
@@ -289,6 +324,15 @@ func main() {
 				log.Printf("[web] cannot enable HTTPS: %v (falling back to plain HTTP)", err)
 				go func() { _ = srv.ListenAndServe() }()
 				return
+			}
+			// When DoH shares this listener, advertise HTTP/2 (RFC 8484
+			// recommends h2 for DoH clients).
+			if webSharesDoH() {
+				wtls = wtls.Clone()
+				wtls.NextProtos = []string{"h2", "http/1.1"}
+				if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
+					log.Printf("[web] http2 setup: %v", err)
+				}
 			}
 			go func() {
 				ln, err := net.Listen("tcp", srv.Addr)
@@ -374,7 +418,7 @@ func main() {
 		}
 		if err := dnsMgr.Restart(
 			cfg.Server.ListenUDP, cfg.Server.ListenTCP,
-			cfg.Server.ListenDoT, cfg.Server.ListenDoH, cfg.Server.ListenDoQ,
+			cfg.Server.ListenDoT, dohAddr(), cfg.Server.ListenDoQ,
 			cfg.Server.DoHPath, newTLS,
 		); err != nil {
 			return fmt.Errorf("dns listeners: %w", err)
@@ -402,7 +446,7 @@ func main() {
 			oldWeb := webSrv
 			newWeb := &http.Server{
 				Addr:         cfg.Server.WebListen,
-				Handler:      api.NewRouter(apiApp),
+				Handler:      webHandler(),
 				ReadTimeout:  30 * time.Second,
 				WriteTimeout: 30 * time.Second,
 			}
@@ -462,7 +506,7 @@ func main() {
 		//    reported asynchronously via the results channel, not as errors.
 		if err := dnsMgr.Restart(
 			cfg.Server.ListenUDP, cfg.Server.ListenTCP,
-			cfg.Server.ListenDoT, cfg.Server.ListenDoH, cfg.Server.ListenDoQ,
+			cfg.Server.ListenDoT, dohAddr(), cfg.Server.ListenDoQ,
 			cfg.Server.DoHPath, newTLS,
 		); err != nil {
 			_ = newCache.Close()
@@ -492,7 +536,7 @@ func main() {
 			oldWeb := webSrv
 			newWeb := &http.Server{
 				Addr:         cfg.Server.WebListen,
-				Handler:      api.NewRouter(apiApp),
+				Handler:      webHandler(),
 				ReadTimeout:  30 * time.Second,
 				WriteTimeout: 30 * time.Second,
 			}
@@ -614,3 +658,5 @@ func hostOnly(addr string) string {
 	}
 	return host
 }
+
+

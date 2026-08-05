@@ -76,6 +76,30 @@ func TestBuildConfigWhitelistDedup(t *testing.T) {
 	}
 }
 
+// webOnDoHPort puts the dashboard on the same HTTPS port as DoH
+// (https://host, no :8080 suffix).
+func TestBuildConfigWebOnDoHPort(t *testing.T) {
+	a := testAnswers()
+	a.webOnDoHPort = true
+	cfg, err := a.buildConfig(catalog.Default())
+	if err != nil {
+		t.Fatalf("buildConfig: %v", err)
+	}
+	if cfg.Server.WebListen != cfg.Server.ListenDoH {
+		t.Errorf("WebListen = %q, want shared with ListenDoH %q", cfg.Server.WebListen, cfg.Server.ListenDoH)
+	}
+	if !cfg.Server.WebTLS {
+		t.Error("WebTLS should be enabled when the dashboard shares the DoH port")
+	}
+	if !cfg.Server.WebRedirect {
+		t.Error("WebRedirect should be enabled when the dashboard shares the DoH port")
+	}
+	// The generated config must pass validation (web_tls required on shared port).
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
 func TestBuildConfigNoProtocolsFails(t *testing.T) {
 	a := testAnswers()
 	a.protos = []string{}

@@ -63,6 +63,9 @@ type answers struct {
 	webUser         string
 	webPass         string
 	webConfirm      string
+	// webOnDoHPort serves the dashboard on the same HTTPS port as DoH
+	// (https://host, no :8080 suffix) when DoH is enabled.
+	webOnDoHPort   bool
 	tlsHosts        string
 	installDragonfly bool // native mode: install and start Dragonfly after writing the config
 	confirm         bool
@@ -263,7 +266,7 @@ func (w *wizard) askListeners() error {
 	if w.a.protos == nil {
 		w.a.protos = []string{"UDP", "TCP"}
 	}
-	return w.newForm(
+	if err := w.newForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("DNS listeners").
@@ -284,7 +287,36 @@ func (w *wizard) askListeners() error {
 				Placeholder("0.0.0.0").
 				Value(&w.a.listenHost),
 		),
-	).Run()
+	).Run(); err != nil {
+		return err
+	}
+	// When DoH is enabled, offer to serve the dashboard on the same HTTPS
+	// port so it is reachable at https://host (no :8080 suffix).
+	if containsStr(w.a.protos, "DoH") {
+		if err := w.newForm(
+			huh.NewGroup(
+				huh.NewConfirm().
+					Title("Serve the dashboard on the DoH port too?").
+					Description("Put the web dashboard on https://<host> (port 443, shared with DoH) instead of :8080, so it opens without a port suffix. Requires HTTPS (web_tls) which uses the TLS certificate.").
+					Affirmative("Yes — dashboard at https://host").
+					Negative("No — keep :8080").
+					Value(&w.a.webOnDoHPort),
+			),
+		).Run(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// containsStr reports whether a slice contains the given string.
+func containsStr(list []string, want string) bool {
+	for _, s := range list {
+		if s == want {
+			return true
+		}
+	}
+	return false
 }
 
 func (w *wizard) askUpstreams() error {
@@ -473,7 +505,11 @@ func (w *wizard) askConfirm() error {
 	summary.WriteString(fmt.Sprintf("Cache      : %s\n", cacheLine))
 	summary.WriteString(fmt.Sprintf("Blocklists : %d selected\n", len(a.blocklists)))
 	summary.WriteString(fmt.Sprintf("Whitelists : %d presets\n", len(a.whitelists)))
-	summary.WriteString(fmt.Sprintf("Dashboard  : %s / %s\n", a.webUser, "********"))
+	dashURL := "http://host:8080"
+	if a.webOnDoHPort {
+		dashURL = "https://host (shared with DoH)"
+	}
+	summary.WriteString(fmt.Sprintf("Dashboard  : %s / %s  → %s\n", a.webUser, "********", dashURL))
 	return w.newForm(
 		huh.NewGroup(
 			huh.NewNote().
@@ -584,6 +620,13 @@ func (a *answers) buildConfig(cat *catalog.Catalog) (*config.Config, error) {
 
 	cfg.Web.Username = a.webUser
 	cfg.Web.Password = a.webPass
+
+	// Dashboard on the DoH port (https://host, no :8080).
+	if a.webOnDoHPort && cfg.Server.ListenDoH != "" {
+		cfg.Server.WebListen = cfg.Server.ListenDoH
+		cfg.Server.WebTLS = true
+		cfg.Server.WebRedirect = true
+	}
 
 	if a.tlsHosts != "" {
 		var hosts []string

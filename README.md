@@ -177,6 +177,7 @@ The wizard supports **Linux, macOS, Windows and Docker** targets:
 | Deployment | `docker` (container + bundled Dragonfly) or `native` (binary on this machine) |
 | Service manager | systemd unit, launchd plist, Windows elevated logon task (Go binaries don't speak the SCM protocol, so a scheduled task with `/RL HIGHEST` is used instead of `sc.exe`), or none |
 | Protocols | UDP/TCP on :53, DoT on :853, DoH on :443, DoQ on :853 |
+| Dashboard port | Optional: serve the dashboard on the same HTTPS port as DoH (`https://host`, no `:8080` suffix) |
 | Upstreams | Cloudflare, Google, Quad9 presets or custom (`udp://`, `tls://`, `https://`, `quic://`) |
 | Cache | Dragonfly address (+ optional password) |
 | Blocklists | Pick curated presets: OISD, Hagezi, StevenBlack, AdGuard, EasyList, 1Hosts… |
@@ -216,7 +217,28 @@ Point your router or device at the server:
 
 - DNS server: `53`
 - Private DNS (Android): `dns.example.com` (DoT) or `https://dns.example.com/dns-query` (DoH)
-- Dashboard: `http://<server>:8080`
+- Dashboard: `http://<server>:8080` (or `https://<server>` with no port — see below)
+
+### Dashboard on port 443, shared with DoH
+
+Set `server.web_listen` to the **same port as `server.listen_doh`** (both
+`0.0.0.0:443`) with `server.web_tls: true`, and the dashboard shares the DoH
+HTTPS listener: `https://your-domain` opens the dashboard with **no port
+suffix**, while `https://your-domain/dns-query` keeps serving DNS over HTTPS
+(RFC 8484) from the same port. `server.web_redirect: true` then 301s plain
+HTTP on port 80 to `https://your-domain/` too.
+
+```yaml
+server:
+  listen_doh: "0.0.0.0:443"   # DoH listener
+  web_listen: "0.0.0.0:443"   # same port -> dashboard shares it
+  web_tls: true
+  web_redirect: true
+  web_redirect_port: 80
+```
+
+The wizard asks “Serve the dashboard on the DoH port too?” whenever DoH is
+selected, and `server.web_tls` is required for the shared port (validated).
 
 ### Pre-made blocklist & allow-list presets
 
@@ -314,6 +336,7 @@ written automatically on first launch. Key options:
 | `tls.acme` | Automatic Let's Encrypt issuance: `enabled`, `email`, `domains`, `staging`, `http01_port`, and `dns01` (DNS TXT issuance via Cloudflare, DigitalOcean, Hetzner, GoDaddy or AWS Route53 — no open port needed) |
 | `server.web_tls` | Serve the dashboard + API over HTTPS using the same TLS certificate |
 | `server.web_redirect` | With `web_tls`, also serve plain HTTP on `web_redirect_port` that 301s to HTTPS |
+| `server.web_listen == listen_doh` | Same port + `web_tls` → dashboard and DoH share one HTTPS listener (`https://host`, no port) |
 | `tunnel` | Baked-in cloudflared settings |
 
 ## Cloudflare Tunnel (baked in)

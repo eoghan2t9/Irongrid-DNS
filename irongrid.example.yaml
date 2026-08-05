@@ -9,8 +9,11 @@ server:
   listen_doh: "0.0.0.0:443"    # DNS over HTTPS
   listen_doq: "0.0.0.0:853"    # DNS over QUIC
   doh_path: "/dns-query"       # RFC 8484 path
-  web_listen: "0.0.0.0:8080"   # dashboard + REST API
-  # web_tls: true              # serve the dashboard over HTTPS (uses the TLS cert)
+  # Set web_listen to the DoH port (0.0.0.0:443) with web_tls to serve the
+  # dashboard and DoH on ONE HTTPS port — open it at https://your-domain
+  # with no port suffix (/dns-query keeps serving DoH).
+  web_listen: "0.0.0.0:8080"   # dashboard + REST API (or 0.0.0.0:443 to share with DoH)
+  # web_tls: true              # serve the dashboard over HTTPS (uses the TLS cert; required when sharing the DoH port)
   # web_redirect: true         # with web_tls: plain HTTP on web_redirect_port 301s to HTTPS
   # web_redirect_port: 80
   timeout_sec: 5               # per-query upstream timeout

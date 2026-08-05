@@ -300,7 +300,11 @@ func (w *wizard) printNextSteps(configPath, dataDir string) {
 	if a.deploy == "docker" {
 		fmt.Fprintln(w.out, "  1. Build the image:  docker build -t irongrid .")
 		fmt.Fprintf(w.out, "  2. Start:            cd %s && docker compose up -d\n", filepath.Join(filepath.Dir(configPath), "deploy"))
-		fmt.Fprintln(w.out, "  3. Dashboard:       http://localhost:8080  (login with the credentials you chose)")
+		if a.webOnDoHPort {
+			fmt.Fprintln(w.out, "  3. Dashboard:       https://host  (port 443, shared with DoH — login with the credentials you chose)")
+		} else {
+			fmt.Fprintln(w.out, "  3. Dashboard:       http://localhost:8080  (login with the credentials you chose)")
+		}
 		return
 	}
 
@@ -330,6 +334,11 @@ func (w *wizard) printNextSteps(configPath, dataDir string) {
 
 	if len(a.protos) > 0 {
 		fmt.Fprintln(w.out, "  3. Point your router at this machine's port 53 (UDP/TCP)")
+	}
+	if a.webOnDoHPort {
+		fmt.Fprintln(w.out, "  4. Dashboard:       https://<this-host>  (port 443 shared with DoH — login with the credentials you chose)")
+	} else {
+		fmt.Fprintln(w.out, "  4. Dashboard:       http://<this-host>:8080  (login with the credentials you chose)")
 	}
 	fmt.Fprintln(w.out)
 
