@@ -122,9 +122,13 @@ GET  /api/diag/dns?name=…   resolve through your upstreams
 
 ## Development
 
+Requirements: **Go 1.26+** and **Node.js 22+** (Node 22 LTS or newer — Vite 8
+requires Node `^20.19 || >=22.12`). The Docker build uses `node:22-alpine`
+and `golang:1.26-alpine` automatically.
+
 ```bash
 make test     # go vet + go test (includes a DoQ round-trip integration test)
-make web      # rebuild the React dashboard
+make web      # install deps and rebuild the React dashboard
 make build    # rebuild the binary with the dashboard embedded
 ```
 
