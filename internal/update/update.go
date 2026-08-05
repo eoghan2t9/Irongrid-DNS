@@ -21,6 +21,11 @@ const (
 	DefaultRepo = "eoghan2t9/Irongrid-DNS"
 	// DefaultAPIURL is the template for the "latest release" endpoint.
 	DefaultAPIURL = "https://api.github.com/repos/%s/releases/latest"
+	// ChangelogAPIURL is the template for the recent-releases list endpoint
+	// (drafts are excluded by GitHub; prereleases are filtered client-side).
+	ChangelogAPIURL = "https://api.github.com/repos/%s/releases?per_page=%d"
+	// changelogLimit is how many releases the changelog page shows.
+	changelogLimit = 10
 )
 
 // Asset is the subset of a GitHub release asset we care about.
@@ -28,6 +33,16 @@ type Asset struct {
 	Name string `json:"name"`
 	URL  string `json:"browser_download_url"`
 	Size int64  `json:"size"`
+}
+
+// Release is the subset of a GitHub release shown on the changelog page.
+type Release struct {
+	TagName     string `json:"tag_name"`
+	Name        string `json:"name"`
+	PublishedAt string `json:"published_at"`
+	HTMLURL     string `json:"html_url"`
+	Body        string `json:"body"`
+	Prerelease  bool   `json:"prerelease"`
 }
 
 // release is the subset of the GitHub "latest release" payload we consume.
@@ -67,6 +82,8 @@ type Client struct {
 
 	// latestURL overrides the API endpoint (used by tests).
 	latestURL string
+	// listURL overrides the releases-list endpoint (used by tests).
+	listURL string
 }
 
 // Check fetches the latest release and reports whether it is newer than the
@@ -102,39 +119,74 @@ func (c *Client) Check(ctx context.Context) Info {
 	return info
 }
 
+// List returns the most recent stable releases, newest first, for the
+// changelog page. Prereleases are filtered out; drafts are never returned by
+// the API.
+func (c *Client) List(ctx context.Context) ([]Release, error) {
+	repo := c.Repo
+	if repo == "" {
+		repo = DefaultRepo
+	}
+	url := fmt.Sprintf(ChangelogAPIURL, repo, changelogLimit)
+	if c.listURL != "" {
+		url = c.listURL
+	}
+	var rels []Release
+	if err := c.getJSON(ctx, url, &rels); err != nil {
+		return nil, err
+	}
+	out := make([]Release, 0, len(rels))
+	for _, r := range rels {
+		if r.Prerelease {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out, nil
+}
+
 func (c *Client) latest(ctx context.Context) (*release, error) {
 	repo := c.Repo
 	if repo == "" {
 		repo = DefaultRepo
 	}
-	client := c.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
-	}
 	url := fmt.Sprintf(DefaultAPIURL, repo)
 	if c.latestURL != "" {
 		url = c.latestURL
 	}
+	var rel release
+	if err := c.getJSON(ctx, url, &rel); err != nil {
+		return nil, err
+	}
+	return &rel, nil
+}
+
+// getJSON performs an authenticated-style GitHub API GET and decodes the JSON
+// body, normalising transport and HTTP errors into a single error.
+func (c *Client) getJSON(ctx context.Context, url string, out any) error {
+	client := c.HTTPClient
+	if client == nil {
+		client = &http.Client{Timeout: 10 * time.Second}
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "irongrid-dns/"+version.Version)
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
-		return nil, fmt.Errorf("releases API returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
+		return fmt.Errorf("releases API returned %s: %s", resp.Status, strings.TrimSpace(string(body)))
 	}
-	var rel release
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
-		return nil, fmt.Errorf("decoding release: %w", err)
+	if err := json.NewDecoder(resp.Body).Decode(out); err != nil {
+		return fmt.Errorf("decoding release: %w", err)
 	}
-	return &rel, nil
+	return nil
 }
 
 // assetName maps GOOS/GOARCH to the release asset name produced by the

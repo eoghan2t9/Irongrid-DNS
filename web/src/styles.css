@@ -320,6 +320,20 @@ body {
   font-family: ui-monospace, monospace;
 }
 
+/* ---------- changelog page ---------- */
+.changelog-page { max-width: 860px; }
+.changelog-page .btn.tiny { padding: 3px 8px; font-size: 11.5px; border-radius: 6px; }
+.changelog-list { display: flex; flex-direction: column; gap: 14px; }
+.changelog-entry { padding: 18px 20px; }
+.changelog-entry-head { border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 10px; }
+.changelog-tags { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.changelog-name { font-weight: 650; font-size: 13.5px; }
+.changelog-meta { display: flex; align-items: center; gap: 10px; }
+.changelog-meta .modal-date { font-size: 12px; }
+@media (max-width: 640px) {
+  .changelog-entry { padding: 14px; }
+}
+
 /* ---------- dashboard bits ---------- */
 .proto-bars { display: flex; flex-direction: column; gap: 10px; }
 .proto-row { display: flex; align-items: center; gap: 10px; font-size: 12.5px; }

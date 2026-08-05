@@ -129,6 +129,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.diagDNS(ctx, w, r)
 	case len(parts) == 2 && parts[0] == "update" && parts[1] == "check" && r.Method == http.MethodGet:
 		h.checkUpdate(ctx, w)
+	case len(parts) == 2 && parts[0] == "update" && parts[1] == "changelog" && r.Method == http.MethodGet:
+		h.updateChangelog(ctx, w)
 	case len(parts) == 1 && parts[0] == "tls" && r.Method == http.MethodGet:
 		h.getTLS(w)
 	case len(parts) == 2 && parts[0] == "tls" && parts[1] == "generate" && r.Method == http.MethodPost:
@@ -1155,6 +1157,31 @@ func (h *Handler) checkUpdate(ctx context.Context, w http.ResponseWriter) {
 	}
 	client := &update.Client{Repo: update.DefaultRepo, Current: cur}
 	writeJSON(w, http.StatusOK, client.Check(ctx))
+}
+
+// updateChangelog returns the recent stable releases for the in-app
+// changelog page. Failures are folded into an error field (the page shows a
+// quiet notice) rather than an HTTP error.
+func (h *Handler) updateChangelog(ctx context.Context, w http.ResponseWriter) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	cur := h.Version
+	if cur == "" {
+		cur = version.Version
+	}
+	client := &update.Client{Repo: update.DefaultRepo, Current: cur}
+	releases, err := client.List(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"current_version": cur,
+			"error":           err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"current_version": cur,
+		"releases":        releases,
+	})
 }
 
 func (h *Handler) diagDNS(ctx context.Context, w http.ResponseWriter, r *http.Request) {

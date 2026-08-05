@@ -137,6 +137,41 @@ func TestCheckUpToDate(t *testing.T) {
 	}
 }
 
+const releasesJSON = `[
+  {"tag_name":"v1.1.0","name":"Irongrid DNS v1.1.0","published_at":"2026-08-05T10:00:00Z","html_url":"https://github.com/eoghan2t9/Irongrid-DNS/releases/tag/v1.1.0","body":"## What's Changed\n- feat: wizard handles the install","prerelease":false},
+  {"tag_name":"v1.1.0-rc.1","name":"v1.1.0-rc.1","published_at":"2026-08-04T10:00:00Z","html_url":"https://github.com/eoghan2t9/Irongrid-DNS/releases/tag/v1.1.0-rc.1","body":"rc notes","prerelease":true},
+  {"tag_name":"v1.0.2","name":"Irongrid DNS v1.0.2","published_at":"2026-08-03T10:00:00Z","html_url":"https://github.com/eoghan2t9/Irongrid-DNS/releases/tag/v1.0.2","body":"## What's Changed\n- fix: ci pipeline","prerelease":false}
+]`
+
+func TestListFiltersPrereleases(t *testing.T) {
+	srv := fakeRelease(t, releasesJSON, http.StatusOK)
+	defer srv.Close()
+	c := &Client{HTTPClient: srv.Client(), listURL: srv.URL}
+
+	rels, err := c.List(context.Background())
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rels) != 2 {
+		t.Fatalf("List returned %d releases, want 2 (prerelease filtered): %+v", len(rels), rels)
+	}
+	if rels[0].TagName != "v1.1.0" || rels[1].TagName != "v1.0.2" {
+		t.Errorf("unexpected releases/order: %+v", rels)
+	}
+	if rels[0].Name == "" || rels[0].HTMLURL == "" || rels[0].Body == "" {
+		t.Errorf("release fields missing: %+v", rels[0])
+	}
+}
+
+func TestListHTTPError(t *testing.T) {
+	srv := fakeRelease(t, `{"message":"rate limited"}`, http.StatusForbidden)
+	defer srv.Close()
+	c := &Client{HTTPClient: srv.Client(), listURL: srv.URL}
+	if _, err := c.List(context.Background()); err == nil {
+		t.Fatal("expected error on non-200 response")
+	}
+}
+
 func TestCheckHTTPError(t *testing.T) {
 	srv := fakeRelease(t, `{"message":"rate limited"}`, http.StatusForbidden)
 	defer srv.Close()

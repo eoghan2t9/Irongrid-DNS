@@ -8,6 +8,7 @@ import Tunnel from './components/Tunnel'
 import Settings from './components/Settings'
 import Tls from './components/Tls'
 import UpdateChecker from './components/UpdateChecker'
+import Changelog from './components/Changelog'
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: '◧' },
@@ -16,6 +17,7 @@ const NAV = [
   { id: 'lists', label: 'Allow / Block', icon: '✓' },
   { id: 'tls', label: 'SSL / TLS', icon: '🔒' },
   { id: 'tunnel', label: 'Tunnel', icon: '↗' },
+  { id: 'changelog', label: 'Changelog', icon: '✦' },
   { id: 'settings', label: 'Settings', icon: '⚙' },
 ]
 
@@ -108,7 +110,7 @@ export default function App() {
             <div className="topbar-title">{NAV.find((n) => n.id === view)?.label}</div>
           </div>
           <div className="topbar-actions">
-            <UpdateChecker />
+            <UpdateChecker onNavigate={navigate} />
             <button className="btn ghost small" onClick={refreshStatus}>
               ⟳ Refresh
             </button>
@@ -121,6 +123,7 @@ export default function App() {
           {view === 'lists' && <Lists />}
           {view === 'tls' && <Tls />}
           {view === 'tunnel' && <Tunnel />}
+          {view === 'changelog' && <Changelog />}
           {view === 'settings' && <Settings />}
         </div>
       </main>

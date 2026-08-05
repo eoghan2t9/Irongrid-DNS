@@ -1,71 +1,11 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
+import { renderMarkdown } from '../markdown'
 
 const DISMISS_KEY = 'irongrid_dismissed_update'
 const INSTALL_CMD = 'curl -fsSL https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.sh | bash'
 
-// rich turns the GitHub changelog's **bold** and [label](url) into nodes.
-function rich(text) {
-  const out = []
-  const re = /(\*\*[^*]+\*\*|\[[^\]]+\]\(https?:\/\/[^)\s]+\))/g
-  let last = 0
-  let m
-  let k = 0
-  while ((m = re.exec(text))) {
-    if (m.index > last) out.push(text.slice(last, m.index))
-    const tok = m[0]
-    if (tok.startsWith('**')) {
-      out.push(<strong key={k++}>{tok.slice(2, -2)}</strong>)
-    } else {
-      const mm = tok.match(/^\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)$/)
-      out.push(
-        <a key={k++} href={mm[2]} target="_blank" rel="noreferrer">
-          {mm[1]}
-        </a>
-      )
-    }
-    last = m.index + tok.length
-  }
-  if (last < text.length) out.push(text.slice(last))
-  return out
-}
-
-// renderChangelog renders the release body with ## / ### headers and bullets.
-function renderChangelog(body) {
-  if (!body || !body.trim()) {
-    return <p className="modal-note">No changelog was published for this release.</p>
-  }
-  const out = []
-  let list = []
-  let key = 0
-  const flush = () => {
-    if (list.length) {
-      out.push(<ul key={`ul-${key++}`}>{list}</ul>)
-      list = []
-    }
-  }
-  body.split('\n').forEach((line) => {
-    const t = line.trim()
-    if (/^###\s+/.test(t)) {
-      flush()
-      out.push(<h5 key={key++}>{t.replace(/^###\s+/, '')}</h5>)
-    } else if (/^##\s+/.test(t)) {
-      flush()
-      out.push(<h4 key={key++}>{t.replace(/^##\s+/, '')}</h4>)
-    } else if (/^[-*]\s+/.test(t)) {
-      list.push(<li key={key++}>{rich(t.replace(/^[-*]\s+/, ''))}</li>)
-    } else if (t === '') {
-      flush()
-    } else {
-      flush()
-      out.push(<p key={key++}>{rich(t)}</p>)
-    }
-  })
-  flush()
-  return out
-}
-
-export default function UpdateChecker() {
+export default function UpdateChecker({ onNavigate }) {
   const [info, setInfo] = useState(null)
   const [loading, setLoading] = useState(false)
   const [show, setShow] = useState(false)
@@ -150,7 +90,7 @@ export default function UpdateChecker() {
               </button>
             </div>
 
-            <div className="modal-body changelog">{renderChangelog(info.changelog)}</div>
+            <div className="modal-body changelog">{renderMarkdown(info.changelog)}</div>
 
             {info.download_url && (
               <div className="modal-install">
@@ -175,6 +115,17 @@ export default function UpdateChecker() {
                 <a className="btn" href={info.release_url} target="_blank" rel="noreferrer">
                   Release notes
                 </a>
+              )}
+              {onNavigate && (
+                <button
+                  className="btn"
+                  onClick={() => {
+                    setShow(false)
+                    onNavigate('changelog')
+                  }}
+                >
+                  Full changelog
+                </button>
               )}
               <span className="modal-spacer" />
               <button className="btn ghost" onClick={() => dismiss(false)}>
