@@ -3,10 +3,16 @@
 // and whitelist presets (from the shared catalog), web credentials and TLS,
 // then writes a validated irongrid.yaml plus platform service files
 // (systemd / launchd / Windows service / Docker Compose).
+//
+// The wizard renders with the Catppuccin theme on a real TTY and falls back
+// to accessible (line-based) rendering when stdin is not a terminal, which
+// also makes it scriptable. Setting IRONGRID_ACCESSIBLE=1 forces accessible
+// mode even on a TTY (used by CI and the E2E tests).
 package installer
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -23,12 +29,21 @@ import (
 type Options struct {
 	ConfigPath string // where irongrid.yaml will be written
 	DataDir    string // runtime data directory (querylog, lists, certs)
+	In         io.Reader // wizard input; nil = os.Stdin
+	Out        io.Writer // wizard output; nil = os.Stdout
+}
+
+// wizard carries the answers plus the IO streams for one interactive run.
+type wizard struct {
+	a   *answers
+	in  io.Reader
+	out io.Writer
 }
 
 // answers collects every wizard choice before the config is built.
 type answers struct {
 	deploy         string   // "docker" | "native"
-	service        string   // "systemd" | "launchd" | "windows" | "none"
+	service        string   // "systemd" | "launchd" | "windows" | "docker" | "none"
 	protos         []string // subset of {"UDP","TCP","DoT","DoH","DoQ"}
 	listenHost     string
 	upstreamPreset string // "cloudflare" | "google" | "quad9" | "custom"
@@ -54,41 +69,47 @@ func Run(opts Options) error {
 		opts.DataDir = "data"
 	}
 
-	a := &answers{}
+	w := &wizard{a: &answers{}, in: opts.In, out: opts.Out}
+	if w.in == nil {
+		w.in = os.Stdin
+	}
+	if w.out == nil {
+		w.out = os.Stdout
+	}
 	cat := catalog.Default()
 
-	banner()
+	w.banner()
 
-	if err := a.askBasics(); err != nil {
+	if err := w.askBasics(); err != nil {
 		return err
 	}
-	if err := a.askListeners(); err != nil {
+	if err := w.askListeners(); err != nil {
 		return err
 	}
-	if err := a.askUpstreams(); err != nil {
+	if err := w.askUpstreams(); err != nil {
 		return err
 	}
-	if err := a.askCache(); err != nil {
+	if err := w.askCache(); err != nil {
 		return err
 	}
-	if err := a.askLists(cat); err != nil {
+	if err := w.askLists(cat); err != nil {
 		return err
 	}
-	if err := a.askWeb(); err != nil {
+	if err := w.askWeb(); err != nil {
 		return err
 	}
-	if err := a.askTLS(); err != nil {
+	if err := w.askTLS(); err != nil {
 		return err
 	}
-	if err := a.askConfirm(); err != nil {
+	if err := w.askConfirm(); err != nil {
 		return err
 	}
-	if !a.confirm {
-		fmt.Println("\n✓ Installation cancelled — nothing was written.")
+	if !w.a.confirm {
+		fmt.Fprintln(w.out, "\n✓ Installation cancelled — nothing was written.")
 		return nil
 	}
 
-	cfg, err := a.buildConfig(cat)
+	cfg, err := w.a.buildConfig(cat)
 	if err != nil {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
@@ -106,22 +127,22 @@ func Run(opts Options) error {
 	if err := cfg.Save(absConfig); err != nil {
 		return fmt.Errorf("write config: %w", err)
 	}
-	fmt.Printf("\n✍  Config written to %s\n", absConfig)
+	fmt.Fprintf(w.out, "\n✍  Config written to %s\n", absConfig)
 
-	files, err := writeServiceFiles(a, absConfig, absData)
+	files, err := writeServiceFiles(w, absConfig, absData)
 	if err != nil {
 		return err
 	}
 	if len(files) > 0 {
-		fmt.Printf("   Service files written to %s\n", filepath.Dir(files[0]))
+		fmt.Fprintf(w.out, "   Service files written to %s\n", filepath.Dir(files[0]))
 	}
 
-	printNextSteps(a, absConfig, absData)
+	w.printNextSteps(absConfig, absData)
 	return nil
 }
 
-func banner() {
-	fmt.Println(strings.TrimSpace(`
+func (w *wizard) banner() {
+	fmt.Fprintln(w.out, strings.TrimSpace(`
   ██╗██████╗  ██████╗ ███╗   ██╗ ██████╗ ██████╗ ██╗██████╗
   ██║██╔══██╗██╔═══██╗████╗  ██║██╔════╝ ██╔══██╗██║██╔══██╗
   ██║██████╔╝██║   ██║██╔██╗ ██║██║  ███╗██████╔╝██║██║  ██║
@@ -129,24 +150,27 @@ func banner() {
   ██║██║  ██║╚██████╔╝██║ ╚████║╚██████╔╝██║  ██║██║██████╔╝
   ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚═╝╚═════╝
 `))
-	fmt.Println("             ad-blocking DNS server — setup wizard")
-	fmt.Println("     drag → select · enter → confirm · ctrl+c → cancel")
-	fmt.Println()
+	fmt.Fprintln(w.out, "             ad-blocking DNS server — setup wizard")
+	fmt.Fprintln(w.out, "     drag → select · enter → confirm · ctrl+c → cancel")
+	fmt.Fprintln(w.out)
 }
 
-// newForm builds a form with the Catppuccin theme on a real TTY, or switches
-// to accessible (line-based) rendering when stdin is not a terminal, which
-// also makes the wizard scriptable for non-interactive installs.
-func newForm(groups ...*huh.Group) *huh.Form {
-	f := huh.NewForm(groups...)
-	if term.IsTerminal(int(os.Stdin.Fd())) {
+// newForm builds a form wired to the wizard's IO streams. On a real TTY it
+// uses the Catppuccin theme; otherwise (or when IRONGRID_ACCESSIBLE=1) it
+// switches to accessible line-based rendering.
+func (w *wizard) newForm(groups ...*huh.Group) *huh.Form {
+	f := huh.NewForm(groups...).WithInput(w.in).WithOutput(w.out)
+	if os.Getenv("IRONGRID_ACCESSIBLE") == "1" {
+		return f.WithAccessible(true)
+	}
+	if fd, ok := w.in.(interface{ Fd() uintptr }); ok && term.IsTerminal(int(fd.Fd())) {
 		return f.WithTheme(huh.ThemeCatppuccin())
 	}
 	return f.WithAccessible(true)
 }
 
-func (a *answers) askBasics() error {
-	if err := newForm(
+func (w *wizard) askBasics() error {
+	if err := w.newForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("How will you run Irongrid DNS?").
@@ -157,27 +181,27 @@ func (a *answers) askBasics() error {
 					huh.NewOption("Docker Compose (container + Dragonfly cache)", "docker"),
 					huh.NewOption("Native binary (on this machine)", "native"),
 				).
-				Value(&a.deploy),
+				Value(&w.a.deploy),
 		),
 	).Run(); err != nil {
 		return err
 	}
 	// Docker deployments always get a compose file with the bundled cache.
-	if a.deploy == "docker" {
-		a.service = "docker"
+	if w.a.deploy == "docker" {
+		w.a.service = "docker"
 		return nil
 	}
 	// Native deployments: pre-select the service manager that matches this platform.
-	a.service = "none"
+	w.a.service = "none"
 	switch runtime.GOOS {
 	case "linux":
-		a.service = "systemd"
+		w.a.service = "systemd"
 	case "darwin":
-		a.service = "launchd"
+		w.a.service = "launchd"
 	case "windows":
-		a.service = "windows"
+		w.a.service = "windows"
 	}
-	return newForm(
+	return w.newForm(
 		huh.NewGroup(
 			huh.NewSelect[string]().
 				Title("Service manager").
@@ -188,18 +212,18 @@ func (a *answers) askBasics() error {
 					huh.NewOption("Windows Service (sc)", "windows"),
 					huh.NewOption("None — I'll run it manually", "none"),
 				).
-				Value(&a.service),
+				Value(&w.a.service),
 		),
 	).Run()
 }
 
-func (a *answers) askListeners() error {
+func (w *wizard) askListeners() error {
 	// Sensible defaults: plain DNS on UDP+TCP covers routers; the rest can be
 	// toggled on for encrypted DNS.
-	if a.protos == nil {
-		a.protos = []string{"UDP", "TCP"}
+	if w.a.protos == nil {
+		w.a.protos = []string{"UDP", "TCP"}
 	}
-	return newForm(
+	return w.newForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("DNS listeners").
@@ -213,18 +237,18 @@ func (a *answers) askListeners() error {
 					huh.NewOption("DoH — DNS over HTTPS on :443 (browsers)", "DoH"),
 					huh.NewOption("DoQ — DNS over QUIC on :853 (RFC 9250)", "DoQ"),
 				).
-				Value(&a.protos),
+				Value(&w.a.protos),
 			huh.NewInput().
 				Title("Listen address").
 				Description("Bind host (empty = all interfaces). Ports are fixed per protocol.").
 				Placeholder("0.0.0.0").
-				Value(&a.listenHost),
+				Value(&w.a.listenHost),
 		),
 	).Run()
 }
 
-func (a *answers) askUpstreams() error {
-	return newForm(
+func (w *wizard) askUpstreams() error {
+	return w.newForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("Upstream resolvers").
@@ -237,23 +261,23 @@ func (a *answers) askUpstreams() error {
 					huh.NewOption("Quad9 9.9.9.9 (threat blocking)", "quad9"),
 					huh.NewOption("Custom — I'll type them", "custom"),
 				).
-				Value(&a.upstreamPreset),
+				Value(&w.a.upstreamPreset),
 			huh.NewInput().
 				Title("Custom upstreams").
 				Description("Comma-separated, e.g. tls://dns.quad9.net, udp://10.0.0.1:53").
 				Placeholder("(optional)").
-				Value(&a.customUpstream),
+				Value(&w.a.customUpstream),
 		),
 	).Run()
 }
 
-func (a *answers) askCache() error {
+func (w *wizard) askCache() error {
 	// Docker deployments get the compose service hostname; native gets localhost.
 	addrDefault := "localhost:6379"
-	if a.deploy == "docker" {
+	if w.a.deploy == "docker" {
 		addrDefault = "dragonfly:6379"
 	}
-	return newForm(
+	return w.newForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("Dragonfly cache").
@@ -261,7 +285,7 @@ func (a *answers) askCache() error {
 			huh.NewInput().
 				Title("Dragonfly address").
 				Placeholder(addrDefault).
-				Value(&a.cacheAddr).
+				Value(&w.a.cacheAddr).
 				Validate(func(s string) error {
 					if strings.TrimSpace(s) == "" {
 						return fmt.Errorf("Dragonfly address is required")
@@ -273,21 +297,21 @@ func (a *answers) askCache() error {
 				Description("Leave empty if Dragonfly has no auth.").
 				Placeholder("(optional)").
 				Password(true).
-				Value(&a.cachePass),
+				Value(&w.a.cachePass),
 		),
 	).Run()
 }
 
-func (a *answers) askLists(cat *catalog.Catalog) error {
+func (w *wizard) askLists(cat *catalog.Catalog) error {
 	blockOpts := make([]huh.Option[string], 0, len(cat.Blocklists))
 	for _, b := range cat.Blocklists {
 		blockOpts = append(blockOpts, huh.NewOption(fmt.Sprintf("%s — %s", b.Name, b.Description), b.ID))
 	}
 	whiteOpts := make([]huh.Option[string], 0, len(cat.Whitelists))
-	for _, w := range cat.Whitelists {
-		whiteOpts = append(whiteOpts, huh.NewOption(fmt.Sprintf("%s — %s", w.Name, w.Description), w.ID))
+	for _, wl := range cat.Whitelists {
+		whiteOpts = append(whiteOpts, huh.NewOption(fmt.Sprintf("%s — %s", wl.Name, wl.Description), wl.ID))
 	}
-	return newForm(
+	return w.newForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("Blocking presets").
@@ -295,17 +319,17 @@ func (a *answers) askLists(cat *catalog.Catalog) error {
 			huh.NewMultiSelect[string]().
 				Title("Blocklists").
 				Options(blockOpts...).
-				Value(&a.blocklists),
+				Value(&w.a.blocklists),
 			huh.NewMultiSelect[string]().
 				Title("Always-allow presets (whitelist)").
 				Options(whiteOpts...).
-				Value(&a.whitelists),
+				Value(&w.a.whitelists),
 		),
 	).Run()
 }
 
-func (a *answers) askWeb() error {
-	return newForm(
+func (w *wizard) askWeb() error {
+	return w.newForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("Dashboard access").
@@ -313,7 +337,7 @@ func (a *answers) askWeb() error {
 			huh.NewInput().
 				Title("Username").
 				Placeholder("admin").
-				Value(&a.webUser).
+				Value(&w.a.webUser).
 				Validate(func(s string) error {
 					if strings.TrimSpace(s) == "" {
 						return fmt.Errorf("username is required")
@@ -323,7 +347,7 @@ func (a *answers) askWeb() error {
 			huh.NewInput().
 				Title("Password").
 				Password(true).
-				Value(&a.webPass).
+				Value(&w.a.webPass).
 				Validate(func(s string) error {
 					if len(s) < 8 {
 						return fmt.Errorf("use at least 8 characters")
@@ -333,9 +357,9 @@ func (a *answers) askWeb() error {
 			huh.NewInput().
 				Title("Confirm password").
 				Password(true).
-				Value(&a.webConfirm).
+				Value(&w.a.webConfirm).
 				Validate(func(s string) error {
-					if s != a.webPass {
+					if s != w.a.webPass {
 						return fmt.Errorf("passwords do not match")
 					}
 					return nil
@@ -344,8 +368,8 @@ func (a *answers) askWeb() error {
 	).Run()
 }
 
-func (a *answers) askTLS() error {
-	return newForm(
+func (w *wizard) askTLS() error {
+	return w.newForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("TLS certificates").
@@ -354,12 +378,13 @@ func (a *answers) askTLS() error {
 				Title("Self-signed certificate hosts").
 				Description("Comma-separated SANs, e.g. dns.example.com, localhost").
 				Placeholder("localhost, dns.example.com").
-				Value(&a.tlsHosts),
+				Value(&w.a.tlsHosts),
 		),
 	).Run()
 }
 
-func (a *answers) askConfirm() error {
+func (w *wizard) askConfirm() error {
+	a := w.a
 	var summary strings.Builder
 	summary.WriteString(fmt.Sprintf("Deployment : %s\n", a.deploy))
 	summary.WriteString(fmt.Sprintf("Service    : %s\n", a.service))
@@ -369,7 +394,7 @@ func (a *answers) askConfirm() error {
 	summary.WriteString(fmt.Sprintf("Blocklists : %d selected\n", len(a.blocklists)))
 	summary.WriteString(fmt.Sprintf("Whitelists : %d presets\n", len(a.whitelists)))
 	summary.WriteString(fmt.Sprintf("Dashboard  : %s / %s\n", a.webUser, "********"))
-	return newForm(
+	return w.newForm(
 		huh.NewGroup(
 			huh.NewNote().
 				Title("Ready to install?").
@@ -459,16 +484,16 @@ func (a *answers) buildConfig(cat *catalog.Catalog) (*config.Config, error) {
 		})
 	}
 	whiteByID := make(map[string]catalog.Whitelist, len(cat.Whitelists))
-	for _, w := range cat.Whitelists {
-		whiteByID[w.ID] = w
+	for _, wl := range cat.Whitelists {
+		whiteByID[wl.ID] = wl
 	}
 	seen := make(map[string]bool)
 	for _, id := range a.whitelists {
-		w, ok := whiteByID[id]
+		wl, ok := whiteByID[id]
 		if !ok {
 			continue
 		}
-		for _, d := range w.Domains {
+		for _, d := range wl.Domains {
 			d = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(d), "."))
 			if d != "" && !seen[d] {
 				seen[d] = true

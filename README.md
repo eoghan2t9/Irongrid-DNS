@@ -118,13 +118,50 @@ Both the wizard and the dashboard come with a curated catalog of presets,
 served by `GET /api/lists/catalog` and shared by every entry point:
 
 - **Blocklists** — OISD Big/Full, Hagezi Multi PRO, StevenBlack, AdGuard DNS
-  filter, EasyList, EasyPrivacy, 1Hosts (Lite/Pro), yoyo.org, AdAway, NoTracking.
+  filter, EasyList, EasyPrivacy, 1Hosts (Lite/Pro/Xtra), yoyo.org, AdAway,
+  NoTracking, plus category lists: **adult** (Hagezi Adult, 1Hosts Xtra,
+  Sinfonietta), **gambling** (Hagezi), **social media** (Hagezi) and
+  **security** (Hagezi phishing/scam/threat-intel/crypto/fake).
 - **Allow lists** — OS & security updates, Development & CI, Cloud &
-  collaboration, Banking & payments, Smart home & IoT, News & reference.
+  collaboration, Banking & payments, Smart home & IoT, News & reference,
+  Gaming, Streaming & music, Social media.
 
 In the **Blocklists** page, presets appear as quick-add buttons; in the
 **Lists** page, allow-list presets add their domains to the Allow list with one
 click (they override every blocklist).
+
+### Scripted / unattended installs
+
+The wizard falls back to accessible line-based rendering when stdin is not a
+terminal, and `IRONGRID_ACCESSIBLE=1` forces that mode even on a TTY — which
+makes the installer fully scriptable for CI or unattended provisioning:
+
+```bash
+printf '2\n4\n0\n0.0.0.0\n1\n\nlocalhost:6379\n\n0\n0\nadmin\ntestpass123\ntestpass123\nlocalhost\ny\n' | \
+  IRONGRID_ACCESSIBLE=1 ./irongrid install -config irongrid.yaml -data data
+```
+
+Each line answers one prompt in order: deployment (1=Docker, 2=Native),
+service manager, protocols, listen address, upstream preset, custom
+upstreams, Dragonfly address/password, blocklists, allow lists, username,
+password + confirmation, TLS hosts, and the final confirm (`y`). The same
+path is covered by an end-to-end test in `internal/installer`.
+
+### Building releases
+
+Tag a release to build static binaries for **Linux, macOS and Windows** (amd64
++ arm64) on GitHub Actions and attach them with checksums:
+
+```bash
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+Or build them locally with:
+
+```bash
+make release   # cross-compiles all 6 targets into dist/
+```
 
 ## Configuration
 

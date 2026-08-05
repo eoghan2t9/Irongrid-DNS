@@ -1,0 +1,82 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node (frontend)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Build the dashboard (embedded into the binary)
+        run: |
+          cd web
+          npm install --no-audit --no-fund
+          npm run build
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+
+      - name: Derive version metadata
+        id: meta
+        run: |
+          echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          echo "commit=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: Cross-compile all platforms
+        env:
+          LDFLAGS: >-
+            -s -w
+            -X github.com/eoghan2t9/Irongrid-DNS/internal/version.Version=${{ steps.meta.outputs.version }}
+            -X github.com/eoghan2t9/Irongrid-DNS/internal/version.Commit=${{ steps.meta.outputs.commit }}
+            -X github.com/eoghan2t9/Irongrid-DNS/internal/version.BuildTime=${{ steps.meta.outputs.built }}
+        run: |
+          set -e
+          mkdir -p dist
+          for t in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64 windows/arm64; do
+            os=${t%%/*}; arch=${t##*/}
+            ext=""; [ "$os" = "windows" ] && ext=".exe"
+            name="irongrid-${os}-${arch}${ext}"
+            echo "  -> ${name}"
+            CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" \
+              go build -trimpath -ldflags "${LDFLAGS}" \
+              -o "dist/${name}" ./cmd/irongrid
+          done
+          cd dist && sha256sum irongrid-* > SHA256SUMS.txt
+
+      - name: Verify tests (incl. PTY-driven installer E2E)
+        run: |
+          go vet ./...
+          go test ./internal/installer/ -run TestRunEndToEnd -v
+
+      - name: Smoke-test the linux binary
+        run: |
+          ./dist/irongrid-linux-amd64 -version
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: Irongrid DNS ${{ github.ref_name }}
+          generate_release_notes: true
+          files: dist/*

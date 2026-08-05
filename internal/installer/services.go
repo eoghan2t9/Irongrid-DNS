@@ -12,7 +12,7 @@ import (
 // wizard, next to the config file in a deploy/ directory. It never installs
 // the service itself — it prints the exact command to do so, because that
 // typically requires root/admin privileges and a manual confirmation.
-func writeServiceFiles(a *answers, configPath, dataDir string) ([]string, error) {
+func writeServiceFiles(w *wizard, configPath, dataDir string) ([]string, error) {
 	deployDir := filepath.Join(filepath.Dir(configPath), "deploy")
 	if err := os.MkdirAll(deployDir, 0o755); err != nil {
 		return nil, fmt.Errorf("create deploy dir: %w", err)
@@ -22,15 +22,15 @@ func writeServiceFiles(a *answers, configPath, dataDir string) ([]string, error)
 		files []string
 		err   error
 	)
-	switch a.service {
+	switch w.a.service {
 	case "systemd":
-		files, err = writeSystemd(deployDir, configPath, dataDir)
+		files, err = writeSystemd(w, deployDir, configPath, dataDir)
 	case "launchd":
-		files, err = writeLaunchd(deployDir, configPath, dataDir)
+		files, err = writeLaunchd(w, deployDir, configPath, dataDir)
 	case "windows":
-		files, err = writeWindowsService(deployDir, configPath, dataDir)
+		files, err = writeWindowsService(w, deployDir, configPath, dataDir)
 	case "docker":
-		files, err = writeDockerCompose(deployDir, configPath)
+		files, err = writeDockerCompose(w, deployDir, configPath)
 	}
 	if err != nil {
 		return nil, err
@@ -49,7 +49,7 @@ func binaryPath() string {
 	}
 }
 
-func writeSystemd(dir, configPath, dataDir string) ([]string, error) {
+func writeSystemd(w *wizard, dir, configPath, dataDir string) ([]string, error) {
 	unit := fmt.Sprintf(`[Unit]
 Description=Irongrid DNS — ad-blocking DNS server
 After=network-online.target
@@ -73,15 +73,15 @@ WantedBy=multi-user.target
 	if err := os.WriteFile(f, []byte(unit), 0o644); err != nil {
 		return nil, err
 	}
-	fmt.Println()
-	fmt.Println("  systemd unit written. To install it:")
-	fmt.Printf("    sudo cp %s /etc/systemd/system/\n", f)
-	fmt.Println("    sudo systemctl daemon-reload")
-	fmt.Println("    sudo systemctl enable --now irongrid")
+	fmt.Fprintln(w.out)
+	fmt.Fprintln(w.out, "  systemd unit written. To install it:")
+	fmt.Fprintf(w.out, "    sudo cp %s /etc/systemd/system/\n", f)
+	fmt.Fprintln(w.out, "    sudo systemctl daemon-reload")
+	fmt.Fprintln(w.out, "    sudo systemctl enable --now irongrid")
 	return []string{f}, nil
 }
 
-func writeLaunchd(dir, configPath, dataDir string) ([]string, error) {
+func writeLaunchd(w *wizard, dir, configPath, dataDir string) ([]string, error) {
 	label := "com.irongrid.dns"
 	plist := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -113,15 +113,15 @@ func writeLaunchd(dir, configPath, dataDir string) ([]string, error) {
 	if err := os.WriteFile(f, []byte(plist), 0o644); err != nil {
 		return nil, err
 	}
-	fmt.Println()
-	fmt.Println("  launchd plist written. To install it:")
-	fmt.Printf("    mkdir -p ~/Library/LaunchAgents\n")
-	fmt.Printf("    cp %s ~/Library/LaunchAgents/\n", f)
-	fmt.Println("    launchctl load ~/Library/LaunchAgents/" + label + ".plist")
+	fmt.Fprintln(w.out)
+	fmt.Fprintln(w.out, "  launchd plist written. To install it:")
+	fmt.Fprintln(w.out, "    mkdir -p ~/Library/LaunchAgents")
+	fmt.Fprintf(w.out, "    cp %s ~/Library/LaunchAgents/\n", f)
+	fmt.Fprintln(w.out, "    launchctl load ~/Library/LaunchAgents/"+label+".plist")
 	return []string{f}, nil
 }
 
-func writeWindowsService(dir, configPath, dataDir string) ([]string, error) {
+func writeWindowsService(w *wizard, dir, configPath, dataDir string) ([]string, error) {
 	script := fmt.Sprintf(`@echo off
 REM Irongrid DNS — install as a Windows service (run as Administrator)
 sc create IrongridDNS binPath= "\"%s\" -config \"%s\" -data \"%s\"" start= auto
@@ -132,13 +132,13 @@ sc start IrongridDNS
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		return nil, err
 	}
-	fmt.Println()
-	fmt.Println("  Windows service script written. To install it (as Administrator):")
-	fmt.Printf("    %s\n", f)
+	fmt.Fprintln(w.out)
+	fmt.Fprintln(w.out, "  Windows service script written. To install it (as Administrator):")
+	fmt.Fprintf(w.out, "    %s\n", f)
 	return []string{f}, nil
 }
 
-func writeDockerCompose(dir, configPath string) ([]string, error) {
+func writeDockerCompose(w *wizard, dir, configPath string) ([]string, error) {
 	// The compose file lives in deploy/ while the config is one level up,
 	// so the mount path is relative (../<config>).
 	cfgName := filepath.Base(configPath)
@@ -153,7 +153,8 @@ func writeDockerCompose(dir, configPath string) ([]string, error) {
       - "853:853/tcp"    # DNS over TLS
       - "853:853/udp"    # DNS over QUIC
       - "443:443/tcp"    # DNS over HTTPS
-      - "8080:8080/tcp"  # web dashboard + API	    volumes:
+      - "8080:8080/tcp"  # web dashboard + API
+    volumes:
       - ../%s:/app/%s:ro
       - irongrid-data:/data
     depends_on:
@@ -179,44 +180,45 @@ volumes:
 	if err := os.WriteFile(f, []byte(compose), 0o644); err != nil {
 		return nil, err
 	}
-	fmt.Println()
-	fmt.Println("  Docker Compose file written. To start:")
-	fmt.Printf("    cd %s && docker compose up -d\n", dir)
+	fmt.Fprintln(w.out)
+	fmt.Fprintln(w.out, "  Docker Compose file written. To start:")
+	fmt.Fprintf(w.out, "    cd %s && docker compose up -d\n", dir)
 	return []string{f}, nil
 }
 
 // printNextSteps shows the final instructions, adjusting for deployment mode.
-func printNextSteps(a *answers, configPath, dataDir string) {
-	fmt.Println()
-	fmt.Println("  ───────────────────────────────────────────────")
-	fmt.Println("  Next steps")
-	fmt.Println("  ───────────────────────────────────────────────")
+func (w *wizard) printNextSteps(configPath, dataDir string) {
+	a := w.a
+	fmt.Fprintln(w.out)
+	fmt.Fprintln(w.out, "  ───────────────────────────────────────────────")
+	fmt.Fprintln(w.out, "  Next steps")
+	fmt.Fprintln(w.out, "  ───────────────────────────────────────────────")
 
 	if a.deploy == "docker" {
-		fmt.Printf("  1. Build the image:  docker build -t irongrid .\n")
-		fmt.Printf("  2. Start:            cd %s && docker compose up -d\n", filepath.Join(filepath.Dir(configPath), "deploy"))
-		fmt.Println("  3. Dashboard:       http://localhost:8080  (login with the credentials you chose)")
+		fmt.Fprintln(w.out, "  1. Build the image:  docker build -t irongrid .")
+		fmt.Fprintf(w.out, "  2. Start:            cd %s && docker compose up -d\n", filepath.Join(filepath.Dir(configPath), "deploy"))
+		fmt.Fprintln(w.out, "  3. Dashboard:       http://localhost:8080  (login with the credentials you chose)")
 		return
 	}
 
 	switch runtime.GOOS {
 	case "windows":
-		fmt.Printf("  1. Copy the binary to %s\n", binaryPath())
-		fmt.Println("  2. Run install-irongrid-service.bat as Administrator")
+		fmt.Fprintf(w.out, "  1. Copy the binary to %s\n", binaryPath())
+		fmt.Fprintln(w.out, "  2. Run install-irongrid-service.bat as Administrator")
 	default:
-		fmt.Printf("  1. Copy the binary: sudo cp irongrid %s\n", binaryPath())
-		fmt.Println("  2. Start Dragonfly: docker run -d --name dragonfly -p 6379:6379 docker.dragonflydb.io/dragonfly/dragonfly")
+		fmt.Fprintf(w.out, "  1. Copy the binary: sudo cp irongrid %s\n", binaryPath())
+		fmt.Fprintln(w.out, "  2. Start Dragonfly: docker run -d --name dragonfly -p 6379:6379 docker.dragonflydb.io/dragonfly/dragonfly")
 	}
 
 	if a.service != "none" && a.service != "docker" {
-		fmt.Printf("  3. Install the service (see deploy/ above)\n")
+		fmt.Fprintln(w.out, "  3. Install the service (see deploy/ above)")
 	} else {
-		fmt.Printf("  3. Run it manually: %s -config %s -data %s\n", binaryPath(), configPath, dataDir)
+		fmt.Fprintf(w.out, "  3. Run it manually: %s -config %s -data %s\n", binaryPath(), configPath, dataDir)
 	}
 	if len(a.protos) > 0 {
-		fmt.Printf("  4. Point your router at this machine's port 53 (UDP/TCP)\n")
+		fmt.Fprintln(w.out, "  4. Point your router at this machine's port 53 (UDP/TCP)")
 	}
-	fmt.Println()
+	fmt.Fprintln(w.out)
 
 	// Sanity note about what was configured.
 	var notes []string
@@ -227,6 +229,6 @@ func printNextSteps(a *answers, configPath, dataDir string) {
 		notes = append(notes, fmt.Sprintf("%d whitelist presets applied", len(a.whitelists)))
 	}
 	if len(notes) > 0 {
-		fmt.Println("  " + strings.Join(notes, " · ") + " — the dashboard can adjust these anytime.")
+		fmt.Fprintln(w.out, "  "+strings.Join(notes, " · ")+" — the dashboard can adjust these anytime.")
 	}
 }

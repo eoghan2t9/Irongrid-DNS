@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/charmbracelet/huh v1.0.0
 	github.com/cloudflare/cloudflared v0.0.0-20260722163246-3a2b45c2a511
+	github.com/creack/pty v1.1.24
 	github.com/miekg/dns v1.1.72
 	github.com/quic-go/quic-go v0.61.0
 	github.com/redis/go-redis/v9 v9.22.0

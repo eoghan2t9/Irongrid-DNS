@@ -86,8 +86,8 @@ func TestBuildConfigNoProtocolsFails(t *testing.T) {
 func TestWriteDockerCompose(t *testing.T) {
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "..", "irongrid.yaml") // one level above deploy/
-	a := &answers{service: "docker"}
-	files, err := writeServiceFiles(a, configPath, filepath.Join(dir, "data"))
+	w := &wizard{a: &answers{service: "docker"}, out: os.Stdout}
+	files, err := writeServiceFiles(w, configPath, filepath.Join(dir, "data"))
 	if err != nil {
 		t.Fatalf("writeServiceFiles: %v", err)
 	}
