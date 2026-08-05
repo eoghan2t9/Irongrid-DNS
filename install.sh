@@ -6,12 +6,20 @@
 #
 # Downloads the latest Irongrid DNS release binary for your platform, verifies
 # its SHA-256 checksum against the published SHA256SUMS.txt, and installs it.
-# It also installs and starts DragonflyDB (the required cache): a native
-# binary + systemd service on Linux, or a Docker container on macOS/Windows
-# (Dragonfly publishes no native builds for those platforms). Options:
+# It also:
+#   - installs and starts DragonflyDB (the required cache): a native binary +
+#     systemd service on Linux, or a Docker container on macOS/Windows
+#     (Dragonfly publishes no native builds for those platforms)
+#   - writes a default irongrid.yaml if none exists
+#   - installs Irongrid itself as a startup service when possible
+#     (systemd on Linux, launchd on macOS)
 #
+# Options:
 #   --version <tag>     install a specific release tag (default: latest)
-#   --dir <path>        install into a custom directory
+#   --dir <path>        install binaries into a custom directory
+#   --config <path>     config file to create (default: ./irongrid.yaml)
+#   --data <dir>        runtime data directory (default: ./data)
+#   --no-service        do not install Irongrid as a startup service
 #   --skip-verify       skip checksum verification (not recommended)
 #   --skip-dragonfly    do not install/start Dragonfly
 #   -h, --help          show this help
@@ -23,8 +31,11 @@ DFLY_REPO="dragonflydb/dragonfly"
 DFLY_IMAGE="docker.dragonflydb.io/dragonfly/dragonfly"
 VERSION=""
 INSTALL_DIR=""
+CONFIG_PATH="irongrid.yaml"
+DATA_DIR="data"
 SKIP_VERIFY=0
 SKIP_DRAGONFLY=0
+INSTALL_SERVICE=1
 
 die() { echo "error: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required tool missing: $1"; }
@@ -37,14 +48,18 @@ Irongrid DNS - one-line installer (Linux / macOS, and Windows via Git Bash)
 
   curl -fsSL https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.sh | bash
 
-Installs Irongrid DNS and DragonflyDB (the required cache):
+Installs Irongrid DNS + DragonflyDB (the required cache), writes a default
+config, and installs Irongrid as a startup service:
   - Linux:    native Dragonfly binary + systemd service
   - macOS:    Dragonfly in Docker (no native macOS build exists)
   - Windows:  Dragonfly in Docker (no native Windows build exists)
 
 Options:
   --version <tag>     install a specific release tag (default: latest)
-  --dir <path>        install into a custom directory
+  --dir <path>        install binaries into a custom directory
+  --config <path>     config file to create (default: ./irongrid.yaml)
+  --data <dir>        runtime data directory (default: ./data)
+  --no-service        do not install Irongrid as a startup service
   --skip-verify       skip checksum verification (not recommended)
   --skip-dragonfly    do not install/start Dragonfly
   -h, --help          show this help
@@ -57,6 +72,11 @@ while [ $# -gt 0 ]; do
       [ $# -ge 2 ] || die "--version requires a value"; VERSION="$2"; shift 2 ;;
     --dir)
       [ $# -ge 2 ] || die "--dir requires a value"; INSTALL_DIR="$2"; shift 2 ;;
+    --config)
+      [ $# -ge 2 ] || die "--config requires a value"; CONFIG_PATH="$2"; shift 2 ;;
+    --data)
+      [ $# -ge 2 ] || die "--data requires a value"; DATA_DIR="$2"; shift 2 ;;
+    --no-service) INSTALL_SERVICE=0; shift ;;
     --skip-verify) SKIP_VERIFY=1; shift ;;
     --skip-dragonfly) SKIP_DRAGONFLY=1; shift ;;
     -h|--help) usage; exit 0 ;;
@@ -78,6 +98,29 @@ case "$(uname -m)" in
   aarch64|arm64|ARM64) ARCH=arm64 ;;
   *) die "unsupported architecture: $(uname -m)" ;;
 esac
+
+# Root access: we are root, or have passwordless sudo, or (interactive
+# terminal only) can prompt for a sudo password. Never hang a piped install
+# on a password prompt.
+ROOT=()
+if [ "$(id -u)" != 0 ]; then
+  if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+    ROOT=(sudo -n)
+  elif command -v sudo >/dev/null 2>&1 && [ -t 0 ] && sudo true 2>/dev/null; then
+    ROOT=(sudo)
+  fi
+fi
+run_root() { if [ "${#ROOT[@]}" -gt 0 ]; then "${ROOT[@]}" "$@"; else "$@"; fi }
+has_root() { [ "$(id -u)" = 0 ] || [ "${#ROOT[@]}" -gt 0 ]; }
+
+abs_path() {
+  case "$1" in
+    /*) echo "$1" ;;
+    *) echo "$PWD/$1" ;;
+  esac
+}
+CONFIG_ABS="$(abs_path "$CONFIG_PATH")"
+DATA_ABS="$(abs_path "$DATA_DIR")"
 
 EXT=""
 [ "$OS" = windows ] && EXT=".exe"
@@ -210,21 +253,6 @@ install_dragonfly_linux() {
   fi
   tar -xzf "$TMP/dragonfly.tar.gz" -C "$TMP"
 
-  # Dragonfly publishes no checksums, so verify the binary responds instead.
-  # Root access: we are root, or have passwordless sudo, or (interactive
-  # terminal only) can prompt for a sudo password. Otherwise fall back to a
-  # background process — never hang a piped install on a password prompt.
-  ROOT=()
-  if [ "$(id -u)" != 0 ]; then
-    if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
-      ROOT=(sudo -n)
-    elif command -v sudo >/dev/null 2>&1 && [ -t 0 ] && sudo true 2>/dev/null; then
-      ROOT=(sudo)
-    fi
-  fi
-  run_root() { if [ "${#ROOT[@]}" -gt 0 ]; then "${ROOT[@]}" "$@"; else "$@"; fi }
-  has_root() { [ "$(id -u)" = 0 ] || [ "${#ROOT[@]}" -gt 0 ]; }
-
   if has_root; then
     DFLY_BIN="/usr/local/bin/dragonfly"
     DFLY_DATA="/var/lib/dragonfly"
@@ -239,6 +267,9 @@ install_dragonfly_linux() {
 
   if has_root && systemd_available; then
     echo "==> installing systemd service ..."
+    # Reset any stale failed/auto-restarting instance before swapping the unit.
+    run_root systemctl stop dragonfly >/dev/null 2>&1 || true
+    run_root systemctl reset-failed dragonfly >/dev/null 2>&1 || true
     run_root tee /etc/systemd/system/dragonfly.service >/dev/null <<EOF
 [Unit]
 Description=DragonflyDB - Redis-compatible cache for Irongrid DNS
@@ -304,6 +335,164 @@ wait_for_dragonfly() {
 
 install_dragonfly
 
+# ---- default config ----
+# Write a ready-to-run default config when none exists, so the server can be
+# started straight after installing. cache.addr always points at localhost:6379
+# (where the Dragonfly above is served).
+if [ ! -f "$CONFIG_ABS" ]; then
+  echo "==> writing default config to $CONFIG_ABS"
+  mkdir -p "$(dirname "$CONFIG_ABS")"
+  cat >"$CONFIG_ABS" <<EOF
+# Irongrid DNS configuration (default, generated by the installer).
+# The dashboard can edit everything here live — see README for details.
+# Encrypted listeners (DoT/DoH/DoQ) are off by default to avoid port
+# conflicts; enable them in the dashboard or with: irongrid install
+server:
+  listen_udp: "0.0.0.0:53"     # plain DNS over UDP
+  listen_tcp: "0.0.0.0:53"     # plain DNS over TCP
+  listen_dot: ""               # DNS over TLS ("" disables)
+  listen_doh: ""               # DNS over HTTPS
+  listen_doq: ""               # DNS over QUIC
+  doh_path: "/dns-query"
+  web_listen: "0.0.0.0:8080"   # dashboard + REST API
+  timeout_sec: 5
+
+upstreams:
+  - "udp://1.1.1.1:53"
+  - "udp://8.8.8.8:53"
+
+cache:
+  addr: "localhost:6379"       # Dragonfly endpoint (installed by this script)
+  password: ""
+  db: 0
+  ttl: 6h
+  negative_ttl: 1m
+
+tls:
+  cert_file: ""
+  key_file: ""
+  generate_self_signed: true
+  self_signed_hosts:
+    - "localhost"
+  cert_dir: "data/certs"
+
+filter:
+  block_response: "nxdomain"
+  block_ttl: 600
+  blocklists: []
+  whitelist: []
+  blacklist: []
+
+log:
+  query_log_file: "data/querylog.db"
+  retention_days: 30
+  verbose: true
+
+web:
+  username: "admin"
+  password: ""                 # default login is admin / irongrid — change it!
+
+tunnel:
+  enabled: false
+EOF
+else
+  echo "==> config already exists at $CONFIG_ABS (leaving it untouched)"
+fi
+
+# ---- Irongrid as a startup service ----
+install_irongrid_service() {
+  [ "$INSTALL_SERVICE" -eq 1 ] || { echo "==> service install skipped (--no-service)"; return 0; }
+  case "$OS" in
+    linux) install_irongrid_systemd ;;
+    darwin) install_irongrid_launchd ;;
+    windows) echo "==> service install handled by install.ps1 on Windows" ;;
+  esac
+}
+
+install_irongrid_systemd() {
+  if ! { has_root && systemd_available; }; then
+    echo "!! not installing Irongrid as a service (no root or no systemd)"
+    echo "   run it manually:  $DEST/irongrid -config $CONFIG_ABS -data $DATA_ABS"
+    return 0
+  fi
+  echo "==> installing Irongrid systemd service ..."
+  # Reset any stale failed/auto-restarting instance before swapping the unit.
+  run_root systemctl stop irongrid >/dev/null 2>&1 || true
+  run_root systemctl reset-failed irongrid >/dev/null 2>&1 || true
+  run_root mkdir -p "$DATA_ABS"
+  run_root tee /etc/systemd/system/irongrid.service >/dev/null <<EOF
+[Unit]
+Description=Irongrid DNS - ad-blocking DNS server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=$DEST/irongrid -config $CONFIG_ABS -data $DATA_ABS
+WorkingDirectory=$DATA_ABS   # resolves relative paths in the config (data/certs, data/querylog.db)
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  run_root systemctl daemon-reload
+  run_root systemctl enable irongrid >/dev/null 2>&1 || true
+  run_root systemctl start irongrid 2>/dev/null || true
+  sleep 2  # let systemd spawn the process before judging it
+  if [ "$(run_root systemctl is-active irongrid 2>/dev/null || echo failed)" = "active" ]; then
+    echo "==> Irongrid service enabled and running (systemctl status irongrid)"
+  else
+    echo "!! Irongrid service installed but not active — check: systemctl status irongrid"
+  fi
+}
+
+install_irongrid_launchd() {
+  echo "==> installing Irongrid launchd agent ..."
+  mkdir -p "$DATA_ABS" "$HOME/Library/LaunchAgents"
+  local label="com.irongrid.dns"
+  local plist="$HOME/Library/LaunchAgents/$label.plist"
+  cat >"$plist" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>$label</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$DEST/irongrid</string>
+    <string>-config</string>
+    <string>$CONFIG_ABS</string>
+    <string>-data</string>
+    <string>$DATA_ABS</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>WorkingDirectory</key>
+  <string>$DATA_ABS</string>
+  <key>StandardOutPath</key>
+  <string>$DATA_ABS/irongrid.log</string>
+  <key>StandardErrorPath</key>
+  <string>$DATA_ABS/irongrid.log</string>
+</dict>
+</plist>
+EOF
+  if launchctl load "$plist" 2>/dev/null; then
+    echo "==> Irongrid launchd agent loaded (com.irongrid.dns)"
+  else
+    echo "   launchd plist written to $plist — load it with: launchctl load $plist"
+  fi
+}
+
+install_irongrid_service
+
 echo
 echo "Next steps:"
 if [ "$DFLY_STARTED" -eq 1 ]; then
@@ -311,6 +500,9 @@ if [ "$DFLY_STARTED" -eq 1 ]; then
 else
   echo "  ! Start Dragonfly (required cache) - see the notes above or docker-compose.yml"
 fi
-echo "  1. Run the setup wizard:     $DEST/irongrid install"
-echo "  2. Start the server:         $DEST/irongrid -config irongrid.yaml -data data"
-echo "  3. Dashboard:                http://localhost:8080"
+echo "  ✓ Config: $CONFIG_ABS"
+echo "  1. If the service above is not running, start it:"
+echo "       $DEST/irongrid -config $CONFIG_ABS -data $DATA_ABS"
+echo "  2. (Optional) customise setup with the wizard: $DEST/irongrid install"
+echo "  3. Dashboard:      http://localhost:8080  (default login: admin / irongrid)"
+echo "  4. Point devices at this machine's port 53 (UDP/TCP)"

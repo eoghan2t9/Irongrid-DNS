@@ -52,16 +52,30 @@ The one-line installers set up **DragonflyDB** (the required cache) for you:
 | **Windows** | Docker container (WSL2) — Dragonfly has no native Windows build |
 
 It listens on `127.0.0.1:6379`, matching the default `cache.addr` in the
-config. Skip it with `--skip-dragonfly` (install.sh) if you already run a
-Redis-compatible server.
+config. Skip it with `--skip-dragonfly` if you already run a Redis-compatible
+server — a live Redis/KeyDB/Dragonfly on 6379 is detected and used as-is.
+
+### What the one-line installer does
+
+1. Installs the **Irongrid binary** (checksum-verified) to `/usr/local/bin` (or `~/.local/bin`).
+2. Installs and starts **Dragonfly** (see above).
+3. Writes a **default `irongrid.yaml`** (skipped if one already exists).
+4. Installs **Irongrid as a startup service** — systemd on Linux,
+   launchd on macOS, an elevated logon scheduled task on Windows
+   (it runs while a user is logged in; Linux needs root; use
+   `--no-service` to skip).
+
+```bash
+# Customise the locations:
+curl -fsSL https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.sh | bash -s -- \
+  --config /etc/irongrid/irongrid.yaml --data /var/lib/irongrid --no-service
+```
 
 ### After installing
 
-1. **Dragonfly is already installed and running** (or see the notes the
-   installer printed if you skipped it).
-2. Run the interactive setup wizard: `irongrid install` (or `sudo irongrid install`)
-3. Start the server: `irongrid -config irongrid.yaml -data data`
-4. Open the dashboard at **http://localhost:8080**
+1. **Dragonfly and the service are already running** — the dashboard is at
+   **http://localhost:8080** (default login `admin` / `irongrid`).
+2. (Optional) customise everything with the wizard: `irongrid install`.
 
 The wizard writes a ready-to-use config and installs the service for your
 platform (systemd / launchd / Windows service / Docker).
@@ -137,7 +151,7 @@ The wizard supports **Linux, macOS, Windows and Docker** targets:
 | Choice | What it sets |
 |---|---|
 | Deployment | `docker` (container + bundled Dragonfly) or `native` (binary on this machine) |
-| Service manager | systemd unit, launchd plist, Windows `sc` service, or none |
+| Service manager | systemd unit, launchd plist, Windows elevated logon task (Go binaries don't speak the SCM protocol, so a scheduled task with `/RL HIGHEST` is used instead of `sc.exe`), or none |
 | Protocols | UDP/TCP on :53, DoT on :853, DoH on :443, DoQ on :853 |
 | Upstreams | Cloudflare, Google, Quad9 presets or custom (`udp://`, `tls://`, `https://`, `quic://`) |
 | Cache | Dragonfly address (+ optional password) |
@@ -151,7 +165,7 @@ prints the exact install command for your platform:
 
 - **Linux** — `sudo cp deploy/irongrid.service /etc/systemd/system/ && sudo systemctl enable --now irongrid`
 - **macOS** — `cp deploy/com.irongrid.dns.plist ~/Library/LaunchAgents/ && launchctl load ~/Library/LaunchAgents/com.irongrid.dns.plist`
-- **Windows** — run `deploy/install-irongrid-service.bat` as Administrator
+- **Windows** — run `deploy/install-irongrid-service.bat` as Administrator (installs an elevated logon scheduled task — plain Go binaries don't implement the SCM protocol, so `sc.exe` would leave the service stuck in START_PENDING; the task runs while you're logged in)
 - **Docker** — `cd deploy && docker compose up -d`
 
 ### 2. Docker Compose (Dragonfly included)
@@ -197,6 +211,13 @@ served by `GET /api/lists/catalog` and shared by every entry point:
 In the **Blocklists** page, presets appear as quick-add buttons; in the
 **Lists** page, allow-list presets add their domains to the Allow list with one
 click (they override every blocklist).
+
+### Wizard: auto-start Dragonfly
+
+`irongrid install --with-dragonfly` probes the configured `cache.addr` and,
+if nothing answers, starts Dragonfly for you (native binary + background
+process on Linux, Docker on macOS/Windows). Combine it with the scripted mode
+for a fully unattended install.
 
 ### Scripted / unattended installs
 

@@ -31,6 +31,9 @@ type Options struct {
 	DataDir    string // runtime data directory (querylog, lists, certs)
 	In         io.Reader // wizard input; nil = os.Stdin
 	Out        io.Writer // wizard output; nil = os.Stdout
+	// WithDragonfly makes the wizard detect whether a Redis-compatible cache
+	// answers at cache.addr and start Dragonfly if it does not.
+	WithDragonfly bool
 }
 
 // wizard carries the answers plus the IO streams for one interactive run.
@@ -135,6 +138,13 @@ func Run(opts Options) error {
 	}
 	if len(files) > 0 {
 		fmt.Fprintf(w.out, "   Service files written to %s\n", filepath.Dir(files[0]))
+	}
+
+	if opts.WithDragonfly {
+		fmt.Fprintln(w.out)
+		if err := EnsureDragonfly(cfg.Cache.Addr, w.out); err != nil {
+			fmt.Fprintf(w.out, "  ⚠ Dragonfly: %v\n", err)
+		}
 	}
 
 	w.printNextSteps(absConfig, absData)

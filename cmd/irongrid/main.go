@@ -48,8 +48,13 @@ func main() {
 		installFlags := flag.NewFlagSet("irongrid install", flag.ExitOnError)
 		instConfig := installFlags.String("config", "irongrid.yaml", "path to write the YAML configuration file")
 		instData := installFlags.String("data", "data", "runtime data directory (querylog, lists, certs)")
+		instDfly := installFlags.Bool("with-dragonfly", false, "detect and start Dragonfly if no cache answers at cache.addr")
 		_ = installFlags.Parse(os.Args[2:])
-		if err := installer.Run(installer.Options{ConfigPath: *instConfig, DataDir: *instData}); err != nil {
+		if err := installer.Run(installer.Options{
+			ConfigPath:    *instConfig,
+			DataDir:       *instData,
+			WithDragonfly: *instDfly,
+		}); err != nil {
 			log.Fatalf("install: %v", err)
 		}
 		return

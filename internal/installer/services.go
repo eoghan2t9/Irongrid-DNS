@@ -58,6 +58,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 ExecStart=%s -config %s -data %s
+WorkingDirectory=%s   # resolves relative paths in the config (data/certs, data/querylog.db)
 Restart=on-failure
 RestartSec=3
 # Hardening
@@ -68,7 +69,7 @@ LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
-`, binaryPath(), configPath, dataDir)
+`, binaryPath(), configPath, dataDir, dataDir)
 	f := filepath.Join(dir, "irongrid.service")
 	if err := os.WriteFile(f, []byte(unit), 0o644); err != nil {
 		return nil, err
@@ -101,13 +102,15 @@ func writeLaunchd(w *wizard, dir, configPath, dataDir string) ([]string, error) 
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
+	<key>WorkingDirectory</key>
+	<string>%s</string>
 	<key>StandardOutPath</key>
 	<string>%s</string>
 	<key>StandardErrorPath</key>
 	<string>%s</string>
 </dict>
 </plist>
-`, label, binaryPath(), configPath, dataDir,
+`, label, binaryPath(), configPath, dataDir, dataDir,
 		filepath.Join(dataDir, "irongrid.log"), filepath.Join(dataDir, "irongrid.log"))
 	f := filepath.Join(dir, label+".plist")
 	if err := os.WriteFile(f, []byte(plist), 0o644); err != nil {
@@ -123,10 +126,14 @@ func writeLaunchd(w *wizard, dir, configPath, dataDir string) ([]string, error) 
 
 func writeWindowsService(w *wizard, dir, configPath, dataDir string) ([]string, error) {
 	script := fmt.Sprintf(`@echo off
-REM Irongrid DNS — install as a Windows service (run as Administrator)
-sc create IrongridDNS binPath= "\"%s\" -config \"%s\" -data \"%s\"" start= auto
-sc description IrongridDNS "Irongrid DNS — ad-blocking DNS server"
-sc start IrongridDNS
+REM Irongrid DNS — install as a startup task (run as Administrator)
+REM A plain Go binary does not speak the SCM protocol, so a scheduled task
+REM at logon is used instead of sc.exe (which would leave the service stuck
+REM in START_PENDING and get killed after ~30s).
+REM /RL HIGHEST is required: the default config binds 0.0.0.0:53, which a
+REM LIMITED (filtered-token) task cannot do.
+schtasks /Create /TN IrongridDNS /TR "\"%s\" -config \"%s\" -data \"%s\"" /SC ONLOGON /RL HIGHEST /F
+schtasks /Run /TN IrongridDNS
 `, binaryPath(), configPath, dataDir)
 	f := filepath.Join(dir, "install-irongrid-service.bat")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
@@ -166,7 +173,9 @@ func writeDockerCompose(w *wizard, dir, configPath string) ([]string, error) {
     image: docker.dragonflydb.io/dragonfly/dragonfly
     container_name: irongrid-dragonfly
     restart: unless-stopped
-    command: --cache_mode=true --maxmemory=512mb --port=6379
+    # --proactor_threads=2 keeps 2 x 256MiB <= the 512mb maxmemory cap
+    # (Dragonfly requires >= 256MiB per proactor thread on startup).
+    command: --cache_mode=true --maxmemory=512mb --proactor_threads=2 --port=6379
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
@@ -205,6 +214,7 @@ func (w *wizard) printNextSteps(configPath, dataDir string) {
 	case "windows":
 		fmt.Fprintf(w.out, "  1. Copy the binary to %s\n", binaryPath())
 		fmt.Fprintln(w.out, "  2. Run install-irongrid-service.bat as Administrator")
+		fmt.Fprintln(w.out, "     (installs a logon task — runs while you are logged in)")
 	default:
 		fmt.Fprintf(w.out, "  1. Copy the binary: sudo cp irongrid %s\n", binaryPath())
 		fmt.Fprintln(w.out, "  2. Start Dragonfly: docker run -d --name dragonfly -p 6379:6379 docker.dragonflydb.io/dragonfly/dragonfly")

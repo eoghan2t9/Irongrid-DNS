@@ -79,6 +79,7 @@ try {
 $docker = Get-Command docker -ErrorAction SilentlyContinue
 if ($existing) {
   Write-Host "==> a Redis-compatible server already answers on 127.0.0.1:6379 - using it"
+  $dflyStarted = $true
 } elseif (-not $docker) {
   Write-Host "!! Dragonfly has no native Windows build and Docker was not found." -ForegroundColor Yellow
   Write-Host "   Install Docker Desktop (WSL2 backend): https://www.docker.com/products/docker-desktop/"
@@ -97,6 +98,38 @@ if ($existing) {
   }
 }
 
+# ---- Install Irongrid as a Windows scheduled task ---------------
+# A plain Go binary does not speak the Windows Service Control Manager
+# protocol, so `sc.exe create` leaves it stuck in START_PENDING and SCM
+# kills it after ~30s. A scheduled task runs it reliably instead.
+# /RL HIGHEST is required: the default config binds 0.0.0.0:53, which a
+# LIMITED (filtered-token) task cannot do. The /TR quoting is written to a
+# temp .bat and run via cmd /c — PowerShell's native-argument marshalling
+# does not reliably preserve schtasks' doubled-quote convention.
+Write-Host ""
+Write-Host "==> installing Irongrid as a startup task ..."
+$configFile = Join-Path $Dir "irongrid.yaml"
+$dataDir = Join-Path $Dir "data"
+New-Item -ItemType Directory -Force -Path $dataDir | Out-Null
+$taskName = "IrongridDNS"
+$esc = '\"'
+$tr = "$esc$exe$esc -config $esc$configFile$esc -data $esc$dataDir$esc"
+$bat = "@echo off`r`n" +
+  "schtasks /Create /TN $taskName /TR `"$tr`" /SC ONLOGON /RL HIGHEST /F`r`n" +
+  "schtasks /Run /TN $taskName`r`n"
+$batFile = Join-Path $env:TEMP "$taskName-install.bat"
+Set-Content -Path $batFile -Value $bat -Encoding ASCII
+try {
+  cmd /c $batFile
+  if ($LASTEXITCODE -eq 0) {
+    Write-Host "==> IrongridDNS task installed (runs elevated at logon) and started"
+  } else {
+    Write-Host "!! Could not create the startup task - run this installer as Administrator" -ForegroundColor Yellow
+  }
+} finally {
+  Remove-Item $batFile -Force -ErrorAction SilentlyContinue
+}
+
 Write-Host ""
 Write-Host "Next steps:"
 if ($dflyStarted) {
@@ -104,6 +137,6 @@ if ($dflyStarted) {
 } else {
   Write-Host "  1. Start Dragonfly (required cache) - see the notes above"
 }
-Write-Host "  2. Run the setup wizard:   $exe install"
-Write-Host "  3. Start the server:       $exe -config irongrid.yaml -data data"
-Write-Host "  4. Dashboard:              http://localhost:8080"
+Write-Host "  2. Edit the config:       $configFile"
+Write-Host "  3. (Optional) run the setup wizard:  $exe install"
+Write-Host "  4. Dashboard:              http://localhost:8080  (default login: admin / irongrid)"
