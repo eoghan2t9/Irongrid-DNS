@@ -4,6 +4,61 @@ A fast, self-hosted, ad-blocking DNS server written in pure Go — a single
 self-contained binary with a modern web dashboard. Built to replace slow
 commercial ad-blocking DNS with sub-millisecond local responses.
 
+## Install in one line
+
+**Linux / macOS** (amd64 & arm64 — downloads the latest release, verifies the
+SHA-256 checksum, installs to `/usr/local/bin`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.sh | bash
+```
+
+**Windows** (PowerShell — same checksum-verified install, added to your PATH):
+
+```powershell
+irm https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.ps1 | iex
+```
+
+**Docker** (compose bundle with Dragonfly included):
+
+```bash
+curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/docker-compose.yml
+curl -fsSL -o irongrid.example.yaml https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/irongrid.example.yaml
+cp irongrid.example.yaml irongrid.yaml
+docker compose up -d
+```
+
+Or pull the pre-built image straight from GHCR (needs a separate Dragonfly):
+
+```bash
+docker run -d --name dragonfly -p 6379:6379 docker.dragonflydb.io/dragonfly/dragonfly
+docker run -d --name irongrid --restart unless-stopped \
+  -p 53:53/udp -p 53:53/tcp -p 853:853/tcp -p 853:853/udp -p 443:443/tcp -p 8080:8080 \
+  -v "$PWD/irongrid.yaml:/app/irongrid.yaml:ro" \
+  ghcr.io/eoghan2t9/irongrid-dns:latest
+```
+
+### After installing
+
+1. Start a **Dragonfly** (Redis-compatible) server — the cache is a hard
+   requirement. The Docker routes include it automatically.
+2. Run the interactive setup wizard: `irongrid install` (or `sudo irongrid install`)
+3. Start the server: `irongrid -config irongrid.yaml -data data`
+4. Open the dashboard at **http://localhost:8080**
+
+The wizard writes a ready-to-use config and installs the service for your
+platform (systemd / launchd / Windows service / Docker).
+
+## Update in one line
+
+- **Binary installs** — re-run the one-liner; it replaces your binary with
+  the newest version (same checksum verification).
+- **Docker** — `docker compose pull && docker compose up -d`
+- **In the dashboard** — Irongrid checks GitHub Releases automatically on
+  load and pops up the **latest changelog** when a new version is out, with a
+  direct download link and the terminal update command. The **⬆ Updates**
+  button in the top bar re-checks any time.
+
 ## Features
 
 | | |
@@ -12,9 +67,10 @@ commercial ad-blocking DNS with sub-millisecond local responses.
 | 🌐 **All protocols** | DNS over **UDP**, **TCP**, **TLS (DoT)**, **HTTPS (DoH, RFC 8484)** and **QUIC (DoQ, RFC 9250)** |
 | 🛡️ **Blocking** | Hosts files, Adblock syntax (`\|\|domain^`, `@@` exceptions), plain domains, wildcards (`*.domain`), and IP rules |
 | ✅ **Allow list** | Whitelist entries override *any* blocklist, including IP addresses |
-| 📜 **Blocklists** | Add unlimited remote/local lists, per-list auto-update, one-click refresh |
+| 📜 **Blocklists** | Add unlimited remote/local lists, per-list auto-update, one-click refresh, curated one-click presets |
 | 🪵 **Full query log** | Every allowed/blocked/cached request with client, reason, upstream, latency — stored in pure-Go SQLite |
-| 📊 **Dashboard** | Modern React UI: live stats, protocol breakdown, top blocked domains, log explorer |
+| 📊 **Dashboard** | Modern React UI: live stats, protocol breakdown, top blocked domains, log explorer, live config editing |
+| 🔄 **Built-in updater** | Checks GitHub Releases, pops up the changelog, offers the download |
 | 🔗 **Cloudflare Tunnel** | cloudflared compiled **into the binary** (imported as Go modules) — no external install, managed from the dashboard |
 | 📱 **Android Private DNS** | DoT/DoH on your own domain via the tunnel, with auto-generated or custom TLS certificates |
 | 🐳 **Cross-platform** | Linux, macOS, Windows (single static binary) plus Docker + Dragonfly Compose |
@@ -38,12 +94,7 @@ commercial ad-blocking DNS with sub-millisecond local responses.
 Every response passes through: **filter → cache → upstream → log**. Blocked
 queries never touch an upstream, so they are answered instantly.
 
-## Installation
-
-There are three ways to install: the **interactive TUI wizard** (recommended),
-**Docker Compose**, or **native** from source. All three need a
-[Dragonfly](https://www.dragonflydb.io/) (Redis-compatible) server for the
-response cache — the Docker route includes it automatically.
+## Installation options
 
 ### 1. Interactive TUI wizard (recommended)
 
@@ -147,10 +198,31 @@ upstreams, Dragonfly address/password, blocklists, allow lists, username,
 password + confirmation, TLS hosts, and the final confirm (`y`). The same
 path is covered by an end-to-end test in `internal/installer`.
 
-### Building releases
+## Built-in updater
+
+The dashboard checks `https://api.github.com/repos/eoghan2t9/Irongrid-DNS/releases/latest`
+shortly after loading (`GET /api/update/check`). When a newer version exists:
+
+- A **popup shows the latest changelog**, your version → new version, the
+  release date, and links to download the binary for your platform or view
+  the release notes.
+- **⬆ Updates** in the top bar re-checks manually; an amber dot appears while
+  a new version is pending.
+- **Don't show again** remembers the dismissed version (per browser).
+
+The check is read-only and fails quietly (no popup) when offline or
+rate-limited. Releases are published by tagging:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+## Building releases
 
 Tag a release to build static binaries for **Linux, macOS and Windows** (amd64
-+ arm64) on GitHub Actions and attach them with checksums:
++ arm64) on GitHub Actions, generate a changelog, attach binaries with
+checksums, and push the **`ghcr.io/eoghan2t9/irongrid-dns`** container image
+(Linux amd64 + arm64):
 
 ```bash
 git tag v1.0.0
@@ -218,6 +290,7 @@ GET/POST /api/tunnel/*      tunnel lifecycle + logs
 GET/PUT /api/config         read / update the full config (live-apply + restart notes)
 POST /api/config/reload     apply listener/cache/TLS/upstream changes in-process (no restart)
 GET  /api/diag/dns?name=…   resolve through your upstreams
+GET  /api/update/check      check GitHub Releases for a newer version + changelog
 ```
 
 ## Development

@@ -6,6 +6,7 @@ import Blocklists from './components/Blocklists'
 import Lists from './components/Lists'
 import Tunnel from './components/Tunnel'
 import Settings from './components/Settings'
+import UpdateChecker from './components/UpdateChecker'
 
 const NAV = [
   { id: 'dashboard', label: 'Dashboard', icon: '◧' },
@@ -89,9 +90,12 @@ export default function App() {
       <main className="main">
         <header className="topbar">
           <div className="topbar-title">{NAV.find((n) => n.id === view)?.label}</div>
-          <button className="btn ghost small" onClick={refreshStatus}>
-            ⟳ Refresh
-          </button>
+          <div className="topbar-actions">
+            <UpdateChecker />
+            <button className="btn ghost small" onClick={refreshStatus}>
+              ⟳ Refresh
+            </button>
+          </div>
         </header>
         <div className="content">
           {view === 'dashboard' && <Dashboard onNavigate={setView} />}

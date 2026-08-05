@@ -22,6 +22,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tunnel"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/update"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/version"
 )
@@ -111,6 +112,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.reloadConfig(w)
 	case len(parts) == 2 && parts[0] == "diag" && parts[1] == "dns" && r.Method == http.MethodGet:
 		h.diagDNS(ctx, w, r)
+	case len(parts) == 2 && parts[0] == "update" && parts[1] == "check" && r.Method == http.MethodGet:
+		h.checkUpdate(ctx, w)
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 	}
@@ -822,6 +825,22 @@ func (h *Handler) reloadConfig(w http.ResponseWriter) {
 		"reloaded":          true,
 		"still_requires_restart": remaining,
 	})
+}
+
+// ---- updates ----
+
+// checkUpdate queries GitHub Releases for a newer version. Failures (offline,
+// rate limit, no releases yet) are folded into the payload as a non-empty
+// "error" field so the UI can degrade quietly.
+func (h *Handler) checkUpdate(ctx context.Context, w http.ResponseWriter) {
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+	cur := h.Version
+	if cur == "" {
+		cur = version.Version
+	}
+	client := &update.Client{Repo: update.DefaultRepo, Current: cur}
+	writeJSON(w, http.StatusOK, client.Check(ctx))
 }
 
 func (h *Handler) diagDNS(ctx context.Context, w http.ResponseWriter, r *http.Request) {
