@@ -74,7 +74,7 @@ export default function UpdateChecker({ onNavigate }) {
 
       {show && info && (
         <div className="modal-overlay" onClick={() => setShow(false)}>
-          <div className="modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
+          <div className="modal updater-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
             <div className="modal-head">
               <div>
                 <div className="modal-title">New version available ✨</div>

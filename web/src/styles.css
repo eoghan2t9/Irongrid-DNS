@@ -227,12 +227,44 @@ body {
   /* Let the label size the button — a fixed 40px square made the "Updates"
      text overflow on small screens. */
   .updater-btn { width: auto; padding: 0 12px; }
+
+  /* Touch-first modal defaults shared by all dialogs: comfortable close
+     target and bottom safe-area clearance. */
+  .modal-head { padding: 18px 16px 12px; }
+  .modal-body { padding: 14px 16px; }
+  .modal-x { width: 38px; height: 38px; font-size: 16px; }
+  .modal-foot { padding: 14px 16px calc(18px + env(safe-area-inset-bottom)); }
+
+  /* Update popup bottom sheet (scoped to .updater-modal so other dialogs
+     keep their flex foot): full-width primary action, 2x2 action grid, and
+     no horizontal overflow from the long install command. */
+  .updater-modal .modal-foot {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+  }
+  .updater-modal .modal-foot .modal-spacer { display: none; }
+  .updater-modal .modal-foot .btn {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 100%; text-align: center;
+  }
+  .updater-modal .modal-foot .btn.primary { grid-column: 1 / -1; }
+  .updater-modal .modal-install { padding: 10px 16px; }
+  .updater-modal .modal-install code {
+    display: block;
+    white-space: normal;
+    overflow-wrap: anywhere;
+    line-height: 1.5;
+    padding: 8px 10px;
+  }
 }
 
 @media (max-width: 480px) {
   .topbar-actions .btn.small { padding: 8px 10px; font-size: 12.5px; }
   .cards { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
   .quick-actions .btn { flex: 1 1 45%; }
+  /* Long labels like "Don't show again" deserve a full row on phones. */
+  .updater-modal .modal-foot { grid-template-columns: 1fr; }
 }
 
 .card {
