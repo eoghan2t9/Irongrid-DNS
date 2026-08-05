@@ -18,9 +18,12 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Cache is a thin, type-safe wrapper around a Dragonfly connection.
+// Cache is a two-layer response cache: a fast in-process L1 in front of the
+// Dragonfly/Redis L2. The L2 is authoritative for the fleet (and survives
+// restarts); the L1 makes local hits a pure map lookup.
 type Cache struct {
 	client      *redis.Client
+	l1          *l1Cache
 	prefix      string
 	ttl         time.Duration
 	negativeTTL time.Duration
@@ -53,6 +56,7 @@ func New(addr, password string, db int, ttl, negativeTTL time.Duration) (*Cache,
 
 	return &Cache{
 		client:      client,
+		l1:          newL1(),
 		prefix:      "irongrid:dns:",
 		ttl:         ttl,
 		negativeTTL: negativeTTL,
@@ -108,14 +112,42 @@ func (c *Cache) negKey(q dns.Question) string {
 // ---- positive answers ----
 
 // cacheEntryPrefix marks the stored value format: an 8-byte big-endian store
-// timestamp followed by the packed DNS message. The timestamp lets Get rebase
-// record TTLs to their remaining lifetime.
+// timestamp followed by the packed DNS message. The timestamp lets reads
+// rebase record TTLs to their remaining lifetime.
 const cacheEntryPrefixLen = 8
 
-// Get returns a cached response for q, or nil when absent/expired.
+// Get returns a cached response for q, or nil when absent/expired. The L1
+// memory cache is consulted first; L2 (Dragonfly) only on an L1 miss, and a
+// hit is then re-warmed into L1.
 func (c *Cache) Get(ctx context.Context, q dns.Question) *dns.Msg {
-	raw, err := c.client.Get(ctx, c.msgKey(q)).Bytes()
-	if err != nil || len(raw) <= cacheEntryPrefixLen {
+	key := c.msgKey(q)
+	now := time.Now()
+	if raw, ok := c.l1.get(key, now); ok {
+		return unpackEntry(raw)
+	}
+	raw, ok := c.l2Get(ctx, key)
+	if !ok {
+		return nil
+	}
+	c.l1.set(key, raw, c.ttl, now)
+	return unpackEntry(raw)
+}
+
+// l2Get fetches raw bytes from Dragonfly/Redis. A nil client (unit tests)
+// is a clean miss.
+func (c *Cache) l2Get(ctx context.Context, key string) ([]byte, bool) {
+	if c.client == nil {
+		return nil, false
+	}
+	raw, err := c.client.Get(ctx, key).Bytes()
+	return raw, err == nil
+}
+
+// unpackEntry decodes a stored positive entry (8-byte store timestamp +
+// packed DNS message) and rebases answer TTLs to the remaining lifetime
+// (floor at 1 so clients don't cache a zero-TTL answer as immortal).
+func unpackEntry(raw []byte) *dns.Msg {
+	if len(raw) <= cacheEntryPrefixLen {
 		return nil
 	}
 	stored := int64(binary.BigEndian.Uint64(raw[:cacheEntryPrefixLen]))
@@ -123,8 +155,6 @@ func (c *Cache) Get(ctx context.Context, q dns.Question) *dns.Msg {
 	if err := m.Unpack(raw[cacheEntryPrefixLen:]); err != nil {
 		return nil
 	}
-	// Rebase TTLs to the remaining lifetime (floor at 1 so clients don't
-	// cache a zero-TTL answer as immortal).
 	elapsed := time.Now().Unix() - stored
 	for _, rr := range m.Answer {
 		if elapsed > 0 && rr.Header().Ttl > uint32(elapsed) {
@@ -138,7 +168,8 @@ func (c *Cache) Get(ctx context.Context, q dns.Question) *dns.Msg {
 
 // Set stores a positive response for q. capTTL of zero means the configured
 // default cap (cache.ttl) applies; the stored TTL is the minimum of the
-// record TTLs and that cap.
+// record TTLs and that cap. The entry goes to L1 immediately and L2 for the
+// fleet.
 func (c *Cache) Set(ctx context.Context, q dns.Question, m *dns.Msg, capTTL time.Duration) {
 	if m == nil || len(m.Answer) == 0 {
 		return
@@ -167,9 +198,14 @@ func (c *Cache) Set(ctx context.Context, q dns.Question, m *dns.Msg, capTTL time
 		return
 	}
 	buf := make([]byte, cacheEntryPrefixLen+len(packed))
-	binary.BigEndian.PutUint64(buf[:cacheEntryPrefixLen], uint64(time.Now().Unix()))
+	now := time.Now()
+	binary.BigEndian.PutUint64(buf[:cacheEntryPrefixLen], uint64(now.Unix()))
 	copy(buf[cacheEntryPrefixLen:], packed)
-	c.client.Set(ctx, c.msgKey(q), buf, ttl)
+	key := c.msgKey(q)
+	c.l1.set(key, buf, ttl, now)
+	if c.client != nil {
+		c.client.Set(ctx, key, buf, ttl)
+	}
 }
 
 // ---- negative answers ----
@@ -191,15 +227,32 @@ func (c *Cache) SetNegative(ctx context.Context, q dns.Question, m *dns.Msg, ttl
 	if err != nil {
 		return
 	}
-	c.client.Set(ctx, c.negKey(q), raw, ttl)
+	key := c.negKey(q)
+	now := time.Now()
+	c.l1.set(key, raw, ttl, now)
+	if c.client != nil {
+		c.client.Set(ctx, key, raw, ttl)
+	}
 }
 
-// GetNegative returns a cached empty response, if any.
+// GetNegative returns a cached empty response, if any (L1 first, then L2).
 func (c *Cache) GetNegative(ctx context.Context, q dns.Question) *dns.Msg {
-	raw, err := c.client.Get(ctx, c.negKey(q)).Bytes()
-	if err != nil {
+	key := c.negKey(q)
+	now := time.Now()
+	if raw, ok := c.l1.get(key, now); ok {
+		return unpackNegative(raw)
+	}
+	raw, ok := c.l2Get(ctx, key)
+	if !ok {
 		return nil
 	}
+	c.l1.set(key, raw, c.negativeTTL, now)
+	return unpackNegative(raw)
+}
+
+// unpackNegative decodes a stored negative entry (no TTL rebasing needed;
+// the Redis expiry already bounds it).
+func unpackNegative(raw []byte) *dns.Msg {
 	m := new(dns.Msg)
 	if err := m.Unpack(raw); err != nil {
 		return nil
@@ -207,8 +260,13 @@ func (c *Cache) GetNegative(ctx context.Context, q dns.Question) *dns.Msg {
 	return m
 }
 
-// FlushAll clears every cached entry (used by the UI "clear cache" action).
+// FlushAll clears every cached entry in L1 and L2 (used by the UI "clear
+// cache" action).
 func (c *Cache) FlushAll(ctx context.Context) (int64, error) {
+	c.l1.flush()
+	if c.client == nil {
+		return 0, nil
+	}
 	var n int64
 	iter := c.client.Scan(ctx, 0, c.prefix+"*", 1000).Iterator()
 	for iter.Next(ctx) {
@@ -216,4 +274,3 @@ func (c *Cache) FlushAll(ctx context.Context) (int64, error) {
 	}
 	return n, iter.Err()
 }
-

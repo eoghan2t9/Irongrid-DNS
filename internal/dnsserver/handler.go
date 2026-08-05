@@ -5,6 +5,7 @@ package dnsserver
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"net"
 	"strings"
@@ -178,7 +179,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		cancel()
 	}
 
-	// 3. Forward to upstreams in order.
+	// 3. Forward to upstreams. Multiple upstreams are raced concurrently so
+	//    the fastest healthy one answers; a single upstream is queried
+	//    directly to avoid goroutine overhead.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	var (
@@ -186,13 +189,15 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		usedUp string
 		err    error
 	)
-	for _, up := range upstreams {
-		resp, err = up.Query(ctx, r)
-		usedUp = up.Name()
+	if len(upstreams) == 1 {
+		resp, err = upstreams[0].Query(ctx, r)
 		if err == nil && resp != nil {
-			break
+			usedUp = upstreams[0].Name()
+		} else if err != nil {
+			log.Printf("[dns] upstream %s failed: %v", upstreams[0].Name(), err)
 		}
-		log.Printf("[dns] upstream %s failed: %v", up.Name(), err)
+	} else {
+		resp, usedUp, err = raceUpstreams(ctx, upstreams, r)
 	}
 	if err != nil || resp == nil {
 		h.Stats.Errors.Add(1)
@@ -271,6 +276,46 @@ func answerIPs(m *dns.Msg) []net.IP {
 		}
 	}
 	return ips
+}
+
+// raceUpstreams queries every upstream concurrently and returns the first
+// successful response, hiding slow or down upstreams behind the fastest one.
+// On success the shared context is cancelled so the losing queries abort
+// instead of burning the full timeout. Each goroutine performs exactly one
+// send into a channel buffered for every upstream, so nothing leaks.
+func raceUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*dns.Msg, string, error) {
+	qctx, qcancel := context.WithCancel(ctx)
+	defer qcancel()
+	type result struct {
+		resp *dns.Msg
+		up   string
+		err  error
+	}
+	ch := make(chan result, len(ups))
+	for _, up := range ups {
+		go func(u *upstream.Upstream) {
+			// Copy the query: miekg/dns's transport layer overwrites msg.Id
+			// while sending, so the same message cannot be handed to several
+			// upstreams concurrently.
+			resp, err := u.Query(qctx, r.Copy())
+			ch <- result{resp: resp, up: u.Name(), err: err}
+		}(up)
+	}
+	var lastErr error
+	for range len(ups) {
+		res := <-ch
+		if res.err == nil && res.resp != nil {
+			return res.resp, res.up, nil
+		}
+		if res.err != nil {
+			lastErr = res.err
+			log.Printf("[dns] upstream %s failed: %v", res.up, res.err)
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no upstream returned a response")
+	}
+	return nil, "", lastErr
 }
 
 func isMetaQuery(q dns.Question) bool {

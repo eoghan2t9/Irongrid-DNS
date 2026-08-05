@@ -8,34 +8,54 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
+const (
+	// logQueueCap bounds the pending-entry queue. Serving never blocks on
+	// logging: once the queue is full, new entries are dropped.
+	logQueueCap = 8192
+	// logBatchSize flushes the writer once this many entries have queued.
+	logBatchSize = 256
+	// logFlushInterval is the maximum age of a queued entry before the
+	// writer flushes it in one transaction.
+	logFlushInterval = 100 * time.Millisecond
+)
+
 // Entry is a single logged query.
 type Entry struct {
-	ID        int64     `json:"id"`
-	Time      time.Time `json:"time"`
-	Client    string    `json:"client"`
-	Domain    string    `json:"domain"`
-	Type      string    `json:"type"` // A, AAAA, TXT...
-	Action    string    `json:"action"` // "allowed", "blocked", "cached", "error"
-	Reason    string    `json:"reason"`
-	Upstream  string    `json:"upstream"`
-	ResponseTimeMS int64 `json:"response_time_ms"`
-	Rcode     int       `json:"rcode"`
-	Answers   int       `json:"answers"`
+	ID             int64     `json:"id"`
+	Time           time.Time `json:"time"`
+	Client         string    `json:"client"`
+	Domain         string    `json:"domain"`
+	Type           string    `json:"type"`   // A, AAAA, TXT...
+	Action         string    `json:"action"` // "allowed", "blocked", "cached", "error"
+	Reason         string    `json:"reason"`
+	Upstream       string    `json:"upstream"`
+	ResponseTimeMS int64     `json:"response_time_ms"`
+	Rcode          int       `json:"rcode"`
+	Answers        int       `json:"answers"`
 }
 
-// Log is a concurrency-safe query logger backed by SQLite.
+// Log is a concurrency-safe query logger backed by SQLite. Entries are
+// enqueued and written by a single background goroutine in batches (one
+// transaction per flush), so per-query disk I/O never sits on the DNS hot
+// path.
 type Log struct {
 	db        *sql.DB
-	mu        sync.Mutex
-	insertStm *sql.Stmt
+	mu        sync.Mutex // serialises Exec/Prune (raw writes by callers)
 	retention time.Duration
 	dir       string
+
+	entries chan Entry
+	done    chan struct{}
+	closed  atomic.Bool
+	wg      sync.WaitGroup
 }
 
 // New opens (creating if needed) the query log database.
@@ -51,6 +71,18 @@ func New(path string, retentionDays int) (*Log, error) {
 		return nil, fmt.Errorf("open query log: %w", err)
 	}
 	db.SetMaxOpenConns(1) // modernc sqlite is single-writer; serialize writes
+
+	// WAL + NORMAL: batched commits skip per-write fsync without risking
+	// corruption (a crash may lose at most the last ~100ms of entries).
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		return nil, fmt.Errorf("enable WAL: %w", err)
+	}
+	if _, err := db.Exec(`PRAGMA synchronous=NORMAL`); err != nil {
+		return nil, fmt.Errorf("set synchronous=NORMAL: %w", err)
+	}
+	if _, err := db.Exec(`PRAGMA busy_timeout=5000`); err != nil {
+		return nil, fmt.Errorf("set busy_timeout: %w", err)
+	}
 
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS queries (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -74,33 +106,105 @@ func New(path string, retentionDays int) (*Log, error) {
 		return nil, err
 	}
 
-	stm, err := db.Prepare(`INSERT INTO queries
-		(ts, client, domain, qtype, action, reason, upstream, rt_ms, rcode, answers)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
-	if err != nil {
-		return nil, fmt.Errorf("prepare insert: %w", err)
-	}
-
-	return &Log{
+	l := &Log{
 		db:        db,
-		insertStm: stm,
 		retention: time.Duration(retentionDays) * 24 * time.Hour,
 		dir:       filepath.Dir(path),
-	}, nil
+		entries:   make(chan Entry, logQueueCap),
+		done:      make(chan struct{}),
+	}
+	l.wg.Add(1)
+	go l.runWriter()
+	return l, nil
 }
 
-// Record writes one query entry. It never blocks query serving on DB errors.
+// Record enqueues one query entry. It never blocks or slows query serving:
+// the background writer batches entries and commits them in a single
+// transaction. If the queue is full (or the log is closed), the entry is
+// dropped — logging must never break DNS.
 func (l *Log) Record(e Entry) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	_, err := l.insertStm.Exec(
-		e.Time.Unix(), e.Client, e.Domain, e.Type, e.Action,
-		e.Reason, e.Upstream, e.ResponseTimeMS, e.Rcode, e.Answers,
-	)
-	if err != nil {
-		// Drop silently on failure: logging must not break DNS.
+	if l.closed.Load() {
 		return
 	}
+	select {
+	case l.entries <- e:
+	default:
+		// Queue full — drop rather than stall DNS serving.
+	}
+}
+
+// runWriter drains the queue, flushing in batches of logBatchSize or every
+// logFlushInterval, whichever comes first. Close() signals via l.done so the
+// writer drains whatever is queued and flushes the final batch. The entries
+// channel is deliberately never closed: Record may race Close and a send on
+// a closed channel would panic.
+func (l *Log) runWriter() {
+	defer l.wg.Done()
+	batch := make([]Entry, 0, logBatchSize)
+	ticker := time.NewTicker(logFlushInterval)
+	defer ticker.Stop()
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		l.writeBatch(batch)
+		batch = batch[:0]
+	}
+	for {
+		select {
+		case e := <-l.entries:
+			batch = append(batch, e)
+			if len(batch) >= logBatchSize {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		case <-l.done:
+			// Shutdown: drain everything still queued, then flush and exit.
+			for {
+				select {
+				case e := <-l.entries:
+					batch = append(batch, e)
+					if len(batch) >= logBatchSize {
+						flush()
+					}
+				default:
+					flush()
+					return
+				}
+			}
+		}
+	}
+}
+
+// writeBatch commits entries with one multi-row INSERT in a single
+// transaction — one commit per batch instead of one per query.
+func (l *Log) writeBatch(entries []Entry) {
+	if len(entries) == 0 {
+		return
+	}
+	var sb strings.Builder
+	sb.WriteString(`INSERT INTO queries
+		(ts, client, domain, qtype, action, reason, upstream, rt_ms, rcode, answers) VALUES `)
+	args := make([]any, 0, len(entries)*10)
+	for i, e := range entries {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString("(?,?,?,?,?,?,?,?,?,?)")
+		args = append(args, e.Time.Unix(), e.Client, e.Domain, e.Type, e.Action,
+			e.Reason, e.Upstream, e.ResponseTimeMS, e.Rcode, e.Answers)
+	}
+	tx, err := l.db.Begin()
+	if err != nil {
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(sb.String(), args...); err != nil {
+		// Drop the batch silently: logging must not break DNS.
+		return
+	}
+	_ = tx.Commit()
 }
 
 // Query fetches recent entries with optional filters and pagination.
@@ -146,7 +250,7 @@ func (l *Log) Query(ctx context.Context, limit, offset int, action, domain, qtyp
 // Stats returns aggregate counters for a time window.
 func (l *Log) Stats(ctx context.Context, since time.Time) (map[string]any, error) {
 	stats := map[string]any{
-		"total":    0, "allowed": 0, "blocked": 0, "cached": 0,
+		"total": 0, "allowed": 0, "blocked": 0, "cached": 0,
 		"avg_rt_ms": 0, "top_blocked": []TopDomain{}, "top_clients": []TopDomain{},
 	}
 	if l.db == nil {
@@ -240,10 +344,13 @@ func (l *Log) StartPruner(ctx context.Context) {
 	}()
 }
 
-// Close closes the database.
+// Close stops the writer (flushing any pending entries) and closes the
+// database. Safe to call more than once.
 func (l *Log) Close() error {
-	if l.db != nil {
-		return l.db.Close()
+	if !l.closed.CompareAndSwap(false, true) {
+		return nil
 	}
-	return nil
+	close(l.done) // writer drains the queue and flushes the final batch
+	l.wg.Wait()
+	return l.db.Close()
 }
