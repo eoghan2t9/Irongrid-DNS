@@ -107,6 +107,11 @@ body {
 
 /* ---------- updater ---------- */
 .updater-btn { position: relative; white-space: nowrap; }
+
+.pager {
+  display: flex; align-items: center; justify-content: center;
+  gap: 12px; margin-top: 14px;
+}
 .updater-dot {
   position: absolute; top: 4px; right: 5px;
   width: 8px; height: 8px; border-radius: 50%;

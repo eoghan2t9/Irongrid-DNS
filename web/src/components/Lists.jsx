@@ -1,6 +1,63 @@
 import React, { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 
+const PAGE_SIZE = 50
+
+// ListCard renders one allow/block table with client-side pagination so the
+// page stays fast as the lists grow over time.
+function ListCard({ k, items, onRemove }) {
+  const [page, setPage] = useState(0)
+  const total = items.length
+  const pages = Math.max(1, Math.ceil(total / PAGE_SIZE))
+  // Clamp in case the list shrank (e.g. an entry was removed) — the current
+  // page may no longer exist.
+  const cur = Math.min(page, pages - 1)
+  const start = cur * PAGE_SIZE
+  const slice = items.slice(start, start + PAGE_SIZE)
+  const isAllow = k === 'whitelist'
+
+  return (
+    <div className="card">
+      <div className="row-between">
+        <h3 style={{ margin: 0 }}>
+          {isAllow ? 'Allow list — always resolves' : 'Block list — always blocked'}
+        </h3>
+        <span className="chip">{total.toLocaleString()} entries</span>
+      </div>
+      <p className="dim small">
+        {isAllow
+          ? 'Domains here override every blocklist. Use it to unblock false positives.'
+          : 'Manual deny entries with the same syntax as blocklists (domains, wildcards, IPs).'}
+      </p>
+      {total === 0 ? (
+        <div className="empty">Nothing here yet.</div>
+      ) : (
+        <>
+          <ul className="tag-list">
+            {slice.map((it) => (
+              <li className="tag" key={it}>
+                <span className="mono">{it}</span>
+                <button className="tag-x" onClick={() => onRemove(k, it)} title="Remove">✕</button>
+              </li>
+            ))}
+          </ul>
+          {pages > 1 && (
+            <div className="pager">
+              <button className="btn small" disabled={cur === 0} onClick={() => setPage(cur - 1)}>
+                ← Prev
+              </button>
+              <span className="dim small">Page {cur + 1} / {pages}</span>
+              <button className="btn small" disabled={cur >= pages - 1} onClick={() => setPage(cur + 1)}>
+                Next →
+              </button>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  )
+}
+
 export default function Lists() {
   const [whitelist, setWhitelist] = useState([])
   const [blacklist, setBlacklist] = useState([])
@@ -60,29 +117,6 @@ export default function Lists() {
     }
   }
 
-  const renderList = (k, items) => (
-    <div className="card">
-      <h3>{k === 'whitelist' ? 'Allow list — always resolves' : 'Block list — always blocked'}</h3>
-      <p className="dim small">
-        {k === 'whitelist'
-          ? 'Domains here override every blocklist. Use it to unblock false positives.'
-          : 'Manual deny entries with the same syntax as blocklists (domains, wildcards, IPs).'}
-      </p>
-      {items.length === 0 ? (
-        <div className="empty">Nothing here yet.</div>
-      ) : (
-        <ul className="tag-list">
-          {items.map((it) => (
-            <li className="tag" key={it}>
-              <span className="mono">{it}</span>
-              <button className="tag-x" onClick={() => remove(k, it)} title="Remove">✕</button>
-            </li>
-          ))}
-        </ul>
-      )}
-    </div>
-  )
-
   return (
     <div className="stack">
       {msg && <div className="info-banner">{msg}</div>}
@@ -140,8 +174,8 @@ export default function Lists() {
       </div>
 
       <div className="grid-2">
-        {renderList('whitelist', whitelist)}
-        {renderList('blacklist', blacklist)}
+        <ListCard k="whitelist" items={whitelist} onRemove={remove} />
+        <ListCard k="blacklist" items={blacklist} onRemove={remove} />
       </div>
     </div>
   )

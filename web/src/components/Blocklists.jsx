@@ -3,9 +3,9 @@ import { api } from '../api'
 
 const PRESETS = [
   { name: 'OISD Big (comprehensive)', url: 'https://big.oisd.nl/', enabled: true, auto_update_hours: 24 },
-  { name: 'StevenBlack hosts', url: 'https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts', enabled: true, auto_update_hours: 168 },
-  { name: 'AdGuard DNS filter', url: 'https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt', enabled: true, auto_update_hours: 168 },
-  { name: 'EasyList', url: 'https://easylist.to/easylist/easylist.txt', enabled: true, auto_update_hours: 168 },
+  { name: 'StevenBlack hosts', url: 'https://raw.githubusercontent.com/StevenBlack/hosts/master/hosts', enabled: true, auto_update_hours: 24 },
+  { name: 'AdGuard DNS filter', url: 'https://adguardteam.github.io/AdGuardSDNSFilter/Filters/filter.txt', enabled: true, auto_update_hours: 24 },
+  { name: 'EasyList', url: 'https://easylist.to/easylist/easylist.txt', enabled: true, auto_update_hours: 24 },
 ]
 
 const fmtWhen = (t) => (t ? new Date(t).toLocaleString([], { hour12: false }) : 'never')

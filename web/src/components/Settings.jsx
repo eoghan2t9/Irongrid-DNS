@@ -240,7 +240,7 @@ export default function Settings({ onSessionInvalidated }) {
   const addBlocklist = () => {
     setCfg((prev) => {
       const next = JSON.parse(JSON.stringify(prev))
-      next.filter.blocklists = [...(next.filter.blocklists || []), { id: '', name: '', url: '', enabled: true, auto_update: '' }]
+      next.filter.blocklists = [...(next.filter.blocklists || []), { id: '', name: '', url: '', enabled: true, auto_update: '24h' }]
       return next
     })
     setDirty(true)
