@@ -83,7 +83,7 @@ body {
   color: var(--cyan);
   border-left-color: var(--cyan);
 }
-.nav-icon { width: 18px; text-align: center; font-size: 13px; }
+.nav-icon { width: 18px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
 
 .sidebar-foot {
   border-top: 1px solid var(--border);
