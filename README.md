@@ -182,7 +182,7 @@ The wizard supports **Linux, macOS, Windows and Docker** targets:
 | Service manager | systemd unit, launchd plist, Windows elevated logon task (Go binaries don't speak the SCM protocol, so a scheduled task with `/RL HIGHEST` is used instead of `sc.exe`), or none |
 | Protocols | UDP/TCP on :53, DoT on :853, DoH on :443, DoQ on :853 |
 | Dashboard port | Optional: serve the dashboard on the same HTTPS port as DoH (`https://host`, no `:8080` suffix) |
-| Upstreams | Cloudflare, Google, Quad9 presets or custom (`udp://`, `tls://`, `https://`, `quic://`) |
+| Upstreams | Cloudflare, Google, Quad9 presets or custom (`udp://`, `tls://`, `https://`, `quic://`, `recursive://`) |
 | Cache | Dragonfly address (+ optional password) |
 | Blocklists | Pick curated presets: OISD, Hagezi, StevenBlack, AdGuard, EasyList, 1Hosts… |
 | Allow lists | One-click whitelist presets: OS updates, dev/CI, cloud, banking, IoT, news |
@@ -331,7 +331,7 @@ written automatically on first launch. Key options:
 | Option | Meaning |
 |---|---|
 | `server.listen_*` | Per-protocol listen addresses; empty string disables |
-| `upstreams` | Forwarders — `udp://`, `tcp://`, `tls://`, `https://`, `quic://` |
+| `upstreams` | Forwarders — `udp://`, `tcp://`, `tls://`, `https://`, `quic://`, or `recursive://` (resolves from the root servers itself, no forwarder involved) |
 | `cache.addr` | Dragonfly endpoint — **server will not start without it** |
 | `filter.blocklists` | Remote URLs or `file://` paths |
 | `filter.auto_update` | How often every enabled blocklist refreshes — one global interval, not per-list |

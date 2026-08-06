@@ -118,7 +118,7 @@ export default function ClientGroups() {
               {field('Extra blacklist', 'one per line, added to the global blacklist', (
                 <textarea className="input mono" rows={2} value={linesOf(g.blacklist)} onChange={(e) => setGroup(i, { blacklist: parseLines(e.target.value) })} />
               ))}
-              {field('Upstream override', 'one per line; empty = use the global upstreams in Settings', (
+              {field('Upstream override', 'one per line, e.g. udp://1.1.1.1:53 or recursive://; empty = use the global upstreams in Settings', (
                 <textarea className="input mono" rows={2} value={linesOf(g.upstreams)} onChange={(e) => setGroup(i, { upstreams: parseLines(e.target.value) })} />
               ))}
             </div>

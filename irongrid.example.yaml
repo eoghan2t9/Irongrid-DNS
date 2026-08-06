@@ -24,6 +24,12 @@ upstreams:
   - "udp://8.8.8.8:53"
   # - "tls://1.1.1.1:853"                  # DNS over TLS upstream
   # - "https://cloudflare-dns.com/dns-query" # DNS over HTTPS upstream
+  # - "recursive://"                       # resolve from the root servers
+  #                                         # yourself instead of forwarding —
+  #                                         # no third-party resolver sees the
+  #                                         # query, at the cost of slower
+  #                                         # cold lookups and no upstream
+  #                                         # DNSSEC validation to lean on
 
 cache:
   # Dragonfly is a HARD requirement: the server refuses to start without it.

@@ -250,6 +250,54 @@ func TestDoQUpstreamReusesConnection(t *testing.T) {
 	}
 }
 
+// TestRecursiveUpstreamDispatches verifies Transport == Recursive routes
+// through the iterative resolver rather than dialing Addr (which is empty
+// for this transport) — a single fake "root" that answers directly is
+// enough to prove the wiring; internal/recursive's own tests cover the
+// referral-walking logic in depth.
+func TestRecursiveUpstreamDispatches(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Authoritative = true
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP("203.0.113.9"),
+		})
+		w.WriteMsg(m)
+	})}
+	go srv.ActivateAndServe()
+	t.Cleanup(func() { srv.Shutdown() })
+
+	u := NewRecursive([]string{pc.LocalAddr().String()})
+	r, err := u.Query(context.Background(), aQuery())
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(r.Answer) != 1 {
+		t.Fatalf("answers = %d, want 1", len(r.Answer))
+	}
+	if a, ok := r.Answer[0].(*dns.A); !ok || a.A.String() != "203.0.113.9" {
+		t.Fatalf("unexpected answer: %v", r.Answer[0])
+	}
+}
+
+// TestParseRecursiveScheme verifies "recursive://" parses to the Recursive
+// transport without requiring a host.
+func TestParseRecursiveScheme(t *testing.T) {
+	u, err := Parse("recursive://")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if u.Transport != Recursive {
+		t.Fatalf("transport = %q, want %q", u.Transport, Recursive)
+	}
+}
+
 // TestUpstreamCloseDrainsPoolAndQUICConn verifies Close doesn't panic and
 // actually clears the pooled/persistent connections it holds — the property
 // SetUpstreams' hot-swap relies on to avoid leaking sockets on reload.

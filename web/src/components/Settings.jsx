@@ -275,7 +275,12 @@ export default function Settings({ onSessionInvalidated }) {
 
       <div className="card">
         <h3>Upstreams</h3>
-        {listEditor('upstreams', 'upstreams', 'udp://, tcp://, tls://, https://, quic:// — tried in order')}
+        {listEditor('upstreams', 'upstreams', 'udp://, tcp://, tls://, https://, quic://, recursive:// — tried in order')}
+        <p className="dim small" style={{ marginTop: -6 }}>
+          <code>recursive://</code> resolves from the root servers itself instead of forwarding — no third-party
+          resolver sees your query stream, at the cost of slower cold lookups and no upstream DNSSEC validation to
+          rely on. Mix it with forwarders (tried in order) or list it alone.
+        </p>
       </div>
 
       <div className="card">

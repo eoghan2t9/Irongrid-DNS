@@ -19,6 +19,8 @@ import (
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 	"golang.org/x/net/http2"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/recursive"
 )
 
 // upstreamPoolSize bounds the number of warm TCP/DoT connections kept per
@@ -31,11 +33,12 @@ const upstreamPoolSize = 8
 type Transport string
 
 const (
-	UDP  Transport = "udp"
-	TCP  Transport = "tcp"
-	TLS  Transport = "tls"
-	HTTPS Transport = "https"
-	QUIC Transport = "quic"
+	UDP       Transport = "udp"
+	TCP       Transport = "tcp"
+	TLS       Transport = "tls"
+	HTTPS     Transport = "https"
+	QUIC      Transport = "quic"
+	Recursive Transport = "recursive"
 )
 
 // Upstream is a configured forwarder.
@@ -61,6 +64,10 @@ type Upstream struct {
 	// QUIC+TLS 1.3 handshake every time.
 	quicMu   sync.Mutex
 	quicConn quic.Connection
+
+	// resolver performs the walk for Transport == Recursive; nil for every
+	// other transport.
+	resolver *recursive.Resolver
 }
 
 // Parse builds an Upstream from a spec string:
@@ -68,6 +75,8 @@ type Upstream struct {
 //	udp://1.1.1.1:53        tcp://8.8.8.8:53
 //	tls://1.1.1.1:853       https://cloudflare-dns.com/dns-query
 //	quic://dns.adguard-dns.com:853
+//	recursive://            iterative resolution from the root servers,
+//	                        no forwarder involved
 func Parse(spec string) (*Upstream, error) {
 	spec = strings.TrimSpace(spec)
 	if spec == "" {
@@ -84,6 +93,13 @@ func Parse(spec string) (*Upstream, error) {
 	}
 	u.URL = parsed
 	switch parsed.Scheme {
+	case "recursive":
+		// No host to dial — resolution starts at the root servers and walks
+		// referrals itself. "recursive://" (or "recursive://root", any host
+		// part is ignored) is the whole spec.
+		u.Transport = Recursive
+		u.resolver = recursive.New(nil)
+		return u, nil
 	case "udp", "tcp", "tls", "quic":
 		u.Transport = Transport(parsed.Scheme)
 		u.Host = parsed.Hostname()
@@ -148,6 +164,13 @@ func NewWithTLS(transport Transport, addr, host string, tlsConf *tls.Config) *Up
 	return u
 }
 
+// NewRecursive builds a Recursive-transport Upstream seeded with the given
+// root hints instead of the real root servers — for tests that need an
+// iterative resolver pointed at a local fake root/TLD/authoritative chain.
+func NewRecursive(rootHints []string) *Upstream {
+	return &Upstream{Transport: Recursive, resolver: recursive.New(rootHints)}
+}
+
 // Address returns the dial address.
 func (u *Upstream) Address() string { return u.Addr }
 
@@ -170,6 +193,8 @@ func (u *Upstream) Query(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 		return u.queryDoH(ctx, m)
 	case QUIC:
 		return u.queryDoQ(ctx, m)
+	case Recursive:
+		return u.resolver.Resolve(ctx, m)
 	}
 	return nil, fmt.Errorf("unknown transport %s", u.Transport)
 }
