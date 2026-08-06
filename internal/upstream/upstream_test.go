@@ -298,6 +298,27 @@ func TestParseRecursiveScheme(t *testing.T) {
 	}
 }
 
+// TestIsRecursiveSpec verifies the scheme pre-check matches what Parse
+// actually treats as the recursive transport, so the startup root-hints
+// fetch can't drift from the real classification.
+func TestIsRecursiveSpec(t *testing.T) {
+	cases := map[string]bool{
+		"recursive://":     true,
+		"recursive://root": true,
+		"  recursive://":   true,
+		"RECURSIVE://":     true,
+		"udp://1.1.1.1:53": false,
+		"recursive:foo":    false, // no :// — Parse rewrites this to udp://
+		"1.1.1.1":          false,
+		"":                 false,
+	}
+	for spec, want := range cases {
+		if got := IsRecursiveSpec(spec); got != want {
+			t.Fatalf("IsRecursiveSpec(%q) = %v, want %v", spec, got, want)
+		}
+	}
+}
+
 // TestUpstreamCloseDrainsPoolAndQUICConn verifies Close doesn't panic and
 // actually clears the pooled/persistent connections it holds — the property
 // SetUpstreams' hot-swap relies on to avoid leaking sockets on reload.

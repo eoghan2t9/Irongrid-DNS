@@ -28,6 +28,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsserver"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/recursive"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tunnel"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/update"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
@@ -62,6 +63,9 @@ type Handler struct {
 	DNS       *dnsserver.Handler
 	Tunnel    *tunnel.Manager
 	Upstreams []*upstream.Upstream
+	// Hints is the authoritative root-hints manager for recursive://
+	// upstreams; nil when no recursive upstream is configured.
+	Hints     *recursive.HintsManager
 	Catalog   *catalog.Catalog
 	StartedAt time.Time
 	Version   string
@@ -184,12 +188,29 @@ func (h *Handler) getStatus(w http.ResponseWriter) {
 			cacheOK = false
 		}
 	}
+	// Root-hints status (only present when a recursive:// upstream is
+	// configured and the HintsManager exists).
+	rootHints := map[string]any{"enabled": false}
+	if h.Hints != nil {
+		st := h.Hints.Status()
+		rootHints = map[string]any{
+			"enabled":          true,
+			"source":           st.Source,
+			"verified":         st.Verified,
+			"last_fetch":       st.LastFetch,
+			"last_error":       st.LastError,
+			"addresses":        st.Addresses,
+			"refresh_interval": st.RefreshInterval,
+			"key_fingerprint":  st.KeyFingerprint,
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":    version.String(),
 		"uptime_sec": int(time.Since(h.StartedAt).Seconds()),
 		"listeners":  listeners,
 		"cache_ok":   cacheOK,
 		"tunnel":     h.Tunnel.Status(),
+		"root_hints": rootHints,
 	})
 }
 

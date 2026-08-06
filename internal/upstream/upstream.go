@@ -171,6 +171,16 @@ func NewRecursive(rootHints []string) *Upstream {
 	return &Upstream{Transport: Recursive, resolver: recursive.New(rootHints)}
 }
 
+// IsRecursiveSpec reports whether spec names the recursive transport,
+// mirroring the scheme check Parse performs — so startup code can decide
+// whether a recursive upstream is configured (and fetch authoritative root
+// hints for it) without parsing the spec into a full Upstream.
+func IsRecursiveSpec(spec string) bool {
+	spec = strings.TrimSpace(spec)
+	i := strings.Index(spec, "://")
+	return i > 0 && strings.EqualFold(spec[:i], "recursive")
+}
+
 // Address returns the dial address.
 func (u *Upstream) Address() string { return u.Addr }
 

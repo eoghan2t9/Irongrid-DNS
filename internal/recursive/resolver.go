@@ -34,7 +34,9 @@ const (
 // It caches NS delegations (which servers are authoritative for which zone)
 // so only the first query under a given TLD or domain pays the full walk;
 // later queries under the same zone jump straight to the deepest known
-// delegation. Safe for concurrent use.
+// delegation. It also caches the addresses of out-of-bailiwick nameservers
+// themselves, so a second domain hosted by the same DNS provider skips the
+// nested lookup of that provider's nameservers. Safe for concurrent use.
 type Resolver struct {
 	rootHints []string
 	// nsPort is the port assumed for every address derived from glue
@@ -45,6 +47,7 @@ type Resolver struct {
 
 	mu          sync.RWMutex
 	delegations map[string]delegation
+	nsAddrs     map[string]nsAddr
 }
 
 type delegation struct {
@@ -52,16 +55,26 @@ type delegation struct {
 	expiry  time.Time
 }
 
+// nsAddr caches an out-of-bailiwick nameserver's own address lookup so it
+// happens once per TTL instead of once per newly-encountered domain.
+type nsAddr struct {
+	addr   string // "ip:port" / "[ipv6]:port", dial-ready
+	expiry time.Time
+}
+
 // New returns a Resolver seeded with rootHints ("ip:port" strings). A
-// nil/empty slice falls back to DefaultRootHints.
+// nil/empty slice falls back to the process's current default root hints —
+// the bundled DefaultRootHints, unless SetDefaultRootHints has replaced
+// them with a fetched copy of the authoritative named.root file.
 func New(rootHints []string) *Resolver {
 	if len(rootHints) == 0 {
-		rootHints = DefaultRootHints
+		rootHints = defaultHints()
 	}
 	return &Resolver{
 		rootHints:   rootHints,
 		nsPort:      "53",
 		delegations: map[string]delegation{},
+		nsAddrs:     map[string]nsAddr{},
 	}
 }
 
@@ -258,23 +271,21 @@ func parseReferral(resp *dns.Msg) (zone string, ns []nsInfo, ttl time.Duration, 
 		ns = append(ns, nsInfo{name: name, glueIPs: glue[name]})
 	}
 
-	ttl = time.Duration(minTTL) * time.Second
-	if ttl < minDelegationTTL {
-		ttl = minDelegationTTL
-	}
-	if ttl > maxDelegationTTL {
-		ttl = maxDelegationTTL
-	}
-	return zone, ns, ttl, true
+	return zone, ns, clampDelegationTTL(time.Duration(minTTL) * time.Second), true
 }
 
 // resolveNameservers turns a referral's nameservers into dial-ready
 // addresses: glue is used directly when the referral supplied it, and an
 // out-of-bailiwick nameserver (no glue) is resolved with its own
 // independent lookup, bounded by nsDepth against a runaway chain of
-// glueless delegations.
+// glueless delegations. Glueless nameservers are the common case (the DNS
+// hosting used by Cloudflare/Route53/DNSimple-style setups lives outside
+// the delegated zone), and each address lookup is an independent walk, so
+// they run concurrently and every address that resolves is collected — the
+// referral loop races them anyway, and only one working address is needed.
 func (r *Resolver) resolveNameservers(ctx context.Context, ns []nsInfo, nsDepth int) []string {
 	var servers []string
+	var glueless []string
 	for _, n := range ns {
 		if len(n.glueIPs) > 0 {
 			for _, ip := range n.glueIPs {
@@ -285,8 +296,26 @@ func (r *Resolver) resolveNameservers(ctx context.Context, ns []nsInfo, nsDepth 
 		if nsDepth >= maxNSResolveDepth {
 			continue
 		}
-		if addr, ok := r.resolveNSAddr(ctx, n.name, nsDepth+1); ok {
-			servers = append(servers, addr)
+		glueless = append(glueless, n.name)
+	}
+	if len(glueless) == 0 {
+		return servers
+	}
+	addrs := make([]string, len(glueless))
+	var wg sync.WaitGroup
+	for i, host := range glueless {
+		wg.Add(1)
+		go func(i int, host string) {
+			defer wg.Done()
+			if addr, ok := r.resolveNSAddr(ctx, host, nsDepth+1); ok {
+				addrs[i] = addr
+			}
+		}(i, host)
+	}
+	wg.Wait()
+	for _, a := range addrs {
+		if a != "" {
+			servers = append(servers, a)
 		}
 	}
 	return servers
@@ -295,7 +324,13 @@ func (r *Resolver) resolveNameservers(ctx context.Context, ns []nsInfo, nsDepth 
 // resolveNSAddr independently resolves a nameserver hostname's own address
 // (A, falling back to AAAA) via a nested walk that goes through the exact
 // same referral/glue handling as any other query, one nsDepth deeper.
+// Successful lookups are cached per hostname (with the same TTL clamping
+// as delegations) so a second domain hosted by the same DNS provider skips
+// the walk entirely.
 func (r *Resolver) resolveNSAddr(ctx context.Context, host string, nsDepth int) (string, bool) {
+	if addr, ok := r.cachedNSAddr(host); ok {
+		return addr, true
+	}
 	for _, qtype := range [...]uint16{dns.TypeA, dns.TypeAAAA} {
 		resp, err := r.resolve(ctx, dns.Question{Name: host, Qtype: qtype, Qclass: dns.ClassINET}, 0, nsDepth)
 		if err != nil {
@@ -304,13 +339,66 @@ func (r *Resolver) resolveNSAddr(ctx context.Context, host string, nsDepth int) 
 		for _, rr := range resp.Answer {
 			switch v := rr.(type) {
 			case *dns.A:
-				return net.JoinHostPort(v.A.String(), r.nsPort), true
+				addr := net.JoinHostPort(v.A.String(), r.nsPort)
+				r.cacheNSAddr(host, addr, nsAnswerTTL(resp))
+				return addr, true
 			case *dns.AAAA:
-				return net.JoinHostPort(v.AAAA.String(), r.nsPort), true
+				addr := net.JoinHostPort(v.AAAA.String(), r.nsPort)
+				r.cacheNSAddr(host, addr, nsAnswerTTL(resp))
+				return addr, true
 			}
 		}
 	}
 	return "", false
+}
+
+// nsAnswerTTL is the caching lifetime for a nameserver-address answer: the
+// minimum A/AAAA record TTL, clamped to the same window delegations use.
+func nsAnswerTTL(resp *dns.Msg) time.Duration {
+	var min uint32
+	for _, rr := range resp.Answer {
+		if rr.Header().Rrtype != dns.TypeA && rr.Header().Rrtype != dns.TypeAAAA {
+			continue
+		}
+		if min == 0 || rr.Header().Ttl < min {
+			min = rr.Header().Ttl
+		}
+	}
+	if min == 0 {
+		return minDelegationTTL
+	}
+	return clampDelegationTTL(time.Duration(min) * time.Second)
+}
+
+// cachedNSAddr returns the cached dial-ready address for a nameserver
+// hostname while it's still fresh.
+func (r *Resolver) cachedNSAddr(host string) (string, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if e, ok := r.nsAddrs[host]; ok && time.Now().Before(e.expiry) {
+		return e.addr, true
+	}
+	return "", false
+}
+
+// cacheNSAddr records a nameserver hostname's resolved address for ttl.
+func (r *Resolver) cacheNSAddr(host, addr string, ttl time.Duration) {
+	r.mu.Lock()
+	r.nsAddrs[host] = nsAddr{addr: addr, expiry: time.Now().Add(ttl)}
+	r.mu.Unlock()
+}
+
+// clampDelegationTTL bounds a delegation or nameserver-address TTL to the
+// configured window so a wild TTL (0 or absurdly large) from a misbehaving
+// server can't pin a referral for seconds or years.
+func clampDelegationTTL(ttl time.Duration) time.Duration {
+	if ttl < minDelegationTTL {
+		return minDelegationTTL
+	}
+	if ttl > maxDelegationTTL {
+		return maxDelegationTTL
+	}
+	return ttl
 }
 
 // bestDelegation returns the deepest cached, unexpired delegation covering

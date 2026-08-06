@@ -8,6 +8,12 @@ package recursive
 // (IANA's "named.root" hint file), IPv4 first across the whole list so a
 // host without IPv6 connectivity never pays for a failed dial attempt before
 // reaching a working address.
+//
+// It's the bundled fallback: at startup, when a recursive:// upstream is
+// configured, HintsManager fetches the live named.root (PGP-verified),
+// caches it on disk and refreshes weekly, and SetDefaultRootHints swaps
+// these for all subsequently-created resolvers, so a root-server address
+// change is picked up without a release.
 var DefaultRootHints = []string{
 	"198.41.0.4:53",     // a.root-servers.net
 	"170.247.170.2:53",  // b.root-servers.net

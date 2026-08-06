@@ -68,7 +68,7 @@ func (z *fakeZone) allDelegates() []delegateEntry {
 // derived addresses on Resolver.nsPort, so every fake level in a chain must
 // share one port to be reachable via glue, same as real nameservers all
 // living on port 53.
-func startFakeServer(t *testing.T, listenAddr string, z *fakeZone) string {
+func startFakeServer(t *testing.T, listenAddr string, z *fakeZone) (string, func()) {
 	t.Helper()
 	pc, err := net.ListenPacket("udp", listenAddr)
 	if err != nil {
@@ -109,8 +109,8 @@ func startFakeServer(t *testing.T, listenAddr string, z *fakeZone) string {
 		w.WriteMsg(m)
 	})}
 	go srv.ActivateAndServe()
-	t.Cleanup(func() { srv.Shutdown() })
-	return pc.LocalAddr().String()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	return pc.LocalAddr().String(), func() { _ = srv.Shutdown() }
 }
 
 // buildChain wires a fake root -> fake "com." TLD -> fake "example.com."
@@ -132,7 +132,7 @@ func buildChain(t *testing.T) (rootAddr, authAddr, nsPort string) {
 	authAnswers["www.example.com."] = []dns.RR{cnameRR, authRR}
 
 	authZone := &fakeZone{name: "example.com.", answers: authAnswers}
-	authAddr = startFakeServer(t, "127.0.0.3:"+nsPort, authZone)
+	authAddr, _ = startFakeServer(t, "127.0.0.3:"+nsPort, authZone)
 
 	tldZone := &fakeZone{
 		name:           "com.",
@@ -142,7 +142,7 @@ func buildChain(t *testing.T) (rootAddr, authAddr, nsPort string) {
 		delegateAddr:   authAddr,
 		childName:      "example.com.",
 	}
-	tldAddr := startFakeServer(t, "127.0.0.2:"+nsPort, tldZone)
+	tldAddr, _ := startFakeServer(t, "127.0.0.2:"+nsPort, tldZone)
 
 	rootZone := &fakeZone{
 		name:           ".",
@@ -152,7 +152,7 @@ func buildChain(t *testing.T) (rootAddr, authAddr, nsPort string) {
 		delegateAddr:   tldAddr,
 		childName:      "com.",
 	}
-	rootAddr = startFakeServer(t, "127.0.0.1:"+nsPort, rootZone)
+	rootAddr, _ = startFakeServer(t, "127.0.0.1:"+nsPort, rootZone)
 	return rootAddr, authAddr, nsPort
 }
 
@@ -339,7 +339,7 @@ func TestResolveGluelessOutOfBailiwickNS(t *testing.T) {
 	exampleRR, _ := dns.NewRR("example.com. 300 IN A 93.184.216.34")
 	nsHostAnswers["example.com."] = []dns.RR{exampleRR}
 	nsHostZone := &fakeZone{name: "dnshost.invalid.", answers: nsHostAnswers}
-	nsHostAddr := startFakeServer(t, "127.0.0.4:"+nsPort, nsHostZone)
+	nsHostAddr, _ := startFakeServer(t, "127.0.0.4:"+nsPort, nsHostZone)
 
 	// A TLD ("invalid.") that glues its own in-bailiwick delegation for
 	// dnshost.invalid. normally...
@@ -351,7 +351,7 @@ func TestResolveGluelessOutOfBailiwickNS(t *testing.T) {
 		delegateAddr:   nsHostAddr,
 		childName:      "dnshost.invalid.",
 	}
-	tldInvalidAddr := startFakeServer(t, "127.0.0.5:"+nsPort, tldInvalid)
+	tldInvalidAddr, _ := startFakeServer(t, "127.0.0.5:"+nsPort, tldInvalid)
 
 	// The "com." TLD delegates example.com. to ns1.dnshost.invalid — an
 	// out-of-bailiwick nameserver — WITHOUT glue, the case that matters here.
@@ -365,7 +365,7 @@ func TestResolveGluelessOutOfBailiwickNS(t *testing.T) {
 		childName:      "example.com.",
 		delegateNoGlue: true,
 	}
-	tldComAddr := startFakeServer(t, "127.0.0.2:"+nsPort, tldCom)
+	tldComAddr, _ := startFakeServer(t, "127.0.0.2:"+nsPort, tldCom)
 
 	// The root delegates both "com." and "invalid." so the nested lookup of
 	// ns1.dnshost.invalid's own address can succeed.
@@ -377,7 +377,7 @@ func TestResolveGluelessOutOfBailiwickNS(t *testing.T) {
 			{suffix: "invalid.", ns: "a.iana-servers.invalid.", addr: tldInvalidAddr, childName: "invalid."},
 		},
 	}
-	rootAddr := startFakeServer(t, "127.0.0.1:"+nsPort, root)
+	rootAddr, _ := startFakeServer(t, "127.0.0.1:"+nsPort, root)
 
 	r := newTestResolver(rootAddr, nsPort)
 	m := new(dns.Msg)
@@ -391,6 +391,95 @@ func TestResolveGluelessOutOfBailiwickNS(t *testing.T) {
 	}
 	a, ok := resp.Answer[0].(*dns.A)
 	if !ok || a.A.String() != "93.184.216.34" {
+		t.Fatalf("unexpected answer: %v", resp.Answer[0])
+	}
+}
+
+// TestResolveCachesNSAddress verifies an out-of-bailiwick nameserver's
+// address is cached after the first resolution, so a second domain hosted
+// by the same DNS provider skips the nested walk — proven by killing the
+// TLD that a fresh nameserver-address lookup would need before resolving
+// the second domain.
+func TestResolveCachesNSAddress(t *testing.T) {
+	nsPort := freePort(t)
+
+	// One provider host answers its own nameserver's A record plus two
+	// unrelated customer zones, as a real DNS host serves many domains.
+	nsHostAnswers := map[string][]dns.RR{}
+	nsA, _ := dns.NewRR("ns1.dnshost.invalid. 300 IN A 127.0.0.4")
+	nsHostAnswers["ns1.dnshost.invalid."] = []dns.RR{nsA}
+	exampleRR, _ := dns.NewRR("example.com. 300 IN A 93.184.216.34")
+	nsHostAnswers["example.com."] = []dns.RR{exampleRR}
+	otherRR, _ := dns.NewRR("other.com. 300 IN A 203.0.113.7")
+	nsHostAnswers["other.com."] = []dns.RR{otherRR}
+	nsHostZone := &fakeZone{name: "dnshost.invalid.", answers: nsHostAnswers}
+	nsHostAddr, _ := startFakeServer(t, "127.0.0.4:"+nsPort, nsHostZone)
+
+	// The invalid. TLD glues dnshost.invalid., which is what a fresh
+	// nameserver-address walk would need — killed before the second query.
+	tldInvalid := &fakeZone{
+		name:           "invalid.",
+		answers:        map[string][]dns.RR{},
+		delegateSuffix: "dnshost.invalid.",
+		delegateNS:     "a.gtld-servers.invalid.",
+		delegateAddr:   nsHostAddr,
+		childName:      "dnshost.invalid.",
+	}
+	tldInvalidAddr, stopInvalid := startFakeServer(t, "127.0.0.5:"+nsPort, tldInvalid)
+
+	// The com. TLD delegates both customer zones to the same glueless,
+	// out-of-bailiwick nameserver.
+	tldCom := &fakeZone{
+		name:    "com.",
+		answers: map[string][]dns.RR{},
+		delegates: []delegateEntry{
+			{suffix: "example.com.", ns: "ns1.dnshost.invalid.", childName: "example.com.", noGlue: true},
+			{suffix: "other.com.", ns: "ns1.dnshost.invalid.", childName: "other.com.", noGlue: true},
+		},
+	}
+	tldComAddr, _ := startFakeServer(t, "127.0.0.2:"+nsPort, tldCom)
+
+	root := &fakeZone{
+		name:    ".",
+		answers: map[string][]dns.RR{},
+		delegates: []delegateEntry{
+			{suffix: "com.", ns: "a.gtld-servers.invalid.", addr: tldComAddr, childName: "com."},
+			{suffix: "invalid.", ns: "a.iana-servers.invalid.", addr: tldInvalidAddr, childName: "invalid."},
+		},
+	}
+	rootAddr, _ := startFakeServer(t, "127.0.0.1:"+nsPort, root)
+
+	r := newTestResolver(rootAddr, nsPort)
+
+	m1 := new(dns.Msg)
+	m1.SetQuestion("example.com.", dns.TypeA)
+	if _, err := r.Resolve(context.Background(), m1); err != nil {
+		t.Fatalf("first Resolve: %v", err)
+	}
+	if addr, ok := r.cachedNSAddr("ns1.dnshost.invalid."); !ok || addr != "127.0.0.4:"+nsPort {
+		t.Fatalf("expected ns1.dnshost.invalid. cached at 127.0.0.4, got %q (ok=%v)", addr, ok)
+	}
+
+	// Drop every delegation learned during the first resolve so a fresh
+	// nameserver-address lookup would have to walk root -> invalid. TLD
+	// again — which is dead below. Only the NS-address cache can still
+	// supply ns1.dnshost.invalid's address, so success proves the nested
+	// walk was skipped.
+	r.mu.Lock()
+	r.delegations = map[string]delegation{}
+	r.mu.Unlock()
+	stopInvalid()
+	m2 := new(dns.Msg)
+	m2.SetQuestion("other.com.", dns.TypeA)
+	resp, err := r.Resolve(context.Background(), m2)
+	if err != nil {
+		t.Fatalf("second Resolve with cached NS address: %v", err)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("answers = %d, want 1: %v", len(resp.Answer), resp.Answer)
+	}
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok || a.A.String() != "203.0.113.7" {
 		t.Fatalf("unexpected answer: %v", resp.Answer[0])
 	}
 }

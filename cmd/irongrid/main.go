@@ -29,6 +29,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/installer"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/recursive"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tunnel"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
@@ -98,6 +99,42 @@ func main() {
 	// Note: closes the *current* cache, which reload may have swapped.
 	defer func() { _ = dfly.Close() }()
 	log.Printf("[cache] Dragonfly caching enabled (positive TTL %s, negative TTL %s)", cfg.Cache.TTL, cfg.Cache.NegativeTTL)
+
+	// ---- authoritative root hints for recursive upstreams ----
+	// recursive:// upstreams walk referrals from the root servers; seed them
+	// from IANA's named.root file instead of the bundled snapshot so a
+	// root-server address change is picked up without a release. The fetch
+	// runs before upstreams are parsed (each resolver snapshots the default
+	// hints at construction) and falls back to a last-known-good copy on
+	// disk, then to the bundled hints, so boot never depends on network
+	// access. SetDefaultRootHints also covers per-client-group upstreams and
+	// any created by a later config reload.
+	hasRecursive := false
+	for _, spec := range cfg.Upstreams {
+		if upstream.IsRecursiveSpec(spec) {
+			hasRecursive = true
+			break
+		}
+	}
+	var hintsMgr *recursive.HintsManager
+	if hasRecursive {
+		// The manager fetches the authoritative named.root at boot, verifies
+		// its detached PGP signature, persists a last-known-good copy on
+		// disk and refreshes weekly while the server runs. The initial
+		// Refresh runs synchronously before upstreams are parsed (each
+		// resolver snapshots the default hints at construction); any
+		// failure falls back to the disk cache and then the bundled hints,
+		// so boot never depends on network access.
+		hintsMgr = recursive.NewHintsManager(recursive.RootHintsURL, filepath.Join(*dataDir, "root-hints.txt"), recursive.DefaultRefreshInterval)
+		hintsMgr.Refresh(ctx)
+		st := hintsMgr.Status()
+		detail := ""
+		if st.LastError != "" {
+			detail = " — " + st.LastError
+		}
+		log.Printf("[recursive] root hints: %s, %d addresses, PGP-verified %v%s", st.Source, st.Addresses, st.Verified, detail)
+		hintsMgr.Start(ctx)
+	}
 
 	// ---- upstreams ----
 	var upstreams []*upstream.Upstream
@@ -228,6 +265,7 @@ func main() {
 		DNS:        handler,
 		Tunnel:     tunnelMgr,
 		Upstreams:  upstreams,
+		Hints:      hintsMgr,
 		Catalog:    catalog.Default(),
 		StartedAt:  time.Now(),
 		Version:    version.Version,
@@ -518,6 +556,28 @@ func main() {
 				return fmt.Errorf("upstream %q: %w", spec, err)
 			}
 			newUps = append(newUps, up)
+		}
+		// A reload can introduce recursive:// upstreams when none were
+		// configured at boot (hintsMgr was never created). Start the manager
+		// so they get the authoritative root hints too, not just the bundled
+		// fallback. Once running it keeps refreshing weekly, covering any
+		// later reloads as well.
+		if hintsMgr == nil {
+			hasRec := false
+			for _, up := range newUps {
+				if up.Transport == upstream.Recursive {
+					hasRec = true
+					break
+				}
+			}
+			if hasRec {
+				hintsMgr = recursive.NewHintsManager(recursive.RootHintsURL, filepath.Join(*dataDir, "root-hints.txt"), recursive.DefaultRefreshInterval)
+				hintsMgr.Refresh(ctx)
+				hintsMgr.Start(ctx)
+				apiHandler.Hints = hintsMgr
+				st := hintsMgr.Status()
+				log.Printf("[recursive] root hints manager started on config reload (%s, %d addresses, PGP-verified %v)", st.Source, st.Addresses, st.Verified)
+			}
 		}
 
 		// 4. Restart the DNS listeners with the new addresses + TLS. This is

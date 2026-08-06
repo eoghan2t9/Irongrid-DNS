@@ -6,6 +6,7 @@ const fmt = (n) => (n ?? 0).toLocaleString()
 export default function Dashboard({ onNavigate }) {
   const [stats, setStats] = useState(null)
   const [tls, setTls] = useState(null)
+  const [status, setStatus] = useState(null)
   const [error, setError] = useState('')
 
   const load = useCallback(async () => {
@@ -17,6 +18,9 @@ export default function Dashboard({ onNavigate }) {
     }
     try {
       setTls(await api.tlsStatus())
+    } catch { /* optional */ }
+    try {
+      setStatus(await api.status())
     } catch { /* optional */ }
   }, [])
 
@@ -84,6 +88,8 @@ export default function Dashboard({ onNavigate }) {
         ))}
       </div>
 
+      <RootHintsCard status={status} />
+
       <div className="grid-2">
         <div className="card">
           <h3>Protocol usage</h3>
@@ -143,6 +149,59 @@ export default function Dashboard({ onNavigate }) {
       </div>
 
       <AcmeCard acme={tls?.acme} onNavigate={onNavigate} onRenewed={load} />
+    </div>
+  )
+}
+
+// RootHintsCard summarises the authoritative root-hints source: whether the
+// resolver walks referrals from a live PGP-verified named.root fetch, a
+// last-known-good disk cache, or the bundled fallback.
+function RootHintsCard({ status }) {
+  const rh = status?.root_hints
+  if (!rh?.enabled) return null
+  const badge =
+    rh.source === 'live' ? 'badge-allowed'
+      : rh.source === 'cached' ? 'badge-warn'
+        : 'badge-error'
+  const sourceLabel =
+    rh.source === 'live' ? 'Live (named.root)'
+      : rh.source === 'cached' ? 'Disk cache'
+        : 'Bundled fallback'
+  return (
+    <div className="card">
+      <div className="row-between">
+        <h3 style={{ margin: 0 }}>Root hints</h3>
+        <span className={`badge ${badge}`}>{sourceLabel}</span>
+      </div>
+      <div className="kv-grid" style={{ marginTop: 8 }}>
+        <div className="kv-row">
+          <span className="kv-label">Signature</span>
+          <span className="kv-value">
+            {rh.verified
+              ? '✓ PGP-verified (Verisign)'
+              : 'not verified — using trusted fallback'}
+          </span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Addresses</span>
+          <span className="kv-value">{rh.addresses ?? 0} root server addresses</span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Last fetch</span>
+          <span className="kv-value">
+            {rh.last_fetch ? new Date(rh.last_fetch).toLocaleString() : '—'}
+          </span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Refresh</span>
+          <span className="kv-value">every {rh.refresh_interval || '7d'}</span>
+        </div>
+      </div>
+      {rh.last_error && (
+        <div className="error-text small" style={{ marginTop: 8 }}>
+          ⚠ {rh.last_error}
+        </div>
+      )}
     </div>
   )
 }
