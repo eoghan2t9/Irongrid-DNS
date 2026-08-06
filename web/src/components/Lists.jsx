@@ -18,7 +18,7 @@ function ListCard({ k, items, onRemove }) {
   const isAllow = k === 'whitelist'
 
   return (
-    <div className="card">
+    <div className="card table-card">
       <div className="row-between">
         <h3 style={{ margin: 0 }}>
           {isAllow ? 'Allow list — always resolves' : 'Block list — always blocked'}
@@ -34,14 +34,33 @@ function ListCard({ k, items, onRemove }) {
         <div className="empty">Nothing here yet.</div>
       ) : (
         <>
-          <ul className="tag-list">
-            {slice.map((it) => (
-              <li className="tag" key={it}>
-                <span className="mono">{it}</span>
-                <button className="tag-x" onClick={() => onRemove(k, it)} title="Remove" aria-label={`Remove ${it}`}>✕</button>
-              </li>
-            ))}
-          </ul>
+          <table className="table">
+            <thead>
+              <tr>
+                <th className="num-col">#</th>
+                <th>Entry</th>
+                <th className="action-col"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {slice.map((it, i) => (
+                <tr key={it}>
+                  <td className="mono dim num-col">{start + i + 1}</td>
+                  <td className="entry-cell" title={it}>{it}</td>
+                  <td className="action-col">
+                    <button
+                      className="btn danger ghost small"
+                      onClick={() => onRemove(k, it)}
+                      title="Remove"
+                      aria-label={`Remove ${it}`}
+                    >
+                      ✕
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
           {pages > 1 && (
             <div className="pager">
               <button className="btn small" disabled={cur === 0} onClick={() => setPage(cur - 1)}>

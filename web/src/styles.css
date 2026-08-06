@@ -362,6 +362,11 @@ body {
 .strong { font-weight: 650; }
 .domain-cell { max-width: 300px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-family: var(--font-mono); font-size: 12.5px; }
 
+/* Allow/Block list entry tables (Lists page): one row per entry. */
+.num-col { width: 46px; }
+.entry-cell { font-family: var(--font-mono); font-size: 12.5px; overflow-wrap: anywhere; }
+.action-col { width: 46px; text-align: right; }
+
 .badge {
   display: inline-block; padding: 2px 8px; border-radius: 3px;
   font-size: 11px; font-weight: 650; letter-spacing: 0.2px;
