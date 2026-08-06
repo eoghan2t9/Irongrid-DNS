@@ -121,6 +121,7 @@ startup service (systemd / launchd / Windows task).
 | 🧭 **Recursive mode** | `recursive://` upstream resolves from the root servers itself, no forwarder involved — seeded from IANA's authoritative `named.root` (PGP-verified, weekly refresh, offline fallback) |
 | 🛡️ **Blocking** | Hosts files, Adblock syntax (`\|\|domain^`, `@@` exceptions), plain domains, wildcards (`*.domain`), and IP rules |
 | ✅ **Allow list** | Whitelist entries override *any* blocklist, including IP addresses |
+| 🔎 **Fix a broken site** | Paste a URL; Irongrid scans the page's HTML for the domains your blocklists are blocking and whitelists them in one click |
 | 📜 **Blocklists** | Add unlimited remote/local lists, a global auto-update interval, one-click refresh, curated one-click presets |
 | 🪵 **Full query log** | Every allowed/blocked/cached request with client, reason, upstream, latency — stored in pure-Go SQLite |
 | 📊 **Dashboard** | Modern React UI: live stats, protocol breakdown, top blocked domains, log explorer, live config editing |
@@ -380,6 +381,30 @@ Cold-path performance is tuned too: glueless out-of-bailiwick nameserver
 addresses resolve in parallel, and resolved nameserver addresses are cached
 for their TTL — the price of the first lookup on a given DNS provider is paid
 once, not once per domain.
+
+## Fix a broken site
+
+A page that loads scripts, images or fonts from a domain your blocklists cover
+can look broken even though the page itself resolves fine. The **Fix a broken
+site** tool on the **Lists** page turns that into a one-click fix:
+
+1. Paste the site's URL (`example.com` or `https://example.com`) and hit **Scan site**.
+2. Irongrid fetches the page server-side and scans its HTML for every hostname
+   it references — `<script>`/`<img>`/`<link>`/`<iframe>` `src`/`href`
+   attributes, `srcset` candidates, CSS `url(...)` (inline styles and
+   `<style>` blocks), and `fetch()`/`XMLHttpRequest`/`importScripts` calls in
+   inline scripts — then checks each one against your blocklists.
+3. Blocked domains are flagged with the list that blocked them. **Allow** (or
+   **Allow all blocked**) adds them to the Allow list, which overrides every
+   blocklist, and the page starts working.
+
+The scan is a **static** look at the HTML: URLs a script constructs
+*dynamically* at runtime can't be seen from the page itself, so a clean result
+is a strong signal, not a guarantee. The fetch is safety-bounded — http(s)
+only, private/loopback addresses refused (an SSRF guard that resolves and
+validates before dialing), a 2 MiB page cap and a 10-second budget — so a
+hostile URL can't turn the tool into a LAN probe. The same scan is available
+over the API as `POST /api/filter/site`.
 
 ## Cloudflare Tunnel (baked in)
 
