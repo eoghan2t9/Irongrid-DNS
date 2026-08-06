@@ -25,17 +25,42 @@ func freePort(t *testing.T) string {
 	return port
 }
 
-// fakeZone is one authority level in a test hierarchy: it answers queries
-// for names strictly inside within, and referrals for anything under
-// delegateTo (glue supplied from delegateAddrs), for names not in answers.
-type fakeZone struct {
-	name    string // e.g. "com." or "." for the root
-	answers map[string][]dns.RR
+// delegateEntry is one referral rule: names ending in suffix get referred to
+// ns, with A glue for it unless noGlue (the out-of-bailiwick case).
+type delegateEntry struct {
+	suffix    string // e.g. "com." or "example.com."
+	ns        string // NS hostname, e.g. "a.gtld-servers.invalid."
+	addr      string // child zone's server address, "ip:port"
+	childName string // zone name the NS record is owned by, e.g. "com."
+	noGlue    bool
+}
 
-	delegateSuffix string // e.g. "example.com." — referred to child
-	delegateNS     string // e.g. "ns1.example.com."
-	delegateAddr   string // child zone's server address, "ip:port"
-	childName      string // e.g. "example.com."
+// fakeZone is one authority level in a test hierarchy: it answers queries
+// for names it holds directly, and otherwise checks delegates in order for
+// a referral.
+type fakeZone struct {
+	name      string // e.g. "com." or "." for the root
+	answers   map[string][]dns.RR
+	delegates []delegateEntry
+
+	// Convenience for a zone with exactly one delegate — set these instead
+	// of delegates for the common single-referral case.
+	delegateSuffix string
+	delegateNS     string
+	delegateAddr   string
+	childName      string
+	delegateNoGlue bool
+}
+
+func (z *fakeZone) allDelegates() []delegateEntry {
+	all := append([]delegateEntry{}, z.delegates...)
+	if z.delegateSuffix != "" {
+		all = append(all, delegateEntry{
+			suffix: z.delegateSuffix, ns: z.delegateNS, addr: z.delegateAddr,
+			childName: z.childName, noGlue: z.delegateNoGlue,
+		})
+	}
+	return all
 }
 
 // startFakeServer binds to listenAddr (a fixed "ip:port", not an ephemeral
@@ -61,13 +86,17 @@ func startFakeServer(t *testing.T, listenAddr string, z *fakeZone) string {
 			w.WriteMsg(m)
 			return
 		}
-		if z.delegateSuffix != "" && strings.HasSuffix(name, z.delegateSuffix) {
-			ns, _ := dns.NewRR(z.childName + " 300 IN NS " + z.delegateNS)
+		for _, d := range z.allDelegates() {
+			if !strings.HasSuffix(name, d.suffix) {
+				continue
+			}
+			ns, _ := dns.NewRR(d.childName + " 300 IN NS " + d.ns)
 			m.Ns = []dns.RR{ns}
-			host, port, _ := net.SplitHostPort(z.delegateAddr)
-			_ = port
-			a, _ := dns.NewRR(z.delegateNS + " 300 IN A " + host)
-			m.Extra = []dns.RR{a}
+			if !d.noGlue {
+				host, _, _ := net.SplitHostPort(d.addr)
+				a, _ := dns.NewRR(d.ns + " 300 IN A " + host)
+				m.Extra = []dns.RR{a}
+			}
 			w.WriteMsg(m)
 			return
 		}
@@ -253,18 +282,23 @@ func TestReferralParsing(t *testing.T) {
 	a, _ := dns.NewRR("ns1.example.com. 300 IN A 10.0.0.1")
 	resp.Extra = []dns.RR{a}
 
-	zone, servers, ttl, hasNS := New(nil).referral(resp)
+	zone, records, ttl, hasNS := parseReferral(resp)
 	if !hasNS {
 		t.Fatal("expected hasNS = true")
 	}
 	if zone != "example.com." {
 		t.Fatalf("zone = %q, want example.com.", zone)
 	}
-	if len(servers) != 1 || servers[0] != "10.0.0.1:53" {
-		t.Fatalf("servers = %v", servers)
+	if len(records) != 1 || records[0].name != "ns1.example.com." || len(records[0].glueIPs) != 1 || records[0].glueIPs[0] != "10.0.0.1" {
+		t.Fatalf("records = %v", records)
 	}
 	if ttl != minDelegationTTL*5 { // 300s == minDelegationTTL(60s)*5, i.e. not clamped
 		t.Fatalf("ttl = %v", ttl)
+	}
+
+	servers := New(nil).resolveNameservers(context.Background(), records, 0)
+	if len(servers) != 1 || servers[0] != "10.0.0.1:53" {
+		t.Fatalf("servers = %v", servers)
 	}
 }
 
@@ -273,14 +307,90 @@ func TestReferralNoGlue(t *testing.T) {
 	ns, _ := dns.NewRR("example.com. 300 IN NS ns1.example.com.")
 	resp.Ns = []dns.RR{ns}
 
-	zone, servers, _, hasNS := New(nil).referral(resp)
+	zone, records, _, hasNS := parseReferral(resp)
 	if !hasNS {
 		t.Fatal("expected hasNS = true even without glue")
 	}
 	if zone != "example.com." {
 		t.Fatalf("zone = %q", zone)
 	}
-	if servers != nil {
-		t.Fatalf("expected no servers without glue, got %v", servers)
+	if len(records) != 1 || records[0].glueIPs != nil {
+		t.Fatalf("expected one nameserver with no glue, got %v", records)
+	}
+}
+
+// TestResolveGluelessOutOfBailiwickNS is the real-world case the earlier
+// "skip glueless NS" design got wrong: a domain delegated to nameservers
+// living under a completely different, unrelated domain (as with
+// Cloudflare/Route53/DNSimple-style DNS hosting) — the TLD has no glue
+// obligation for them, so the resolver must look them up independently.
+func TestResolveGluelessOutOfBailiwickNS(t *testing.T) {
+	nsPort := freePort(t)
+
+	// The DNS host's own server answers its nameserver's own A record (so
+	// its bootstrap address can be resolved) — and, since one hosting-
+	// provider IP authoritatively serves many unrelated customer zones in
+	// real life, it's also where example.com. itself actually lives, not on
+	// some separate server: the .com TLD delegated example.com. to exactly
+	// this nameserver, so this IS the server the walk must end up querying.
+	nsHostAnswers := map[string][]dns.RR{}
+	nsA, _ := dns.NewRR("ns1.dnshost.invalid. 300 IN A 127.0.0.4")
+	nsHostAnswers["ns1.dnshost.invalid."] = []dns.RR{nsA}
+	exampleRR, _ := dns.NewRR("example.com. 300 IN A 93.184.216.34")
+	nsHostAnswers["example.com."] = []dns.RR{exampleRR}
+	nsHostZone := &fakeZone{name: "dnshost.invalid.", answers: nsHostAnswers}
+	nsHostAddr := startFakeServer(t, "127.0.0.4:"+nsPort, nsHostZone)
+
+	// A TLD ("invalid.") that glues its own in-bailiwick delegation for
+	// dnshost.invalid. normally...
+	tldInvalid := &fakeZone{
+		name:           "invalid.",
+		answers:        map[string][]dns.RR{},
+		delegateSuffix: "dnshost.invalid.",
+		delegateNS:     "a.gtld-servers.invalid.",
+		delegateAddr:   nsHostAddr,
+		childName:      "dnshost.invalid.",
+	}
+	tldInvalidAddr := startFakeServer(t, "127.0.0.5:"+nsPort, tldInvalid)
+
+	// The "com." TLD delegates example.com. to ns1.dnshost.invalid — an
+	// out-of-bailiwick nameserver — WITHOUT glue, the case that matters here.
+	// delegateAddr is unused when delegateNoGlue is set (no glue is derived
+	// from it), so it's left empty.
+	tldCom := &fakeZone{
+		name:           "com.",
+		answers:        map[string][]dns.RR{},
+		delegateSuffix: "example.com.",
+		delegateNS:     "ns1.dnshost.invalid.",
+		childName:      "example.com.",
+		delegateNoGlue: true,
+	}
+	tldComAddr := startFakeServer(t, "127.0.0.2:"+nsPort, tldCom)
+
+	// The root delegates both "com." and "invalid." so the nested lookup of
+	// ns1.dnshost.invalid's own address can succeed.
+	root := &fakeZone{
+		name:    ".",
+		answers: map[string][]dns.RR{},
+		delegates: []delegateEntry{
+			{suffix: "com.", ns: "a.gtld-servers.invalid.", addr: tldComAddr, childName: "com."},
+			{suffix: "invalid.", ns: "a.iana-servers.invalid.", addr: tldInvalidAddr, childName: "invalid."},
+		},
+	}
+	rootAddr := startFakeServer(t, "127.0.0.1:"+nsPort, root)
+
+	r := newTestResolver(rootAddr, nsPort)
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	resp, err := r.Resolve(context.Background(), m)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("answers = %d, want 1: %v", len(resp.Answer), resp.Answer)
+	}
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok || a.A.String() != "93.184.216.34" {
+		t.Fatalf("unexpected answer: %v", resp.Answer[0])
 	}
 }

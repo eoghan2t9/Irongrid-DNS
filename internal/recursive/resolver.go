@@ -18,6 +18,11 @@ const (
 	maxHops = 30
 	// maxCNAMEChain bounds how many CNAME targets one query will chase.
 	maxCNAMEChain = 10
+	// maxNSResolveDepth bounds how deep a chain of glueless (out-of-bailiwick)
+	// nameserver lookups is allowed to nest — resolving ns1.dnsimple.com's own
+	// address is a completely independent walk, so without a cap a pathological
+	// or hostile chain of glueless delegations could recurse indefinitely.
+	maxNSResolveDepth = 3
 
 	perServerTimeout = 3 * time.Second
 	minDelegationTTL = 60 * time.Second
@@ -67,7 +72,7 @@ func (r *Resolver) Resolve(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	if len(m.Question) == 0 {
 		return nil, fmt.Errorf("recursive: query has no question")
 	}
-	resp, err := r.resolve(ctx, m.Question[0], 0)
+	resp, err := r.resolve(ctx, m.Question[0], 0, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -76,7 +81,7 @@ func (r *Resolver) Resolve(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	return resp, nil
 }
 
-func (r *Resolver) resolve(ctx context.Context, q dns.Question, cnameDepth int) (*dns.Msg, error) {
+func (r *Resolver) resolve(ctx context.Context, q dns.Question, cnameDepth, nsDepth int) (*dns.Msg, error) {
 	if cnameDepth > maxCNAMEChain {
 		return nil, fmt.Errorf("recursive: CNAME chain too long resolving %s", q.Name)
 	}
@@ -91,18 +96,19 @@ func (r *Resolver) resolve(ctx context.Context, q dns.Question, cnameDepth int) 
 		}
 
 		if isFinal(resp) {
-			return r.chaseCNAME(ctx, q, resp, cnameDepth)
+			return r.chaseCNAME(ctx, q, resp, cnameDepth, nsDepth)
 		}
 
-		nextZone, nextServers, ttl, hasNS := r.referral(resp)
+		nextZone, nsRecords, ttl, hasNS := parseReferral(resp)
 		if !hasNS {
 			// No NS records at all in Authority and not otherwise final
 			// (isFinal already covers the AA/answer/NXDOMAIN cases) —
 			// there's nothing more this walk can do with it.
 			return resp, nil
 		}
+		nextServers := r.resolveNameservers(ctx, nsRecords, nsDepth)
 		if len(nextServers) == 0 {
-			return nil, fmt.Errorf("recursive: zone %s delegated with no usable glue", nextZone)
+			return nil, fmt.Errorf("recursive: zone %s delegated with no resolvable nameservers", nextZone)
 		}
 		if visited[nextZone] {
 			// Referral loop (a misbehaving server re-delegating to a zone
@@ -134,7 +140,7 @@ func isFinal(resp *dns.Msg) bool {
 // chaseCNAME follows a CNAME in resp's answer to its target when the client
 // asked for a different type and the target's own records weren't already
 // included, merging the target's answer onto the CNAME hop.
-func (r *Resolver) chaseCNAME(ctx context.Context, q dns.Question, resp *dns.Msg, cnameDepth int) (*dns.Msg, error) {
+func (r *Resolver) chaseCNAME(ctx context.Context, q dns.Question, resp *dns.Msg, cnameDepth, nsDepth int) (*dns.Msg, error) {
 	if q.Qtype == dns.TypeCNAME {
 		return resp, nil
 	}
@@ -150,7 +156,7 @@ func (r *Resolver) chaseCNAME(ctx context.Context, q dns.Question, resp *dns.Msg
 	if target == "" {
 		return resp, nil
 	}
-	follow, err := r.resolve(ctx, dns.Question{Name: target, Qtype: q.Qtype, Qclass: q.Qclass}, cnameDepth+1)
+	follow, err := r.resolve(ctx, dns.Question{Name: target, Qtype: q.Qtype, Qclass: q.Qclass}, cnameDepth+1, nsDepth)
 	if err != nil {
 		// Return the CNAME hop we do have rather than failing the whole
 		// query over a downstream failure resolving its target.
@@ -205,23 +211,32 @@ func exchange(ctx context.Context, addr string, m *dns.Msg, network string) (*dn
 	return resp, err
 }
 
-// referral extracts the next zone's NS names and glue addresses from a
+// nsInfo is one delegated nameserver: its hostname, plus any glue addresses
+// (raw IPs, no port) the referral itself supplied for it.
+type nsInfo struct {
+	name    string
+	glueIPs []string
+}
+
+// parseReferral extracts the next zone's nameservers and any glue from a
 // referral response. hasNS is false only when resp carries no NS records at
-// all; a zone with NS records but no usable glue is reported with a nil
-// servers slice so the caller can distinguish "not a referral" from
-// "referral this resolver can't follow".
-func (r *Resolver) referral(resp *dns.Msg) (zone string, servers []string, ttl time.Duration, hasNS bool) {
+// all (i.e. it isn't a referral). A nameserver with no glue is included with
+// an empty glueIPs — the common case for an out-of-bailiwick nameserver
+// (e.g. a domain hosted on Cloudflare/Route53/DNSimple-style DNS, whose
+// hostname lives outside the zone being delegated), which the parent has no
+// glue obligation for.
+func parseReferral(resp *dns.Msg) (zone string, ns []nsInfo, ttl time.Duration, hasNS bool) {
 	var nsNames []string
 	var minTTL uint32
 	for _, rr := range resp.Ns {
-		ns, ok := rr.(*dns.NS)
+		nsRR, ok := rr.(*dns.NS)
 		if !ok {
 			continue
 		}
-		zone = strings.ToLower(ns.Header().Name)
-		nsNames = append(nsNames, strings.ToLower(ns.Ns))
-		if minTTL == 0 || ns.Header().Ttl < minTTL {
-			minTTL = ns.Header().Ttl
+		zone = strings.ToLower(nsRR.Header().Name)
+		nsNames = append(nsNames, strings.ToLower(nsRR.Ns))
+		if minTTL == 0 || nsRR.Header().Ttl < minTTL {
+			minTTL = nsRR.Header().Ttl
 		}
 	}
 	if len(nsNames) == 0 {
@@ -239,16 +254,8 @@ func (r *Resolver) referral(resp *dns.Msg) (zone string, servers []string, ttl t
 			glue[name] = append(glue[name], v.AAAA.String())
 		}
 	}
-	// NS records without glue (an in-bailiwick nameserver whose own address
-	// lives inside the zone it's delegating for) are skipped rather than
-	// resolved independently — root and TLD infrastructure is required to
-	// supply glue for exactly this case, so it essentially never triggers in
-	// practice, and following it safely needs its own bootstrap-loop guards
-	// that aren't worth the complexity here.
 	for _, name := range nsNames {
-		for _, ip := range glue[name] {
-			servers = append(servers, net.JoinHostPort(ip, r.nsPort))
-		}
+		ns = append(ns, nsInfo{name: name, glueIPs: glue[name]})
 	}
 
 	ttl = time.Duration(minTTL) * time.Second
@@ -258,7 +265,52 @@ func (r *Resolver) referral(resp *dns.Msg) (zone string, servers []string, ttl t
 	if ttl > maxDelegationTTL {
 		ttl = maxDelegationTTL
 	}
-	return zone, servers, ttl, true
+	return zone, ns, ttl, true
+}
+
+// resolveNameservers turns a referral's nameservers into dial-ready
+// addresses: glue is used directly when the referral supplied it, and an
+// out-of-bailiwick nameserver (no glue) is resolved with its own
+// independent lookup, bounded by nsDepth against a runaway chain of
+// glueless delegations.
+func (r *Resolver) resolveNameservers(ctx context.Context, ns []nsInfo, nsDepth int) []string {
+	var servers []string
+	for _, n := range ns {
+		if len(n.glueIPs) > 0 {
+			for _, ip := range n.glueIPs {
+				servers = append(servers, net.JoinHostPort(ip, r.nsPort))
+			}
+			continue
+		}
+		if nsDepth >= maxNSResolveDepth {
+			continue
+		}
+		if addr, ok := r.resolveNSAddr(ctx, n.name, nsDepth+1); ok {
+			servers = append(servers, addr)
+		}
+	}
+	return servers
+}
+
+// resolveNSAddr independently resolves a nameserver hostname's own address
+// (A, falling back to AAAA) via a nested walk that goes through the exact
+// same referral/glue handling as any other query, one nsDepth deeper.
+func (r *Resolver) resolveNSAddr(ctx context.Context, host string, nsDepth int) (string, bool) {
+	for _, qtype := range [...]uint16{dns.TypeA, dns.TypeAAAA} {
+		resp, err := r.resolve(ctx, dns.Question{Name: host, Qtype: qtype, Qclass: dns.ClassINET}, 0, nsDepth)
+		if err != nil {
+			continue
+		}
+		for _, rr := range resp.Answer {
+			switch v := rr.(type) {
+			case *dns.A:
+				return net.JoinHostPort(v.A.String(), r.nsPort), true
+			case *dns.AAAA:
+				return net.JoinHostPort(v.AAAA.String(), r.nsPort), true
+			}
+		}
+	}
+	return "", false
 }
 
 // bestDelegation returns the deepest cached, unexpired delegation covering
