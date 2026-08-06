@@ -171,18 +171,75 @@ func (c *Cache) getPositive(ctx context.Context, h uint64) *dns.Msg {
 }
 
 // Lookup checks both the positive and negative entries for q, hashing the
-// question once and reusing it for both — the DNS hot path used to call Get
-// then GetNegative separately, each re-deriving the same key from scratch.
-// negative reports which kind of entry matched when msg is non-nil.
+// question once and reusing it for both. L1 (in-process, no network) is
+// checked for each first; only when both miss locally does this touch L2,
+// and then it fetches both keys in a single Redis MGET instead of two
+// sequential GETs — a domain this instance has never seen before (an L1
+// miss on both) would otherwise pay for two round trips to Dragonfly before
+// the query ever reaches upstream.
+//
+// This does mean a query where L2 alone holds a fresher positive answer
+// than a stale negative one already warmed into L1 could occasionally
+// return the stale negative — the original sequential Get-then-GetNegative
+// always fully resolved positive (L1 and L2) before ever considering
+// negative. Both entries existing at once is already a rare, transient
+// state (a domain flipping between answering and NXDOMAIN across queries),
+// and every cache entry is TTL-bounded regardless, so this is an acceptable
+// trade for skipping a real network round trip on the much more common
+// full-miss case. negative reports which kind of entry matched when msg is
+// non-nil.
 func (c *Cache) Lookup(ctx context.Context, q dns.Question) (msg *dns.Msg, negative bool) {
 	h := keyHash(q)
-	if m := c.getPositive(ctx, h); m != nil {
-		return m, false
+	posKey := c.msgKey(h)
+	negKey := c.negKey(h)
+	now := time.Now()
+
+	if c.l1 != nil {
+		if raw, ok := c.l1.get(posKey, now); ok {
+			return unpackEntry(raw), false
+		}
+		if raw, ok := c.l1.get(negKey, now); ok {
+			return unpackNegative(raw), true
+		}
 	}
-	if m := c.getNegative(ctx, h); m != nil {
-		return m, true
+	if c.client == nil {
+		return nil, false
 	}
-	return nil, false
+	vals, err := c.client.MGet(ctx, posKey, negKey).Result()
+	if err != nil {
+		return nil, false
+	}
+	posRaw, negRaw, ok := decodeMGetResult(vals)
+	if !ok {
+		return nil, false
+	}
+	if posRaw != nil {
+		if c.l1 != nil {
+			c.l1.set(posKey, posRaw, c.ttl, now)
+		}
+		return unpackEntry(posRaw), false
+	}
+	if c.l1 != nil {
+		c.l1.set(negKey, negRaw, c.negativeTTL, now)
+	}
+	return unpackNegative(negRaw), true
+}
+
+// decodeMGetResult interprets the [positive, negative] result of an MGET
+// against the two keys for one question, as go-redis returns it: a present
+// key comes back as a string, a missing key as nil. ok is false when
+// neither key was present, or the result didn't have the expected shape.
+func decodeMGetResult(vals []interface{}) (posRaw, negRaw []byte, ok bool) {
+	if len(vals) != 2 {
+		return nil, nil, false
+	}
+	if s, isStr := vals[0].(string); isStr {
+		return []byte(s), nil, true
+	}
+	if s, isStr := vals[1].(string); isStr {
+		return nil, []byte(s), true
+	}
+	return nil, nil, false
 }
 
 // l2Get fetches raw bytes from Dragonfly/Redis. A nil client (unit tests)

@@ -121,3 +121,75 @@ func BenchmarkL1Get(b *testing.B) {
 		c.Get(context.Background(), q)
 	}
 }
+
+func TestLookupL1Positive(t *testing.T) {
+	c := l1onlyCache(time.Hour, time.Minute)
+	ctx := context.Background()
+	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
+	msg, negative := c.Lookup(ctx, aQuestion())
+	if msg == nil {
+		t.Fatal("expected a hit")
+	}
+	if negative {
+		t.Fatal("expected a positive hit, got negative")
+	}
+}
+
+func TestLookupL1Negative(t *testing.T) {
+	c := l1onlyCache(time.Hour, time.Minute)
+	ctx := context.Background()
+	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
+	msg, negative := c.Lookup(ctx, aQuestion())
+	if msg == nil {
+		t.Fatal("expected a hit")
+	}
+	if !negative {
+		t.Fatal("expected a negative hit")
+	}
+}
+
+// TestLookupMissWithNilClient verifies Lookup degrades to a clean miss (no
+// panic) when neither L1 nor L2 (nil Redis client, as in every test in this
+// file) has anything — the path a genuinely new domain takes before ever
+// reaching upstream.
+func TestLookupMissWithNilClient(t *testing.T) {
+	c := l1onlyCache(time.Hour, time.Minute)
+	msg, negative := c.Lookup(context.Background(), aQuestion())
+	if msg != nil || negative {
+		t.Fatalf("expected a clean miss, got msg=%v negative=%v", msg, negative)
+	}
+}
+
+// TestDecodeMGetResult exercises the MGET response parsing in isolation
+// (posKey, negKey order, as Lookup calls MGet) without needing a real Redis
+// connection — go-redis returns a present key as a string and a missing key
+// as nil in the result slice.
+func TestDecodeMGetResult(t *testing.T) {
+	cases := []struct {
+		name    string
+		vals    []interface{}
+		wantPos []byte
+		wantNeg []byte
+		wantOK  bool
+	}{
+		{"both missing", []interface{}{nil, nil}, nil, nil, false},
+		{"positive present", []interface{}{"pos-bytes", nil}, []byte("pos-bytes"), nil, true},
+		{"negative present", []interface{}{nil, "neg-bytes"}, nil, []byte("neg-bytes"), true},
+		{"both present positive wins", []interface{}{"pos-bytes", "neg-bytes"}, []byte("pos-bytes"), nil, true},
+		{"wrong length", []interface{}{"only-one"}, nil, nil, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			pos, neg, ok := decodeMGetResult(c.vals)
+			if ok != c.wantOK {
+				t.Fatalf("ok = %v, want %v", ok, c.wantOK)
+			}
+			if string(pos) != string(c.wantPos) {
+				t.Errorf("posRaw = %q, want %q", pos, c.wantPos)
+			}
+			if string(neg) != string(c.wantNeg) {
+				t.Errorf("negRaw = %q, want %q", neg, c.wantNeg)
+			}
+		})
+	}
+}
