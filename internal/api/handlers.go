@@ -1330,9 +1330,11 @@ func (h *Handler) installUpdate(ctx context.Context, w http.ResponseWriter) {
 	// h.Version is the version the process started with. Once a swap has
 	// happened it is stale, so refuse a second install until the restart —
 	// this also preserves the .prev rollback copy from being overwritten.
+	// lastInstalledVersion is a GitHub release tag ("v1.4.1"), already
+	// v-prefixed — do not add a second one.
 	if h.lastInstalledVersion != "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{
-			"error": fmt.Sprintf("v%s was already installed and is pending a restart", h.lastInstalledVersion),
+			"error": fmt.Sprintf("%s was already installed and is pending a restart", h.lastInstalledVersion),
 		})
 		return
 	}
@@ -1372,23 +1374,39 @@ func (h *Handler) installUpdate(ctx context.Context, w http.ResponseWriter) {
 	}
 
 	// Only claim (and guard) a restart when it can actually happen: systemd
-	// must be running and systemd-run on PATH. The swap itself is safe to
-	// retry — a repeated install simply re-downloads and re-verifies.
+	// must be running, systemd-run on PATH, and the systemd-run invocation
+	// itself (which just registers a timer unit and returns — the actual
+	// restart still happens on its own detached unit after the 1s delay,
+	// independent of this process) has to actually succeed. Run it
+	// synchronously so a registration failure (e.g. a stale same-named unit
+	// left over from a previous attempt) is caught here instead of only
+	// logged from an unobserved goroutine — the previous fire-and-forget
+	// version set lastInstalledVersion unconditionally, so a failed
+	// registration permanently wedged every future install behind a
+	// "pending restart" that would never happen. --collect auto-unloads the
+	// transient unit on completion (success or failure) so a retry never
+	// collides with a leftover unit from an earlier attempt. The swap
+	// itself is safe to retry regardless — a repeated install simply
+	// re-downloads and re-verifies.
 	unit := update.UnitName()
 	_, systemdRunOK := exec.LookPath("systemd-run")
-	if _, err := os.Stat("/run/systemd/system"); err == nil && unit != "" && systemdRunOK == nil {
-		h.lastInstalledVersion = res.NewVersion
-		payload["restarting"] = true
-		payload["unit"] = unit
-		go func(unit string) {
-			// Detached transient unit: fires once after 1s and is not a
-			// child of this process, so the response always flushes and the
-			// restart survives even if the service is killed instantly.
-			cmd := exec.Command("systemd-run", "--unit=irongrid-update", "--on-active=1", "systemctl", "restart", unit)
-			if out, err := cmd.CombinedOutput(); err != nil {
-				log.Printf("[update] schedule restart failed: %v: %s", err, out)
-			}
-		}(unit)
+	restartable := unit != "" && systemdRunOK == nil
+	if restartable {
+		if _, err := os.Stat("/run/systemd/system"); err != nil {
+			restartable = false
+		}
+	}
+	if restartable {
+		cmd := exec.Command("systemd-run", "--unit=irongrid-update", "--collect", "--on-active=1", "systemctl", "restart", unit)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			log.Printf("[update] schedule restart failed: %v: %s", err, out)
+			payload["restarting"] = false
+			payload["note"] = "Binary updated, but scheduling the restart failed. Restart Irongrid manually to run the new version."
+		} else {
+			h.lastInstalledVersion = res.NewVersion
+			payload["restarting"] = true
+			payload["unit"] = unit
+		}
 	} else {
 		payload["restarting"] = false
 		payload["note"] = "Binary updated. Restart Irongrid manually to run the new version."
