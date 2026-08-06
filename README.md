@@ -386,7 +386,8 @@ once, not once per domain.
 
 A page that loads scripts, images or fonts from a domain your blocklists cover
 can look broken even though the page itself resolves fine. The **Fix a broken
-site** tool on the **Lists** page turns that into a one-click fix:
+site** tool — on the **Lists** page and the **DNS Tools** page — turns that
+into a one-click fix:
 
 1. Paste the site's URL (`example.com` or `https://example.com`) and hit **Scan site**.
 2. Irongrid fetches the page server-side and scans its HTML for every hostname
@@ -448,6 +449,11 @@ POST /api/lists/refresh     update all lists
 GET/POST /api/filter/{whitelist,blacklist}   allow/block entries
 POST /api/filter/check      test a domain or IP
 POST /api/filter/site       scan a site's HTML and list the domains it loads that are blocked
+POST /api/tools/resolve     dig-style lookup through chosen sources (local upstreams and/or 1.1.1.1/8.8.8.8/9.9.9.9)
+POST /api/tools/mail        MX/SPF/DKIM/DMARC/CAA for a domain, with SPF issue detection
+POST /api/tools/rbl         reputation check of an IPv4 against DNS-based blocklists
+POST /api/tools/axfr        zone-transfer (AXFR) check against a domain's nameservers
+POST /api/tools/subdomains  enumerate a domain's subdomains via crt.sh and flag blocked ones
 POST /api/cache/flush       clear Dragonfly cache
 GET/POST /api/tunnel/*      tunnel lifecycle + logs
 GET/PUT /api/config         read / update the full config (live-apply + restart notes)

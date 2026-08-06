@@ -129,6 +129,16 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.checkFilter(w, r)
 	case len(parts) == 2 && parts[0] == "filter" && parts[1] == "site" && r.Method == http.MethodPost:
 		h.siteCheck(ctx, w, r)
+	case len(parts) == 2 && parts[0] == "tools" && parts[1] == "resolve" && r.Method == http.MethodPost:
+		h.toolsResolve(ctx, w, r)
+	case len(parts) == 2 && parts[0] == "tools" && parts[1] == "mail" && r.Method == http.MethodPost:
+		h.toolsMail(ctx, w, r)
+	case len(parts) == 2 && parts[0] == "tools" && parts[1] == "rbl" && r.Method == http.MethodPost:
+		h.toolsRBL(ctx, w, r)
+	case len(parts) == 2 && parts[0] == "tools" && parts[1] == "axfr" && r.Method == http.MethodPost:
+		h.toolsAXFR(ctx, w, r)
+	case len(parts) == 2 && parts[0] == "tools" && parts[1] == "subdomains" && r.Method == http.MethodPost:
+		h.toolsSubdomains(ctx, w, r)
 	case len(parts) == 2 && parts[0] == "cache" && parts[1] == "flush" && r.Method == http.MethodPost:
 		h.flushCache(ctx, w)
 	case len(parts) == 2 && parts[0] == "tunnel" && parts[1] == "status" && r.Method == http.MethodGet:

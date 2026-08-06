@@ -5,6 +5,7 @@ import QueryLog from './components/QueryLog'
 import Blocklists from './components/Blocklists'
 import Lists from './components/Lists'
 import Rewrites from './components/Rewrites'
+import Tools from './components/Tools'
 import ClientGroups from './components/ClientGroups'
 import Tunnel from './components/Tunnel'
 import Settings from './components/Settings'
@@ -45,6 +46,10 @@ const NAV = [
   {
     id: 'rewrites', label: 'Local DNS',
     icon: navSvg(<><path d="M12 21s-7-6.5-7-11a7 7 0 1 1 14 0c0 4.5-7 11-7 11z" /><circle cx="12" cy="10" r="2.5" /></>),
+  },
+  {
+    id: 'tools', label: 'DNS Tools',
+    icon: navSvg(<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />),
   },
   {
     id: 'client-groups', label: 'Client Groups',
@@ -244,6 +249,7 @@ export default function App() {
           {view === 'blocklists' && <Blocklists />}
           {view === 'lists' && <Lists />}
           {view === 'rewrites' && <Rewrites />}
+          {view === 'tools' && <Tools />}
           {view === 'client-groups' && <ClientGroups />}
           {view === 'tls' && <Tls />}
           {view === 'tunnel' && <Tunnel />}
