@@ -411,17 +411,8 @@ func isWritableDir(dir string) bool {
 func UnitName() string {
 	// 1. cgroup: the unit is the *.service component of the slice path.
 	if data, err := os.ReadFile("/proc/self/cgroup"); err == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			for _, part := range strings.Split(line, ":") {
-				p := strings.TrimSpace(part)
-				if i := strings.Index(p, ".service"); i >= 0 {
-					unit := p[strings.LastIndex(p, "/")+1:]
-					unit = unit[:i+len(".service")]
-					if strings.HasSuffix(unit, ".service") {
-						return unit
-					}
-				}
-			}
+		if unit, ok := unitFromCgroupData(string(data)); ok {
+			return unit
 		}
 	}
 	// 2. Executable basename ("irongrid" → "irongrid.service"). Strip a
@@ -439,6 +430,26 @@ func UnitName() string {
 		return "irongrid.service"
 	}
 	return ""
+}
+
+// unitFromCgroupData scans the contents of /proc/self/cgroup for a
+// "*.service" path component, e.g. "0::/system.slice/irongrid.service" ->
+// "irongrid.service". Each colon-separated field is trimmed to its last
+// path segment *before* searching for ".service" in it — searching the
+// untrimmed field and slicing the trimmed one used two different indices
+// into two different-length strings and panicked with a slice-bounds error
+// on every real systemd cgroup path.
+func unitFromCgroupData(data string) (string, bool) {
+	for _, line := range strings.Split(data, "\n") {
+		for _, part := range strings.Split(line, ":") {
+			p := strings.TrimSpace(part)
+			unit := p[strings.LastIndex(p, "/")+1:]
+			if i := strings.Index(unit, ".service"); i >= 0 {
+				return unit[:i+len(".service")], true
+			}
+		}
+	}
+	return "", false
 }
 
 // sha256File returns the hex sha256 of a file.

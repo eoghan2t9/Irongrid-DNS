@@ -320,6 +320,31 @@ func TestUnitName(t *testing.T) {
 	}
 }
 
+func TestUnitFromCgroupData(t *testing.T) {
+	cases := []struct {
+		name string
+		data string
+		want string
+		ok   bool
+	}{
+		// The real /proc/self/cgroup content of a systemd-managed unit that
+		// used to panic with "slice bounds out of range [:30] with length 16".
+		{"systemd unified", "0::/system.slice/irongrid.service\n", "irongrid.service", true},
+		{"nested slice", "0::/user.slice/user-1000.slice/session-1.scope/irongrid.service\n", "irongrid.service", true},
+		{"cgroup v1 multi-line", "12:pids:/system.slice/irongrid.service\n11:cpu,cpuacct:/system.slice/irongrid.service\n", "irongrid.service", true},
+		{"no service unit", "0::/user.slice/user-1000.slice/session-1.scope\n", "", false},
+		{"empty", "", "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, ok := unitFromCgroupData(c.data)
+			if ok != c.ok || got != c.want {
+				t.Errorf("unitFromCgroupData(%q) = (%q, %v), want (%q, %v)", c.data, got, ok, c.want, c.ok)
+			}
+		})
+	}
+}
+
 func TestInstallChecksumMismatch(t *testing.T) {
 	bin := []byte("new binary")
 	srv := installTestServer(t, bin, false) // wrong checksum served
