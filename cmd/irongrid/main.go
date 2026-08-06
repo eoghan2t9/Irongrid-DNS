@@ -29,6 +29,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/installer"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tunnel"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/version"
@@ -69,6 +70,12 @@ func main() {
 
 	log.SetFlags(log.LstdFlags | log.LUTC)
 	log.Printf("%s", version.String())
+
+	// ---- runtime auto-tuning: match GOMAXPROCS/GOGC/GOMEMLIMIT to whatever
+	// hardware or container limits this process actually has, and keep
+	// re-checking so a live resize is picked up without a restart.
+	stopTuning := tuning.Start()
+	defer stopTuning()
 
 	// ---- config ----
 	cfg, err := config.Load(*configPath)
