@@ -30,6 +30,15 @@ upstreams:
   #                                         # query, at the cost of slower
   #                                         # cold lookups and no upstream
   #                                         # DNSSEC validation to lean on
+  #
+  #   recursive:// root hints come from IANA's authoritative named.root
+  #   (https://www.internic.net/domain/named.root), fetched at boot with its
+  #   PGP signature and only trusted when the signature verifies against the
+  #   embedded Verisign key. A verified copy is cached to data/root-hints.txt
+  #   so offline restarts skip the network; the bundled hints are the final
+  #   fallback. Hints re-fetch weekly while running, and the dashboard's
+  #   Root hints card shows the source (live / cached / bundled) and
+  #   signature state.
 
 cache:
   # Dragonfly is a HARD requirement: the server refuses to start without it.

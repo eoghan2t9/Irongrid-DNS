@@ -118,6 +118,7 @@ startup service (systemd / launchd / Windows task).
 |---|---|
 | ⚡ **Performance** | DragonflyDB-backed response cache (hard requirement), typical answers served in < 1 ms |
 | 🌐 **All protocols** | DNS over **UDP**, **TCP**, **TLS (DoT)**, **HTTPS (DoH, RFC 8484)** and **QUIC (DoQ, RFC 9250)** |
+| 🧭 **Recursive mode** | `recursive://` upstream resolves from the root servers itself, no forwarder involved — seeded from IANA's authoritative `named.root` (PGP-verified, weekly refresh, offline fallback) |
 | 🛡️ **Blocking** | Hosts files, Adblock syntax (`\|\|domain^`, `@@` exceptions), plain domains, wildcards (`*.domain`), and IP rules |
 | ✅ **Allow list** | Whitelist entries override *any* blocklist, including IP addresses |
 | 📜 **Blocklists** | Add unlimited remote/local lists, a global auto-update interval, one-click refresh, curated one-click presets |
@@ -142,7 +143,8 @@ startup service (systemd / launchd / Windows task).
   UDP:53 ─────────► │  ┌──────────┐   ┌────────────┐   ┌───────────┐   ┌───────────────┐  │
   TCP:53 ─────────► │  │  Listener │──►│  Filter    │──►│  Cache    │──►│  Upstreams    │  │
   DoT:853 ────────► │  │  (5 protos)│  │  engine    │  │  Dragonfly│  │  udp/tcp/tls/  │  │
-  DoH:443 ────────► │  └──────────┘   └────────────┘  │  (Redis)   │  │  https/quic    │  │
+  DoH:443 ────────► │  └──────────┘   └────────────┘  │  (Redis)   │  │  https/quic/   │  │
+  │  recursive     │  │
   DoQ:853 ────────► │                    │  whitelist │  └──────────┘  └───────────────┘  │
                     │                    ▼            │                │                   │
                     │              Query log (SQLite)◄┴────────────────┘                   │
@@ -331,7 +333,7 @@ written automatically on first launch. Key options:
 | Option | Meaning |
 |---|---|
 | `server.listen_*` | Per-protocol listen addresses; empty string disables |
-| `upstreams` | Forwarders — `udp://`, `tcp://`, `tls://`, `https://`, `quic://`, or `recursive://` (resolves from the root servers itself, no forwarder involved) |
+| `upstreams` | Forwarders — `udp://`, `tcp://`, `tls://`, `https://`, `quic://`, or `recursive://` (resolves from the root servers itself, no forwarder involved — seeded with IANA's PGP-verified `named.root` hints; see [Recursive resolution](#recursive-resolution-recursive)) |
 | `cache.addr` | Dragonfly endpoint — **server will not start without it** |
 | `filter.blocklists` | Remote URLs or `file://` paths |
 | `filter.auto_update` | How often every enabled blocklist refreshes — one global interval, not per-list |
@@ -347,6 +349,37 @@ written automatically on first launch. Key options:
 | `client_groups` | Per-client policy: CIDR/IP-matched groups with their own blocklist subset, allow/block entries and (optional) upstream override |
 | `rate_limit` | Per-client-IP token bucket: `enabled`, `qps` (sustained), `burst` (must be ≥ `qps`) |
 | `dnssec` | `enabled` sets the DO bit upstream; `require_ad` rejects an answer without the upstream's AD bit as SERVFAIL — trusts an *encrypted* validating upstream rather than validating locally |
+
+## Recursive resolution (`recursive://`)
+
+Instead of forwarding every query to a third-party resolver, a `recursive://`
+upstream walks the delegation chain from the root servers itself — nothing
+between you and the authoritative answer, and no upstream provider sees your
+queries.
+
+**Root hints come from IANA's authoritative `named.root`**
+(`https://www.internic.net/domain/named.root` — the same file BIND and Unbound
+seed from), not just a snapshot baked into the binary:
+
+- **PGP-verified** — `named.root` and its detached signature (`named.root.sig`)
+  are fetched together, and the signature must verify against the embedded
+  Verisign *Registry Administrator* key (fingerprint
+  `F0CB1A326BDF3F3EFA3A01FA937BB869E3A238C5`) before the content is trusted.
+  Tampered or unverifiable downloads are discarded — only verified content is
+  ever used or cached.
+- **Last-known-good disk cache** — a verified fetch is persisted to
+  `data/root-hints.txt`, so an offline restart still uses the newest hints
+  instead of the bundled ones.
+- **Graceful fallback** — at boot the resolver tries **live → disk cache →
+  bundled** and never fails or blocks on network trouble (10s fetch timeout);
+  the dashboard's **Root hints** card shows which source won and why.
+- **Weekly refresh** — hints re-fetch every 7 days while running, so a root
+  address change is picked up automatically, without waiting for a release.
+
+Cold-path performance is tuned too: glueless out-of-bailiwick nameserver
+addresses resolve in parallel, and resolved nameserver addresses are cached
+for their TTL — the price of the first lookup on a given DNS provider is paid
+once, not once per domain.
 
 ## Cloudflare Tunnel (baked in)
 
@@ -380,7 +413,7 @@ issuer — a Let's Encrypt chain means phones will accept it without extra steps
 The dashboard uses a JSON REST API (HTTP Basic auth):
 
 ```
-GET  /api/status            server, listeners, cache, tunnel status
+GET  /api/status            server, listeners, cache, tunnel, root-hints status
 GET  /api/stats             counters, protocol split, top blocked
 GET  /api/log?limit&action&domain&qtype   query log
 DELETE /api/log             clear query log
@@ -401,6 +434,24 @@ POST /api/tls/upload        upload a CA-signed cert + key pair and apply it
 GET  /api/tls/cert          download the active certificate (for clients to trust)
 POST /api/tls/acme/issue    trigger an immediate Let's Encrypt issuance/renewal (HTTP-01 or DNS-01)
 ```
+
+### Root-hints status
+
+When a `recursive://` upstream is configured, `GET /api/status` includes a
+`root_hints` object (absent otherwise):
+
+| Field | Meaning |
+|---|---|
+| `enabled` | `true` when a `recursive://` upstream exists and the hints manager is running |
+| `source` | Where the current hints came from: `live` (verified fetch), `cached` (last-known-good on disk), or `bundled` (compiled-in fallback) |
+| `verified` | Whether the content passed PGP verification against the embedded Verisign key |
+| `last_fetch` | When the hints were last fetched (or the cached file's mtime, for `cached`) |
+| `last_error` | Why the live fetch was skipped, when it was (empty on a live fetch) |
+| `addresses` | Number of root-server addresses currently in use |
+| `refresh_interval` | How often hints re-fetch, e.g. `168h` |
+| `key_fingerprint` | The embedded Verisign *Registry Administrator* key fingerprint used for verification |
+
+The dashboard's **Root hints** card renders the same fields.
 
 ### TLS config reference
 
