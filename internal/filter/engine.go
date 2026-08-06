@@ -122,9 +122,10 @@ func (e *Engine) LoadList(id, name string, content []byte) (ParseResult, error) 
 		e.listNames = map[string]string{}
 	}
 	e.listNames[id] = name
-	res := parseContent(string(content),
+	res := parseContent(string(content), id,
 		e.blockDomains, e.blockExact, e.blockIPs,
-		e.allowDomains, e.allowExact, e.allowIPs)
+		e.allowDomains, e.allowExact, e.allowIPs,
+		e.domainList)
 	e.totalBlockedDomains += res.Domains + res.ExactDomains
 	e.totalIPRules += res.IPs
 	return res, nil

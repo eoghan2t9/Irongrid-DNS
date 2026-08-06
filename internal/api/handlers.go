@@ -127,6 +127,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.deleteFilterEntry(w, r)
 	case len(parts) == 2 && parts[0] == "filter" && parts[1] == "check" && r.Method == http.MethodPost:
 		h.checkFilter(w, r)
+	case len(parts) == 2 && parts[0] == "filter" && parts[1] == "site" && r.Method == http.MethodPost:
+		h.siteCheck(ctx, w, r)
 	case len(parts) == 2 && parts[0] == "cache" && parts[1] == "flush" && r.Method == http.MethodPost:
 		h.flushCache(ctx, w)
 	case len(parts) == 2 && parts[0] == "tunnel" && parts[1] == "status" && r.Method == http.MethodGet:

@@ -17,10 +17,18 @@ type ParseResult struct {
 // parseContent applies blocklist content to the target rule sets.
 // targetBlock* receives blocking rules, targetAllow* receives exceptions
 // (both inline "@@" adblock rules and dedicated whitelist entries).
-func parseContent(content string, targetBlock, targetBlockExact, targetIPs, targetAllow, targetAllowExact map[string]struct{}, allowIPs map[string]struct{}) ParseResult {
+func parseContent(content string, listID string, targetBlock, targetBlockExact, targetIPs, targetAllow, targetAllowExact map[string]struct{}, allowIPs map[string]struct{}, listOf map[string]string) ParseResult {
 	var res ParseResult
 	sc := bufio.NewScanner(strings.NewReader(content))
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	// track records which block domain came from this list, for the UI's
+	// "blocked by" reporting. Exceptions and IP rules have their own
+	// attribution and are skipped.
+	track := func(domain string) {
+		if listOf != nil {
+			listOf[domain] = listID
+		}
+	}
 	for sc.Scan() {
 		line := strings.TrimSpace(sc.Text())
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "!") {
@@ -50,6 +58,7 @@ func parseContent(content string, targetBlock, targetBlockExact, targetIPs, targ
 					targetBlock[domain] = struct{}{}
 					res.Domains++
 				}
+				track(domain)
 			}
 			continue
 		}
@@ -80,6 +89,7 @@ func parseContent(content string, targetBlock, targetBlockExact, targetIPs, targ
 			targetBlock[domain] = struct{}{}
 			res.Domains++
 		}
+		track(domain)
 	}
 	return res
 }

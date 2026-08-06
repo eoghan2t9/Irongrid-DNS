@@ -82,6 +82,7 @@ export const api = {
   addFilterEntry: (kind, entry) => request(`/api/filter/${kind}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entry }) }),
   deleteFilterEntry: (kind, entry) => request('/api/filter/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, entry }) }),
   checkFilter: (entry) => request('/api/filter/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entry }) }),
+  siteCheck: (url) => request('/api/filter/site', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) }),
   flushCache: () => request('/api/cache/flush', { method: 'POST' }),
   tunnelStatus: () => request('/api/tunnel/status'),
   tunnelStart: (body) => request('/api/tunnel/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),

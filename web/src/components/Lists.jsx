@@ -88,6 +88,11 @@ export default function Lists() {
   const [kind, setKind] = useState('whitelist')
   const [checkName, setCheckName] = useState('')
   const [checkResult, setCheckResult] = useState(null)
+  const [site, setSite] = useState('')
+  const [siteBusy, setSiteBusy] = useState(false)
+  const [siteResult, setSiteResult] = useState(null)
+  const [siteError, setSiteError] = useState('')
+  const [siteAllowed, setSiteAllowed] = useState({})
 
   const load = useCallback(async () => {
     const [w, b] = await Promise.all([api.getFilterList('whitelist'), api.getFilterList('blacklist')])
@@ -149,6 +154,71 @@ export default function Lists() {
       setCheckResult({ error: err.message })
     }
   }
+
+  // ---- "fix a broken site" scanner ----
+  const scanSite = async (e) => {
+    e.preventDefault()
+    if (!site.trim()) return
+    setSiteBusy(true)
+    setSiteError('')
+    setSiteResult(null)
+    setSiteAllowed({})
+    try {
+      const res = await api.siteCheck(site.trim())
+      setSiteResult(res)
+    } catch (err) {
+      setSiteError(err.message)
+    }
+    setSiteBusy(false)
+  }
+
+  const allowSiteDomain = async (d) => {
+    try {
+      await api.addFilterEntry('whitelist', d)
+      setSiteAllowed((s) => ({ ...s, [d]: true }))
+      toast(`Allowed "${d}"`)
+      load()
+    } catch (e) {
+      toast('Failed to allow: ' + e.message, 'error')
+    }
+  }
+
+  const allowAllSiteDomains = async () => {
+    const ok = []
+    for (const d of siteBlocked) {
+      try {
+        await api.addFilterEntry('whitelist', d)
+        ok.push(d)
+      } catch (e) {
+        toast(`Failed to allow "${d}": ` + e.message, 'error')
+      }
+    }
+    // Only the successfully added domains get marked allowed — a partial
+    // failure must not paint the failed rows as fixed.
+    if (ok.length) {
+      toast(`Allowed ${ok.length} blocked domain${ok.length === 1 ? '' : 's'}`)
+    }
+    setSiteAllowed((s) => {
+      const n = { ...s }
+      ok.forEach((d) => { n[d] = true })
+      return n
+    })
+    load()
+  }
+
+  // Domains still blocked that we haven't whitelisted yet (this scan or in
+  // the loaded whitelist) — what "Allow all" and the per-row button act on.
+  const siteBlocked = siteResult
+    ? siteResult.domains
+        .filter((x) => x.blocked && !siteAllowed[x.domain] && !whitelist.includes(x.domain))
+        .map((x) => x.domain)
+    : []
+  // Blocked first, then alphabetical, so the problem rows sit on top.
+  const sortedSiteDomains = siteResult
+    ? [...siteResult.domains].sort(
+        (a, b) => (b.blocked ? 1 : 0) - (a.blocked ? 1 : 0) || a.domain.localeCompare(b.domain)
+      )
+    : []
 
   return (
     <div className="stack">
@@ -230,6 +300,85 @@ export default function Lists() {
             </div>
             {checkResult.reason && <div className="dim small">{checkResult.reason}</div>}
           </div>
+        )}
+      </div>
+
+      <div className="card">
+        <h3>Fix a broken site</h3>
+        <p className="dim small">
+          A page can break when one of the domains it loads is blocked. Enter a URL and Irongrid
+          scans its HTML for every domain it references, then flags the ones your blocklists are
+          blocking so you can whitelist them.
+        </p>
+        <form onSubmit={scanSite} className="form-grid">
+          <input
+            className="input"
+            placeholder="example.com or https://example.com"
+            value={site}
+            onChange={(e) => setSite(e.target.value)}
+          />
+          <button className="btn primary" type="submit" disabled={siteBusy}>
+            {siteBusy ? 'Scanning…' : 'Scan site'}
+          </button>
+        </form>
+        {siteError && <div className="error-banner" style={{ marginTop: 12 }}>{siteError}</div>}
+        {siteResult && (
+          <>
+            <div className="row-between" style={{ marginTop: 12 }}>
+              <div className="dim small">
+                {siteResult.title && <span className="strong" style={{ color: 'var(--text)' }}>{siteResult.title}</span>}
+                {' — '}<span className="mono">{siteResult.final_url}</span>
+                <br />
+                {siteResult.total} domains found,{' '}
+                <span style={{ color: siteResult.blocked_count ? 'var(--rose)' : undefined }}>
+                  {siteResult.blocked_count} blocked
+                </span>
+                {siteResult.truncated && ' · page truncated at 2 MiB'}
+                {' · '}{siteResult.fetch_ms} ms
+              </div>
+              {siteBlocked.length > 0 && (
+                <button className="btn small" onClick={allowAllSiteDomains}>
+                  Allow all {siteBlocked.length} blocked
+                </button>
+              )}
+            </div>
+            <div style={{ maxHeight: 360, overflowY: 'auto', marginTop: 10 }}>
+              <table className="table">
+                <thead>
+                  <tr>
+                    <th>Domain</th>
+                    <th>Status</th>
+                    <th>Blocked by</th>
+                    <th className="action-col"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {sortedSiteDomains.map((x) => {
+                    const already = siteAllowed[x.domain] || whitelist.includes(x.domain)
+                    return (
+                      <tr key={x.domain} className={x.blocked ? '' : 'row-dim'}>
+                        <td className="entry-cell" title={x.domain}>{x.domain}</td>
+                        <td>
+                          <span className={`badge ${x.blocked ? 'badge-blocked' : 'badge-allowed'}`}>
+                            {x.blocked ? 'Blocked' : 'Allowed'}
+                          </span>
+                        </td>
+                        <td className="dim small">{x.blocked ? (x.list || x.reason || 'blocklist') : ''}</td>
+                        <td className="action-col">
+                          {x.blocked && !already && (
+                            <button className="btn small" onClick={() => allowSiteDomain(x.domain)}>Allow</button>
+                          )}
+                          {x.blocked && already && (
+                            <button className="btn small" disabled>✓ Allowed</button>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
       </div>
 

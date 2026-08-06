@@ -422,6 +422,7 @@ GET  /api/lists/catalog     curated blocklist & allow-list presets (used by the 
 POST /api/lists/refresh     update all lists
 GET/POST /api/filter/{whitelist,blacklist}   allow/block entries
 POST /api/filter/check      test a domain or IP
+POST /api/filter/site       scan a site's HTML and list the domains it loads that are blocked
 POST /api/cache/flush       clear Dragonfly cache
 GET/POST /api/tunnel/*      tunnel lifecycle + logs
 GET/PUT /api/config         read / update the full config (live-apply + restart notes)
