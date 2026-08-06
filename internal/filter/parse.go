@@ -8,10 +8,10 @@ import (
 
 // ParseResult accumulates what a blocklist contributed.
 type ParseResult struct {
-	Domains     int
+	Domains      int
 	ExactDomains int
-	IPs         int
-	Exceptions  int
+	IPs          int
+	Exceptions   int
 }
 
 // parseContent applies blocklist content to the target rule sets.

@@ -47,9 +47,9 @@ func TestBlockAndWhitelist(t *testing.T) {
 		blocked bool
 	}{
 		{"blocked.net.", true},
-		{"www.blocked.net.", true},        // subdomain blocked
-		{"ads.example.com.", false},       // whitelisted overrides
-		{"sub.ads.example.com.", false},   // whitelist subtree overrides
+		{"www.blocked.net.", true},      // subdomain blocked
+		{"ads.example.com.", false},     // whitelisted overrides
+		{"sub.ads.example.com.", false}, // whitelist subtree overrides
 		{"plain.org.", true},
 		{"other.org.", false},
 	}

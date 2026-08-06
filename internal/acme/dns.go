@@ -28,12 +28,12 @@ type DNSProvider interface {
 // DNSProviderConfig carries the credentials for every supported provider.
 // Only the fields for the configured provider are required.
 type DNSProviderConfig struct {
-	CloudflareToken   string
-	DigitalOceanToken string
-	HetznerToken      string
-	GoDaddyKey        string
-	GoDaddySecret     string
-	AWSAccessKeyID    string
+	CloudflareToken    string
+	DigitalOceanToken  string
+	HetznerToken       string
+	GoDaddyKey         string
+	GoDaddySecret      string
+	AWSAccessKeyID     string
 	AWSSecretAccessKey string
 }
 

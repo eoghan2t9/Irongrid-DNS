@@ -29,8 +29,8 @@ import (
 
 // Options configures a Run.
 type Options struct {
-	ConfigPath string // where irongrid.yaml will be written
-	DataDir    string // runtime data directory (querylog, lists, certs)
+	ConfigPath string    // where irongrid.yaml will be written
+	DataDir    string    // runtime data directory (querylog, lists, certs)
 	In         io.Reader // wizard input; nil = os.Stdin
 	Out        io.Writer // wizard output; nil = os.Stdout
 	// WithDragonfly forces Dragonfly installation even when the wizard's
@@ -59,15 +59,15 @@ type answers struct {
 	cachePass      string
 	blocklists     []string // catalog IDs
 	whitelists     []string // catalog IDs
-	webUser         string
-	webPass         string
-	webConfirm      string
+	webUser        string
+	webPass        string
+	webConfirm     string
 	// webOnDoHPort serves the dashboard on the same HTTPS port as DoH
 	// (https://host, no :8080 suffix) when DoH is enabled.
-	webOnDoHPort   bool
-	tlsHosts        string
+	webOnDoHPort     bool
+	tlsHosts         string
 	installDragonfly bool // native mode: install and start Dragonfly after writing the config
-	confirm         bool
+	confirm          bool
 }
 
 // Run presents the wizard, writes the config and service files, and prints
@@ -362,12 +362,12 @@ func (w *wizard) askCache() error {
 						return fmt.Errorf("Dragonfly address is required")
 					}
 					return nil
-				}),		huh.NewInput().
-			Title("Dragonfly password").
-			Description("Leave empty if Dragonfly has no auth.").
-			Placeholder("(optional)").
-			Password(true).
-			Value(&w.a.cachePass),
+				}), huh.NewInput().
+				Title("Dragonfly password").
+				Description("Leave empty if Dragonfly has no auth.").
+				Placeholder("(optional)").
+				Password(true).
+				Value(&w.a.cachePass),
 		),
 	).Run()
 }

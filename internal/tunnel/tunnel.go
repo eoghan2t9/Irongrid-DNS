@@ -32,12 +32,12 @@ const (
 
 // Status is the current tunnel state.
 type Status struct {
-	Running  bool      `json:"running"`
-	Mode     Mode      `json:"mode"`
-	Started  time.Time `json:"started"`
-	Error    string    `json:"error"`
-	LastLog  string    `json:"last_log"`
-	LogFile  string    `json:"log_file"`
+	Running bool      `json:"running"`
+	Mode    Mode      `json:"mode"`
+	Started time.Time `json:"started"`
+	Error   string    `json:"error"`
+	LastLog string    `json:"last_log"`
+	LogFile string    `json:"log_file"`
 }
 
 // Manager controls the embedded cloudflared process.

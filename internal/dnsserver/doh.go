@@ -48,12 +48,12 @@ func (m *Manager) startDoH(addr, path string) error {
 	dohTLS := m.tlsConf.Clone()
 	dohTLS.NextProtos = []string{"h2", "http/1.1"}
 	srv := &http.Server{
-		Addr:        addr,
-		Handler:     mux,
-		TLSConfig:   dohTLS,
-		ReadTimeout: 10 * time.Second,
+		Addr:         addr,
+		Handler:      mux,
+		TLSConfig:    dohTLS,
+		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 15 * time.Second,
-		IdleTimeout: 120 * time.Second,
+		IdleTimeout:  120 * time.Second,
 	}
 	if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
 		return err
@@ -163,10 +163,10 @@ func (w *dohResponseWriter) Write(b []byte) (int, error) {
 
 func (w *dohResponseWriter) LocalAddr() net.Addr  { return nil }
 func (w *dohResponseWriter) RemoteAddr() net.Addr { return addrOnly(w.clientIP) }
-func (w *dohResponseWriter) Close() error        { return nil }
-func (w *dohResponseWriter) TsigStatus() error   { return nil }
-func (w *dohResponseWriter) TsigTimersOnly(bool) {}
-func (w *dohResponseWriter) Hijack()             {}
+func (w *dohResponseWriter) Close() error         { return nil }
+func (w *dohResponseWriter) TsigStatus() error    { return nil }
+func (w *dohResponseWriter) TsigTimersOnly(bool)  {}
+func (w *dohResponseWriter) Hijack()              {}
 
 func addrOnly(ip string) net.Addr { return &fakeAddr{ip: ip} }
 

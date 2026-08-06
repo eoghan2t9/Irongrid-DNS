@@ -36,7 +36,9 @@ type Manager struct {
 	tlsConf *tls.Config
 	mu      sync.Mutex
 	servers []*dns.Server
-	httpSrv interface{ Shutdown(ctx context.Context) error }
+	httpSrv interface {
+		Shutdown(ctx context.Context) error
+	}
 	doqLns  []*quic.Listener
 	results chan Listener
 }

@@ -16,7 +16,7 @@ import (
 // periodic refresh loop.
 type ListManager struct {
 	mu     sync.Mutex
-	specs  []ListSpec      // user-configured lists
+	specs  []ListSpec // user-configured lists
 	store  map[string]*StoredList
 	engine *Engine
 	dir    string

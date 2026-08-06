@@ -394,11 +394,11 @@ const route53Service = "route53"
 const route53Region = "us-east-1"
 
 type route53ChangeRequest struct {
-	XMLName    xml.Name `xml:"ChangeResourceRecordSetsRequest"`
-	NS         string   `xml:"xmlns,attr"`
+	XMLName     xml.Name `xml:"ChangeResourceRecordSetsRequest"`
+	NS          string   `xml:"xmlns,attr"`
 	ChangeBatch struct {
 		Changes []struct {
-			Action string `xml:"Action"`
+			Action            string `xml:"Action"`
 			ResourceRecordSet struct {
 				Name            string `xml:"Name"`
 				Type            string `xml:"Type"`
@@ -516,7 +516,7 @@ func (p *route53Provider) change(ctx context.Context, zoneID, domain, value, act
 	var req route53ChangeRequest
 	req.NS = "https://route53.amazonaws.com/doc/2013-04-01/"
 	req.ChangeBatch.Changes = make([]struct {
-		Action string `xml:"Action"`
+		Action            string `xml:"Action"`
 		ResourceRecordSet struct {
 			Name            string `xml:"Name"`
 			Type            string `xml:"Type"`

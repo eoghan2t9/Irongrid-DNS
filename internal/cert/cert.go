@@ -26,19 +26,19 @@ import (
 // Info is the inspectable view of the active certificate, served by the
 // SSL/TLS page in the dashboard.
 type Info struct {
-	Present          bool      `json:"present"`
-	Source           string    `json:"source"` // "self-signed" | "custom" | ""
-	CertPath         string    `json:"cert_path"`
-	KeyPath          string    `json:"key_path"`
-	SubjectCN        string    `json:"subject_cn"`
-	IssuerCN         string    `json:"issuer_cn"`
-	SANs             []string  `json:"sans"`
-	NotBefore        time.Time `json:"not_before"`
-	NotAfter         time.Time `json:"not_after"`
-	ExpiresInDays    int       `json:"expires_in_days"`
-	FingerprintSHA256 string   `json:"fingerprint_sha256"`
-	KeyAlgo          string    `json:"key_algo"`
-	Serial           string    `json:"serial"`
+	Present           bool      `json:"present"`
+	Source            string    `json:"source"` // "self-signed" | "custom" | ""
+	CertPath          string    `json:"cert_path"`
+	KeyPath           string    `json:"key_path"`
+	SubjectCN         string    `json:"subject_cn"`
+	IssuerCN          string    `json:"issuer_cn"`
+	SANs              []string  `json:"sans"`
+	NotBefore         time.Time `json:"not_before"`
+	NotAfter          time.Time `json:"not_after"`
+	ExpiresInDays     int       `json:"expires_in_days"`
+	FingerprintSHA256 string    `json:"fingerprint_sha256"`
+	KeyAlgo           string    `json:"key_algo"`
+	Serial            string    `json:"serial"`
 }
 
 // LoadOrGenerate returns a *tls.Config for the DNS listeners. If certFile and

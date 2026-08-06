@@ -72,12 +72,12 @@ type Manager struct {
 
 // Status is the public state of the ACME manager.
 type Status struct {
-	Enabled       bool       `json:"enabled"`
-	Email         string     `json:"email"`
-	Domains       []string   `json:"domains"`
-	Staging       bool       `json:"staging"`
-	Challenge     string     `json:"challenge"`     // "http-01" or "dns-01"
-	DNSProvider   string     `json:"dns_provider"`  // e.g. "cloudflare" when dns-01
+	Enabled     bool     `json:"enabled"`
+	Email       string   `json:"email"`
+	Domains     []string `json:"domains"`
+	Staging     bool     `json:"staging"`
+	Challenge   string   `json:"challenge"`    // "http-01" or "dns-01"
+	DNSProvider string   `json:"dns_provider"` // e.g. "cloudflare" when dns-01
 	// The timestamps are pointers so a manager that has never issued serializes
 	// them as null instead of Go's zero time ("0001-01-01T00:00:00Z"), which
 	// the dashboard rendered as "31/12/1" with absurd day counts.
@@ -116,16 +116,16 @@ func New(o Options) *Manager {
 	}
 	renewIn := time.Duration(o.RenewBeforeDays) * 24 * time.Hour
 	m := &Manager{
-		email:           o.Email,
-		domains:         append([]string(nil), o.Domains...),
-		dir:             o.CertDir,
-		staging:         o.Staging,
-		httpPort:        o.HTTP01Port,
-		renewIn:         renewIn,
-		dns:             o.DNS,
-		externalHTTP01:  o.ExternalHTTP01,
-		tokens:          map[string]string{},
-		stopCh:          make(chan struct{}),
+		email:          o.Email,
+		domains:        append([]string(nil), o.Domains...),
+		dir:            o.CertDir,
+		staging:        o.Staging,
+		httpPort:       o.HTTP01Port,
+		renewIn:        renewIn,
+		dns:            o.DNS,
+		externalHTTP01: o.ExternalHTTP01,
+		tokens:         map[string]string{},
+		stopCh:         make(chan struct{}),
 	}
 	m.Status.Enabled = true
 	m.Status.Email = o.Email
@@ -393,8 +393,6 @@ func (m *Manager) notifyIssued() {
 		m.OnIssued()
 	}
 }
-
-
 
 // NeedsRenewal reports whether the current certificate is missing, expired,
 // within the renewal window, or does not cover every configured ACME domain

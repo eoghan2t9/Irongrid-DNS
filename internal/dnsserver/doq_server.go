@@ -119,7 +119,7 @@ func (w *doqResponseWriter) Write(b []byte) (int, error) {
 
 func (w *doqResponseWriter) LocalAddr() net.Addr  { return addrOnly("") }
 func (w *doqResponseWriter) RemoteAddr() net.Addr { return addrOnly(w.clientIP) }
-func (w *doqResponseWriter) Close() error        { return nil }
-func (w *doqResponseWriter) TsigStatus() error   { return nil }
-func (w *doqResponseWriter) TsigTimersOnly(bool) {}
-func (w *doqResponseWriter) Hijack()             {}
+func (w *doqResponseWriter) Close() error         { return nil }
+func (w *doqResponseWriter) TsigStatus() error    { return nil }
+func (w *doqResponseWriter) TsigTimersOnly(bool)  {}
+func (w *doqResponseWriter) Hijack()              {}

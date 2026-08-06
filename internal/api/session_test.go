@@ -189,5 +189,3 @@ func validCookie(t *testing.T, a *App, user string) string {
 	t.Fatal("issueSession set no cookie")
 	return ""
 }
-
-

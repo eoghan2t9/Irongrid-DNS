@@ -14,17 +14,17 @@ import (
 // Cloud both include microsoft/apple/amazon domains) to verify dedup.
 func testAnswers() *answers {
 	return &answers{
-		deploy:   "docker",
-		service:  "docker",
-		protos:   []string{"UDP", "DoH"},
-		listenHost: "0.0.0.0",
+		deploy:         "docker",
+		service:        "docker",
+		protos:         []string{"UDP", "DoH"},
+		listenHost:     "0.0.0.0",
 		upstreamPreset: "quad9",
-		cacheAddr: "dragonfly:6379",
-		blocklists: []string{"oisd-big", "stevenblack"},
-		whitelists: []string{"os-updates", "cloud"},
-		webUser:  "admin",
-		webPass:  "testpass123",
-		tlsHosts: "localhost, dns.example.com",
+		cacheAddr:      "dragonfly:6379",
+		blocklists:     []string{"oisd-big", "stevenblack"},
+		whitelists:     []string{"os-updates", "cloud"},
+		webUser:        "admin",
+		webPass:        "testpass123",
+		tlsHosts:       "localhost, dns.example.com",
 	}
 }
 
