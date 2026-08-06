@@ -8,6 +8,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
@@ -204,4 +205,37 @@ func TestRaceUpstreamsAllFail(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("all-fail took %s, want a prompt failure", elapsed)
 	}
+}
+
+// TestHandlerCacheWriteDoesNotBlockResponse verifies the response is written
+// to the client without waiting for the cache write to land, and that the
+// answer still ends up cached shortly after (the async write actually runs,
+// and — since it hands the cache a copy rather than resp itself — running
+// concurrently with WriteMsg's own packing of resp doesn't race either;
+// `go test -race` covers that property).
+func TestHandlerCacheWriteDoesNotBlockResponse(t *testing.T) {
+	addr := startUDPTestServer(t, "1.1.1.1", 0)
+	c := cache.NewLocalOnly(time.Hour, time.Minute, 512)
+	h := NewHandler(filter.NewEngine(), c, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: addr},
+	}, nil, "nxdomain", 600, 5*time.Second)
+
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	q := m.Question[0]
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, m)
+
+	if fw.msg == nil || len(fw.msg.Answer) == 0 {
+		t.Fatalf("expected an answer, got %v", fw.msg)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := c.Get(context.Background(), q); got != nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("cached entry never appeared after the response was written")
 }

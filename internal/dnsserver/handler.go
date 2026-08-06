@@ -342,16 +342,26 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		return
 	}
 
-	// 8. Cache the result (positive or negative) and return. Zero TTLs fall
-	//    back to the configured Dragonfly cache lifetimes.
+	// 8. Cache the result (positive or negative) in the background. Caching
+	//    only ever helps *future* queries, so there's no reason to make this
+	//    client wait on a Redis round trip before getting the answer it
+	//    already has. Cache.Set/SetNegative mutate the message they're given
+	//    (SetReply, Compress, Pack) while writing it, so a copy is handed to
+	//    the goroutine — resp itself is about to be packed concurrently by
+	//    w.WriteMsg below, and sharing the same *dns.Msg between the two
+	//    would race. Zero TTLs fall back to the configured Dragonfly cache
+	//    lifetimes.
 	if cache != nil && !isMetaQuery(q) {
-		cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
-		if len(resp.Answer) > 0 {
-			cache.Set(cctx, q, resp, 0)
-		} else {
-			cache.SetNegative(cctx, q, resp, 0)
-		}
-		ccancel()
+		cacheResp := resp.Copy()
+		go func() {
+			cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer ccancel()
+			if len(cacheResp.Answer) > 0 {
+				cache.Set(cctx, q, cacheResp, 0)
+			} else {
+				cache.SetNegative(cctx, q, cacheResp, 0)
+			}
+		}()
 	}
 
 	h.Stats.Allowed.Add(1)

@@ -27,6 +27,13 @@ type Cache struct {
 	negativeTTL time.Duration
 }
 
+// NewLocalOnly returns a Cache backed only by the in-process L1 layer, with
+// no Dragonfly connection — for tests in other packages that need a working
+// Cache without standing up a real Redis-compatible server.
+func NewLocalOnly(ttl, negativeTTL time.Duration, l1Entries int) *Cache {
+	return &Cache{l1: newL1(l1Entries), prefix: "irongrid:dns:", ttl: ttl, negativeTTL: negativeTTL}
+}
+
 // New connects to Dragonfly. It returns an error if the instance is
 // unreachable, enforcing the hard dependency. l1Entries is the per-shard
 // capacity of the in-process L1 cache; <= 0 disables the L1 layer.
