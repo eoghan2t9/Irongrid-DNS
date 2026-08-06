@@ -451,7 +451,25 @@ When a `recursive://` upstream is configured, `GET /api/status` includes a
 | `refresh_interval` | How often hints re-fetch, e.g. `168h` |
 | `key_fingerprint` | The embedded Verisign *Registry Administrator* key fingerprint used for verification |
 
-The dashboard's **Root hints** card renders the same fields.
+Example (a healthy live-verified fetch):
+
+```json
+{
+  "enabled": true,
+  "source": "live",
+  "verified": true,
+  "last_fetch": "2026-08-06T09:00:00Z",
+  "last_error": "",
+  "addresses": 26,
+  "refresh_interval": "168h",
+  "key_fingerprint": "F0CB1A326BDF3F3EFA3A01FA937BB869E3A238C5"
+}
+```
+
+When the live fetch can't be verified (network trouble, bad signature),
+`source` becomes `cached` or `bundled`, `verified` is `false`, and
+`last_error` explains why. The dashboard's **Root hints** card renders the
+same fields.
 
 ### TLS config reference
 
