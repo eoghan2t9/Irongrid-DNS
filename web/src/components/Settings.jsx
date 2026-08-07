@@ -378,7 +378,7 @@ export default function Settings({ onSessionInvalidated }) {
           {toggle('Enable geo blocking', 'geo_block.enabled')}
           {textarea('Blocked countries (ISO 3166-1 alpha-2)', 'geo_block.countries', 'one per line, e.g. RU, CN, KP')}
           {textarea('Allowlist (IPs / CIDRs)', 'geo_block.allowlist', 'clients that are never geo-blocked')}
-          {text('Data source URL (optional)', 'geo_block.base_url', 'defaults to ipverse/rir-ip; appends &lt;CC&gt;/ipv4_agg.txt and &lt;CC&gt;/ipv6_agg.txt')}
+          {text('Data source URL (optional)', 'geo_block.base_url', 'defaults to ipverse/rir-ip; appends &lt;cc&gt;/ipv4-aggregated.txt and &lt;cc&gt;/ipv6-aggregated.txt (lowercase codes)')}
           {field('Auto-refresh country data', 'how often the per-country CIDR lists re-fetch themselves', (
             <select className="input" value={deepGet('geo_block.auto_update', '') || ''} onChange={(e) => set('geo_block.auto_update', e.target.value)}>
               <option value="">Never</option>
@@ -388,6 +388,11 @@ export default function Settings({ onSessionInvalidated }) {
             </select>
           ))}
         </div>
+        {deepGet('geo_block.enabled', false) && (deepGet('geo_block.countries', []) || []).length === 0 && (
+          <p className="dim small" style={{ marginTop: 8, color: 'var(--amber)' }}>
+            ⚠ Geo blocking is on but no countries are listed — add ISO codes above (one per line, e.g. RU, CN), save, then refresh.
+          </p>
+        )}
         <h4 style={{ margin: '16px 0 10px' }}>Geo data status</h4>
         {geoInfo && geoInfo.countries && geoInfo.countries.length > 0 ? (
           <div>
@@ -403,7 +408,7 @@ export default function Settings({ onSessionInvalidated }) {
             ))}
           </div>
         ) : (
-          <p className="dim small">No country data loaded yet — enable geo blocking, save, then refresh.</p>
+          <p className="dim small">No country data loaded yet — enable geo blocking, add country codes above, save, then refresh.</p>
         )}
         {geoInfo && geoInfo.next_refresh && deepGet('geo_block.enabled', false) && (
           <p className="dim small" style={{ marginTop: 8 }}>

@@ -79,12 +79,14 @@ func TestBlockerConfigAllowlistAndUnknownIPs(t *testing.T) {
 func TestManagerRefreshFromSource(t *testing.T) {
 	dir := t.TempDir()
 	src := t.TempDir()
-	ruDir := filepath.Join(src, "RU")
+	// ipverse keeps per-country directories lowercase with the file names
+	// used by the default base URL; the manager must fetch exactly this.
+	ruDir := filepath.Join(src, "ru")
 	if err := os.MkdirAll(ruDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(ruDir, "ipv4_agg.txt"), []byte("93.0.0.0/8\n"), 0o644)
-	os.WriteFile(filepath.Join(ruDir, "ipv6_agg.txt"), []byte("2001:db8::/32\n"), 0o644)
+	os.WriteFile(filepath.Join(ruDir, "ipv4-aggregated.txt"), []byte("93.0.0.0/8\n"), 0o644)
+	os.WriteFile(filepath.Join(ruDir, "ipv6-aggregated.txt"), []byte("2001:db8::/32\n"), 0o644)
 
 	m := NewManager(dir, "file://"+src)
 	b, err := m.Refresh(context.Background(), []string{"RU"}, nil)

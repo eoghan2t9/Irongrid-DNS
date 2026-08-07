@@ -1162,6 +1162,13 @@ func (h *Handler) geoRefresh(w http.ResponseWriter) {
 	h.cfgMu.Lock()
 	geo := h.Cfg.GeoBlock
 	h.cfgMu.Unlock()
+	// Nothing to download when no countries are configured — say so instead
+	// of answering "ok" for a no-op (the dashboard otherwise looks like it
+	// worked while the blocker stays uninstalled).
+	if geo.Enabled && len(geo.Countries) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "geo blocking is enabled but no countries are configured — add ISO 3166-1 alpha-2 codes (e.g. RU, CN) in Settings, save, then refresh"})
+		return
+	}
 	if err := h.RebuildGeo(geo); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

@@ -22,7 +22,8 @@ import (
 
 // DefaultBaseURL is where per-country CIDR lists come from. ipverse/rir-ip
 // aggregates the RIPE/ARIN/APNIC/LACNIC/AFRINIC delegated files into one
-// ipv4_agg.txt + ipv6_agg.txt per country, refreshed regularly.
+// "<cc>/ipv4-aggregated.txt" + "<cc>/ipv6-aggregated.txt" per country
+// (lowercase country code), refreshed regularly.
 const DefaultBaseURL = "https://raw.githubusercontent.com/ipverse/rir-ip/master/country"
 
 // Blocker decides whether a client source IP is geo-blocked. It is safe for
@@ -263,9 +264,12 @@ func (m *Manager) Status() []CountryStatus {
 }
 
 // fetchCountry downloads (or loads from cache) both family lists for cc.
+// ipverse keeps its per-country directories lowercase ("country/ru/"), so
+// the code is lowercased for the URL regardless of how it was configured.
 func (m *Manager) fetchCountry(ctx context.Context, cc string) ([]byte, []byte, error) {
-	v4, err4 := m.fetchURL(ctx, m.baseURL+"/"+cc+"/ipv4_agg.txt", filepath.Join(m.dir, cc+".ipv4.txt"))
-	v6, err6 := m.fetchURL(ctx, m.baseURL+"/"+cc+"/ipv6_agg.txt", filepath.Join(m.dir, cc+".ipv6.txt"))
+	dir := strings.ToLower(cc)
+	v4, err4 := m.fetchURL(ctx, m.baseURL+"/"+dir+"/ipv4-aggregated.txt", filepath.Join(m.dir, cc+".ipv4.txt"))
+	v6, err6 := m.fetchURL(ctx, m.baseURL+"/"+dir+"/ipv6-aggregated.txt", filepath.Join(m.dir, cc+".ipv6.txt"))
 	if err4 != nil && err6 != nil {
 		return nil, nil, fmt.Errorf("country %s: ipv4: %v; ipv6: %v", cc, err4, err6)
 	}

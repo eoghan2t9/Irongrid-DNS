@@ -91,8 +91,9 @@ type GeoBlockConfig struct {
 	// Allowlist is a set of client IPs/CIDRs that are never geo-blocked.
 	Allowlist []string `yaml:"allowlist"`
 	// BaseURL overrides where per-country CIDR lists are fetched from; the
-	// country code and file are appended as "<CC>/ipv4_agg.txt" and
-	// "<CC>/ipv6_agg.txt". file:// paths are supported for local datasets.
+	// lowercase country code and file are appended as
+	// "<cc>/ipv4-aggregated.txt" and "<cc>/ipv6-aggregated.txt" (the
+	// ipverse/rir-ip layout). file:// paths are supported for local datasets.
 	BaseURL string `yaml:"base_url"`
 	// AutoUpdate re-fetches the enabled countries' data every AutoUpdate
 	// (the ipverse/rir-ip aggregates change roughly weekly). 0 disables
