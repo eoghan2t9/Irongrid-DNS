@@ -91,6 +91,16 @@ func TestApplyNft(t *testing.T) {
 	if !strings.Contains(joined, "203.0.113.9, 10.0.0.0/8") {
 		t.Errorf("geo_allow_v4 elements missing:\n%s", joined)
 	}
+	// Ordering: the country DROPs must be added BEFORE the
+	// established/related ACCEPT — otherwise a pre-existing conntrack flow
+	// exempts blocked clients forever (each REFUSED reply refreshes the
+	// timer, so the drop never fires). This ordering regression would let a
+	// previously-active blocked country keep reaching the DNS server.
+	idxDrop := strings.Index(joined, "nft add rule inet irongrid geo_input ip saddr @geo_v4 drop")
+	idxEst := strings.Index(joined, "nft add rule inet irongrid geo_input ct state established,related accept")
+	if idxDrop < 0 || idxEst < 0 || idxDrop > idxEst {
+		t.Errorf("geo drop rule (%d) must precede established/related accept (%d):\n%s", idxDrop, idxEst, joined)
+	}
 
 	// Second Apply must be idempotent in shape (flush + rebuild, no error).
 	before := len(f.cmds)
@@ -130,12 +140,21 @@ func TestApplyIptables(t *testing.T) {
 		"iptables -N irongrid-geo",
 		"iptables -A irongrid-geo -m set --match-set irongrid_geo_allow_v4 src -j ACCEPT",
 		"iptables -A irongrid-geo -m set --match-set irongrid_geo_v4 src -j DROP",
+		"iptables -A irongrid-geo -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT",
 		"iptables -C INPUT -j irongrid-geo",
 		"ip6tables -C INPUT -j irongrid-geo",
 	} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("missing command %q\nissued:\n%s", want, joined)
 		}
+	}
+	// Ordering: country DROP before the established/related ACCEPT (see
+	// TestApplyNft's ordering check for why). The conntrack accept is
+	// appended after the drop rules, not inserted at position 1.
+	idxDrop := strings.Index(joined, "iptables -A irongrid-geo -m set --match-set irongrid_geo_v4 src -j DROP")
+	idxEst := strings.Index(joined, "iptables -A irongrid-geo -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT")
+	if idxDrop < 0 || idxEst < 0 || idxDrop > idxEst {
+		t.Errorf("iptables drop rule (%d) must precede established accept (%d):\n%s", idxDrop, idxEst, joined)
 	}
 }
 

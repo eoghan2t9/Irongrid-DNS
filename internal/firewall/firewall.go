@@ -198,11 +198,16 @@ func (m *Manager) applyNft(v4, v6, a4, a6 []string) error {
 		_ = m.runner.Run("nft", "flush", "set", nftTable, set)
 	}
 
+	// Order matters: the country DROPs must come BEFORE the
+	// established/related ACCEPT. A client that held an ESTABLISHED
+	// conntrack flow when the rules were applied (e.g. it was querying
+	// before geo blocking went live) would otherwise be exempted by the
+	// first rule forever: the DNS server answers geo-blocked queries with
+	// REFUSED, and each reply refreshes the conntrack timer, keeping the
+	// flow ESTABLISHED and matching the accept — so the DROP never fires.
+	// Dropping blocked countries first closes that loop.
 	var rules []string
-	rules = append(rules,
-		"ct state established,related accept", // never cut live sessions
-		`iif "lo" accept`,
-	)
+	rules = append(rules, `iif "lo" accept`)
 	if len(a4) > 0 {
 		rules = append(rules, "ip saddr @geo_allow_v4 accept")
 	}
@@ -215,6 +220,9 @@ func (m *Manager) applyNft(v4, v6, a4, a6 []string) error {
 	if len(v6) > 0 {
 		rules = append(rules, "ip6 saddr @geo_v6 drop")
 	}
+	// Established/related connections pass for everyone else, after the
+	// country DROPs above have had their say.
+	rules = append(rules, "ct state established,related accept")
 	for _, r := range rules {
 		if err := m.runner.Run("nft", "add", "rule", nftTable, nftChain, r); err != nil {
 			return err
@@ -274,8 +282,10 @@ func (m *Manager) applyIptables(v4, v6, a4, a6 []string) error {
 		_ = m.runner.Run(bin, "-N", iptChain)
 		_ = m.runner.Run(bin, "-F", iptChain)
 	}
-	_ = m.runner.Run("iptables", "-I", iptChain, "1", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
-	_ = m.runner.Run("ip6tables", "-I", iptChain, "1", "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
+	// Same ordering as the nft backend: country DROPs before the
+	// established/related ACCEPT, so a pre-existing conntrack flow can't
+	// exempt a blocked client forever (each REFUSED reply would refresh the
+	// flow timer and keep it matching the accept).
 	if len(a4) > 0 {
 		_ = m.runner.Run("iptables", "-A", iptChain, "-m", "set", "--match-set", ipsetAllowV4, "src", "-j", "ACCEPT")
 	}
@@ -288,6 +298,8 @@ func (m *Manager) applyIptables(v4, v6, a4, a6 []string) error {
 	if len(v6) > 0 {
 		_ = m.runner.Run("ip6tables", "-A", iptChain, "-m", "set", "--match-set", ipsetV6, "src", "-j", "DROP")
 	}
+	_ = m.runner.Run("iptables", "-A", iptChain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
+	_ = m.runner.Run("ip6tables", "-A", iptChain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
 	// Single jump from INPUT; -C check keeps it idempotent across applies.
 	if err := m.runner.Run("iptables", "-C", "INPUT", "-j", iptChain); err != nil {
 		if err := m.runner.Run("iptables", "-I", "INPUT", "1", "-j", iptChain); err != nil {
