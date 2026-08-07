@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // writeServiceFiles emits the platform service definition chosen during the
@@ -47,10 +48,21 @@ func installService(w *wizard, configPath, dataDir string) {
 	if a.service == "none" || a.service == "docker" {
 		return
 	}
+	// Every generated service definition runs the binary with dataDir as its
+	// WorkingDirectory (systemd/launchd) or -data argument (Windows task).
+	// systemd chdirs into WorkingDirectory before exec'ing the process, so a
+	// missing data dir makes the unit exit with status 200/CHDIR in a crash
+	// loop — create it up front, mirroring install.sh's `mkdir -p "$DATA_ABS"`.
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		fmt.Fprintf(w.out, "  ⚠ could not create the data directory %s: %v\n", dataDir, err)
+		fmt.Fprintf(w.out, "    create it and re-run the wizard, or run the service manually:\n")
+		fmt.Fprintf(w.out, "      mkdir -p %s && %s -config %s -data %s\n", dataDir, binaryPath(), configPath, dataDir)
+		return
+	}
 	deployDir := filepath.Join(filepath.Dir(configPath), "deploy")
 	switch a.service {
 	case "systemd":
-		installSystemd(w, deployDir)
+		installSystemd(w, deployDir, dataDir)
 	case "launchd":
 		installLaunchd(w, deployDir)
 	case "windows":
@@ -58,8 +70,9 @@ func installService(w *wizard, configPath, dataDir string) {
 	}
 }
 
-// installSystemd copies the unit into place, reloads and enables+starts it.
-func installSystemd(w *wizard, deployDir string) {
+// installSystemd copies the unit into place, reloads and enables+starts it,
+// then waits for the unit to actually be active.
+func installSystemd(w *wizard, deployDir, dataDir string) {
 	src := filepath.Join(deployDir, "irongrid.service")
 	if _, err := os.Stat(src); err != nil {
 		fmt.Fprintf(w.out, "  ⚠ systemd unit missing (%s)\n", src)
@@ -81,7 +94,23 @@ func installSystemd(w *wizard, deployDir string) {
 			return
 		}
 	}
-	fmt.Fprintln(w.out, "  ✓ systemd service installed and started (systemctl status irongrid)")
+	// `systemctl enable --now` returns as soon as the unit has started — for
+	// Type=simple that can be before a process that dies instantly is even
+	// reaped, so a broken unit (e.g. a missing WorkingDirectory: status
+	// 200/CHDIR) would otherwise look installed while it crash-loops. Poll
+	// `is-active` (exit 0 only when truly active) for up to 10s — long
+	// enough for a slow first start (self-signed cert generation, initial
+	// blocklist download/compile) while still catching a crash loop that
+	// restarts every ~3s — and warn if the unit never comes up.
+	for i := 0; i < 10; i++ {
+		if runPrivileged("systemctl", "is-active", "irongrid") == nil {
+			fmt.Fprintln(w.out, "  ✓ systemd service installed and started (systemctl status irongrid)")
+			return
+		}
+		time.Sleep(time.Second)
+	}
+	fmt.Fprintln(w.out, "  ⚠ systemd service installed but is not staying up — check: systemctl status irongrid")
+	fmt.Fprintf(w.out, "    (a common cause is a missing working directory: mkdir -p %s && sudo systemctl restart irongrid)\n", dataDir)
 }
 
 // installLaunchd copies the plist into ~/Library/LaunchAgents and loads it.

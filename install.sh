@@ -478,11 +478,21 @@ EOF
   run_root systemctl daemon-reload
   run_root systemctl enable irongrid >/dev/null 2>&1 || true
   run_root systemctl start irongrid 2>/dev/null || true
-  sleep 2  # let systemd spawn the process before judging it
-  if [ "$(run_root systemctl is-active irongrid 2>/dev/null || echo failed)" = "active" ]; then
+  # Poll is-active for up to 10s: a Type=simple unit that dies instantly
+  # (e.g. a missing WorkingDirectory — status 200/CHDIR) reports "activating"
+  # right after start, so a single sleep can race with its 3s restart loop —
+  # while a slow first start (cert generation, initial blocklist download)
+  # may take a few seconds to become active legitimately.
+  ACTIVE=""
+  for _ in $(seq 1 10); do
+    [ "$(run_root systemctl is-active irongrid 2>/dev/null || echo failed)" = "active" ] && { ACTIVE=1; break; }
+    sleep 1
+  done
+  if [ -n "$ACTIVE" ]; then
     echo "==> Irongrid service enabled and running (systemctl status irongrid)"
   else
     echo "!! Irongrid service installed but not active — check: systemctl status irongrid"
+    echo "   (a common cause is a missing data dir: mkdir -p $DATA_ABS && systemctl restart irongrid)"
   fi
 }
 
@@ -576,9 +586,22 @@ run_wizard() {
   # Restart a startup service so the wizard's config takes effect right away.
   if [ "$INSTALL_SERVICE" -eq 1 ]; then
     if [ "$OS" = linux ] && has_root && systemd_available; then
+      # The unit's WorkingDirectory is $DATA_ABS — systemd chdirs into it
+      # before exec'ing the process, so a missing data dir makes the service
+      # exit with status 200/CHDIR and crash-loop. Make sure it exists (the
+      # wizard may have been run with an older binary that didn't create it).
+      run_root mkdir -p "$DATA_ABS"
       if run_root systemctl restart irongrid >/dev/null 2>&1; then
-        sleep 2  # let systemd spawn the process before judging it
-        if [ "$(run_root systemctl is-active irongrid 2>/dev/null || echo failed)" = "active" ]; then
+        # Poll is-active for up to 10s: a unit that dies instantly reports
+        # "activating" right after start, so a single sleep can race its 3s
+        # restart loop — while a slow first start may take a few seconds to
+        # become active legitimately.
+        ACTIVE=""
+        for _ in $(seq 1 10); do
+          [ "$(run_root systemctl is-active irongrid 2>/dev/null || echo failed)" = "active" ] && { ACTIVE=1; break; }
+          sleep 1
+        done
+        if [ -n "$ACTIVE" ]; then
           echo "==> Irongrid service restarted with the new config"
         else
           echo "!! Irongrid service did not stay up after restart — check: systemctl status irongrid"
