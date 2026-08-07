@@ -350,7 +350,7 @@ written automatically on first launch. Key options:
 | `rewrites` | Local DNS records (A/AAAA/CNAME) — answered directly, ahead of blocklists and the cache |
 | `client_groups` | Per-client policy: CIDR/IP-matched groups with their own blocklist subset, allow/block entries and (optional) upstream override |
 | `rate_limit` | Per-client-IP token bucket: `enabled`, `qps` (sustained), `burst` (must be ≥ `qps`), plus `auto_block` (requires `enabled`), `block_after` (violations), `block_for` (cooldown) for the fail2ban-style auto-block |
-| `geo_block` | Country blocking: `enabled`, `countries` (ISO 3166-1 alpha-2, e.g. `RU`, `CN`), `allowlist` (client IPs/CIDRs that always pass), optional `base_url` override for the CIDR data source |
+| `geo_block` | Country blocking: `enabled`, `countries` (ISO 3166-1 alpha-2, e.g. `RU`, `CN`), `allowlist` (client IPs/CIDRs that always pass), optional `base_url` override for the CIDR data source, and `auto_update` (how often the country lists re-fetch; default `168h`, `0` = never) |
 | `dnssec` | `enabled` sets the DO bit upstream; `require_ad` rejects an answer without the upstream's AD bit as SERVFAIL — trusts an *encrypted* validating upstream rather than validating locally |
 
 ## Recursive resolution (`recursive://`)

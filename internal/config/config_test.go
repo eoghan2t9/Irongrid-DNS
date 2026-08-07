@@ -211,6 +211,18 @@ func TestValidateGeoBlock(t *testing.T) {
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "base_url") {
 		t.Fatalf("err = %v, want base_url error", err)
 	}
+
+	c = validBase()
+	c.GeoBlock = GeoBlockConfig{Enabled: true, Countries: []string{"RU"}, AutoUpdate: -time.Hour}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "auto_update") {
+		t.Fatalf("err = %v, want auto_update error", err)
+	}
+}
+
+func TestGeoAutoUpdateDefault(t *testing.T) {
+	if d := Default().GeoBlock.AutoUpdate; d != 168*time.Hour {
+		t.Errorf("geo_block.auto_update default = %v, want 168h (weekly)", d)
+	}
 }
 
 func TestValidateDNS01SupportedProviders(t *testing.T) {

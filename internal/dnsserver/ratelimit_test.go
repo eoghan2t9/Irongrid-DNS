@@ -76,6 +76,18 @@ func TestRateLimiterAutoBlockTriggersAndExpires(t *testing.T) {
 	}
 	if list := rl.BlockedList(); len(list) != 1 || list[0].IP != "1.2.3.4" {
 		t.Fatalf("BlockedList = %+v, want exactly [1.2.3.4]", list)
+	} else {
+		// Lifetime stats: every Allow call counted, exactly one block
+		// triggered, and the bucket has existed since the first query.
+		if list[0].Queries != 10 {
+			t.Errorf("Queries = %d, want 10", list[0].Queries)
+		}
+		if list[0].Blocks != 1 {
+			t.Errorf("Blocks = %d, want 1", list[0].Blocks)
+		}
+		if list[0].FirstSeen.IsZero() || list[0].FirstSeen.After(time.Now()) {
+			t.Errorf("FirstSeen %v is not a sensible past timestamp", list[0].FirstSeen)
+		}
 	}
 
 	// During the cooldown, Allow always refuses even after time passes.
@@ -126,6 +138,27 @@ func TestRateLimiterUnblock(t *testing.T) {
 	}
 	if !rl.Allow("5.5.5.5") {
 		t.Fatal("an unblocked client is still refused")
+	}
+	// The lifetime stats survive unblocking — they are the block history.
+	rl.Allow("5.5.5.5") // one more query
+	if blocked, _ := rl.Blocked("5.5.5.5"); blocked {
+		t.Fatal("client re-blocked by leftover state after Unblock")
+	}
+	s := rl.shard("5.5.5.5")
+	s.mu.Lock()
+	b := s.buckets["5.5.5.5"]
+	s.mu.Unlock()
+	if b == nil {
+		t.Fatal("bucket missing after Unblock")
+	}
+	if b.queries != 12 {
+		t.Errorf("Queries = %d after unblock, want 12 (10 before + 2 after)", b.queries)
+	}
+	if b.blocks != 1 {
+		t.Errorf("Blocks = %d, want 1 — the block history must survive Unblock", b.blocks)
+	}
+	if b.firstSeen.IsZero() {
+		t.Error("FirstSeen must survive Unblock")
 	}
 }
 

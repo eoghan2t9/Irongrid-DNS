@@ -170,9 +170,12 @@ type Manager struct {
 	baseURL string
 	client  *http.Client
 
-	mu        sync.Mutex
-	status    map[string]CountryStatus
-	refreshMu sync.Mutex // serialises Refresh calls (boot + async rebuilds)
+	mu     sync.Mutex
+	status map[string]CountryStatus
+	// lastRefresh is when the most recent Refresh attempt finished (even a
+	// partially-failed one), for the dashboard's "next refresh" display.
+	lastRefresh time.Time
+	refreshMu   sync.Mutex // serialises Refresh calls (boot + async rebuilds)
 }
 
 // NewManager returns a manager that caches country data under dir. An empty
@@ -226,7 +229,18 @@ func (m *Manager) Refresh(ctx context.Context, countries, allowlist []string) (*
 	if err := b.SetConfig(countries, allowlist); err != nil {
 		return b, err
 	}
+	m.mu.Lock()
+	m.lastRefresh = time.Now()
+	m.mu.Unlock()
 	return b, firstErr
+}
+
+// LastRefresh returns when the most recent Refresh attempt finished (zero if
+// Refresh has never run).
+func (m *Manager) LastRefresh() time.Time {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastRefresh
 }
 
 // setStatus records a country's refresh outcome.

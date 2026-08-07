@@ -17,7 +17,7 @@ const empty = () => ({
   rewrites: [],
   client_groups: [],
   rate_limit: { enabled: false, qps: 20, burst: 40, auto_block: false, block_after: 3, block_for: '10m' },
-  geo_block: { enabled: false, countries: [], allowlist: [], base_url: '' },
+  geo_block: { enabled: false, countries: [], allowlist: [], base_url: '', auto_update: '168h' },
   dnssec: { enabled: false, require_ad: true },
 })
 
@@ -348,9 +348,15 @@ export default function Settings({ onSessionInvalidated }) {
         ) : (
           <div>
             {blocked.map((b) => (
-              <div className="list-row" key={b.ip}>
-                <span className="mono">{b.ip}</span>
-                <span className="dim small">blocked until {new Date(b.blocked_until).toLocaleString()}</span>
+              <div className="list-row" key={b.ip} style={{ alignItems: 'flex-start' }}>
+                <div style={{ minWidth: 0 }}>
+                  <div className="mono">{b.ip}</div>
+                  <div className="dim small">
+                    blocked until {new Date(b.blocked_until).toLocaleString()} · {b.queries ?? 0} queries ·
+                    {' '}blocked {b.blocks ?? 0}×
+                    {b.first_seen ? <> · first seen {new Date(b.first_seen).toLocaleString()}</> : null}
+                  </div>
+                </div>
                 <button className="btn small danger" type="button" onClick={() => unblock(b.ip)}>Unblock</button>
               </div>
             ))}
@@ -373,6 +379,14 @@ export default function Settings({ onSessionInvalidated }) {
           {textarea('Blocked countries (ISO 3166-1 alpha-2)', 'geo_block.countries', 'one per line, e.g. RU, CN, KP')}
           {textarea('Allowlist (IPs / CIDRs)', 'geo_block.allowlist', 'clients that are never geo-blocked')}
           {text('Data source URL (optional)', 'geo_block.base_url', 'defaults to ipverse/rir-ip; appends &lt;CC&gt;/ipv4_agg.txt and &lt;CC&gt;/ipv6_agg.txt')}
+          {field('Auto-refresh country data', 'how often the per-country CIDR lists re-fetch themselves', (
+            <select className="input" value={deepGet('geo_block.auto_update', '') || ''} onChange={(e) => set('geo_block.auto_update', e.target.value)}>
+              <option value="">Never</option>
+              <option value="6h">Every 6 hours</option>
+              <option value="24h">Daily</option>
+              <option value="168h">Weekly</option>
+            </select>
+          ))}
         </div>
         <h4 style={{ margin: '16px 0 10px' }}>Geo data status</h4>
         {geoInfo && geoInfo.countries && geoInfo.countries.length > 0 ? (
@@ -390,6 +404,11 @@ export default function Settings({ onSessionInvalidated }) {
           </div>
         ) : (
           <p className="dim small">No country data loaded yet — enable geo blocking, save, then refresh.</p>
+        )}
+        {geoInfo && geoInfo.next_refresh && deepGet('geo_block.enabled', false) && (
+          <p className="dim small" style={{ marginTop: 8 }}>
+            Next automatic refresh: {new Date(geoInfo.next_refresh).toLocaleString()}
+          </p>
         )}
         <div className="quick-actions" style={{ marginTop: 8 }}>
           <button className="btn small" type="button" onClick={refreshGeo}>Refresh country data</button>

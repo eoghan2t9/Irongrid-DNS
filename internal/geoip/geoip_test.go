@@ -108,6 +108,11 @@ func TestManagerRefreshFromSource(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "RU.ipv4.txt")); err != nil {
 		t.Fatalf("country data not persisted: %v", err)
 	}
+	// The manager records when the refresh ran (drives the dashboard's
+	// "next automatic refresh" display).
+	if m.LastRefresh().IsZero() {
+		t.Error("LastRefresh should be set after a successful refresh")
+	}
 }
 
 func TestManagerHTTPFallbackToCache(t *testing.T) {

@@ -94,6 +94,11 @@ type GeoBlockConfig struct {
 	// country code and file are appended as "<CC>/ipv4_agg.txt" and
 	// "<CC>/ipv6_agg.txt". file:// paths are supported for local datasets.
 	BaseURL string `yaml:"base_url"`
+	// AutoUpdate re-fetches the enabled countries' data every AutoUpdate
+	// (the ipverse/rir-ip aggregates change roughly weekly). 0 disables
+	// automatic refreshes (data is then only refreshed on save/manual
+	// refresh); the default is 168h (weekly).
+	AutoUpdate time.Duration `yaml:"auto_update"`
 }
 
 // DNSSECConfig enables DNSSEC enforcement. Irongrid is a forwarding
@@ -291,7 +296,9 @@ func Default() *Config {
 			BlockAfter: 3,
 			BlockFor:   10 * time.Minute,
 		},
-		GeoBlock: GeoBlockConfig{},
+		GeoBlock: GeoBlockConfig{
+			AutoUpdate: 168 * time.Hour,
+		},
 		DNSSEC: DNSSECConfig{
 			Enabled:   false,
 			RequireAD: true,
@@ -525,6 +532,9 @@ func (c *Config) validate() error {
 	}
 	if u := c.GeoBlock.BaseURL; u != "" && !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "file://") {
 		return fmt.Errorf("geo_block.base_url must start with http://, https:// or file://")
+	}
+	if c.GeoBlock.AutoUpdate < 0 {
+		return fmt.Errorf("geo_block.auto_update must be >= 0 (0 disables automatic refreshes)")
 	}
 	return nil
 }

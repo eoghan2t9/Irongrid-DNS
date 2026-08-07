@@ -629,10 +629,11 @@ type rateLimitPayload struct {
 }
 
 type geoBlockPayload struct {
-	Enabled   bool     `json:"enabled"`
-	Countries []string `json:"countries"`
-	Allowlist []string `json:"allowlist"`
-	BaseURL   string   `json:"base_url"`
+	Enabled    bool     `json:"enabled"`
+	Countries  []string `json:"countries"`
+	Allowlist  []string `json:"allowlist"`
+	BaseURL    string   `json:"base_url"`
+	AutoUpdate string   `json:"auto_update"` // duration string, "" = never
 }
 
 type dnssecPayload struct {
@@ -851,10 +852,11 @@ func payloadFromConfig(c *config.Config) configPayload {
 		BlockFor:   durationOrEmpty(c.RateLimit.BlockFor),
 	}
 	p.GeoBlock = geoBlockPayload{
-		Enabled:   c.GeoBlock.Enabled,
-		Countries: c.GeoBlock.Countries,
-		Allowlist: c.GeoBlock.Allowlist,
-		BaseURL:   c.GeoBlock.BaseURL,
+		Enabled:    c.GeoBlock.Enabled,
+		Countries:  c.GeoBlock.Countries,
+		Allowlist:  c.GeoBlock.Allowlist,
+		BaseURL:    c.GeoBlock.BaseURL,
+		AutoUpdate: durationOrEmpty(c.GeoBlock.AutoUpdate),
 	}
 	p.DNSSEC = dnssecPayload{Enabled: c.DNSSEC.Enabled, RequireAD: c.DNSSEC.RequireAD}
 	return p
@@ -889,6 +891,10 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	blockFor, err := parseDur(p.RateLimit.BlockFor)
 	if err != nil {
 		return nil, fmt.Errorf("rate_limit.block_for: %w", err)
+	}
+	geoAutoUpdate, err := parseDur(p.GeoBlock.AutoUpdate)
+	if err != nil {
+		return nil, fmt.Errorf("geo_block.auto_update: %w", err)
 	}
 	// Friendly defaults when auto-block is switched on without explicit
 	// values: 3 violations then a 10-minute cooldown.
@@ -985,10 +991,11 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			BlockFor:   blockFor,
 		},
 		GeoBlock: config.GeoBlockConfig{
-			Enabled:   p.GeoBlock.Enabled,
-			Countries: p.GeoBlock.Countries,
-			Allowlist: p.GeoBlock.Allowlist,
-			BaseURL:   p.GeoBlock.BaseURL,
+			Enabled:    p.GeoBlock.Enabled,
+			Countries:  p.GeoBlock.Countries,
+			Allowlist:  p.GeoBlock.Allowlist,
+			BaseURL:    p.GeoBlock.BaseURL,
+			AutoUpdate: geoAutoUpdate,
 		},
 		DNSSEC: config.DNSSECConfig{
 			Enabled:   p.DNSSEC.Enabled,
@@ -1121,13 +1128,28 @@ func (h *Handler) rateUnblock(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "unblocked"})
 }
 
-// geoStatus serves the per-country geo data status.
+// geoStatus serves the per-country geo data status, plus the auto-refresh
+// cadence and when the next automatic refresh is due (zero/nil when disabled).
 func (h *Handler) geoStatus(w http.ResponseWriter) {
 	if h.Geo == nil {
 		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "countries": []any{}})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "countries": h.Geo.Status()})
+	h.cfgMu.Lock()
+	autoUpdate := h.Cfg.GeoBlock.AutoUpdate
+	h.cfgMu.Unlock()
+	last := h.Geo.LastRefresh()
+	var next any
+	if autoUpdate > 0 && !last.IsZero() {
+		next = last.Add(autoUpdate)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":      true,
+		"countries":    h.Geo.Status(),
+		"auto_update":  durationOrEmpty(autoUpdate),
+		"last_refresh": last,
+		"next_refresh": next,
+	})
 }
 
 // geoRefresh re-downloads the enabled countries' CIDR data and swaps the DNS

@@ -29,6 +29,15 @@ type rlBucket struct {
 	violations   int
 	firstViol    time.Time
 	blockedUntil time.Time
+
+	// Lifetime stats shown on the dashboard's blocked-clients list: queries
+	// is every Allow call seen from this client, blocks is how many times
+	// the auto-block has tripped, firstSeen when the bucket was created.
+	// They survive unblocking (that's the "history") and are only cleared
+	// when the bucket is evicted.
+	queries   int64
+	blocks    int
+	firstSeen time.Time
 }
 
 type rlShard struct {
@@ -137,11 +146,12 @@ func (rl *RateLimiter) Allow(client string) bool {
 				delete(s.buckets, oldest)
 			}
 		}
-		s.buckets[client] = &rlBucket{tokens: rl.burst - 1, lastSeen: now}
+		s.buckets[client] = &rlBucket{tokens: rl.burst - 1, lastSeen: now, queries: 1, firstSeen: now}
 		return true
 	}
 	elapsed := now.Sub(b.lastSeen).Seconds()
 	b.lastSeen = now
+	b.queries++
 	if !b.blockedUntil.IsZero() {
 		if now.Before(b.blockedUntil) {
 			return false
@@ -184,6 +194,7 @@ func (rl *RateLimiter) recordViolationLocked(b *rlBucket, now time.Time) {
 		b.blockedUntil = now.Add(rl.blockFor)
 		b.violations = 0
 		b.firstViol = time.Time{}
+		b.blocks++
 	}
 }
 
@@ -203,10 +214,14 @@ func (rl *RateLimiter) Blocked(client string) (bool, time.Time) {
 }
 
 // BlockedClient is one entry of the currently-blocked snapshot served to the
-// dashboard.
+// dashboard. Queries/Blocks/FirstSeen are lifetime stats since the client's
+// bucket was created, so the list doubles as a block history.
 type BlockedClient struct {
 	IP           string    `json:"ip"`
 	BlockedUntil time.Time `json:"blocked_until"`
+	Queries      int64     `json:"queries"`
+	Blocks       int       `json:"blocks"`
+	FirstSeen    time.Time `json:"first_seen"`
 }
 
 // BlockedList returns every client currently under an auto-block, newest
@@ -218,7 +233,10 @@ func (rl *RateLimiter) BlockedList() []BlockedClient {
 		s.mu.Lock()
 		for ip, b := range s.buckets {
 			if !b.blockedUntil.IsZero() && now.Before(b.blockedUntil) {
-				out = append(out, BlockedClient{IP: ip, BlockedUntil: b.blockedUntil})
+				out = append(out, BlockedClient{
+					IP: ip, BlockedUntil: b.blockedUntil,
+					Queries: b.queries, Blocks: b.blocks, FirstSeen: b.firstSeen,
+				})
 			}
 		}
 		s.mu.Unlock()

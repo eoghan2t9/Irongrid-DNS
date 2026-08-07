@@ -310,6 +310,49 @@ func main() {
 		return nil
 	}
 
+	// Auto-refresh keeps country data fresh without a manual refresh: the
+	// ipverse/rir-ip aggregates change roughly weekly, so the default cadence
+	// is weekly. The interval and enabled state are re-read from the live
+	// config under the config mutex on every cycle, so dashboard changes
+	// apply without a restart — when geo blocking is disabled (or auto-refresh
+	// is off) the goroutine idles and re-checks hourly. Rebuilds run on this
+	// goroutine and fall back to cached data on network failure, so a spell
+	// of outages never clears the blocked set.
+	cfgMu := apiHandler.ConfigMu()
+	go func() {
+		for {
+			cfgMu.Lock()
+			g := cfg.GeoBlock
+			cfgMu.Unlock()
+			// Idle cadence when nothing is scheduled: re-check hourly so a
+			// dashboard toggle (enabling geo, or setting auto_update) is
+			// picked up promptly instead of on the old — possibly never —
+			// cadence.
+			wait := time.Hour
+			if g.Enabled && len(g.Countries) > 0 && g.AutoUpdate > 0 {
+				wait = g.AutoUpdate
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+			// Re-read the config after the sleep: the user may have disabled
+			// geo (or changed countries / the interval) while we waited, and
+			// the rebuild must never act on a stale snapshot — otherwise a
+			// long-interval refresh could re-enable blocking the dashboard
+			// had just switched off.
+			cfgMu.Lock()
+			g = cfg.GeoBlock
+			cfgMu.Unlock()
+			if g.Enabled && len(g.Countries) > 0 && g.AutoUpdate > 0 {
+				if err := buildGeo(g); err != nil {
+					log.Printf("[geo] auto-refresh: %v", err)
+				}
+			}
+		}
+	}()
+
 	// ---- ACME (Let's Encrypt) auto-issuance ----
 	// startACME is callable at boot AND from the reload hook so toggling
 	// tls.acme.enabled in the dashboard takes effect without a restart.
