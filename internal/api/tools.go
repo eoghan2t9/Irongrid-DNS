@@ -175,7 +175,11 @@ func (h *Handler) toolsResolve(ctx context.Context, w http.ResponseWriter, r *ht
 			m.Extra = append(m.Extra, o)
 		}
 
-		res := resolveResult{Source: src}
+		// Answers must be non-nil so JSON serializes it as [] — a nil slice
+		// becomes null, and the dashboard reads res.answers.length, which
+		// throws on null and blanks the whole page (NXDOMAIN/NODATA lookups
+		// return no records, so this is the common case, not the edge case).
+		res := resolveResult{Source: src, Answers: []string{}}
 		var lastErr error
 		for _, up := range ups {
 			start := time.Now()
@@ -253,7 +257,7 @@ func (h *Handler) toolsMail(ctx context.Context, w http.ResponseWriter, r *http.
 
 	// Slices must be non-nil so JSON serializes them as [] — a nil slice
 	// becomes null and crashes the frontend's res.mx.join/res.caa.length.
-	res := mailCheckResult{Domain: domain, MX: []string{}, CAA: []string{}}
+	res := mailCheckResult{Domain: domain, MX: []string{}, CAA: []string{}, SPFIssues: []string{}}
 
 	if m, err := h.resolveAny(ctx, domain, dns.TypeMX); err == nil {
 		for _, rr := range m.Answer {

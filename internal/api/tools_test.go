@@ -110,6 +110,45 @@ func TestToolsResolve(t *testing.T) {
 	}
 }
 
+// TestToolsResolveNXDOMAINAnswersNotNull guards the JSON contract the
+// dashboard depends on: a lookup that returns no records (NXDOMAIN, NODATA)
+// must serialize answers as [] — not null — because the frontend reads
+// res.answers.length and null.length throws, blanking the whole page.
+func TestToolsResolveNXDOMAINAnswersNotNull(t *testing.T) {
+	addr := startUDPDNS(t, map[string][]dns.RR{}) // nothing answers -> NXDOMAIN
+	h := handlerFor(t, addr)
+
+	code, body := postTools(t, h, "/api/tools/resolve", `{"name": "nx.test", "type": "A", "rd": true, "sources": ["local"]}`)
+	if code != http.StatusOK {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	// The raw JSON must contain "answers":[] — a nil Go slice would emit
+	// "answers":null. Match structurally so field order doesn't matter.
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	results, ok := raw["results"].([]any)
+	if !ok || len(results) != 1 {
+		t.Fatalf("results = %v, want 1", raw["results"])
+	}
+	first, ok := results[0].(map[string]any)
+	if !ok {
+		t.Fatal("first result not an object")
+	}
+	ans, ok := first["answers"]
+	if !ok {
+		t.Fatal("missing answers field")
+	}
+	arr, isSlice := ans.([]any)
+	if !isSlice {
+		t.Fatalf("answers = %v (%T), want a JSON array ([]), not null — the dashboard crashes on null.length", ans, ans)
+	}
+	if len(arr) != 0 {
+		t.Fatalf("answers = %v, want empty array", arr)
+	}
+}
+
 func TestToolsResolveBadSource(t *testing.T) {
 	h := &Handler{} // no local upstreams at all
 	code, body := postTools(t, h, "/api/tools/resolve", `{"name": "x.com", "sources": ["local"]}`)

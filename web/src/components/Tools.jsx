@@ -40,10 +40,10 @@ function ResolveTable({ results }) {
           </div>
           {res.error ? (
             <div className="error-text small">{res.error}</div>
-          ) : res.answers.length === 0 ? (
+          ) : (res.answers || []).length === 0 ? (
             <div className="dim small" style={{ marginTop: 8 }}>No answers ({res.rcode})</div>
           ) : (
-            <pre className="log-view" style={{ marginTop: 8 }}>{res.answers.join('\n')}</pre>
+            <pre className="log-view" style={{ marginTop: 8 }}>{(res.answers || []).join('\n')}</pre>
           )}
         </div>
       ))}
