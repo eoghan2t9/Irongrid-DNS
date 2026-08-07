@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestPerfTunablesDefaults verifies the performance tunables ship with sane
@@ -153,6 +154,62 @@ func TestValidateDNS01UnsupportedProvider(t *testing.T) {
 	err := c.Validate()
 	if err == nil || !strings.Contains(err.Error(), "unsupported provider") {
 		t.Fatalf("err = %v, want unsupported-provider error", err)
+	}
+}
+
+func TestValidateRateLimitAutoBlock(t *testing.T) {
+	c := validBase()
+	c.RateLimit = RateLimitConfig{Enabled: true, QPS: 10, Burst: 20, AutoBlock: true, BlockAfter: 3, BlockFor: 10 * time.Minute}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid auto_block config rejected: %v", err)
+	}
+	c.RateLimit.BlockAfter = 0
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "block_after") {
+		t.Fatalf("err = %v, want block_after error", err)
+	}
+	c = validBase()
+	c.RateLimit = RateLimitConfig{Enabled: true, QPS: 10, Burst: 20, AutoBlock: true, BlockAfter: 3, BlockFor: 0}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "block_for") {
+		t.Fatalf("err = %v, want block_for error", err)
+	}
+	// auto_block is a layer on the token bucket: without rate limiting there
+	// are no rejections to count, so the config must say so explicitly.
+	c = validBase()
+	c.RateLimit = RateLimitConfig{AutoBlock: true, BlockAfter: 3, BlockFor: 10 * time.Minute} // Enabled stays false
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "auto_block") {
+		t.Fatalf("err = %v, want auto_block-requires-enabled error", err)
+	}
+}
+
+func TestValidateGeoBlock(t *testing.T) {
+	c := validBase()
+	c.GeoBlock = GeoBlockConfig{
+		Enabled:   true,
+		Countries: []string{"ru", "CN"},
+		Allowlist: []string{"192.168.1.0/24", "10.0.0.5"},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid geo_block rejected: %v", err)
+	}
+	if c.GeoBlock.Countries[0] != "RU" {
+		t.Errorf("country normalized to %q, want RU", c.GeoBlock.Countries[0])
+	}
+
+	c.GeoBlock.Countries = []string{"Russia"}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "alpha-2") {
+		t.Fatalf("err = %v, want alpha-2 error", err)
+	}
+
+	c = validBase()
+	c.GeoBlock = GeoBlockConfig{Enabled: true, Countries: []string{"RU"}, Allowlist: []string{"not-an-ip"}}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "allowlist") {
+		t.Fatalf("err = %v, want allowlist error", err)
+	}
+
+	c = validBase()
+	c.GeoBlock = GeoBlockConfig{Enabled: true, Countries: []string{"RU"}, BaseURL: "ftp://example.com/geo"}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "base_url") {
+		t.Fatalf("err = %v, want base_url error", err)
 	}
 }
 

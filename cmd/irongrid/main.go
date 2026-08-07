@@ -27,6 +27,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsserver"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/installer"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/recursive"
@@ -275,6 +276,39 @@ func main() {
 	// same mutex applyPayload uses, so a session-secret rotation can never be
 	// read as a torn mix.
 	apiApp.Mu = apiHandler.ConfigMu()
+
+	// ---- geo blocking (country-based client blocking) ----
+	// Country CIDR data is fetched like blocklists (ipverse/rir-ip by
+	// default) and cached under the data dir. buildGeo loads it for the
+	// given config and hot-swaps the DNS handler's blocker: a network
+	// failure falls back to the last cached copy and only skips countries
+	// with neither, and an empty/disabled config uninstalls blocking.
+	geoMgr := geoip.NewManager(filepath.Join(*dataDir, "geo"), cfg.GeoBlock.BaseURL)
+	apiHandler.Geo = geoMgr
+	buildGeo := func(g config.GeoBlockConfig) error {
+		if !g.Enabled || len(g.Countries) == 0 {
+			handler.SetGeo(nil)
+			return nil
+		}
+		b, err := geoMgr.Refresh(ctx, g.Countries, g.Allowlist)
+		handler.SetGeo(b)
+		return err
+	}
+	if err := buildGeo(cfg.GeoBlock); err != nil {
+		log.Printf("[geo] initial load partially failed (using cached data): %v", err)
+	}
+	// The config-save and refresh-button paths must never stall on a
+	// country-data download (multi-country fetches can take seconds), so
+	// RebuildGeo runs the rebuild off the request path; the DNS handler
+	// keeps serving with the previous blocker until the new one is ready.
+	apiHandler.RebuildGeo = func(g config.GeoBlockConfig) error {
+		go func() {
+			if err := buildGeo(g); err != nil {
+				log.Printf("[geo] background refresh: %v", err)
+			}
+		}()
+		return nil
+	}
 
 	// ---- ACME (Let's Encrypt) auto-issuance ----
 	// startACME is callable at boot AND from the reload hook so toggling
@@ -603,6 +637,10 @@ func main() {
 		handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
 		handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
 		handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
+		// Geo blocking is hot-swapped asynchronously (see RebuildGeo).
+		if apiHandler.RebuildGeo != nil {
+			_ = apiHandler.RebuildGeo(cfg.GeoBlock)
+		}
 		apiHandler.Cache = newCache
 		apiHandler.Upstreams = newUps
 		oldCache := dfly

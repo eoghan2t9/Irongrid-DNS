@@ -16,7 +16,8 @@ const empty = () => ({
   tunnel: { enabled: false, token: '', config_file: '', quick_tunnel: false, quick_tunnel_url: '', hostname: '' },
   rewrites: [],
   client_groups: [],
-  rate_limit: { enabled: false, qps: 20, burst: 40 },
+  rate_limit: { enabled: false, qps: 20, burst: 40, auto_block: false, block_after: 3, block_for: '10m' },
+  geo_block: { enabled: false, countries: [], allowlist: [], base_url: '' },
   dnssec: { enabled: false, require_ad: true },
 })
 
@@ -31,6 +32,8 @@ export default function Settings({ onSessionInvalidated }) {
   const [diagName, setDiagName] = useState('example.com')
   const [diagType, setDiagType] = useState('A')
   const [diagResult, setDiagResult] = useState(null)
+  const [blocked, setBlocked] = useState([])
+  const [geoInfo, setGeoInfo] = useState({ enabled: false, countries: [] })
 
   const load = useCallback(async () => {
     try {
@@ -40,7 +43,13 @@ export default function Settings({ onSessionInvalidated }) {
     } catch { /* ignore */ }
   }, [])
 
+  const loadAbuse = useCallback(async () => {
+    try { setBlocked((await api.rateBlocked()).blocked || []) } catch { /* ignore */ }
+    try { setGeoInfo(await api.geoStatus()) } catch { /* ignore */ }
+  }, [])
+
   useEffect(() => { load() }, [load])
+  useEffect(() => { loadAbuse() }, [loadAbuse])
 
   const set = (path, value) => {
     setCfg((prev) => {
@@ -111,10 +120,31 @@ export default function Settings({ onSessionInvalidated }) {
       )
       setDirty(false)
       await load()
+      await loadAbuse()
     } catch (e) {
       toast(e.message, 'error')
     } finally {
       setSaving(false)
+    }
+  }
+
+  const unblock = async (ip) => {
+    try {
+      await api.rateUnblock(ip)
+      toast(`Unblocked ${ip}`)
+      await loadAbuse()
+    } catch (e) {
+      toast('Unblock failed: ' + e.message, 'error')
+    }
+  }
+
+  const refreshGeo = async () => {
+    try {
+      await api.geoRefresh()
+      toast('Country data refresh started — status will update shortly.')
+      setTimeout(loadAbuse, 2000)
+    } catch (e) {
+      toast('Geo refresh failed: ' + e.message, 'error')
     }
   }
 
@@ -296,19 +326,73 @@ export default function Settings({ onSessionInvalidated }) {
           {toggle('Enable DNSSEC (trust upstream validation)', 'dnssec.enabled')}
           {toggle('Reject unauthenticated answers (SERVFAIL)', 'dnssec.require_ad')}
         </div>
-      </div>
-
-      <div className="card">
-        <h3>Rate limiting</h3>
+      </div>      <div className="card">
+        <h3>Rate limiting &amp; abuse protection</h3>
         <p className="dim small" style={{ marginTop: -6 }}>
           Throttles queries per client IP — a defense against a compromised LAN device or a public listener being
-          abused for DNS amplification. UDP queries over the limit are dropped silently (answering at all would
-          still amplify toward a spoofed source); TCP/DoT/DoH/DoQ get REFUSED.
+          abused for DNS amplification. UDP queries over the limit are dropped silently (answering at all would still
+          amplify toward a spoofed source); TCP/DoT/DoH/DoQ get REFUSED. With <strong>auto-block</strong>, a client that
+          keeps tripping the limit is refused entirely for the cooldown window instead of just being throttled back.
         </p>
         <div className="form-grid">
           {toggle('Enable rate limiting', 'rate_limit.enabled')}
           {number('Sustained queries/sec per client', 'rate_limit.qps')}
           {number('Burst allowance per client', 'rate_limit.burst')}
+          {toggle('Auto-block repeat offenders', 'rate_limit.auto_block')}
+          {number('Violations before blocking', 'rate_limit.block_after')}
+          {text('Block cooldown', 'rate_limit.block_for', 'e.g. 10m, 1h', '10m')}
+        </div>
+        <h4 style={{ margin: '16px 0 10px' }}>Currently blocked clients</h4>
+        {blocked.length === 0 ? (
+          <p className="dim small">No clients are currently auto-blocked.</p>
+        ) : (
+          <div>
+            {blocked.map((b) => (
+              <div className="list-row" key={b.ip}>
+                <span className="mono">{b.ip}</span>
+                <span className="dim small">blocked until {new Date(b.blocked_until).toLocaleString()}</span>
+                <button className="btn small danger" type="button" onClick={() => unblock(b.ip)}>Unblock</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="quick-actions" style={{ marginTop: 8 }}>
+          <button className="btn small" type="button" onClick={loadAbuse}>Refresh list</button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>Geo blocking</h3>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          Refuses queries (<strong>REFUSED</strong> on every transport) from client IPs that belong to the selected
+          countries. Country data comes from free per-country CIDR lists (ipverse/rir-ip) fetched automatically and
+          cached locally — no account or API key needed. Allowlisted IPs/CIDRs always pass.
+        </p>
+        <div className="form-grid">
+          {toggle('Enable geo blocking', 'geo_block.enabled')}
+          {textarea('Blocked countries (ISO 3166-1 alpha-2)', 'geo_block.countries', 'one per line, e.g. RU, CN, KP')}
+          {textarea('Allowlist (IPs / CIDRs)', 'geo_block.allowlist', 'clients that are never geo-blocked')}
+          {text('Data source URL (optional)', 'geo_block.base_url', 'defaults to ipverse/rir-ip; appends &lt;CC&gt;/ipv4_agg.txt and &lt;CC&gt;/ipv6_agg.txt')}
+        </div>
+        <h4 style={{ margin: '16px 0 10px' }}>Geo data status</h4>
+        {geoInfo && geoInfo.countries && geoInfo.countries.length > 0 ? (
+          <div>
+            {geoInfo.countries.map((c) => (
+              <div className="list-row" key={c.code}>
+                <span className="mono">{c.code}</span>
+                <span className="dim small">
+                  {c.ipv4_ranges} IPv4 · {c.ipv6_ranges} IPv6 ranges
+                  {c.last_fetch && <> · updated {new Date(c.last_fetch).toLocaleString()}</>}
+                  {c.error && <span className="error-text"> · {c.error}</span>}
+                </span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="dim small">No country data loaded yet — enable geo blocking, save, then refresh.</p>
+        )}
+        <div className="quick-actions" style={{ marginTop: 8 }}>
+          <button className="btn small" type="button" onClick={refreshGeo}>Refresh country data</button>
         </div>
       </div>
 

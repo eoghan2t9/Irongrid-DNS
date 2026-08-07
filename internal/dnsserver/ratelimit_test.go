@@ -1,6 +1,7 @@
 package dnsserver
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -57,5 +58,163 @@ func TestRateLimiterEmptyClientAlwaysAllowed(t *testing.T) {
 		if !rl.Allow("") {
 			t.Fatal("an empty client key (unidentifiable) must never be throttled")
 		}
+	}
+}
+
+func TestRateLimiterAutoBlockTriggersAndExpires(t *testing.T) {
+	rl := NewRateLimiter(1, 1)
+	rl.SetAutoBlock(3, 100*time.Millisecond)
+
+	// Hammer past the 3-violation threshold.
+	for i := 0; i < 10; i++ {
+		rl.Allow("1.2.3.4")
+	}
+	if blocked, until := rl.Blocked("1.2.3.4"); !blocked {
+		t.Fatal("expected 1.2.3.4 to be auto-blocked after repeated violations")
+	} else if until.IsZero() || time.Until(until) <= 0 {
+		t.Fatalf("blockedUntil %v is not in the future", until)
+	}
+	if list := rl.BlockedList(); len(list) != 1 || list[0].IP != "1.2.3.4" {
+		t.Fatalf("BlockedList = %+v, want exactly [1.2.3.4]", list)
+	}
+
+	// During the cooldown, Allow always refuses even after time passes.
+	time.Sleep(50 * time.Millisecond)
+	if rl.Allow("1.2.3.4") {
+		t.Fatal("blocked client was allowed mid-cooldown")
+	}
+	if blocked, _ := rl.Blocked("1.2.3.4"); !blocked {
+		t.Fatal("Blocked turned false before the cooldown elapsed")
+	}
+
+	// After the cooldown, the client starts fresh and is allowed again.
+	time.Sleep(80 * time.Millisecond)
+	if !rl.Allow("1.2.3.4") {
+		t.Fatal("client still refused after the cooldown expired")
+	}
+	if blocked, _ := rl.Blocked("1.2.3.4"); blocked {
+		t.Fatal("Blocked still true after expiry")
+	}
+}
+
+func TestRateLimiterAutoBlockIsPerClient(t *testing.T) {
+	rl := NewRateLimiter(1, 1)
+	rl.SetAutoBlock(3, time.Minute)
+	for i := 0; i < 10; i++ {
+		rl.Allow("9.9.9.9")
+	}
+	if blocked, _ := rl.Blocked("9.9.9.9"); !blocked {
+		t.Fatal("9.9.9.9 should be blocked")
+	}
+	if !rl.Allow("1.1.1.1") {
+		t.Fatal("an unrelated client must not be affected by another's block")
+	}
+}
+
+func TestRateLimiterUnblock(t *testing.T) {
+	rl := NewRateLimiter(1, 1)
+	rl.SetAutoBlock(3, time.Hour)
+	for i := 0; i < 10; i++ {
+		rl.Allow("5.5.5.5")
+	}
+	if blocked, _ := rl.Blocked("5.5.5.5"); !blocked {
+		t.Fatal("5.5.5.5 should be blocked")
+	}
+	rl.Unblock("5.5.5.5")
+	if blocked, _ := rl.Blocked("5.5.5.5"); blocked {
+		t.Fatal("5.5.5.5 still blocked after Unblock")
+	}
+	if !rl.Allow("5.5.5.5") {
+		t.Fatal("an unblocked client is still refused")
+	}
+}
+
+func TestRateLimiterSparseViolationsDoNotBlock(t *testing.T) {
+	// Violations that only occur far apart (one per window) are throttled
+	// but must never accumulate into a block — an IP that spikes once in a
+	// while is not a hammerer.
+	rl := NewRateLimiter(1, 1)
+	rl.SetAutoBlock(3, 20*time.Millisecond)
+	for i := 0; i < 3; i++ {
+		rl.Allow("7.7.7.7") // consume the burst
+		rl.Allow("7.7.7.7") // violation
+		time.Sleep(25 * time.Millisecond)
+	}
+	if blocked, _ := rl.Blocked("7.7.7.7"); blocked {
+		t.Fatal("sparse violations must not trigger the auto-block")
+	}
+}
+
+// sameShard returns two distinct client keys that hash to the same shard, so
+// tests can drive one shard past rlMaxPerShard deterministically.
+func sameShard(t *testing.T, rl *RateLimiter) (string, string) {
+	t.Helper()
+	a := "203.0.113.1"
+	for i := 0; i < 10000; i++ {
+		b := fmt.Sprintf("203.0.113.%d", i+2)
+		if rl.shard(b) == rl.shard(a) {
+			return a, b
+		}
+	}
+	t.Fatal("could not find two clients hashing to the same shard")
+	return "", ""
+}
+
+func TestRateLimiterShardCapPrefersIdleEviction(t *testing.T) {
+	rl := NewRateLimiter(1000, 1000) // generous limits: nothing is throttled
+	a, b := sameShard(t, rl)
+	s := rl.shard(a)
+	now := time.Now()
+	s.mu.Lock()
+	s.buckets = make(map[string]*rlBucket, rlMaxPerShard+1)
+	for i := 0; i < rlMaxPerShard; i++ {
+		s.buckets[fmt.Sprintf("198.51.100.%d", i)] = &rlBucket{tokens: 1, lastSeen: now}
+	}
+	// One entry went quiet long ago: it must be the one evicted to make
+	// room, not a live client.
+	s.buckets["198.51.100.0"].lastSeen = now.Add(-2 * rlIdleEvict)
+	s.mu.Unlock()
+
+	if !rl.Allow(b) {
+		t.Fatal("a new client was refused although an idle bucket was evictable")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n := len(s.buckets); n != rlMaxPerShard {
+		t.Fatalf("shard holds %d buckets, want exactly %d", n, rlMaxPerShard)
+	}
+	if _, ok := s.buckets["198.51.100.0"]; ok {
+		t.Fatal("the idle bucket should have been evicted, not a live one")
+	}
+	if _, ok := s.buckets[b]; !ok {
+		t.Fatal("the new client's bucket is missing")
+	}
+}
+
+func TestRateLimiterShardCapHoldsUnderActiveFlood(t *testing.T) {
+	// Every bucket is active (fresh lastSeen) — the scenario a spoofed-IP
+	// flood creates. The cap must still hold: no idle entries to evict means
+	// least-recently-seen entries get dropped instead.
+	rl := NewRateLimiter(1000, 1000)
+	_, b := sameShard(t, rl)
+	s := rl.shard(b)
+	now := time.Now()
+	s.mu.Lock()
+	s.buckets = make(map[string]*rlBucket, rlMaxPerShard+1)
+	for i := 0; i < rlMaxPerShard; i++ {
+		s.buckets[fmt.Sprintf("198.51.100.%d", i)] = &rlBucket{tokens: 1, lastSeen: now}
+	}
+	s.mu.Unlock()
+
+	if !rl.Allow(b) {
+		t.Fatal("a new client was refused although eviction should have made room")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if n := len(s.buckets); n != rlMaxPerShard {
+		t.Fatalf("shard grew to %d buckets under active flood, cap is %d", n, rlMaxPerShard)
+	}
+	if _, ok := s.buckets[b]; !ok {
+		t.Fatal("the new client's bucket is missing")
 	}
 }

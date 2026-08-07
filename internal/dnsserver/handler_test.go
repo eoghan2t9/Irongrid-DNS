@@ -10,6 +10,7 @@ import (
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
 
@@ -40,12 +41,21 @@ func startUDPTestServer(t *testing.T, ip string, delay time.Duration) string {
 	return pc.LocalAddr().String()
 }
 
-// fakeWriter implements dns.ResponseWriter for direct handler invocation.
-type fakeWriter struct{ msg *dns.Msg }
+// fakeWriter implements dns.ResponseWriter for direct handler invocation. ip
+// overrides the client source address (nil = 127.0.0.1) so tests can exercise
+// per-client behaviour like rate-limit auto-blocks and geo-blocking.
+type fakeWriter struct {
+	msg *dns.Msg
+	ip  net.IP
+}
 
 func (f *fakeWriter) LocalAddr() net.Addr { return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53} }
 func (f *fakeWriter) RemoteAddr() net.Addr {
-	return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 12345}
+	ip := f.ip
+	if ip == nil {
+		ip = net.IPv4(127, 0, 0, 1)
+	}
+	return &net.UDPAddr{IP: ip, Port: 12345}
 }
 func (f *fakeWriter) WriteMsg(m *dns.Msg) error {
 	f.msg = m
@@ -160,6 +170,117 @@ func TestHandlerRateLimitRefusesConnectionOriented(t *testing.T) {
 	h.ServeDNSWithProto(fw2, q(), "tcp")
 	if fw2.msg == nil || fw2.msg.Rcode != dns.RcodeRefused {
 		t.Fatalf("expected REFUSED for a rate-limited TCP query, got %v", fw2.msg)
+	}
+}
+
+// TestHandlerAutoBlockedClientDroppedOnUDP verifies a client under an
+// auto-block gets no UDP response at all (same silent-drop path as ordinary
+// over-limit handling).
+func TestHandlerAutoBlockedClientDroppedOnUDP(t *testing.T) {
+	addr := startUDPTestServer(t, "1.1.1.1", 0)
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
+	rl := NewRateLimiter(1, 1)
+	rl.SetAutoBlock(3, time.Hour)
+	h.SetRateLimiter(rl)
+
+	q := func() *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("example.com.", dns.TypeA)
+		return m
+	}
+	// Hammer the same client until the auto-block trips.
+	for i := 0; i < 10; i++ {
+		h.ServeDNS(&fakeWriter{}, q())
+	}
+	if blocked, _ := rl.Blocked("127.0.0.1"); !blocked {
+		t.Fatal("client not auto-blocked after hammering")
+	}
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, q())
+	if fw.msg != nil {
+		t.Fatalf("auto-blocked UDP client got a response, want a silent drop: %v", fw.msg)
+	}
+}
+
+// TestHandlerAutoBlockedClientRefusedOnTCP verifies connection-oriented
+// transports get REFUSED while a client is under an auto-block.
+func TestHandlerAutoBlockedClientRefusedOnTCP(t *testing.T) {
+	h := NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, 5*time.Second)
+	rl := NewRateLimiter(1, 1)
+	rl.SetAutoBlock(3, time.Hour)
+	h.SetRateLimiter(rl)
+
+	q := func() *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("example.com.", dns.TypeA)
+		return m
+	}
+	for i := 0; i < 10; i++ {
+		h.ServeDNSWithProto(&fakeWriter{}, q(), "tcp")
+	}
+	if blocked, _ := rl.Blocked("127.0.0.1"); !blocked {
+		t.Fatal("client not auto-blocked after hammering")
+	}
+	fw := &fakeWriter{}
+	h.ServeDNSWithProto(fw, q(), "tcp")
+	if fw.msg == nil || fw.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("expected REFUSED for an auto-blocked TCP client, got %v", fw.msg)
+	}
+}
+
+// TestHandlerGeoBlockedClientRefusedEveryTransport verifies a client whose
+// IP falls in a blocked country gets REFUSED on UDP as well as TCP (geo
+// blocking's configured action is REFUSED everywhere), and that an
+// allowlisted IP passes untouched.
+func TestHandlerGeoBlockedClientRefusedEveryTransport(t *testing.T) {
+	addr := startUDPTestServer(t, "1.1.1.1", 0)
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
+
+	tbl, err := geoip.LoadTable([]byte("93.0.0.0/8\n"), nil)
+	if err != nil {
+		t.Fatalf("LoadTable: %v", err)
+	}
+	b := geoip.NewBlocker()
+	if err := b.SetConfig([]string{"RU"}, nil); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	b.AddTable("RU", tbl)
+	h.SetGeo(b)
+
+	q := func() *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("example.com.", dns.TypeA)
+		return m
+	}
+	client := &fakeWriter{ip: net.ParseIP("93.184.0.1")}
+	h.ServeDNS(client, q()) // UDP: REFUSED too, unlike rate limiting's silent drop
+	if client.msg == nil || client.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("geo-blocked UDP client: expected REFUSED, got %v", client.msg)
+	}
+	client2 := &fakeWriter{ip: net.ParseIP("93.184.0.1")}
+	h.ServeDNSWithProto(client2, q(), "tcp")
+	if client2.msg == nil || client2.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("geo-blocked TCP client: expected REFUSED, got %v", client2.msg)
+	}
+
+	// A client outside the blocked ranges is served normally.
+	direct := &fakeWriter{}
+	h.ServeDNS(direct, q())
+	if direct.msg == nil || len(direct.msg.Answer) == 0 {
+		t.Fatalf("non-blocked client should get a normal answer, got %v", direct.msg)
+	}
+
+	// Allowlisting an IP inside the blocked country lets it through.
+	b2 := geoip.NewBlocker()
+	if err := b2.SetConfig([]string{"RU"}, []string{"93.184.0.1"}); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	b2.AddTable("RU", tbl)
+	h.SetGeo(b2)
+	allowed := &fakeWriter{ip: net.ParseIP("93.184.0.1")}
+	h.ServeDNS(allowed, q())
+	if allowed.msg == nil || len(allowed.msg.Answer) == 0 {
+		t.Fatalf("allowlisted client was geo-blocked, got %v", allowed.msg)
 	}
 }
 

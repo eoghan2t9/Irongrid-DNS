@@ -17,6 +17,7 @@ import (
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
@@ -54,6 +55,7 @@ type Handler struct {
 	Rewriter        *filter.Rewriter // local DNS records; never nil, may be empty
 	ClientRouter    *ClientRouter    // per-client policy; never nil, may be empty
 	RateLimiter     *RateLimiter     // nil disables rate limiting
+	Geo             *geoip.Blocker   // nil disables geo-blocking
 	DNSSECEnabled   bool
 	DNSSECRequireAD bool
 
@@ -152,6 +154,35 @@ func (h *Handler) SetRateLimiter(rl *RateLimiter) {
 	h.RateLimiter = rl
 }
 
+// SetGeo hot-swaps the geo blocker; nil disables geo-blocking.
+func (h *Handler) SetGeo(g *geoip.Blocker) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.Geo = g
+}
+
+// BlockedClients returns the clients currently under an auto-block (from the
+// rate limiter), for the dashboard.
+func (h *Handler) BlockedClients() []BlockedClient {
+	h.mu.RLock()
+	rl := h.RateLimiter
+	h.mu.RUnlock()
+	if rl == nil {
+		return nil
+	}
+	return rl.BlockedList()
+}
+
+// UnblockClient lifts an auto-blocked client's cooldown early.
+func (h *Handler) UnblockClient(ip string) {
+	h.mu.RLock()
+	rl := h.RateLimiter
+	h.mu.RUnlock()
+	if rl != nil {
+		rl.Unblock(ip)
+	}
+}
+
 // SetDNSSEC hot-swaps DNSSEC enforcement (see DNSSECConfig's doc comment for
 // what "enabled" actually means: trusting an encrypted, validating upstream,
 // not local chain-of-trust validation).
@@ -179,6 +210,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	rewriter := h.Rewriter
 	clientRouter := h.ClientRouter
 	rateLimiter := h.RateLimiter
+	geo := h.Geo
 	dnssecEnabled := h.DNSSECEnabled
 	dnssecRequireAD := h.DNSSECRequireAD
 	h.mu.RUnlock()
@@ -213,6 +245,21 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	m.RecursionAvailable = true
 	q := r.Question[0]
 	qname := strings.ToLower(strings.TrimSuffix(q.Name, "."))
+
+	// 0.5 Geo-blocking: if the client's country is in the blocked set, the
+	//    configured behavior is REFUSED on every transport (an explicit
+	//    answer, not a silent drop — the user's chosen trade-off). The
+	//    allowlist is checked inside the blocker, so whitelisted IPs always
+	//    pass.
+	if geo != nil && client != "" && geo.Blocked(client) {
+		h.Stats.Blocked.Add(1)
+		refused := new(dns.Msg)
+		refused.SetReply(r)
+		refused.Rcode = dns.RcodeRefused
+		h.record(client, qname, q, "geo-blocked", "country-blocked", "", start, refused)
+		w.WriteMsg(refused)
+		return
+	}
 
 	// 1. Local DNS records win over everything else — an explicit config
 	//    entry is a stronger signal of intent than any blocklist or cache,

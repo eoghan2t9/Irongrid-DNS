@@ -27,6 +27,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsserver"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/recursive"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tunnel"
@@ -69,6 +70,13 @@ type Handler struct {
 	Catalog   *catalog.Catalog
 	StartedAt time.Time
 	Version   string
+
+	// Geo is the country-data manager behind geo-blocking; nil when geo
+	// blocking was never enabled. RebuildGeo (re)loads country data and
+	// swaps the DNS handler's blocker; wired up by main, nil when
+	// unavailable.
+	Geo        *geoip.Manager
+	RebuildGeo func(cfg config.GeoBlockConfig) error
 
 	// lastInstalledVersion is set after a successful in-place update and
 	// cleared on restart (process exit). It guards against installing twice
@@ -173,6 +181,14 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.downloadCert(w)
 	case len(parts) == 3 && parts[0] == "tls" && parts[1] == "acme" && parts[2] == "issue" && r.Method == http.MethodPost:
 		h.issueACME(ctx, w)
+	case len(parts) == 2 && parts[0] == "rate" && parts[1] == "blocked" && r.Method == http.MethodGet:
+		h.rateBlocked(w)
+	case len(parts) == 2 && parts[0] == "rate" && parts[1] == "unblock" && r.Method == http.MethodPost:
+		h.rateUnblock(w, r)
+	case len(parts) == 2 && parts[0] == "geo" && parts[1] == "status" && r.Method == http.MethodGet:
+		h.geoStatus(w)
+	case len(parts) == 2 && parts[0] == "geo" && parts[1] == "refresh" && r.Method == http.MethodPost:
+		h.geoRefresh(w)
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 	}
@@ -581,6 +597,7 @@ type configPayload struct {
 	Rewrites     []rewritePayload     `json:"rewrites"`
 	ClientGroups []clientGroupPayload `json:"client_groups"`
 	RateLimit    rateLimitPayload     `json:"rate_limit"`
+	GeoBlock     geoBlockPayload      `json:"geo_block"`
 	DNSSEC       dnssecPayload        `json:"dnssec"`
 }
 
@@ -603,9 +620,19 @@ type clientGroupPayload struct {
 }
 
 type rateLimitPayload struct {
-	Enabled bool `json:"enabled"`
-	QPS     int  `json:"qps"`
-	Burst   int  `json:"burst"`
+	Enabled    bool   `json:"enabled"`
+	QPS        int    `json:"qps"`
+	Burst      int    `json:"burst"`
+	AutoBlock  bool   `json:"auto_block"`
+	BlockAfter int    `json:"block_after"`
+	BlockFor   string `json:"block_for"` // duration string
+}
+
+type geoBlockPayload struct {
+	Enabled   bool     `json:"enabled"`
+	Countries []string `json:"countries"`
+	Allowlist []string `json:"allowlist"`
+	BaseURL   string   `json:"base_url"`
 }
 
 type dnssecPayload struct {
@@ -815,7 +842,20 @@ func payloadFromConfig(c *config.Config) configPayload {
 			Blocklists: g.Blocklists, Whitelist: g.Whitelist, Blacklist: g.Blacklist, Upstreams: g.Upstreams,
 		})
 	}
-	p.RateLimit = rateLimitPayload{Enabled: c.RateLimit.Enabled, QPS: c.RateLimit.QPS, Burst: c.RateLimit.Burst}
+	p.RateLimit = rateLimitPayload{
+		Enabled:    c.RateLimit.Enabled,
+		QPS:        c.RateLimit.QPS,
+		Burst:      c.RateLimit.Burst,
+		AutoBlock:  c.RateLimit.AutoBlock,
+		BlockAfter: c.RateLimit.BlockAfter,
+		BlockFor:   durationOrEmpty(c.RateLimit.BlockFor),
+	}
+	p.GeoBlock = geoBlockPayload{
+		Enabled:   c.GeoBlock.Enabled,
+		Countries: c.GeoBlock.Countries,
+		Allowlist: c.GeoBlock.Allowlist,
+		BaseURL:   c.GeoBlock.BaseURL,
+	}
 	p.DNSSEC = dnssecPayload{Enabled: c.DNSSEC.Enabled, RequireAD: c.DNSSEC.RequireAD}
 	return p
 }
@@ -845,6 +885,20 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	blocklistAutoUpdate, err := parseDur(p.Filter.AutoUpdate)
 	if err != nil {
 		return nil, fmt.Errorf("filter.auto_update: %w", err)
+	}
+	blockFor, err := parseDur(p.RateLimit.BlockFor)
+	if err != nil {
+		return nil, fmt.Errorf("rate_limit.block_for: %w", err)
+	}
+	// Friendly defaults when auto-block is switched on without explicit
+	// values: 3 violations then a 10-minute cooldown.
+	if p.RateLimit.AutoBlock {
+		if blockFor <= 0 {
+			blockFor = 10 * time.Minute
+		}
+		if p.RateLimit.BlockAfter < 1 {
+			p.RateLimit.BlockAfter = 3
+		}
 	}
 
 	cfg := &config.Config{
@@ -923,9 +977,18 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			Hostname:       p.Tunnel.Hostname,
 		},
 		RateLimit: config.RateLimitConfig{
-			Enabled: p.RateLimit.Enabled,
-			QPS:     p.RateLimit.QPS,
-			Burst:   p.RateLimit.Burst,
+			Enabled:    p.RateLimit.Enabled,
+			QPS:        p.RateLimit.QPS,
+			Burst:      p.RateLimit.Burst,
+			AutoBlock:  p.RateLimit.AutoBlock,
+			BlockAfter: p.RateLimit.BlockAfter,
+			BlockFor:   blockFor,
+		},
+		GeoBlock: config.GeoBlockConfig{
+			Enabled:   p.GeoBlock.Enabled,
+			Countries: p.GeoBlock.Countries,
+			Allowlist: p.GeoBlock.Allowlist,
+			BaseURL:   p.GeoBlock.BaseURL,
 		},
 		DNSSEC: config.DNSSECConfig{
 			Enabled:   p.DNSSEC.Enabled,
@@ -1029,7 +1092,59 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 		h.Cfg.Web.SessionSecret = oldSecret
 		return nil, err
 	}
+	// Geo-blocking changes are hot-swapped (no listener rebind needed). The
+	// rebuild runs asynchronously so a country-data download can never stall
+	// the config save or hold cfgMu.
+	if h.RebuildGeo != nil {
+		_ = h.RebuildGeo(cfg.GeoBlock)
+	}
 	return restart, nil
+}
+
+// ---- abuse protection: auto-blocked clients & geo blocking ----
+
+// rateBlocked serves the currently auto-blocked clients for the dashboard.
+func (h *Handler) rateBlocked(w http.ResponseWriter) {
+	writeJSON(w, http.StatusOK, map[string]any{"blocked": h.DNS.BlockedClients()})
+}
+
+// rateUnblock lifts an auto-blocked client's cooldown early.
+func (h *Handler) rateUnblock(w http.ResponseWriter, r *http.Request) {
+	var p struct {
+		IP string `json:"ip"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || p.IP == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ip required"})
+		return
+	}
+	h.DNS.UnblockClient(p.IP)
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "unblocked"})
+}
+
+// geoStatus serves the per-country geo data status.
+func (h *Handler) geoStatus(w http.ResponseWriter) {
+	if h.Geo == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "countries": []any{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"enabled": true, "countries": h.Geo.Status()})
+}
+
+// geoRefresh re-downloads the enabled countries' CIDR data and swaps the DNS
+// handler's blocker when ready.
+func (h *Handler) geoRefresh(w http.ResponseWriter) {
+	if h.RebuildGeo == nil || h.Geo == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "geo blocking not configured in this build"})
+		return
+	}
+	h.cfgMu.Lock()
+	geo := h.Cfg.GeoBlock
+	h.cfgMu.Unlock()
+	if err := h.RebuildGeo(geo); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "refreshing": true})
 }
 
 func (h *Handler) getConfig(w http.ResponseWriter) {

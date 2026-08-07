@@ -22,12 +22,17 @@ func BuildRewriter(specs []config.RewriteSpec) *filter.Rewriter {
 }
 
 // BuildRateLimiter returns a rate limiter for rl, or nil when disabled (nil
-// is the Handler's "no rate limiting" state).
+// is the Handler's "no rate limiting" state). The fail2ban-style auto-block
+// is enabled from the same config block.
 func BuildRateLimiter(rl config.RateLimitConfig) *RateLimiter {
 	if !rl.Enabled {
 		return nil
 	}
-	return NewRateLimiter(rl.QPS, rl.Burst)
+	lim := NewRateLimiter(rl.QPS, rl.Burst)
+	if rl.AutoBlock {
+		lim.SetAutoBlock(rl.BlockAfter, rl.BlockFor)
+	}
+	return lim
 }
 
 // BuildClientRouter compiles cfg.ClientGroups into a ClientRouter: each

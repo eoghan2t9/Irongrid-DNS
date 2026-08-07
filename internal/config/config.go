@@ -30,6 +30,7 @@ type Config struct {
 	Rewrites     []RewriteSpec   `yaml:"rewrites"`      // local DNS records (A/AAAA/CNAME)
 	ClientGroups []ClientGroup   `yaml:"client_groups"` // per-client blocking/upstream policy
 	RateLimit    RateLimitConfig `yaml:"rate_limit"`
+	GeoBlock     GeoBlockConfig  `yaml:"geo_block"`
 	DNSSEC       DNSSECConfig    `yaml:"dnssec"`
 }
 
@@ -68,6 +69,31 @@ type RateLimitConfig struct {
 	Enabled bool `yaml:"enabled"`
 	QPS     int  `yaml:"qps"`   // sustained queries/sec allowed per client IP
 	Burst   int  `yaml:"burst"` // short-burst allowance above qps
+	// AutoBlock adds a fail2ban-style layer on top of the token bucket: a
+	// client that trips the limit BlockAfter times (within BlockFor of each
+	// other) has every query dropped (UDP) or refused (TCP/DoT/DoH/DoQ)
+	// until the BlockFor cooldown elapses, instead of merely being throttled
+	// back to the allowed rate.
+	AutoBlock  bool          `yaml:"auto_block"`
+	BlockAfter int           `yaml:"block_after"` // violations required to trigger; default 3
+	BlockFor   time.Duration `yaml:"block_for"`   // cooldown; default 10m
+}
+
+// GeoBlockConfig blocks queries by the country of the client's source IP.
+// Country-to-CIDR data is fetched from ipverse/rir-ip (or a base_url
+// override) as per-country prefix lists, exactly like blocklists: one
+// "<CC>/ipv4_agg.txt" and one "<CC>/ipv6_agg.txt" per enabled country,
+// cached under the data dir and refreshed on demand.
+type GeoBlockConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Countries are ISO 3166-1 alpha-2 codes (uppercase), e.g. RU, CN, KP.
+	Countries []string `yaml:"countries"`
+	// Allowlist is a set of client IPs/CIDRs that are never geo-blocked.
+	Allowlist []string `yaml:"allowlist"`
+	// BaseURL overrides where per-country CIDR lists are fetched from; the
+	// country code and file are appended as "<CC>/ipv4_agg.txt" and
+	// "<CC>/ipv6_agg.txt". file:// paths are supported for local datasets.
+	BaseURL string `yaml:"base_url"`
 }
 
 // DNSSECConfig enables DNSSEC enforcement. Irongrid is a forwarding
@@ -258,10 +284,14 @@ func Default() *Config {
 			QuickTunnelURL: "http://localhost:8080",
 		},
 		RateLimit: RateLimitConfig{
-			Enabled: false,
-			QPS:     20,
-			Burst:   40,
+			Enabled:    false,
+			QPS:        20,
+			Burst:      40,
+			AutoBlock:  false,
+			BlockAfter: 3,
+			BlockFor:   10 * time.Minute,
 		},
+		GeoBlock: GeoBlockConfig{},
 		DNSSEC: DNSSECConfig{
 			Enabled:   false,
 			RequireAD: true,
@@ -458,6 +488,11 @@ func (c *Config) validate() error {
 			}
 		}
 	}
+	// auto_block is a layer on top of the token bucket — without the limiter
+	// there are no rejections to count, so it would silently never fire.
+	if c.RateLimit.AutoBlock && !c.RateLimit.Enabled {
+		return fmt.Errorf("rate_limit.auto_block requires rate_limit.enabled")
+	}
 	if c.RateLimit.Enabled {
 		if c.RateLimit.QPS < 1 {
 			return fmt.Errorf("rate_limit.qps must be >= 1 when rate_limit is enabled")
@@ -465,6 +500,31 @@ func (c *Config) validate() error {
 		if c.RateLimit.Burst < c.RateLimit.QPS {
 			return fmt.Errorf("rate_limit.burst must be >= rate_limit.qps")
 		}
+		if c.RateLimit.AutoBlock {
+			if c.RateLimit.BlockAfter < 1 {
+				return fmt.Errorf("rate_limit.block_after must be >= 1 when auto_block is enabled")
+			}
+			if c.RateLimit.BlockFor <= 0 {
+				return fmt.Errorf("rate_limit.block_for must be positive when auto_block is enabled")
+			}
+		}
+	}
+	for i, cc := range c.GeoBlock.Countries {
+		cc = strings.ToUpper(strings.TrimSpace(cc))
+		if len(cc) != 2 || cc[0] < 'A' || cc[0] > 'Z' || cc[1] < 'A' || cc[1] > 'Z' {
+			return fmt.Errorf("geo_block.countries[%d]: %q is not an ISO 3166-1 alpha-2 country code (e.g. RU, CN)", i, cc)
+		}
+		c.GeoBlock.Countries[i] = cc
+	}
+	for i, e := range c.GeoBlock.Allowlist {
+		if _, _, err := net.ParseCIDR(e); err != nil {
+			if net.ParseIP(e) == nil {
+				return fmt.Errorf("geo_block.allowlist[%d]: %q is not an IP or CIDR", i, e)
+			}
+		}
+	}
+	if u := c.GeoBlock.BaseURL; u != "" && !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "file://") {
+		return fmt.Errorf("geo_block.base_url must start with http://, https:// or file://")
 	}
 	return nil
 }
