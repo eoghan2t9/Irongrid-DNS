@@ -27,6 +27,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsserver"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/firewall"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/recursive"
@@ -74,8 +75,11 @@ type Handler struct {
 	// Geo is the country-data manager behind geo-blocking; nil when geo
 	// blocking was never enabled. RebuildGeo (re)loads country data and
 	// swaps the DNS handler's blocker; wired up by main, nil when
+	// unavailable. Firewall is the host-firewall manager that mirrors the
+	// blocked countries at the packet level (nftables/iptables); nil when
 	// unavailable.
 	Geo        *geoip.Manager
+	Firewall   *firewall.Manager
 	RebuildGeo func(cfg config.GeoBlockConfig) error
 
 	// lastInstalledVersion is set after a successful in-place update and
@@ -1143,12 +1147,20 @@ func (h *Handler) geoStatus(w http.ResponseWriter) {
 	if autoUpdate > 0 && !last.IsZero() {
 		next = last.Add(autoUpdate)
 	}
+	// Firewall status: the packet-level mirror of geo blocking. Only shown
+	// when main wired a firewall manager (always, in this build).
+	fw := map[string]any{"available": false}
+	if h.Firewall != nil {
+		backend, active := h.Firewall.Status()
+		fw = map[string]any{"available": true, "backend": backend, "active": active}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"enabled":      true,
 		"countries":    h.Geo.Status(),
 		"auto_update":  durationOrEmpty(autoUpdate),
 		"last_refresh": last,
 		"next_refresh": next,
+		"firewall":     fw,
 	})
 }
 

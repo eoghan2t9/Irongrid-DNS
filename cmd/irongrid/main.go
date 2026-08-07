@@ -27,6 +27,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsserver"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/firewall"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/installer"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
@@ -283,15 +284,39 @@ func main() {
 	// given config and hot-swaps the DNS handler's blocker: a network
 	// failure falls back to the last cached copy and only skips countries
 	// with neither, and an empty/disabled config uninstalls blocking.
-	geoMgr := geoip.NewManager(filepath.Join(*dataDir, "geo"), cfg.GeoBlock.BaseURL)
+	//
+	// The same blocked-country CIDR lists drive a host-firewall DROP of all
+	// new inbound traffic (not just DNS): when geo blocking is on, buildGeo
+	// programs the native firewall — nftables when present, otherwise
+	// iptables + ipset — with the blocked countries' ranges. Disabling geo
+	// (or clearing the country list) clears those rules again. buildGeo can
+	// run from boot, a manual refresh and the auto-refresh goroutine at the
+	// same time, but the firewall Manager serialises its own Apply/Clear.
+	geoDir := filepath.Join(*dataDir, "geo")
+	geoMgr := geoip.NewManager(geoDir, cfg.GeoBlock.BaseURL)
+	fwMgr := firewall.New()
 	apiHandler.Geo = geoMgr
+	apiHandler.Firewall = fwMgr
 	buildGeo := func(g config.GeoBlockConfig) error {
 		if !g.Enabled || len(g.Countries) == 0 {
 			handler.SetGeo(nil)
+			if err := fwMgr.Clear(); err != nil {
+				log.Printf("[firewall] clear: %v", err)
+			}
 			return nil
 		}
 		b, err := geoMgr.Refresh(ctx, g.Countries, g.Allowlist)
 		handler.SetGeo(b)
+		// Packet-level country blocking: rebuild the firewall rules from the
+		// freshly persisted CIDR lists. A failure here (e.g. no cached data
+		// yet, or no root) is logged and leaves the DNS-level REFUSED
+		// blocking in effect — buildGeo's own error (data fetch) is what
+		// the caller surfaces.
+		if backend, ferr := fwMgr.Apply(g.Countries, g.Allowlist, geoDir); ferr != nil {
+			log.Printf("[firewall] country rules not applied (%s): %v", backend, ferr)
+		} else {
+			log.Printf("[firewall] dropping inbound traffic from blocked countries via %s", backend)
+		}
 		return err
 	}
 	if err := buildGeo(cfg.GeoBlock); err != nil {

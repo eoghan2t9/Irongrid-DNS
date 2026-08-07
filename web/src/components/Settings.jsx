@@ -415,6 +415,20 @@ export default function Settings({ onSessionInvalidated }) {
             Next automatic refresh: {new Date(geoInfo.next_refresh).toLocaleString()}
           </p>
         )}
+        {geoInfo && geoInfo.firewall && geoInfo.firewall.available && (
+          <p className="dim small" style={{ marginTop: 8 }}>
+            Host firewall:{' '}
+            {geoInfo.firewall.active ? (
+              <strong>active</strong>
+            ) : (
+              <span className="error-text">rules inactive</span>
+            )}{' '}
+            ({geoInfo.firewall.backend || 'no backend'}) — all new inbound traffic from the blocked
+            countries is dropped at the packet level, not just DNS. Established connections and
+            allowlisted clients always pass. If inactive, check the service runs with root or
+            CAP_NET_ADMIN privileges.
+          </p>
+        )}
         <div className="quick-actions" style={{ marginTop: 8 }}>
           <button className="btn small" type="button" onClick={refreshGeo}>Refresh country data</button>
         </div>

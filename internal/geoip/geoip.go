@@ -1,9 +1,9 @@
 // Package geoip implements country-based blocking of DNS clients. Country
 // data comes from per-country CIDR lists (ipverse/rir-ip aggregates the five
-// RIR delegated databases into "<CC>/ipv4_agg.txt" + "<CC>/ipv6_agg.txt"
-// files), fetched and cached like blocklists — no accounts, no API keys and
-// no per-query network calls. Lookups are served from an in-memory range
-// table.
+// RIR delegated databases into "<cc>/ipv4-aggregated.txt" +
+// "<cc>/ipv6-aggregated.txt" files, lowercase country code), fetched and
+// cached like blocklists — no accounts, no API keys and no per-query
+// network calls. Lookups are served from an in-memory range table.
 package geoip
 
 import (

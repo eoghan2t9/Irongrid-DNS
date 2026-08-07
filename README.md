@@ -134,7 +134,7 @@ startup service (systemd / launchd / Windows task).
 | 🏠 **Local DNS records** | Answer a domain yourself (`nas.home → 192.168.1.10`) — A/AAAA/CNAME, exact or `*.subtree` wildcard, wins over blocklists and the cache |
 | 👪 **Per-client policy** | Groups matched by client CIDR/IP get their own blocklist subset, extra allow/block entries and (optionally) their own upstreams — first match wins, everyone else uses the global policy |
 | 🚦 **Rate limiting** | Per-client-IP token bucket guards against a compromised LAN device or amplification abuse on a public listener, with fail2ban-style **auto-block**: repeat offenders are refused entirely for a cooldown and listed in the dashboard with one-click unblock |
-| 🌍 **Geo blocking** | Refuse queries from whole countries — per-country CIDR data (ipverse/rir-ip) fetched automatically, no account or API key, with an IP/CIDR allowlist |
+| 🌍 **Geo blocking** | Refuse queries from whole countries — per-country CIDR data (ipverse/rir-ip) fetched automatically, no account or API key, with an IP/CIDR allowlist. The same country lists are also installed into the **host firewall** (nftables, or iptables+ipset) so all new inbound traffic from blocked countries is dropped at the packet level |
 | 🔒 **DNSSEC** | Sets the DO bit and can require the upstream's AD bit before trusting an answer — a forwarder-model validation (like Pi-hole/AdGuard Home/dnsmasq), not a local root-of-trust chain |
 
 ## Architecture
@@ -350,7 +350,7 @@ written automatically on first launch. Key options:
 | `rewrites` | Local DNS records (A/AAAA/CNAME) — answered directly, ahead of blocklists and the cache |
 | `client_groups` | Per-client policy: CIDR/IP-matched groups with their own blocklist subset, allow/block entries and (optional) upstream override |
 | `rate_limit` | Per-client-IP token bucket: `enabled`, `qps` (sustained), `burst` (must be ≥ `qps`), plus `auto_block` (requires `enabled`), `block_after` (violations), `block_for` (cooldown) for the fail2ban-style auto-block |
-| `geo_block` | Country blocking: `enabled`, `countries` (ISO 3166-1 alpha-2, e.g. `RU`, `CN`), `allowlist` (client IPs/CIDRs that always pass), optional `base_url` override for the CIDR data source, and `auto_update` (how often the country lists re-fetch; default `168h`, `0` = never) |
+| `geo_block` | Country blocking: `enabled`, `countries` (ISO 3166-1 alpha-2, e.g. `RU`, `CN`), `allowlist` (client IPs/CIDRs that always pass), optional `base_url` override for the CIDR data source, and `auto_update` (how often the country lists re-fetch; default `168h`, `0` = never). When enabled, the same country CIDRs are installed into the **host firewall** (nftables when available, otherwise iptables + ipset) as a DROP on all new inbound traffic — run Irongrid as root (or with CAP_NET_ADMIN) for the firewall rules |
 | `dnssec` | `enabled` sets the DO bit upstream; `require_ad` rejects an answer without the upstream's AD bit as SERVFAIL — trusts an *encrypted* validating upstream rather than validating locally |
 
 ## Recursive resolution (`recursive://`)
@@ -459,8 +459,8 @@ POST /api/tools/subdomains  enumerate a domain's subdomains via crt.sh and flag 
 POST /api/cache/flush       clear Dragonfly cache
 GET  /api/rate/blocked      clients currently under an auto-block
 POST /api/rate/unblock      lift an auto-blocked client early
-GET  /api/geo/status        per-country geo data status (ranges, last update, errors)
-POST /api/geo/refresh       re-download country CIDR data and swap the blocker
+GET  /api/geo/status        per-country geo data status (ranges, last update, errors) + host-firewall state (backend, active)
+POST /api/geo/refresh       re-download country CIDR data, swap the blocker, and rebuild the host-firewall rules
 GET/POST /api/tunnel/*      tunnel lifecycle + logs
 GET/PUT /api/config         read / update the full config (live-apply + restart notes)
 POST /api/config/reload     apply listener/cache/TLS/upstream changes in-process (no restart)
