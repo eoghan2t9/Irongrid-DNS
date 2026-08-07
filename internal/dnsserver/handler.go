@@ -291,17 +291,35 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	//    that asked for it is auto-blocked — persisted across restarts and
 	//    pushed into the host firewall so its subsequent connections are
 	//    dropped at the packet level, not just refused at the DNS layer.
+	//    Fail closed on trust: a honeypot hit may only auto-block its
+	//    querying client when it arrived over a known connection-oriented
+	//    transport (TCP/DoT/DoH/DoQ), which required a real handshake, so
+	//    the source address is genuine. A plain-UDP source can be trivially
+	//    spoofed — trusting it would let anyone permanently block an
+	//    innocent victim with a single spoofed packet — and an unrecognised
+	//    transport is treated the same way. Anything else is refused but
+	//    never auto-blocked: the same trust model the rate limiter uses for
+	//    its silent-drop/REFUSED split.
 	if ipbanner != nil && ipbanner.LookupHoneypot(qname) {
-		if client != "" {
+		trusted := proto == "tcp" || proto == "dot" || proto == "doh" || proto == "doq"
+		// Reason records why no block happened, so the log stays truthful
+		// for spoofed-UDP probes and for trusted transports with no
+		// identifiable client.
+		reason := "honeypot-domain-udp"
+		if proto != "udp" {
+			reason = "honeypot-domain-refused"
+		}
+		if client != "" && trusted {
 			if err := ipbanner.Block(client); err != nil {
 				log.Printf("[geo] honeypot: blocking client %s: %v", client, err)
 			}
+			reason = "honeypot-domain"
 		}
 		h.Stats.Blocked.Add(1)
 		refused := new(dns.Msg)
 		refused.SetReply(r)
 		refused.Rcode = dns.RcodeRefused
-		h.record(client, qname, q, "honeypot", "honeypot-domain", "", start, refused)
+		h.record(client, qname, q, "honeypot", reason, "", start, refused)
 		w.WriteMsg(refused)
 		return
 	}

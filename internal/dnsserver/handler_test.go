@@ -288,7 +288,10 @@ func TestHandlerGeoBlockedClientRefusedEveryTransport(t *testing.T) {
 // blocked clients (configured IPs/CIDRs), and that querying a honeypot
 // domain auto-blocks the client (firing the banner's OnBlock callback so the
 // firewall can drop it) and refuses the query — after which the client is
-// refused on every domain.
+// refused on every domain. Auto-blocking only fires over connection-oriented
+// transports: a spoofable UDP source must never be able to permanently block
+// an innocent victim (see the serve() comment), so UDP honeypot queries are
+// refused but leave the client unblocked.
 func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 	addr := startUDPTestServer(t, "1.1.1.1", 0)
 	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
@@ -309,11 +312,29 @@ func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 	if blocked.msg == nil || blocked.msg.Rcode != dns.RcodeRefused {
 		t.Fatalf("banner-blocked client: expected REFUSED, got %v", blocked.msg)
 	}
-	// A honeypot query auto-blocks its client and is itself refused.
+	// A honeypot query over UDP is refused but must NOT auto-block: UDP
+	// sources can be spoofed, so trusting one would let an attacker block an
+	// innocent victim with a single spoofed packet.
+	udpClient := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
+	h.ServeDNS(udpClient, q("trap.example.com."))
+	if udpClient.msg == nil || udpClient.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("UDP honeypot query: expected REFUSED, got %v", udpClient.msg)
+	}
+	if len(autoBlocked) != 0 {
+		t.Fatalf("UDP honeypot query auto-blocked the client: %v", autoBlocked)
+	}
+	// The UDP queryer stays unblocked: a normal query still resolves.
+	udpAgain := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
+	h.ServeDNS(udpAgain, q("example.com."))
+	if udpAgain.msg == nil || len(udpAgain.msg.Answer) == 0 {
+		t.Fatalf("UDP honeypot queryer should still resolve normal domains, got %v", udpAgain.msg)
+	}
+	// The same honeypot query over TCP (a real handshake, so the source is
+	// genuine) auto-blocks the client and is itself refused.
 	client := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
-	h.ServeDNS(client, q("trap.example.com."))
+	h.ServeDNSWithProto(client, q("trap.example.com."), "tcp")
 	if client.msg == nil || client.msg.Rcode != dns.RcodeRefused {
-		t.Fatalf("honeypot query: expected REFUSED, got %v", client.msg)
+		t.Fatalf("TCP honeypot query: expected REFUSED, got %v", client.msg)
 	}
 	if len(autoBlocked) != 1 || autoBlocked[0] != "203.0.113.9" {
 		t.Fatalf("OnBlock fired %v, want [203.0.113.9]", autoBlocked)

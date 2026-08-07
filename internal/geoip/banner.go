@@ -112,7 +112,10 @@ func (b *Banner) LookupHoneypot(qname string) bool {
 // Block auto-blocks a client IP after a honeypot hit: it is added to the
 // in-memory set, persisted, and OnBlock is invoked so the firewall can drop
 // it immediately. Bare IPs only; CIDRs are not auto-added. Already-blocked
-// entries are a no-op (returns nil). Unblockable via Unblock.
+// entries are a no-op (returns nil). Unblockable via Unblock. The caller
+// decides whether the source is trustworthy: the DNS handler only auto-blocks
+// clients over connection-oriented transports (TCP/DoT/DoH/DoQ), never a
+// spoofable UDP source.
 func (b *Banner) Block(ip string) error {
 	parsed := net.ParseIP(strings.TrimSpace(ip))
 	if parsed == nil {

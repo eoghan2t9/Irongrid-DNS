@@ -152,10 +152,13 @@ geo_block:
   # ips: []                  # always-blocked client IPs/CIDRs, e.g. known
                               # proxy-exit ranges like "38.11.0.0/17" — refused
                               # by DNS and dropped by the firewall
-  # honeypots: []            # trap domains: any client that queries one is
-                              # auto-blocked (persisted to
+  # honeypots: []            # trap domains: any client that queries one over
+                              # a connection-oriented transport (TCP/DoT/DoH/
+                              # DoQ) is auto-blocked (persisted to
                               # data/geo/blocked-ips.txt) and dropped at the
-                              # firewall; unblock via the dashboard
+                              # firewall; unblock via the dashboard. UDP
+                              # queries are refused but never auto-block —
+                              # UDP sources can be spoofed
   allowlist: []              # client IPs/CIDRs that are never geo-blocked
   # base_url: ""             # override the CIDR data source (default
                               # ipverse/rir-ip; file:// paths supported)

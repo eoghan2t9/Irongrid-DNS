@@ -390,7 +390,7 @@ export default function Settings({ onSessionInvalidated }) {
           {toggle('Enable geo blocking', 'geo_block.enabled')}
           {textarea('Blocked countries (ISO 3166-1 alpha-2)', 'geo_block.countries', 'one per line, e.g. RU, CN, KP')}
           {textarea('Blocked client IPs / CIDRs', 'geo_block.ips', 'always refused regardless of country — e.g. known proxy-exit ranges like 38.11.0.0/17; feeds DNS and the host firewall')}
-          {textarea('Honeypot domains', 'geo_block.honeypots', 'one per line — any client that queries one is blocked permanently (persisted, dropped at the firewall) until you unblock it below')}
+          {textarea('Honeypot domains', 'geo_block.honeypots', 'one per line — any client that queries one over TCP/DoT/DoH/DoQ is blocked permanently (persisted, dropped at the firewall) until you unblock it below; spoofable UDP queries are refused but never auto-block')}
           {textarea('Allowlist (IPs / CIDRs)', 'geo_block.allowlist', 'clients that are never geo-blocked')}
           {text('Data source URL (optional)', 'geo_block.base_url', 'defaults to ipverse/rir-ip; appends &lt;cc&gt;/ipv4-aggregated.txt and &lt;cc&gt;/ipv6-aggregated.txt (lowercase codes)')}
           {field('Auto-refresh country data', 'how often the per-country CIDR lists re-fetch themselves', (
