@@ -54,7 +54,6 @@ export default function QueryLog() {
             <option value="blocked">Blocked</option>
             <option value="geo-blocked">Geo-blocked</option>
             <option value="ip-blocked">IP-blocked</option>
-            <option value="honeypot">Honeypot</option>
             <option value="cached">Cached</option>
             <option value="error">Errors</option>
             <option value="rewrite">Local DNS</option>

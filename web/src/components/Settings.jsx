@@ -17,7 +17,8 @@ const empty = () => ({
   rewrites: [],
   client_groups: [],
   rate_limit: { enabled: false, qps: 20, burst: 40, auto_block: false, block_after: 3, block_for: '10m' },
-  geo_block: { enabled: false, countries: [], allowlist: [], ips: [], honeypots: [], base_url: '', auto_update: '168h' },
+  geo_block: { enabled: false, countries: [], allowlist: [], ips: [], honeypots: [], base_url: '', auto_update: '168h', trust_udp: false },
+  abuse: { abuseipdb_key: '' },
   dnssec: { enabled: false, require_ad: true },
 })
 
@@ -150,6 +151,16 @@ export default function Settings({ onSessionInvalidated }) {
     }
   }
 
+  const reportAbuse = async (ip) => {
+    if (!window.confirm(`Report ${ip} to AbuseIPDB (DDoS category)? Uses the AbuseIPDB key from the Abuse reporting section above.`)) return
+    try {
+      const r = await api.abuseReport(ip)
+      toast(`Reported ${ip} to AbuseIPDB — abuse confidence ${r.abuse_confidence_score ?? 'n/a'}.`)
+    } catch (e) {
+      toast('Report failed: ' + e.message, 'error')
+    }
+  }
+
   const unblockHoney = async (ip) => {
     try {
       await api.geoUnblock(ip)
@@ -157,6 +168,21 @@ export default function Settings({ onSessionInvalidated }) {
       await loadAbuse()
     } catch (e) {
       toast('Unblock failed: ' + e.message, 'error')
+    }
+  }
+
+  // blockNet permanently adds a honeypot-hit client (or its /24 or /64
+  // network) to geo_block.ips — the config-level block list, enforced by DNS
+  // REFUSED and the host firewall at the packet level.
+  const blockNet = async (ip, prefix) => {
+    const label = prefix ? `${ip}/${prefix}` : ip
+    if (!window.confirm(`Permanently block ${label}? It is added to geo_block.ips (config, survives restarts) and dropped at the host firewall. Remove it under Blocked client IPs in Settings to undo.`)) return
+    try {
+      await api.geoBlockIP(ip, prefix)
+      toast(`Blocked ${label}`)
+      await loadAbuse()
+    } catch (e) {
+      toast('Block failed: ' + e.message, 'error')
     }
   }
 
@@ -390,7 +416,8 @@ export default function Settings({ onSessionInvalidated }) {
           {toggle('Enable geo blocking', 'geo_block.enabled')}
           {textarea('Blocked countries (ISO 3166-1 alpha-2)', 'geo_block.countries', 'one per line, e.g. RU, CN, KP')}
           {textarea('Blocked client IPs / CIDRs', 'geo_block.ips', 'always refused regardless of country — e.g. known proxy-exit ranges like 38.11.0.0/17; feeds DNS and the host firewall')}
-          {textarea('Honeypot domains', 'geo_block.honeypots', 'one per line — any client that queries one over TCP/DoT/DoH/DoQ is blocked permanently (persisted, dropped at the firewall) until you unblock it below; spoofable UDP queries are refused but never auto-block')}
+          {textarea('Honeypot domains', 'geo_block.honeypots', 'one per line — a trap matches the domain AND every subdomain under it (DDoS floods randomise the first label), so any client that queries it over TCP/DoT/DoH/DoQ is blocked permanently (persisted, dropped at the firewall) until you unblock it below; spoofable UDP queries are refused but never auto-block; trap traffic is not written to the query log')}
+          {toggle('Trust UDP honeypot hits (auto-block UDP sources)', 'geo_block.trust_udp')}
           {textarea('Allowlist (IPs / CIDRs)', 'geo_block.allowlist', 'clients that are never geo-blocked')}
           {text('Data source URL (optional)', 'geo_block.base_url', 'defaults to ipverse/rir-ip; appends &lt;cc&gt;/ipv4-aggregated.txt and &lt;cc&gt;/ipv6-aggregated.txt (lowercase codes)')}
           {field('Auto-refresh country data', 'how often the per-country CIDR lists re-fetch themselves', (
@@ -407,6 +434,16 @@ export default function Settings({ onSessionInvalidated }) {
             ⚠ Geo blocking is on but nothing is configured — add countries, blocked IPs, or honeypot domains above, save, then refresh.
           </p>
         )}
+        {!deepGet('geo_block.enabled', false) && ((deepGet('geo_block.honeypots', []) || []).length > 0 || (deepGet('geo_block.ips', []) || []).length > 0) && (
+          <p className="dim small" style={{ marginTop: 8, color: 'var(--amber)' }}>
+            ⚠ Honeypot domains / blocked IPs are configured but <strong>Enable geo blocking</strong> is off — nothing is enforced until you turn it on and save.
+          </p>
+        )}
+        {deepGet('geo_block.trust_udp', false) && (
+          <p className="dim small" style={{ marginTop: 8, color: 'var(--amber)' }}>
+            ⚠ UDP sources can be spoofed — with this on, a spoofed honeypot packet can permanently block an innocent victim. Only enable on a trusted network where client addresses are genuine.
+          </p>
+        )}
         <h4 style={{ margin: '16px 0 10px' }}>Honeypot-blocked clients</h4>
         {honeyBlocked.length === 0 ? (
           <p className="dim small">No clients blocked yet — honeypot-domain queries auto-block their client here.</p>
@@ -415,6 +452,9 @@ export default function Settings({ onSessionInvalidated }) {
             {honeyBlocked.map((ip) => (
               <div className="list-row" key={ip}>
                 <span className="mono">{ip}</span>
+                <button className="btn small" type="button" onClick={() => reportAbuse(ip)}>Report</button>
+                <button className="btn small" type="button" onClick={() => blockNet(ip, 0)}>Block IP</button>
+                <button className="btn small" type="button" onClick={() => blockNet(ip, ip.includes(':') ? 64 : 24)}>Block /{ip.includes(':') ? 64 : 24}</button>
                 <button className="btn small danger" type="button" onClick={() => unblockHoney(ip)}>Unblock</button>
               </div>
             ))}
@@ -458,6 +498,29 @@ export default function Settings({ onSessionInvalidated }) {
         )}
         <div className="quick-actions" style={{ marginTop: 8 }}>
           <button className="btn small" type="button" onClick={refreshGeo}>Refresh country data</button>
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>Abuse reporting</h3>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          One-click reporting of honeypot-confirmed attackers to{' '}
+          <strong>AbuseIPDB</strong> (free account at abuseipdb.com; DDoS category).
+          Reports are sent from the server using this key, which is stored in{' '}
+          <code>irongrid.yaml</code>. No key is needed for the{' '}
+          <strong>Export CSV</strong> and <strong>ⓘ ASN</strong> actions on the
+          dashboard (those use free RIPEstat lookups and your own abuse desks).
+        </p>
+        <div className="form-grid">
+          {field('AbuseIPDB API key', 'free tier: 1,000 checks/reports per day, one report per IP per 15 min', (
+            <input
+              className="input mono"
+              type="password"
+              value={deepGet('abuse.abuseipdb_key', '')}
+              onChange={(e) => set('abuse.abuseipdb_key', e.target.value)}
+              autoComplete="new-password"
+            />
+          ))}
         </div>
       </div>
 

@@ -29,6 +29,10 @@ type Stats struct {
 	Allowed    atomic.Int64
 	Cached     atomic.Int64
 	Errors     atomic.Int64
+	// Honeypot counts refused trap-domain hits (attack traffic). It is not
+	// part of the query log — honeypot hits are never logged — so this is
+	// the only place an active flood remains observable.
+	Honeypot   atomic.Int64
 	ByProtocol map[string]*atomic.Int64
 }
 
@@ -57,6 +61,12 @@ type Handler struct {
 	RateLimiter     *RateLimiter     // nil disables rate limiting
 	Geo             *geoip.Blocker   // nil disables geo-blocking
 	IPBanner        *geoip.Banner    // nil disables IP/honeypot blocking
+	// TrustUDP opt-in: when true, a honeypot hit over plain UDP auto-blocks
+	// its source address too. Off by default — a UDP source can be spoofed,
+	// so enabling this lets a spoofing attacker permanently block an
+	// innocent victim; only meaningful on a trusted network where clients
+	// are real (the flag does nothing unless an IP banner is installed).
+	TrustUDP        bool
 	DNSSECEnabled   bool
 	DNSSECRequireAD bool
 
@@ -170,6 +180,14 @@ func (h *Handler) SetIPBanner(b *geoip.Banner) {
 	h.IPBanner = b
 }
 
+// SetTrustUDP hot-swaps the opt-in that lets plain-UDP honeypot hits
+// auto-block their source (see TrustUDP's doc comment on the struct).
+func (h *Handler) SetTrustUDP(on bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.TrustUDP = on
+}
+
 // CurrentIPBanner returns the active banner (nil when disabled), for the
 // API's blocked-list/unblock endpoints.
 func (h *Handler) CurrentIPBanner() *geoip.Banner {
@@ -229,6 +247,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	rateLimiter := h.RateLimiter
 	geo := h.Geo
 	ipbanner := h.IPBanner
+	trustUDP := h.TrustUDP
 	dnssecEnabled := h.DNSSECEnabled
 	dnssecRequireAD := h.DNSSECRequireAD
 	h.mu.RUnlock()
@@ -287,39 +306,39 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			return
 		}
 	}
-	// 0.6 Honeypot: a configured trap domain is never answered. The client
-	//    that asked for it is auto-blocked — persisted across restarts and
-	//    pushed into the host firewall so its subsequent connections are
-	//    dropped at the packet level, not just refused at the DNS layer.
-	//    Fail closed on trust: a honeypot hit may only auto-block its
-	//    querying client when it arrived over a known connection-oriented
-	//    transport (TCP/DoT/DoH/DoQ), which required a real handshake, so
-	//    the source address is genuine. A plain-UDP source can be trivially
-	//    spoofed — trusting it would let anyone permanently block an
-	//    innocent victim with a single spoofed packet — and an unrecognised
-	//    transport is treated the same way. Anything else is refused but
-	//    never auto-blocked: the same trust model the rate limiter uses for
-	//    its silent-drop/REFUSED split.
+	// 0.6 Honeypot: a configured trap domain (and everything under it) is
+	// never answered. The client that asked for it is auto-blocked —
+	// persisted across restarts and pushed into the host firewall so its
+	// subsequent connections are dropped at the packet level, not just
+	// refused at the DNS layer. Honeypot traffic is attack traffic, so it
+	// is not written to the query log either — the dashboard's blocked-
+	// clients card still surfaces every auto-blocked client via
+	// /api/geo/blocked, and the blocked counter below stays live.
+	// Fail closed on trust: a honeypot hit may only auto-block its
+	// querying client when it arrived over a known connection-oriented
+	// transport (TCP/DoT/DoH/DoQ), which required a real handshake, so
+	// the source address is genuine. A plain-UDP source can be trivially
+	// spoofed — trusting it would let anyone permanently block an
+	// innocent victim with a single spoofed packet — and an unrecognised
+	// transport is treated the same way. Anything else is refused but
+	// never auto-blocked, unless the operator explicitly opted into
+	// trusting UDP sources (geo_block.trust_udp) on a network where
+	// clients are real: the same trust model the rate limiter uses for
+	// its silent-drop/REFUSED split.
 	if ipbanner != nil && ipbanner.LookupHoneypot(qname) {
+		// Connection-oriented transports (a real handshake) always auto-block;
+		// plain UDP only when the operator opted in via trust_udp.
 		trusted := proto == "tcp" || proto == "dot" || proto == "doh" || proto == "doq"
-		// Reason records why no block happened, so the log stays truthful
-		// for spoofed-UDP probes and for trusted transports with no
-		// identifiable client.
-		reason := "honeypot-domain-udp"
-		if proto != "udp" {
-			reason = "honeypot-domain-refused"
-		}
-		if client != "" && trusted {
+		if client != "" && (trusted || trustUDP) {
 			if err := ipbanner.Block(client); err != nil {
 				log.Printf("[geo] honeypot: blocking client %s: %v", client, err)
 			}
-			reason = "honeypot-domain"
 		}
 		h.Stats.Blocked.Add(1)
+		h.Stats.Honeypot.Add(1)
 		refused := new(dns.Msg)
 		refused.SetReply(r)
 		refused.Rcode = dns.RcodeRefused
-		h.record(client, qname, q, "honeypot", reason, "", start, refused)
 		w.WriteMsg(refused)
 		return
 	}

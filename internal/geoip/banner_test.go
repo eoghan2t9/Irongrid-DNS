@@ -39,8 +39,19 @@ func TestBannerHoneypotAutoBlockPersistsAndReloads(t *testing.T) {
 	if !b.LookupHoneypot("trap.example.com") {
 		t.Fatal("honeypot domain must be found (trailing dot stripped, lowercased)")
 	}
-	if b.LookupHoneypot("sub.trap.example.com") {
-		t.Error("honeypot lookup must be exact-match, not prefix")
+	// Subtree match: DDoS floods randomise the label under the trap, so a
+	// configured trap must catch its subdomains too.
+	if !b.LookupHoneypot("sub.trap.example.com") {
+		t.Error("honeypot must match subdomains of the trap domain")
+	}
+	if !b.LookupHoneypot("a.b.trap.example.com") {
+		t.Error("honeypot must match deep subdomains of the trap domain")
+	}
+	// Unrelated names must not match, and the bare TLD must never be tested.
+	for _, name := range []string{"example.com", "com", "trap.example.net", "trap.com"} {
+		if b.LookupHoneypot(name) {
+			t.Errorf("%q must not match the trap", name)
+		}
 	}
 
 	if err := b.Block("38.11.106.3"); err != nil {

@@ -102,11 +102,32 @@ func (b *Banner) Blocked(clientIP string) bool {
 }
 
 // LookupHoneypot reports whether qname (lowercase, no trailing dot) is a
-// configured honeypot domain. Exact match only.
+// configured honeypot domain or falls under one: a trap configured as
+// "trap.example.com" also catches "sub.trap.example.com". Subtree matching
+// matters because DDoS floods almost always randomise the label under the
+// attacked domain (x1.example.com, a3b9.example.com, …), and the trap must
+// refuse those before they ever reach an upstream. The bare top-level label
+// (e.g. "com") is never tested, so a single-label trap can't swallow an
+// entire TLD.
 func (b *Banner) LookupHoneypot(qname string) bool {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.honeypots[qname]
+	if b.honeypots[qname] {
+		return true
+	}
+	// Walk parent suffixes (Go string slicing, zero allocation) and stop
+	// before the bare top-level label, mirroring the blocklist engine's
+	// ancestor walk.
+	lastDot := strings.LastIndexByte(qname, '.')
+	for i := 0; i < lastDot; i++ {
+		if qname[i] != '.' {
+			continue
+		}
+		if b.honeypots[qname[i+1:]] {
+			return true
+		}
+	}
+	return false
 }
 
 // Block auto-blocks a client IP after a honeypot hit: it is added to the

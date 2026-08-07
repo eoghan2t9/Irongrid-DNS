@@ -152,17 +152,37 @@ geo_block:
   # ips: []                  # always-blocked client IPs/CIDRs, e.g. known
                               # proxy-exit ranges like "38.11.0.0/17" — refused
                               # by DNS and dropped by the firewall
-  # honeypots: []            # trap domains: any client that queries one over
-                              # a connection-oriented transport (TCP/DoT/DoH/
+  # honeypots: []            # trap domains: any client that queries one —
+                              # or any subdomain under it, since floods
+                              # randomise the first label — over a
+                              # connection-oriented transport (TCP/DoT/DoH/
                               # DoQ) is auto-blocked (persisted to
                               # data/geo/blocked-ips.txt) and dropped at the
                               # firewall; unblock via the dashboard. UDP
                               # queries are refused but never auto-block —
-                              # UDP sources can be spoofed
+                              # UDP sources can be spoofed. Trap traffic is
+                              # not written to the query log. Requires
+                              # geo_block.enabled to take effect
+  # trust_udp: false          # opt-in: auto-block the source of plain-UDP
+                              # honeypot hits too. OFF by default — UDP
+                              # sources can be spoofed, so enabling this
+                              # lets a spoofing attacker permanently block
+                              # an innocent victim; only for trusted networks
   allowlist: []              # client IPs/CIDRs that are never geo-blocked
   # base_url: ""             # override the CIDR data source (default
                               # ipverse/rir-ip; file:// paths supported)
   auto_update: 168h          # how often country data re-fetches (0 = never)
+
+# Free threat-intel integrations for reporting the attacker IPs Irongrid
+# blocks (see the Blocked clients card on the dashboard).
+abuse:
+  # abuseipdb_key: ""        # AbuseIPDB API key (free account at
+                              # abuseipdb.com) — enables one-click reporting
+                              # of honeypot-confirmed attackers (DDoS
+                              # category) from the dashboard. Free tier:
+                              # 1,000 checks/reports per day, one report per
+                              # IP per 15 min. The CSV export and ⓘ ASN
+                              # lookups (free RIPEstat) need no key.
 
 # DNSSEC: Irongrid is a forwarding resolver — like Pi-hole, AdGuard Home and
 # dnsmasq, it trusts an upstream that already validates rather than building

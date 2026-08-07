@@ -3,6 +3,7 @@ package dnsserver
 import (
 	"context"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
 
@@ -339,6 +341,26 @@ func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 	if len(autoBlocked) != 1 || autoBlocked[0] != "203.0.113.9" {
 		t.Fatalf("OnBlock fired %v, want [203.0.113.9]", autoBlocked)
 	}
+	// Subdomain floods are the classic DDoS shape: a trap configured as
+	// "trap.example.com" must catch random labels under it too, auto-blocking
+	// the client over a real handshake.
+	sub := &fakeWriter{ip: net.ParseIP("198.51.100.42")}
+	h.ServeDNSWithProto(sub, q("rand-9f2a.trap.example.com."), "tcp")
+	if sub.msg == nil || sub.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("TCP subdomain honeypot query: expected REFUSED, got %v", sub.msg)
+	}
+	if len(autoBlocked) != 2 || autoBlocked[1] != "198.51.100.42" {
+		t.Fatalf("OnBlock fired %v, want [203.0.113.9 198.51.100.42]", autoBlocked)
+	}
+	// Subdomain over UDP is refused but never auto-blocks (spoofable source).
+	udpSub := &fakeWriter{ip: net.ParseIP("198.51.100.99")}
+	h.ServeDNS(udpSub, q("rand-7e1a.trap.example.com."))
+	if udpSub.msg == nil || udpSub.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("UDP subdomain honeypot query: expected REFUSED, got %v", udpSub.msg)
+	}
+	if len(autoBlocked) != 2 {
+		t.Fatalf("UDP subdomain honeypot query auto-blocked the client: %v", autoBlocked)
+	}
 	// The auto-blocked client is now refused on a normal domain too.
 	again := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
 	h.ServeDNS(again, q("example.com."))
@@ -350,6 +372,95 @@ func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 	h.ServeDNS(ok, q("example.com."))
 	if ok.msg == nil || len(ok.msg.Answer) == 0 {
 		t.Fatalf("unrelated client should get a normal answer, got %v", ok.msg)
+	}
+}
+
+// TestHandlerHoneypotNotLogged verifies that honeypot hits — the apex and
+// random subdomains under the trap — are never written to the query log, while
+// a normal query is logged as usual. Honeypot traffic is attack traffic; the
+// dashboard surfaces auto-blocked clients via /api/geo/blocked instead.
+func TestHandlerHoneypotNotLogged(t *testing.T) {
+	addr := startUDPTestServer(t, "1.1.1.1", 0)
+	ql, err := querylog.New(filepath.Join(t.TempDir(), "q.db"), 30, 0)
+	if err != nil {
+		t.Fatalf("querylog: %v", err)
+	}
+	defer ql.Close()
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, ql, "nxdomain", 600, 5*time.Second)
+	banner := geoip.NewBanner("", nil, []string{"trap.example.com"})
+	h.SetIPBanner(banner)
+
+	q := func(name string) *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion(name, dns.TypeA)
+		return m
+	}
+	// Honeypot hits (apex over UDP, random subdomain over UDP) are refused
+	// and must not reach the log.
+	for _, name := range []string{"trap.example.com.", "rand-9f2a.trap.example.com."} {
+		fw := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
+		h.ServeDNS(fw, q(name))
+		if fw.msg == nil || fw.msg.Rcode != dns.RcodeRefused {
+			t.Fatalf("honeypot query %s: expected REFUSED, got %v", name, fw.msg)
+		}
+	}
+	// A normal query is served and logged as usual.
+	ok := &fakeWriter{}
+	h.ServeDNS(ok, q("example.com."))
+	if ok.msg == nil || len(ok.msg.Answer) == 0 {
+		t.Fatalf("control query failed: %v", ok.msg)
+	}
+
+	// The async log writer flushes on a 100ms ticker; poll briefly.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := ql.Query(context.Background(), 100, 0, "", "", "")
+		if err != nil {
+			t.Fatalf("query log read: %v", err)
+		}
+		if len(entries) == 1 && entries[0].Domain == "example.com" {
+			return // only the control query was logged
+		}
+		if len(entries) > 1 || (len(entries) == 1 && entries[0].Domain != "example.com") {
+			t.Fatalf("honeypot traffic reached the query log: %+v", entries)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("control query never appeared in the log")
+}
+
+// TestHandlerHoneypotTrustUDP verifies the opt-in trust_udp flag: normally a
+// plain-UDP honeypot hit is refused but never auto-blocks its source (UDP can
+// be spoofed, so trusting it would let an attacker block an innocent victim).
+// With TrustUDP set, the UDP source is auto-blocked too — an operator choice
+// for trusted networks.
+func TestHandlerHoneypotTrustUDP(t *testing.T) {
+	addr := startUDPTestServer(t, "1.1.1.1", 0)
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
+	banner := geoip.NewBanner("", nil, []string{"trap.example.com"})
+	var autoBlocked []string
+	banner.OnBlock = func(ip string) { autoBlocked = append(autoBlocked, ip) }
+	h.SetIPBanner(banner)
+	h.SetTrustUDP(true)
+
+	q := func(name string) *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion(name, dns.TypeA)
+		return m
+	}
+	fw := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
+	h.ServeDNS(fw, q("trap.example.com."))
+	if fw.msg == nil || fw.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("UDP honeypot query with trust_udp: expected REFUSED, got %v", fw.msg)
+	}
+	if len(autoBlocked) != 1 || autoBlocked[0] != "203.0.113.9" {
+		t.Fatalf("trust_udp OnBlock fired %v, want [203.0.113.9]", autoBlocked)
+	}
+	// The auto-blocked client is now refused on a normal domain too.
+	again := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
+	h.ServeDNS(again, q("example.com."))
+	if again.msg == nil || again.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("trust_udp auto-blocked client on a normal domain: expected REFUSED, got %v", again.msg)
 	}
 }
 

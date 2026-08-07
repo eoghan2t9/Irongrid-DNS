@@ -197,6 +197,14 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.geoBlocked(w)
 	case len(parts) == 2 && parts[0] == "geo" && parts[1] == "unblock" && r.Method == http.MethodPost:
 		h.geoUnblock(w, r)
+	case len(parts) == 2 && parts[0] == "geo" && parts[1] == "blockip" && r.Method == http.MethodPost:
+		h.geoBlockIP(w, r)
+	case len(parts) == 2 && parts[0] == "abuse" && parts[1] == "report" && r.Method == http.MethodPost:
+		h.abuseReport(w, r)
+	case len(parts) == 2 && parts[0] == "abuse" && parts[1] == "export" && r.Method == http.MethodGet:
+		h.abuseExport(w)
+	case len(parts) == 2 && parts[0] == "abuse" && parts[1] == "asn" && r.Method == http.MethodPost:
+		h.abuseASN(w, r)
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 	}
@@ -264,11 +272,12 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"query": stats,
 		"counters": map[string]int64{
-			"total":   h.DNS.Stats.Total.Load(),
-			"blocked": h.DNS.Stats.Blocked.Load(),
-			"allowed": h.DNS.Stats.Allowed.Load(),
-			"cached":  h.DNS.Stats.Cached.Load(),
-			"errors":  h.DNS.Stats.Errors.Load(),
+			"total":    h.DNS.Stats.Total.Load(),
+			"blocked":  h.DNS.Stats.Blocked.Load(),
+			"allowed":  h.DNS.Stats.Allowed.Load(),
+			"cached":   h.DNS.Stats.Cached.Load(),
+			"errors":   h.DNS.Stats.Errors.Load(),
+			"honeypot": h.DNS.Stats.Honeypot.Load(),
 		},
 		"protocol": proto,
 		"filter":   h.Engine.Stats(),
@@ -606,6 +615,7 @@ type configPayload struct {
 	ClientGroups []clientGroupPayload `json:"client_groups"`
 	RateLimit    rateLimitPayload     `json:"rate_limit"`
 	GeoBlock     geoBlockPayload      `json:"geo_block"`
+	Abuse        abusePayload         `json:"abuse"`
 	DNSSEC       dnssecPayload        `json:"dnssec"`
 }
 
@@ -644,6 +654,16 @@ type geoBlockPayload struct {
 	Honeypots  []string `json:"honeypots"` // trap domains: querying clients get blocked
 	BaseURL    string   `json:"base_url"`
 	AutoUpdate string   `json:"auto_update"` // duration string, "" = never
+	// TrustUDP lets plain-UDP honeypot hits auto-block their source too.
+	// Off by default — spoofed UDP could otherwise be used to block
+	// innocent victims.
+	TrustUDP bool `json:"trust_udp"`
+}
+
+// abusePayload holds the AbuseIPDB API key used for one-click reporting of
+// blocked attacker IPs from the dashboard.
+type abusePayload struct {
+	AbuseIPDBKey string `json:"abuseipdb_key"`
 }
 
 type dnssecPayload struct {
@@ -869,7 +889,9 @@ func payloadFromConfig(c *config.Config) configPayload {
 		Honeypots:  c.GeoBlock.Honeypots,
 		BaseURL:    c.GeoBlock.BaseURL,
 		AutoUpdate: durationOrEmpty(c.GeoBlock.AutoUpdate),
+		TrustUDP:   c.GeoBlock.TrustUDP,
 	}
+	p.Abuse = abusePayload{AbuseIPDBKey: c.Abuse.AbuseIPDBKey}
 	p.DNSSEC = dnssecPayload{Enabled: c.DNSSEC.Enabled, RequireAD: c.DNSSEC.RequireAD}
 	return p
 }
@@ -1010,6 +1032,10 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			Honeypots:  p.GeoBlock.Honeypots,
 			BaseURL:    p.GeoBlock.BaseURL,
 			AutoUpdate: geoAutoUpdate,
+			TrustUDP:   p.GeoBlock.TrustUDP,
+		},
+		Abuse: config.AbuseConfig{
+			AbuseIPDBKey: p.Abuse.AbuseIPDBKey,
 		},
 		DNSSEC: config.DNSSECConfig{
 			Enabled:   p.DNSSEC.Enabled,
@@ -1210,6 +1236,77 @@ func (h *Handler) geoBlocked(w http.ResponseWriter) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"blocked": ips})
+}
+
+// geoBlockIP adds a client IP (or the /prefix network containing it) to the
+// always-blocked geo list (geo_block.ips), persists it and rebuilds the
+// blocker/firewall. This is the dashboard's one-click "block this attacker"
+// action — unlike the honeypot auto-block (which is per-IP and lives in the
+// banner's runtime file), a quick-block lands in the config so it survives
+// anything and feeds the host firewall's drop set at the packet level.
+func (h *Handler) geoBlockIP(w http.ResponseWriter, r *http.Request) {
+	var p struct {
+		IP     string `json:"ip"`
+		Prefix int    `json:"prefix"` // optional: block ip/prefix instead of the bare IP
+	}
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || strings.TrimSpace(p.IP) == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ip required"})
+		return
+	}
+	ip := net.ParseIP(strings.TrimSpace(p.IP))
+	if ip == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("%q is not an IP address", p.IP)})
+		return
+	}
+	entry := ip.String()
+	if p.Prefix > 0 {
+		bits := 32
+		if ip.To4() == nil {
+			bits = 128
+		}
+		if p.Prefix > bits {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("prefix /%d is too large for this address family", p.Prefix)})
+			return
+		}
+		n := &net.IPNet{IP: ip.Mask(net.CIDRMask(p.Prefix, bits)), Mask: net.CIDRMask(p.Prefix, bits)}
+		entry = n.String()
+	}
+
+	h.cfgMu.Lock()
+	defer h.cfgMu.Unlock()
+	// A config-only add is a silent no-op while geo blocking is off (the
+	// banner that enforces these entries doesn't exist), so refuse it — the
+	// same guard geoRefresh uses for its inert case.
+	if !h.Cfg.GeoBlock.Enabled {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "geo blocking is disabled — enable it in Settings before adding blocked IPs"})
+		return
+	}
+	for _, e := range h.Cfg.GeoBlock.IPs {
+		if e == entry {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "already": true, "entry": entry})
+			return
+		}
+	}
+	h.Cfg.GeoBlock.IPs = append(h.Cfg.GeoBlock.IPs, entry)
+	// The client was almost certainly auto-blocked by a honeypot hit; drop
+	// the runtime auto entry so the dashboard's honeypot list stays truthful
+	// (the config entry now covers it permanently, and Unblock is a no-op for
+	// entries that aren't runtime auto-blocks).
+	if h.DNS != nil {
+		if b := h.DNS.CurrentIPBanner(); b != nil {
+			_ = b.Unblock(ip.String())
+		}
+	}
+	if err := h.SaveConfig(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	// Rebuild asynchronously, exactly like applyPayload: the geo rebuild can
+	// fetch country data, which must never stall the API response.
+	if h.RebuildGeo != nil {
+		_ = h.RebuildGeo(h.Cfg.GeoBlock)
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "entry": entry})
 }
 
 // geoUnblock removes a honeypot-auto-blocked client from the banner and the

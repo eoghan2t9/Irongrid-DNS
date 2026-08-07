@@ -298,6 +298,12 @@ func main() {
 	apiHandler.Geo = geoMgr
 	apiHandler.Firewall = fwMgr
 	buildGeo := func(g config.GeoBlockConfig) error {
+		// A silent no-op here would be confusing: honeypots/IPs are useless
+		// unless the feature is enabled, so say so loudly (boot + every
+		// config save / refresh that hits this branch).
+		if !g.Enabled && (len(g.IPs) > 0 || len(g.Honeypots) > 0) {
+			log.Printf("[geo] WARNING: honeypot domains / blocked IPs are configured but geo_block.enabled is false — nothing is being enforced")
+		}
 		if !g.Enabled || (len(g.Countries) == 0 && len(g.IPs) == 0 && len(g.Honeypots) == 0) {
 			handler.SetGeo(nil)
 			handler.SetIPBanner(nil)
@@ -312,6 +318,9 @@ func main() {
 		// the host firewall's drop set via OnBlock.
 		banner := geoip.NewBanner(filepath.Join(geoDir, "blocked-ips.txt"), g.IPs, g.Honeypots)
 		handler.SetIPBanner(banner)
+		// Opt-in: let plain-UDP honeypot hits auto-block their source too
+		// (off by default — spoofed UDP must not be able to block victims).
+		handler.SetTrustUDP(g.TrustUDP)
 		banner.OnBlock = func(ip string) {
 			if err := fwMgr.AddIP(ip); err != nil {
 				log.Printf("[firewall] add blocked client %s: %v", ip, err)

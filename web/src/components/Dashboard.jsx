@@ -55,7 +55,8 @@ export default function Dashboard({ onNavigate }) {
     { label: 'Blocked', value: fmt(c.blocked), accent: 'rose', sub: `${blockedPct}% of traffic` },
     { label: 'Allowed', value: fmt(c.allowed), accent: 'emerald', sub: `${fmt(q.allowed)} in log` },
     { label: 'Cache hits', value: fmt(c.cached), accent: 'violet', sub: 'served instantly' },
-    { label: 'Avg latency', value: `${(q.avg_rt_ms || 0).toFixed(2)} ms`, accent: 'amber', sub: 'last 24h' },
+    { label: 'Honeypot hits', value: fmt(c.honeypot), accent: 'amber', sub: 'trap domains refused' },
+    { label: 'Avg latency', value: `${(q.avg_rt_ms || 0).toFixed(2)} ms`, accent: 'cyan', sub: 'last 24h' },
   ]
 
   const topBlocked = q.top_blocked || []
@@ -159,10 +160,21 @@ export default function Dashboard({ onNavigate }) {
 // auto-blocks (persisted, firewall-dropped) and rate-limit auto-blocks —
 // each with a one-click unblock. It refreshes on the same cadence as the
 // dashboard's stat cards, so a fresh honeypot hit appears within seconds.
+// BlockedClientsCard shows the clients currently blocked — honeypot
+// auto-blocks (persisted, firewall-dropped) and rate-limit auto-blocks —
+// each with one-click actions: report to AbuseIPDB (honeypot sources only —
+// they're confirmed attackers by a real handshake), look up the owning
+// ASN/host for ISP reports, block the IP or its /24, unblock, and export
+// everything as a CSV for bulk abuse reporting. It refreshes on the same
+// cadence as the dashboard's stat cards, so a fresh honeypot hit appears
+// within seconds.
 function BlockedClientsCard() {
   const [honey, setHoney] = useState([])
   const [rate, setRate] = useState([])
   const [error, setError] = useState('')
+  const [msg, setMsg] = useState('')
+  const [asn, setAsn] = useState({}) // ip -> { asn, name, holder, prefix } | 'loading'
+  const [reporting, setReporting] = useState({}) // ip -> bool
 
   const load = useCallback(async () => {
     try { setHoney((await api.geoBlocked()).blocked || []) } catch { /* optional */ }
@@ -190,31 +202,131 @@ function BlockedClientsCard() {
       await fn()
       await load()
     } catch (e) {
-      setError(e.message || 'Unblock failed')
+      setError(e.message || 'Action failed')
     }
+  }
+
+  // blockNet permanently adds a honeypot-hit client (or its /24 or /64
+  // network) to geo_block.ips — DNS REFUSED plus a host-firewall drop at the
+  // packet level.
+  const blockNet = async (ip, prefix) => {
+    const label = prefix ? `${ip}/${prefix}` : ip
+    if (!window.confirm(`Permanently block ${label}? It is added to geo_block.ips (config, survives restarts) and dropped at the host firewall. Remove it under Blocked client IPs in Settings to undo.`)) return
+    setError('')
+    try {
+      await api.geoBlockIP(ip, prefix)
+      await load()
+    } catch (e) {
+      setError(e.message || 'Block failed')
+    }
+  }
+
+  // report submits a honeypot-confirmed attacker to AbuseIPDB (category
+  // DDoS). Only honeypot rows offer this: they were auto-blocked over a real
+  // handshake, so the source is genuine.
+  const report = async (ip) => {
+    if (!window.confirm(`Report ${ip} to AbuseIPDB (DDoS category)? Requires an API key set under Settings → Abuse reporting.`)) return
+    setError('')
+    setMsg('')
+    setReporting((s) => ({ ...s, [ip]: true }))
+    try {
+      const r = await api.abuseReport(ip)
+      setMsg(`Reported ${ip} to AbuseIPDB — abuse confidence ${r.abuse_confidence_score ?? 'n/a'}.`)
+    } catch (e) {
+      setError('Report failed: ' + e.message)
+    } finally {
+      setReporting((s) => ({ ...s, [ip]: false }))
+    }
+  }
+
+  // toggleAsn lazily looks up the owning ASN / host of an IP (free RIPEstat)
+  // and expands the row with the result, so you know which provider to report
+  // to.
+  const toggleAsn = async (ip) => {
+    if (asn[ip]) {
+      setAsn((s) => { const n = { ...s }; delete n[ip]; return n })
+      return
+    }
+    setAsn((s) => ({ ...s, [ip]: 'loading' }))
+    try {
+      const info = await api.abuseASN(ip)
+      setAsn((s) => ({ ...s, [ip]: info }))
+    } catch (e) {
+      setAsn((s) => ({ ...s, [ip]: { error: e.message } }))
+    }
+  }
+
+  const exportCsv = async () => {
+    try {
+      const blob = await api.abuseExport()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `irongrid-blocked-clients-${new Date().toISOString().slice(0, 10)}.csv`
+      a.click()
+      URL.revokeObjectURL(url)
+      setMsg('Exported blocked clients as CSV — paste the rows into your ISP/abuse-desk report.')
+    } catch (e) {
+      setError('Export failed: ' + e.message)
+    }
+  }
+
+  const AsnRow = ({ ip }) => {
+    const info = asn[ip]
+    if (!info) return null
+    return (
+      <div className="dim small mono" style={{ margin: '2px 0 6px' }}>
+        {info === 'loading' ? 'Looking up ASN…' : (
+          info.error ? `ASN lookup failed: ${info.error}` : (
+            <>{info.asn || 'n/a'} · {info.holder || info.name || 'unknown network'} · {info.prefix || ''}{info.country ? ` · ${info.country}` : ''}</>
+          )
+        )}
+      </div>
+    )
   }
 
   const hasHoney = honey.length > 0
   const hasRate = rate.length > 0
-  // Only take dashboard space when there's something to act on.
-  if (!hasHoney && !hasRate) return null
   return (
     <div className="card">
       <div className="row-between">
         <h3 style={{ margin: 0 }}>Blocked clients</h3>
-        <span className="dim small">honeypot hits &amp; rate-limit auto-blocks</span>
+        <div className="row">
+          <span className="dim small">honeypot hits &amp; rate-limit auto-blocks</span>
+          <button className="btn small" type="button" onClick={exportCsv} title="Download all blocked client IPs as CSV for bulk abuse reporting">Export CSV</button>
+        </div>
       </div>
+      {msg && <div className="text-ok small" style={{ marginTop: 8 }}>{msg}</div>}
       {error && <div className="error-text small" style={{ marginTop: 8 }}>{error}</div>}
       <div className="stack" style={{ marginTop: 8 }}>
+        {!hasHoney && !hasRate ? (
+          <p className="dim small" style={{ margin: 0 }}>
+            No clients currently blocked. Honeypot hits over TCP/DoT/DoH/DoQ and
+            rate-limit offenders appear here. Spoofed-UDP sources are refused but
+            never auto-blocked — they can&apos;t be trusted — so a pure UDP flood can
+            show nothing here even while the <strong>Honeypot hits</strong> counter
+            climbs. Export CSV and ⓘ ASN work whenever clients do get blocked.
+          </p>
+        ) : (
+          <>
           {hasHoney && (
             <div>
               <div className="dim small" style={{ marginBottom: 6 }}>
                 <span className="badge badge-honeypot">Honeypot</span> — blocked permanently, dropped at the firewall
               </div>
               {honey.map((ip) => (
-                <div className="list-row" key={ip}>
-                  <span className="mono">{ip}</span>
-                  <button className="btn small danger" type="button" onClick={() => act(() => api.geoUnblock(ip))}>Unblock</button>
+                <div key={ip}>
+                  <div className="list-row">
+                    <span className="mono">{ip}</span>
+                    <button className="btn small" type="button" onClick={() => report(ip)} disabled={reporting[ip]}>
+                      {reporting[ip] ? 'Reporting…' : 'Report'}
+                    </button>
+                    <button className="btn small" type="button" onClick={() => toggleAsn(ip)}>ⓘ ASN</button>
+                    <button className="btn small" type="button" onClick={() => blockNet(ip, 0)}>Block IP</button>
+                    <button className="btn small" type="button" onClick={() => blockNet(ip, ip.includes(':') ? 64 : 24)}>Block /{ip.includes(':') ? 64 : 24}</button>
+                    <button className="btn small danger" type="button" onClick={() => act(() => api.geoUnblock(ip))}>Unblock</button>
+                  </div>
+                  <AsnRow ip={ip} />
                 </div>
               ))}
             </div>
@@ -225,21 +337,27 @@ function BlockedClientsCard() {
                 <span className="badge badge-error">Rate limit</span> — hammering clients refused until cooldown
               </div>
               {rate.map((b) => (
-                <div className="list-row" key={b.ip} style={{ alignItems: 'flex-start' }}>
-                  <div style={{ minWidth: 0 }}>
-                    <span className="mono">{b.ip}</span>
-                    {b.blocked_until && (
-                      <span className="dim small">
-                        {' '}· blocked until {new Date(b.blocked_until).toLocaleString()}
-                        {b.blocks ? ` · ${b.blocks}×` : ''}
-                      </span>
-                    )}
+                <div key={b.ip}>
+                  <div className="list-row" style={{ alignItems: 'flex-start' }}>
+                    <div style={{ minWidth: 0 }}>
+                      <span className="mono">{b.ip}</span>
+                      {b.blocked_until && (
+                        <span className="dim small">
+                          {' '}· blocked until {new Date(b.blocked_until).toLocaleString()}
+                          {b.blocks ? ` · ${b.blocks}×` : ''}
+                        </span>
+                      )}
+                    </div>
+                    <button className="btn small" type="button" onClick={() => toggleAsn(b.ip)}>ⓘ ASN</button>
+                    <button className="btn small danger" type="button" onClick={() => act(() => api.rateUnblock(b.ip))}>Unblock</button>
                   </div>
-                  <button className="btn small danger" type="button" onClick={() => act(() => api.rateUnblock(b.ip))}>Unblock</button>
+                  <AsnRow ip={b.ip} />
                 </div>
               ))}
             </div>
           )}
+          </>
+        )}
       </div>
     </div>
   )

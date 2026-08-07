@@ -31,6 +31,7 @@ type Config struct {
 	ClientGroups []ClientGroup   `yaml:"client_groups"` // per-client blocking/upstream policy
 	RateLimit    RateLimitConfig `yaml:"rate_limit"`
 	GeoBlock     GeoBlockConfig  `yaml:"geo_block"`
+	Abuse        AbuseConfig     `yaml:"abuse"`
 	DNSSEC       DNSSECConfig    `yaml:"dnssec"`
 }
 
@@ -95,11 +96,21 @@ type GeoBlockConfig struct {
 	// known proxy-exit ranges). Entries are refused by the DNS handler like
 	// blocked countries and installed into the host firewall's drop sets.
 	IPs []string `yaml:"ips"`
-	// Honeypots are domains that are never answered: any client that queries
-	// one is auto-added to the blocked-IP set (persisted across restarts and
-	// pushed into the host firewall so its connections are dropped at the
-	// packet level, not just refused at the DNS layer). Exact-match only.
+	// Honeypots are trap domains that are never answered: any client that
+	// queries one is auto-added to the blocked-IP set (persisted across
+	// restarts and pushed into the host firewall so its connections are
+	// dropped at the packet level, not just refused at the DNS layer). A
+	// trap matches the domain AND every subdomain under it (e.g.
+	// "exponea.com" also traps "x.exponea.com") — DDoS floods randomise the
+	// first label, and the trap must catch those. Honeypot traffic is not
+	// written to the query log. Requires geo_block.enabled to take effect.
 	Honeypots []string `yaml:"honeypots"`
+	// TrustUDP opt-in: when true, a honeypot hit over plain UDP auto-blocks
+	// its source address too. Off by default — a UDP source can be spoofed,
+	// so enabling this lets a spoofing attacker permanently block an
+	// innocent victim with a single packet. Only turn it on for a trusted
+	// network where client addresses are genuine.
+	TrustUDP bool `yaml:"trust_udp"`
 	// BaseURL overrides where per-country CIDR lists are fetched from; the
 	// lowercase country code and file are appended as
 	// "<cc>/ipv4-aggregated.txt" and "<cc>/ipv6-aggregated.txt" (the
@@ -110,6 +121,16 @@ type GeoBlockConfig struct {
 	// automatic refreshes (data is then only refreshed on save/manual
 	// refresh); the default is 168h (weekly).
 	AutoUpdate time.Duration `yaml:"auto_update"`
+}
+
+// AbuseConfig configures the free threat-intel integrations used to report
+// the attacker IPs Irongrid blocks (one-click report from the dashboard, plus
+// IP -> ASN/owner lookups for routing reports to the right hosting provider).
+type AbuseConfig struct {
+	// AbuseIPDBKey is the API key for api.abuseipdb.com (free tier: 1,000
+	// checks/reports per day, one report per IP per 15 minutes). Empty
+	// disables one-click reporting; the export and ASN lookup need no key.
+	AbuseIPDBKey string `yaml:"abuseipdb_key"`
 }
 
 // DNSSECConfig enables DNSSEC enforcement. Irongrid is a forwarding
@@ -310,6 +331,7 @@ func Default() *Config {
 		GeoBlock: GeoBlockConfig{
 			AutoUpdate: 168 * time.Hour,
 		},
+		Abuse: AbuseConfig{},
 		DNSSEC: DNSSECConfig{
 			Enabled:   false,
 			RequireAD: true,

@@ -95,6 +95,23 @@ export const api = {
   geoRefresh: () => request('/api/geo/refresh', { method: 'POST' }),
   geoBlocked: () => request('/api/geo/blocked'),
   geoUnblock: (ip) => request('/api/geo/unblock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) }),
+  geoBlockIP: (ip, prefix) => request('/api/geo/blockip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip, prefix }) }),
+  abuseReport: (ip) => request('/api/abuse/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) }),
+  abuseASN: (ip) => request('/api/abuse/asn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) }),
+  abuseExport: async () => {
+    // Raw fetch so we can return a blob for the CSV download (auth header is
+    // attached like request(); after a reload the session cookie covers it).
+    const headers = {}
+    const auth = authHeader()
+    if (auth) headers.Authorization = auth
+    const resp = await fetch('/api/abuse/export', { headers })
+    if (resp.status === 401) {
+      if (onUnauthorized) onUnauthorized()
+      throw new Error('unauthorized')
+    }
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    return resp.blob()
+  },
   tunnelStatus: () => request('/api/tunnel/status'),
   tunnelStart: (body) => request('/api/tunnel/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   tunnelStop: () => request('/api/tunnel/stop', { method: 'POST' }),
