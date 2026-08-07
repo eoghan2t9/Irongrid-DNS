@@ -298,21 +298,34 @@ func main() {
 	apiHandler.Geo = geoMgr
 	apiHandler.Firewall = fwMgr
 	buildGeo := func(g config.GeoBlockConfig) error {
-		if !g.Enabled || len(g.Countries) == 0 {
+		if !g.Enabled || (len(g.Countries) == 0 && len(g.IPs) == 0 && len(g.Honeypots) == 0) {
 			handler.SetGeo(nil)
+			handler.SetIPBanner(nil)
 			if err := fwMgr.Clear(); err != nil {
 				log.Printf("[firewall] clear: %v", err)
 			}
 			return nil
 		}
+		// Client-IP banner: configured block IPs/CIDRs plus honeypot
+		// auto-blocks (loaded from a persisted file so they survive
+		// restarts/reloads). A honeypot hit pushes the client straight into
+		// the host firewall's drop set via OnBlock.
+		banner := geoip.NewBanner(filepath.Join(geoDir, "blocked-ips.txt"), g.IPs, g.Honeypots)
+		handler.SetIPBanner(banner)
+		banner.OnBlock = func(ip string) {
+			if err := fwMgr.AddIP(ip); err != nil {
+				log.Printf("[firewall] add blocked client %s: %v", ip, err)
+			}
+		}
 		b, err := geoMgr.Refresh(ctx, g.Countries, g.Allowlist)
 		handler.SetGeo(b)
-		// Packet-level country blocking: rebuild the firewall rules from the
-		// freshly persisted CIDR lists. A failure here (e.g. no cached data
+		// Packet-level blocking: rebuild the firewall rules from the freshly
+		// persisted CIDR lists plus the banner's full block set (configured
+		// IPs and honeypot auto-blocks). A failure here (e.g. no cached data
 		// yet, or no root) is logged and leaves the DNS-level REFUSED
 		// blocking in effect — buildGeo's own error (data fetch) is what
 		// the caller surfaces.
-		if backend, ferr := fwMgr.Apply(g.Countries, g.Allowlist, geoDir); ferr != nil {
+		if backend, ferr := fwMgr.Apply(g.Countries, g.Allowlist, banner.List(), geoDir); ferr != nil {
 			log.Printf("[firewall] country rules not applied (%s): %v", backend, ferr)
 		} else {
 			log.Printf("[firewall] dropping inbound traffic from blocked countries via %s", backend)

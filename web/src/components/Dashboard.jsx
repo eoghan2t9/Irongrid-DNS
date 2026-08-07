@@ -90,6 +90,8 @@ export default function Dashboard({ onNavigate }) {
 
       <RootHintsCard status={status} />
 
+      <BlockedClientsCard />
+
       <div className="grid-2">
         <div className="card">
           <h3>Protocol usage</h3>
@@ -149,6 +151,96 @@ export default function Dashboard({ onNavigate }) {
       </div>
 
       <AcmeCard acme={tls?.acme} onNavigate={onNavigate} onRenewed={load} />
+    </div>
+  )
+}
+
+// BlockedClientsCard shows the clients currently blocked — honeypot
+// auto-blocks (persisted, firewall-dropped) and rate-limit auto-blocks —
+// each with a one-click unblock. It refreshes on the same cadence as the
+// dashboard's stat cards, so a fresh honeypot hit appears within seconds.
+function BlockedClientsCard() {
+  const [honey, setHoney] = useState([])
+  const [rate, setRate] = useState([])
+  const [error, setError] = useState('')
+
+  const load = useCallback(async () => {
+    try { setHoney((await api.geoBlocked()).blocked || []) } catch { /* optional */ }
+    try { setRate((await api.rateBlocked()).blocked || []) } catch { /* optional */ }
+  }, [])
+
+  useEffect(() => {
+    load()
+    const t = setInterval(load, 10000)
+    // Same as the parent dashboard: refresh promptly when the tab regains
+    // visibility instead of waiting for the next 10s tick.
+    const onVisible = () => {
+      if (document.visibilityState === 'visible') load()
+    }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      clearInterval(t)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [load])
+
+  const act = async (fn) => {
+    setError('')
+    try {
+      await fn()
+      await load()
+    } catch (e) {
+      setError(e.message || 'Unblock failed')
+    }
+  }
+
+  const hasHoney = honey.length > 0
+  const hasRate = rate.length > 0
+  // Only take dashboard space when there's something to act on.
+  if (!hasHoney && !hasRate) return null
+  return (
+    <div className="card">
+      <div className="row-between">
+        <h3 style={{ margin: 0 }}>Blocked clients</h3>
+        <span className="dim small">honeypot hits &amp; rate-limit auto-blocks</span>
+      </div>
+      {error && <div className="error-text small" style={{ marginTop: 8 }}>{error}</div>}
+      <div className="stack" style={{ marginTop: 8 }}>
+          {hasHoney && (
+            <div>
+              <div className="dim small" style={{ marginBottom: 6 }}>
+                <span className="badge badge-honeypot">Honeypot</span> — blocked permanently, dropped at the firewall
+              </div>
+              {honey.map((ip) => (
+                <div className="list-row" key={ip}>
+                  <span className="mono">{ip}</span>
+                  <button className="btn small danger" type="button" onClick={() => act(() => api.geoUnblock(ip))}>Unblock</button>
+                </div>
+              ))}
+            </div>
+          )}
+          {hasRate && (
+            <div>
+              <div className="dim small" style={{ marginBottom: 6 }}>
+                <span className="badge badge-error">Rate limit</span> — hammering clients refused until cooldown
+              </div>
+              {rate.map((b) => (
+                <div className="list-row" key={b.ip} style={{ alignItems: 'flex-start' }}>
+                  <div style={{ minWidth: 0 }}>
+                    <span className="mono">{b.ip}</span>
+                    {b.blocked_until && (
+                      <span className="dim small">
+                        {' '}· blocked until {new Date(b.blocked_until).toLocaleString()}
+                        {b.blocks ? ` · ${b.blocks}×` : ''}
+                      </span>
+                    )}
+                  </div>
+                  <button className="btn small danger" type="button" onClick={() => act(() => api.rateUnblock(b.ip))}>Unblock</button>
+                </div>
+              ))}
+            </div>
+          )}
+      </div>
     </div>
   )
 }

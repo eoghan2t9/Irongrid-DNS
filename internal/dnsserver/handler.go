@@ -56,6 +56,7 @@ type Handler struct {
 	ClientRouter    *ClientRouter    // per-client policy; never nil, may be empty
 	RateLimiter     *RateLimiter     // nil disables rate limiting
 	Geo             *geoip.Blocker   // nil disables geo-blocking
+	IPBanner        *geoip.Banner    // nil disables IP/honeypot blocking
 	DNSSECEnabled   bool
 	DNSSECRequireAD bool
 
@@ -161,6 +162,22 @@ func (h *Handler) SetGeo(g *geoip.Blocker) {
 	h.Geo = g
 }
 
+// SetIPBanner hot-swaps the client-IP banner (explicit block list + honeypot
+// auto-blocks); nil disables it.
+func (h *Handler) SetIPBanner(b *geoip.Banner) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.IPBanner = b
+}
+
+// CurrentIPBanner returns the active banner (nil when disabled), for the
+// API's blocked-list/unblock endpoints.
+func (h *Handler) CurrentIPBanner() *geoip.Banner {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return h.IPBanner
+}
+
 // BlockedClients returns the clients currently under an auto-block (from the
 // rate limiter), for the dashboard.
 func (h *Handler) BlockedClients() []BlockedClient {
@@ -211,6 +228,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	clientRouter := h.ClientRouter
 	rateLimiter := h.RateLimiter
 	geo := h.Geo
+	ipbanner := h.IPBanner
 	dnssecEnabled := h.DNSSECEnabled
 	dnssecRequireAD := h.DNSSECRequireAD
 	h.mu.RUnlock()
@@ -246,17 +264,44 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	q := r.Question[0]
 	qname := strings.ToLower(strings.TrimSuffix(q.Name, "."))
 
-	// 0.5 Geo-blocking: if the client's country is in the blocked set, the
-	//    configured behavior is REFUSED on every transport (an explicit
-	//    answer, not a silent drop — the user's chosen trade-off). The
-	//    allowlist is checked inside the blocker, so whitelisted IPs always
-	//    pass.
-	if geo != nil && client != "" && geo.Blocked(client) {
+	// 0.5 Client blocking: a geo-blocked country (source-IP country in the
+	//    blocked set) or a banner-blocked client (explicit IPs/CIDRs plus
+	//    IPs auto-added by honeypot hits) is REFUSED on every transport — an
+	//    explicit answer, not a silent drop (the user's chosen trade-off).
+	//    The geo allowlist is checked inside the blocker, so whitelisted IPs
+	//    always pass.
+	if client != "" {
+		geoBlocked := geo != nil && geo.Blocked(client)
+		bannerBlocked := ipbanner != nil && ipbanner.Blocked(client)
+		if geoBlocked || bannerBlocked {
+			h.Stats.Blocked.Add(1)
+			action, reason := "geo-blocked", "country-blocked"
+			if bannerBlocked {
+				action, reason = "ip-blocked", "blocked-client"
+			}
+			refused := new(dns.Msg)
+			refused.SetReply(r)
+			refused.Rcode = dns.RcodeRefused
+			h.record(client, qname, q, action, reason, "", start, refused)
+			w.WriteMsg(refused)
+			return
+		}
+	}
+	// 0.6 Honeypot: a configured trap domain is never answered. The client
+	//    that asked for it is auto-blocked — persisted across restarts and
+	//    pushed into the host firewall so its subsequent connections are
+	//    dropped at the packet level, not just refused at the DNS layer.
+	if ipbanner != nil && ipbanner.LookupHoneypot(qname) {
+		if client != "" {
+			if err := ipbanner.Block(client); err != nil {
+				log.Printf("[geo] honeypot: blocking client %s: %v", client, err)
+			}
+		}
 		h.Stats.Blocked.Add(1)
 		refused := new(dns.Msg)
 		refused.SetReply(r)
 		refused.Rcode = dns.RcodeRefused
-		h.record(client, qname, q, "geo-blocked", "country-blocked", "", start, refused)
+		h.record(client, qname, q, "honeypot", "honeypot-domain", "", start, refused)
 		w.WriteMsg(refused)
 		return
 	}

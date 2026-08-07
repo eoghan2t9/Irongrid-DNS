@@ -60,7 +60,8 @@ func TestApplyNft(t *testing.T) {
 	f := &fakeRunner{available: map[string]bool{"nft": true}}
 	m := NewWithRunner(f)
 
-	backend, err := m.Apply([]string{"RU", "cn"}, []string{"203.0.113.9", "10.0.0.0/8"}, dir)
+	backend, err := m.Apply([]string{"RU", "cn"}, []string{"203.0.113.9", "10.0.0.0/8"},
+		[]string{"198.51.100.7", "2001:db8:1::/48"}, dir)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -91,6 +92,14 @@ func TestApplyNft(t *testing.T) {
 	if !strings.Contains(joined, "203.0.113.9, 10.0.0.0/8") {
 		t.Errorf("geo_allow_v4 elements missing:\n%s", joined)
 	}
+	// Explicit block IPs are merged into the same drop sets as the country
+	// CIDRs.
+	if !strings.Contains(joined, "198.51.100.7") {
+		t.Errorf("blocked client IP missing from the drop set:\n%s", joined)
+	}
+	if !strings.Contains(joined, "2001:db8:1::/48") {
+		t.Errorf("blocked client v6 CIDR missing from the drop set:\n%s", joined)
+	}
 	// Ordering: the country DROPs must be added BEFORE the
 	// established/related ACCEPT — otherwise a pre-existing conntrack flow
 	// exempts blocked clients forever (each REFUSED reply refreshes the
@@ -104,7 +113,7 @@ func TestApplyNft(t *testing.T) {
 
 	// Second Apply must be idempotent in shape (flush + rebuild, no error).
 	before := len(f.cmds)
-	if _, err := m.Apply([]string{"RU"}, nil, dir); err != nil {
+	if _, err := m.Apply([]string{"RU"}, nil, nil, dir); err != nil {
 		t.Fatalf("second Apply: %v", err)
 	}
 	if len(f.cmds) == before {
@@ -112,10 +121,77 @@ func TestApplyNft(t *testing.T) {
 	}
 }
 
+func TestApplyNftIPBlocksOnly(t *testing.T) {
+	// Explicit block IPs alone (no countries, no country data) must still
+	// build the sets and the drop rules — so AddIP can extend them later.
+	f := &fakeRunner{available: map[string]bool{"nft": true}}
+	m := NewWithRunner(f)
+	if _, err := m.Apply(nil, nil, []string{"198.51.100.7"}, t.TempDir()); err != nil {
+		t.Fatalf("Apply with only ipBlocks: %v", err)
+	}
+	joined := strings.Join(f.cmds, "\n")
+	for _, want := range []string{
+		"nft add rule inet irongrid geo_input ip saddr @geo_v4 drop",
+		"nft add rule inet irongrid geo_input ip6 saddr @geo_v6 drop",
+		"198.51.100.7",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Errorf("missing command %q\nissued:\n%s", want, joined)
+		}
+	}
+}
+
+func TestAddIPNft(t *testing.T) {
+	f := &fakeRunner{available: map[string]bool{"nft": true}}
+	m := NewWithRunner(f)
+	if _, err := m.Apply([]string{"RU"}, nil, nil, t.TempDir()); err == nil {
+		t.Fatal("Apply without data should fail before AddIP")
+	}
+	// Seed a valid apply, then AddIP must emit one element-add per family.
+	if _, err := m.Apply(nil, nil, nil, t.TempDir()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if err := m.AddIP("198.51.100.7"); err != nil {
+		t.Fatalf("AddIP v4: %v", err)
+	}
+	if err := m.AddIP("2001:db8::9"); err != nil {
+		t.Fatalf("AddIP v6: %v", err)
+	}
+	if got := f.cmds[len(f.cmds)-2]; got != "nft add element inet irongrid geo_v4 { 198.51.100.7 }" {
+		t.Errorf("v4 add = %q", got)
+	}
+	if got := f.cmds[len(f.cmds)-1]; got != "nft add element inet irongrid geo_v6 { 2001:db8::9 }" {
+		t.Errorf("v6 add = %q", got)
+	}
+	if err := m.AddIP("not-an-ip"); err == nil {
+		t.Error("AddIP with a non-IP should fail")
+	}
+}
+
+func TestAddIPRemoveIPIptables(t *testing.T) {
+	f := &fakeRunner{available: map[string]bool{"ipset": true, "iptables": true, "ip6tables": true}}
+	m := NewWithRunner(f)
+	if _, err := m.Apply(nil, nil, nil, t.TempDir()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if err := m.AddIP("198.51.100.7"); err != nil {
+		t.Fatalf("AddIP: %v", err)
+	}
+	if got := f.last(); got != "ipset add irongrid_geo_v4 198.51.100.7 -exist" {
+		t.Errorf("AddIP command = %q", got)
+	}
+	if err := m.RemoveIP("198.51.100.7"); err != nil {
+		t.Fatalf("RemoveIP: %v", err)
+	}
+	if got := f.last(); got != "ipset del irongrid_geo_v4 198.51.100.7 -exist" {
+		t.Errorf("RemoveIP command = %q", got)
+	}
+}
+
 func TestApplyNftNoData(t *testing.T) {
 	f := &fakeRunner{available: map[string]bool{"nft": true}}
 	m := NewWithRunner(f)
-	if _, err := m.Apply([]string{"XX"}, nil, t.TempDir()); err == nil {
+	if _, err := m.Apply([]string{"XX"}, nil, nil, t.TempDir()); err == nil {
 		t.Fatal("Apply with no cached data should fail")
 	}
 }
@@ -126,7 +202,7 @@ func TestApplyIptables(t *testing.T) {
 
 	f := &fakeRunner{available: map[string]bool{"ipset": true, "iptables": true, "ip6tables": true}}
 	m := NewWithRunner(f)
-	backend, err := m.Apply([]string{"RU"}, []string{"198.51.100.7"}, dir)
+	backend, err := m.Apply([]string{"RU"}, []string{"198.51.100.7"}, nil, dir)
 	if err != nil {
 		t.Fatalf("Apply: %v", err)
 	}
@@ -161,7 +237,7 @@ func TestApplyIptables(t *testing.T) {
 func TestNoBackend(t *testing.T) {
 	f := &fakeRunner{available: map[string]bool{}}
 	m := NewWithRunner(f)
-	if _, err := m.Apply([]string{"RU"}, nil, t.TempDir()); err == nil || !strings.Contains(err.Error(), "no supported firewall backend") {
+	if _, err := m.Apply([]string{"RU"}, nil, nil, t.TempDir()); err == nil || !strings.Contains(err.Error(), "no supported firewall backend") {
 		t.Fatalf("err = %v, want no-backend error", err)
 	}
 }
@@ -209,8 +285,8 @@ func TestParseCIDRs(t *testing.T) {
 	}
 }
 
-func TestClassifyAllowlist(t *testing.T) {
-	v4, v6 := classifyAllowlist([]string{"198.51.100.7", "10.0.0.0/8", "2001:db8::1", "2400::/12", "not-an-ip"})
+func TestClassifyIPs(t *testing.T) {
+	v4, v6 := classifyIPs([]string{"198.51.100.7", "10.0.0.0/8", "2001:db8::1", "2400::/12", "not-an-ip"})
 	if len(v4) != 2 || v4[0] != "198.51.100.7" || v4[1] != "10.0.0.0/8" {
 		t.Fatalf("v4 = %v", v4)
 	}

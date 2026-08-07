@@ -141,6 +141,26 @@ rate_limit:
   qps: 20                      # sustained queries/sec allowed per client IP
   burst: 40                    # short-burst allowance above qps (must be >= qps)
 
+# Country + client-IP blocking. Country data is fetched automatically from
+# ipverse/rir-ip (no account or API key) and cached under the data dir. The
+# same lists are installed into the host firewall (nftables, or iptables +
+# ipset) so new inbound traffic from blocked countries/IPs is dropped at the
+# packet level — run Irongrid as root (or with CAP_NET_ADMIN) for that.
+geo_block:
+  enabled: false
+  countries: []              # ISO 3166-1 alpha-2 codes, e.g. RU, CN, KP
+  # ips: []                  # always-blocked client IPs/CIDRs, e.g. known
+                              # proxy-exit ranges like "38.11.0.0/17" — refused
+                              # by DNS and dropped by the firewall
+  # honeypots: []            # trap domains: any client that queries one is
+                              # auto-blocked (persisted to
+                              # data/geo/blocked-ips.txt) and dropped at the
+                              # firewall; unblock via the dashboard
+  allowlist: []              # client IPs/CIDRs that are never geo-blocked
+  # base_url: ""             # override the CIDR data source (default
+                              # ipverse/rir-ip; file:// paths supported)
+  auto_update: 168h          # how often country data re-fetches (0 = never)
+
 # DNSSEC: Irongrid is a forwarding resolver — like Pi-hole, AdGuard Home and
 # dnsmasq, it trusts an upstream that already validates rather than building
 # its own root-of-trust chain validator. Enabling this sets the DO bit on

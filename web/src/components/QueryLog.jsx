@@ -6,7 +6,7 @@ const fmtTime = (iso) => {
   return d.toLocaleTimeString([], { hour12: false }) + ' ' + d.toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
-const ACTION_LABEL = { allowed: 'Allowed', blocked: 'Blocked', cached: 'Cached', error: 'Error', rewrite: 'Local DNS' }
+const ACTION_LABEL = { allowed: 'Allowed', blocked: 'Blocked', cached: 'Cached', error: 'Error', rewrite: 'Local DNS', 'geo-blocked': 'Geo-blocked', 'ip-blocked': 'IP-blocked', honeypot: 'Honeypot' }
 
 export default function QueryLog() {
   const [entries, setEntries] = useState([])
@@ -52,6 +52,9 @@ export default function QueryLog() {
             <option value="">All actions</option>
             <option value="allowed">Allowed</option>
             <option value="blocked">Blocked</option>
+            <option value="geo-blocked">Geo-blocked</option>
+            <option value="ip-blocked">IP-blocked</option>
+            <option value="honeypot">Honeypot</option>
             <option value="cached">Cached</option>
             <option value="error">Errors</option>
             <option value="rewrite">Local DNS</option>

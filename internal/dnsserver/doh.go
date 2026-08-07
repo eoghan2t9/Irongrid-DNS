@@ -123,8 +123,16 @@ func (m *Manager) handleDoH(w http.ResponseWriter, r *http.Request) {
 }
 
 func clientIPFromRequest(r *http.Request) string {
-	// Respect X-Forwarded-For when sitting behind a reverse proxy.
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+	// Trust X-Forwarded-For only when the DIRECT peer is a loopback or
+	// private address — a local reverse proxy (nginx/Caddy on the same box
+	// or LAN) or the baked-in cloudflared tunnel, both of which stamp the
+	// real client IP. A publicly reachable DoH listener must never honor a
+	// client-supplied header: sending `X-Forwarded-For: 8.8.8.8` would
+	// bypass geo-blocking, rate limiting and per-client policy in one
+	// request. Without this guard, trusting XFF from the open internet is
+	// an open door for exactly the blocked-country traffic geo blocking is
+	// supposed to refuse.
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" && isTrustedProxy(r.RemoteAddr) {
 		first := strings.TrimSpace(strings.Split(xff, ",")[0])
 		if ip := net.ParseIP(first); ip != nil {
 			return first
@@ -135,6 +143,22 @@ func clientIPFromRequest(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
+}
+
+// isTrustedProxy reports whether an HTTP connection's direct peer is a
+// loopback or private address — the only peers whose X-Forwarded-For header
+// is accepted (a proxy on the same host or LAN). Remote peers on public IPs
+// are never trusted, so the header cannot be spoofed from the internet.
+// Link-local (169.254/16, fe80::/10) and CGNAT (100.64/10) peers are
+// deliberately not trusted — a local proxy there is vanishingly rare, and
+// erring closed is the point.
+func isTrustedProxy(remote string) bool {
+	host, _, err := net.SplitHostPort(remote)
+	if err != nil {
+		host = remote
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
 }
 
 // dohResponseWriter adapts the dns.ResponseWriter interface to an HTTP

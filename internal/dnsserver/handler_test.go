@@ -284,6 +284,54 @@ func TestHandlerGeoBlockedClientRefusedEveryTransport(t *testing.T) {
 	}
 }
 
+// TestHandlerIPBannerAndHoneypot verifies the client-IP banner refuses
+// blocked clients (configured IPs/CIDRs), and that querying a honeypot
+// domain auto-blocks the client (firing the banner's OnBlock callback so the
+// firewall can drop it) and refuses the query — after which the client is
+// refused on every domain.
+func TestHandlerIPBannerAndHoneypot(t *testing.T) {
+	addr := startUDPTestServer(t, "1.1.1.1", 0)
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
+
+	var autoBlocked []string
+	banner := geoip.NewBanner("", []string{"38.11.106.3"}, []string{"trap.example.com"})
+	banner.OnBlock = func(ip string) { autoBlocked = append(autoBlocked, ip) }
+	h.SetIPBanner(banner)
+
+	q := func(name string) *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion(name, dns.TypeA)
+		return m
+	}
+	// A configured block IP gets REFUSED like a geo-blocked country.
+	blocked := &fakeWriter{ip: net.ParseIP("38.11.106.3")}
+	h.ServeDNS(blocked, q("example.com."))
+	if blocked.msg == nil || blocked.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("banner-blocked client: expected REFUSED, got %v", blocked.msg)
+	}
+	// A honeypot query auto-blocks its client and is itself refused.
+	client := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
+	h.ServeDNS(client, q("trap.example.com."))
+	if client.msg == nil || client.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("honeypot query: expected REFUSED, got %v", client.msg)
+	}
+	if len(autoBlocked) != 1 || autoBlocked[0] != "203.0.113.9" {
+		t.Fatalf("OnBlock fired %v, want [203.0.113.9]", autoBlocked)
+	}
+	// The auto-blocked client is now refused on a normal domain too.
+	again := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
+	h.ServeDNS(again, q("example.com."))
+	if again.msg == nil || again.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("auto-blocked client on a normal domain: expected REFUSED, got %v", again.msg)
+	}
+	// Unrelated clients are untouched.
+	ok := &fakeWriter{}
+	h.ServeDNS(ok, q("example.com."))
+	if ok.msg == nil || len(ok.msg.Answer) == 0 {
+		t.Fatalf("unrelated client should get a normal answer, got %v", ok.msg)
+	}
+}
+
 // TestHandlerDNSSECRejectsUnauthenticated verifies that with DNSSEC required,
 // an upstream answer lacking the AD bit is rejected as SERVFAIL rather than
 // passed through.

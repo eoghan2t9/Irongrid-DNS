@@ -193,6 +193,10 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.geoStatus(w)
 	case len(parts) == 2 && parts[0] == "geo" && parts[1] == "refresh" && r.Method == http.MethodPost:
 		h.geoRefresh(w)
+	case len(parts) == 2 && parts[0] == "geo" && parts[1] == "blocked" && r.Method == http.MethodGet:
+		h.geoBlocked(w)
+	case len(parts) == 2 && parts[0] == "geo" && parts[1] == "unblock" && r.Method == http.MethodPost:
+		h.geoUnblock(w, r)
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 	}
@@ -636,6 +640,8 @@ type geoBlockPayload struct {
 	Enabled    bool     `json:"enabled"`
 	Countries  []string `json:"countries"`
 	Allowlist  []string `json:"allowlist"`
+	IPs        []string `json:"ips"`       // always-blocked client IPs/CIDRs
+	Honeypots  []string `json:"honeypots"` // trap domains: querying clients get blocked
 	BaseURL    string   `json:"base_url"`
 	AutoUpdate string   `json:"auto_update"` // duration string, "" = never
 }
@@ -859,6 +865,8 @@ func payloadFromConfig(c *config.Config) configPayload {
 		Enabled:    c.GeoBlock.Enabled,
 		Countries:  c.GeoBlock.Countries,
 		Allowlist:  c.GeoBlock.Allowlist,
+		IPs:        c.GeoBlock.IPs,
+		Honeypots:  c.GeoBlock.Honeypots,
 		BaseURL:    c.GeoBlock.BaseURL,
 		AutoUpdate: durationOrEmpty(c.GeoBlock.AutoUpdate),
 	}
@@ -998,6 +1006,8 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			Enabled:    p.GeoBlock.Enabled,
 			Countries:  p.GeoBlock.Countries,
 			Allowlist:  p.GeoBlock.Allowlist,
+			IPs:        p.GeoBlock.IPs,
+			Honeypots:  p.GeoBlock.Honeypots,
 			BaseURL:    p.GeoBlock.BaseURL,
 			AutoUpdate: geoAutoUpdate,
 		},
@@ -1174,11 +1184,12 @@ func (h *Handler) geoRefresh(w http.ResponseWriter) {
 	h.cfgMu.Lock()
 	geo := h.Cfg.GeoBlock
 	h.cfgMu.Unlock()
-	// Nothing to download when no countries are configured — say so instead
-	// of answering "ok" for a no-op (the dashboard otherwise looks like it
-	// worked while the blocker stays uninstalled).
-	if geo.Enabled && len(geo.Countries) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "geo blocking is enabled but no countries are configured — add ISO 3166-1 alpha-2 codes (e.g. RU, CN) in Settings, save, then refresh"})
+	// Nothing to do when the feature is empty — say so instead of answering
+	// "ok" for a no-op (the dashboard otherwise looks like it worked while
+	// the blocker stays uninstalled). Note countries are optional: blocking
+	// can run on explicit IPs / honeypots alone.
+	if geo.Enabled && len(geo.Countries) == 0 && len(geo.IPs) == 0 && len(geo.Honeypots) == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "geo blocking is enabled but nothing is configured — add countries, blocked IPs or honeypot domains in Settings, save, then refresh"})
 		return
 	}
 	if err := h.RebuildGeo(geo); err != nil {
@@ -1186,6 +1197,43 @@ func (h *Handler) geoRefresh(w http.ResponseWriter) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "refreshing": true})
+}
+
+// geoBlocked serves the banner's honeypot-auto-blocked clients for the
+// dashboard. Configured IPs are excluded — they're visible in the config
+// editor and aren't unblockable.
+func (h *Handler) geoBlocked(w http.ResponseWriter) {
+	var ips []string
+	if h.DNS != nil {
+		if b := h.DNS.CurrentIPBanner(); b != nil {
+			ips = b.AutoList()
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"blocked": ips})
+}
+
+// geoUnblock removes a honeypot-auto-blocked client from the banner and the
+// host firewall's drop set.
+func (h *Handler) geoUnblock(w http.ResponseWriter, r *http.Request) {
+	var p struct {
+		IP string `json:"ip"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || p.IP == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ip required"})
+		return
+	}
+	if h.DNS != nil {
+		if b := h.DNS.CurrentIPBanner(); b != nil {
+			if err := b.Unblock(p.IP); err != nil {
+				writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+				return
+			}
+		}
+	}
+	if h.Firewall != nil {
+		_ = h.Firewall.RemoveIP(p.IP)
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "unblocked"})
 }
 
 func (h *Handler) getConfig(w http.ResponseWriter) {

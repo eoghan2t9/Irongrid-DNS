@@ -114,22 +114,31 @@ func (m *Manager) detect() (string, error) {
 
 // Apply programs the firewall to drop all new inbound traffic from the given
 // countries, reading their cached CIDR lists from dir (the geo data dir,
-// populated by the geoip Manager). Allowlisted IPs/CIDRs always pass and
-// established connections are never interrupted. Returns the backend used
-// ("nft" or "iptables"). Repeated calls are idempotent — each Apply rebuilds
-// the rules from the current data.
-func (m *Manager) Apply(countries, allowlist []string, dir string) (string, error) {
+// populated by the geoip Manager). ipBlocks are explicit client IPs/CIDRs
+// that are always dropped, added to the same sets as the country ranges
+// (e.g. known proxy-exit ranges or honeypot-auto-blocked clients).
+// Allowlisted IPs/CIDRs always pass and established connections are never
+// interrupted. Returns the backend used ("nft" or "iptables"). Repeated
+// calls are idempotent — each Apply rebuilds the rules from the current
+// data.
+func (m *Manager) Apply(countries, allowlist, ipBlocks []string, dir string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	backend, err := m.detect()
 	if err != nil {
 		return "", err
 	}
-	v4, v6 := loadCountryCIDRs(dir, countries)
-	if len(v4) == 0 && len(v6) == 0 {
+	countryV4, countryV6 := loadCountryCIDRs(dir, countries)
+	// Countries were requested but none of their data is on disk: nothing to
+	// block. This is an error so the operator learns the geo data is missing
+	// — unless explicit ipBlocks carry the feature on their own.
+	if len(countries) > 0 && len(countryV4) == 0 && len(countryV6) == 0 && len(ipBlocks) == 0 {
 		return backend, fmt.Errorf("no cached country CIDRs found in %s — refresh geo data first", dir)
 	}
-	a4, a6 := classifyAllowlist(allowlist)
+	b4, b6 := classifyIPs(ipBlocks)
+	v4 := append(countryV4, b4...)
+	v6 := append(countryV6, b6...)
+	a4, a6 := classifyIPs(allowlist)
 	switch backend {
 	case "nft":
 		return backend, m.applyNft(v4, v6, a4, a6)
@@ -137,6 +146,89 @@ func (m *Manager) Apply(countries, allowlist []string, dir string) (string, erro
 		return backend, m.applyIptables(v4, v6, a4, a6)
 	}
 	return backend, fmt.Errorf("unsupported backend %q", backend)
+}
+
+// AddIP installs a single blocked client IP/CIDR into the drop set without
+// rebuilding the rules — used when a honeypot hit auto-blocks a client so
+// its next connection is dropped immediately. The sets must already exist
+// (Apply ran once); errors (no backend, or the geo feature was never
+// applied) are returned for the caller to log — the DNS-level REFUSED still
+// enforces the block either way.
+func (m *Manager) AddIP(entry string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	backend, err := m.detect()
+	if err != nil {
+		return err
+	}
+	ip, v6, err := parseIPEntry(entry)
+	if err != nil {
+		return err
+	}
+	switch backend {
+	case "nft":
+		set := "geo_v4"
+		if v6 {
+			set = "geo_v6"
+		}
+		return m.runner.Run("nft", "add", "element", nftTable, set, "{ "+ip+" }")
+	case "iptables":
+		set := ipsetV4
+		if v6 {
+			set = ipsetV6
+		}
+		return m.runner.Run("ipset", "add", set, ip, "-exist")
+	}
+	return fmt.Errorf("unsupported backend %q", backend)
+}
+
+// RemoveIP removes a blocked client IP/CIDR from the drop set (unblock). A
+// missing entry is treated as success.
+func (m *Manager) RemoveIP(entry string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	backend, err := m.detect()
+	if err != nil {
+		return err
+	}
+	ip, v6, err := parseIPEntry(entry)
+	if err != nil {
+		return err
+	}
+	switch backend {
+	case "nft":
+		set := "geo_v4"
+		if v6 {
+			set = "geo_v6"
+		}
+		// Deleting a missing element errors — benign during an unblock.
+		_ = m.runner.Run("nft", "delete", "element", nftTable, set, "{ "+ip+" }")
+		return nil
+	case "iptables":
+		set := ipsetV4
+		if v6 {
+			set = ipsetV6
+		}
+		return m.runner.Run("ipset", "del", set, ip, "-exist")
+	}
+	return nil
+}
+
+// parseIPEntry canonicalises an IP or CIDR entry and reports its family.
+func parseIPEntry(entry string) (string, bool, error) {
+	entry = strings.TrimSpace(entry)
+	var ip net.IP
+	if _, n, err := net.ParseCIDR(entry); err == nil {
+		entry = n.String() // canonical: aligned network + prefix
+		ip = n.IP
+	} else {
+		ip = net.ParseIP(entry)
+		if ip == nil {
+			return "", false, fmt.Errorf("%q is not an IP or CIDR", entry)
+		}
+		entry = ip.String()
+	}
+	return entry, ip.To4() == nil, nil
 }
 
 // Clear removes every rule and set Apply installed. Safe to call when
@@ -214,12 +306,12 @@ func (m *Manager) applyNft(v4, v6, a4, a6 []string) error {
 	if len(a6) > 0 {
 		rules = append(rules, "ip6 saddr @geo_allow_v6 accept")
 	}
-	if len(v4) > 0 {
-		rules = append(rules, "ip saddr @geo_v4 drop")
-	}
-	if len(v6) > 0 {
-		rules = append(rules, "ip6 saddr @geo_v6 drop")
-	}
+	// The drop rules always reference their sets, even when the sets are
+	// empty at Apply time: AddIP adds blocked clients incrementally (e.g.
+	// honeypot hits), and a rule must already exist for those elements to
+	// take effect. An empty set matches nothing, so this is harmless.
+	rules = append(rules, "ip saddr @geo_v4 drop")
+	rules = append(rules, "ip6 saddr @geo_v6 drop")
 	// Established/related connections pass for everyone else, after the
 	// country DROPs above have had their say.
 	rules = append(rules, "ct state established,related accept")
@@ -292,12 +384,11 @@ func (m *Manager) applyIptables(v4, v6, a4, a6 []string) error {
 	if len(a6) > 0 {
 		_ = m.runner.Run("ip6tables", "-A", iptChain, "-m", "set", "--match-set", ipsetAllowV6, "src", "-j", "ACCEPT")
 	}
-	if len(v4) > 0 {
-		_ = m.runner.Run("iptables", "-A", iptChain, "-m", "set", "--match-set", ipsetV4, "src", "-j", "DROP")
-	}
-	if len(v6) > 0 {
-		_ = m.runner.Run("ip6tables", "-A", iptChain, "-m", "set", "--match-set", ipsetV6, "src", "-j", "DROP")
-	}
+	// The DROP rules always reference their sets, even when empty at Apply
+	// time, so incremental AddIP calls (honeypot auto-blocks) take effect
+	// immediately. Empty sets match nothing, so this is harmless.
+	_ = m.runner.Run("iptables", "-A", iptChain, "-m", "set", "--match-set", ipsetV4, "src", "-j", "DROP")
+	_ = m.runner.Run("ip6tables", "-A", iptChain, "-m", "set", "--match-set", ipsetV6, "src", "-j", "DROP")
 	_ = m.runner.Run("iptables", "-A", iptChain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
 	_ = m.runner.Run("ip6tables", "-A", iptChain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
 	// Single jump from INPUT; -C check keeps it idempotent across applies.
@@ -387,16 +478,20 @@ func parseCIDRs(s string) []string {
 	return out
 }
 
-// classifyAllowlist splits allowlist entries (IPs or CIDRs) into v4 and v6.
-func classifyAllowlist(entries []string) (v4, v6 []string) {
+// classifyIPs splits IP/CIDR entries into v4 and v6, skipping invalid ones.
+// Used for both the allowlist and explicit block lists.
+func classifyIPs(entries []string) (v4, v6 []string) {
 	for _, e := range entries {
 		e = strings.TrimSpace(e)
 		if e == "" {
 			continue
 		}
 		var ip net.IP
-		if parsed, _, err := net.ParseCIDR(e); err == nil {
+		if parsed, n, err := net.ParseCIDR(e); err == nil {
 			ip = parsed
+			// Canonical form (aligned network + prefix, e.g. 10.0.0.1/8 →
+			// 10.0.0.0/8) so nft/ipset receive clean prefixes.
+			e = n.String()
 		} else {
 			ip = net.ParseIP(e)
 		}

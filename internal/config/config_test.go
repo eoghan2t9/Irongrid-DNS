@@ -219,6 +219,34 @@ func TestValidateGeoBlock(t *testing.T) {
 	}
 }
 
+func TestValidateGeoBlockIPsAndHoneypots(t *testing.T) {
+	c := validBase()
+	c.GeoBlock = GeoBlockConfig{
+		Enabled:   true,
+		Countries: []string{"RU"},
+		IPs:       []string{"38.11.106.3", "203.0.113.0/24", "2001:db8::/32"},
+		Honeypots: []string{"Trap.Example.com.", "trap2.example.com"},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid ips/honeypots rejected: %v", err)
+	}
+	if c.GeoBlock.Honeypots[0] != "trap.example.com" {
+		t.Errorf("honeypot normalized to %q, want trap.example.com", c.GeoBlock.Honeypots[0])
+	}
+
+	c = validBase()
+	c.GeoBlock = GeoBlockConfig{Enabled: true, Countries: []string{"RU"}, IPs: []string{"not-an-ip"}}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "geo_block.ips") {
+		t.Fatalf("err = %v, want geo_block.ips error", err)
+	}
+
+	c = validBase()
+	c.GeoBlock = GeoBlockConfig{Enabled: true, Countries: []string{"RU"}, Honeypots: []string{"has space.com"}}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "honeypots") {
+		t.Fatalf("err = %v, want honeypots error", err)
+	}
+}
+
 func TestGeoAutoUpdateDefault(t *testing.T) {
 	if d := Default().GeoBlock.AutoUpdate; d != 168*time.Hour {
 		t.Errorf("geo_block.auto_update default = %v, want 168h (weekly)", d)

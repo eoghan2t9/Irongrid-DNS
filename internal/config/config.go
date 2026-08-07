@@ -90,6 +90,16 @@ type GeoBlockConfig struct {
 	Countries []string `yaml:"countries"`
 	// Allowlist is a set of client IPs/CIDRs that are never geo-blocked.
 	Allowlist []string `yaml:"allowlist"`
+	// IPs is a set of client IPs/CIDRs that are always blocked, regardless
+	// of country — the "block this specific client/netblock" list (e.g.
+	// known proxy-exit ranges). Entries are refused by the DNS handler like
+	// blocked countries and installed into the host firewall's drop sets.
+	IPs []string `yaml:"ips"`
+	// Honeypots are domains that are never answered: any client that queries
+	// one is auto-added to the blocked-IP set (persisted across restarts and
+	// pushed into the host firewall so its connections are dropped at the
+	// packet level, not just refused at the DNS layer). Exact-match only.
+	Honeypots []string `yaml:"honeypots"`
 	// BaseURL overrides where per-country CIDR lists are fetched from; the
 	// lowercase country code and file are appended as
 	// "<cc>/ipv4-aggregated.txt" and "<cc>/ipv6-aggregated.txt" (the
@@ -531,6 +541,20 @@ func (c *Config) validate() error {
 			}
 		}
 	}
+	for i, e := range c.GeoBlock.IPs {
+		if _, _, err := net.ParseCIDR(e); err != nil {
+			if net.ParseIP(e) == nil {
+				return fmt.Errorf("geo_block.ips[%d]: %q is not an IP or CIDR", i, e)
+			}
+		}
+	}
+	for i, d := range c.GeoBlock.Honeypots {
+		d = normalizeDomain(d)
+		if d == "" {
+			return fmt.Errorf("geo_block.honeypots[%d]: %q is not a valid domain", i, c.GeoBlock.Honeypots[i])
+		}
+		c.GeoBlock.Honeypots[i] = d
+	}
 	if u := c.GeoBlock.BaseURL; u != "" && !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "file://") {
 		return fmt.Errorf("geo_block.base_url must start with http://, https:// or file://")
 	}
@@ -538,6 +562,18 @@ func (c *Config) validate() error {
 		return fmt.Errorf("geo_block.auto_update must be >= 0 (0 disables automatic refreshes)")
 	}
 	return nil
+}
+
+// normalizeDomain lowercases, trims and strips a trailing dot from a domain
+// for the honeypot list, returning "" for entries that are clearly invalid
+// (empty or containing whitespace).
+func normalizeDomain(d string) string {
+	d = strings.ToLower(strings.TrimSpace(d))
+	d = strings.TrimSuffix(d, ".")
+	if d == "" || strings.ContainsAny(d, " \t") {
+		return ""
+	}
+	return d
 }
 
 // webPort returns the port of a host:port listen address (0 when absent).

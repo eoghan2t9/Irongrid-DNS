@@ -17,7 +17,7 @@ const empty = () => ({
   rewrites: [],
   client_groups: [],
   rate_limit: { enabled: false, qps: 20, burst: 40, auto_block: false, block_after: 3, block_for: '10m' },
-  geo_block: { enabled: false, countries: [], allowlist: [], base_url: '', auto_update: '168h' },
+  geo_block: { enabled: false, countries: [], allowlist: [], ips: [], honeypots: [], base_url: '', auto_update: '168h' },
   dnssec: { enabled: false, require_ad: true },
 })
 
@@ -34,6 +34,7 @@ export default function Settings({ onSessionInvalidated }) {
   const [diagResult, setDiagResult] = useState(null)
   const [blocked, setBlocked] = useState([])
   const [geoInfo, setGeoInfo] = useState({ enabled: false, countries: [] })
+  const [honeyBlocked, setHoneyBlocked] = useState([])
 
   const load = useCallback(async () => {
     try {
@@ -46,6 +47,7 @@ export default function Settings({ onSessionInvalidated }) {
   const loadAbuse = useCallback(async () => {
     try { setBlocked((await api.rateBlocked()).blocked || []) } catch { /* ignore */ }
     try { setGeoInfo(await api.geoStatus()) } catch { /* ignore */ }
+    try { setHoneyBlocked((await api.geoBlocked()).blocked || []) } catch { /* ignore */ }
   }, [])
 
   useEffect(() => { load() }, [load])
@@ -145,6 +147,16 @@ export default function Settings({ onSessionInvalidated }) {
       setTimeout(loadAbuse, 2000)
     } catch (e) {
       toast('Geo refresh failed: ' + e.message, 'error')
+    }
+  }
+
+  const unblockHoney = async (ip) => {
+    try {
+      await api.geoUnblock(ip)
+      toast(`Unblocked ${ip}`)
+      await loadAbuse()
+    } catch (e) {
+      toast('Unblock failed: ' + e.message, 'error')
     }
   }
 
@@ -377,6 +389,8 @@ export default function Settings({ onSessionInvalidated }) {
         <div className="form-grid">
           {toggle('Enable geo blocking', 'geo_block.enabled')}
           {textarea('Blocked countries (ISO 3166-1 alpha-2)', 'geo_block.countries', 'one per line, e.g. RU, CN, KP')}
+          {textarea('Blocked client IPs / CIDRs', 'geo_block.ips', 'always refused regardless of country — e.g. known proxy-exit ranges like 38.11.0.0/17; feeds DNS and the host firewall')}
+          {textarea('Honeypot domains', 'geo_block.honeypots', 'one per line — any client that queries one is blocked permanently (persisted, dropped at the firewall) until you unblock it below')}
           {textarea('Allowlist (IPs / CIDRs)', 'geo_block.allowlist', 'clients that are never geo-blocked')}
           {text('Data source URL (optional)', 'geo_block.base_url', 'defaults to ipverse/rir-ip; appends &lt;cc&gt;/ipv4-aggregated.txt and &lt;cc&gt;/ipv6-aggregated.txt (lowercase codes)')}
           {field('Auto-refresh country data', 'how often the per-country CIDR lists re-fetch themselves', (
@@ -388,10 +402,23 @@ export default function Settings({ onSessionInvalidated }) {
             </select>
           ))}
         </div>
-        {deepGet('geo_block.enabled', false) && (deepGet('geo_block.countries', []) || []).length === 0 && (
+        {deepGet('geo_block.enabled', false) && (deepGet('geo_block.countries', []) || []).length === 0 && (deepGet('geo_block.ips', []) || []).length === 0 && (deepGet('geo_block.honeypots', []) || []).length === 0 && (
           <p className="dim small" style={{ marginTop: 8, color: 'var(--amber)' }}>
-            ⚠ Geo blocking is on but no countries are listed — add ISO codes above (one per line, e.g. RU, CN), save, then refresh.
+            ⚠ Geo blocking is on but nothing is configured — add countries, blocked IPs, or honeypot domains above, save, then refresh.
           </p>
+        )}
+        <h4 style={{ margin: '16px 0 10px' }}>Honeypot-blocked clients</h4>
+        {honeyBlocked.length === 0 ? (
+          <p className="dim small">No clients blocked yet — honeypot-domain queries auto-block their client here.</p>
+        ) : (
+          <div>
+            {honeyBlocked.map((ip) => (
+              <div className="list-row" key={ip}>
+                <span className="mono">{ip}</span>
+                <button className="btn small danger" type="button" onClick={() => unblockHoney(ip)}>Unblock</button>
+              </div>
+            ))}
+          </div>
         )}
         <h4 style={{ margin: '16px 0 10px' }}>Geo data status</h4>
         {geoInfo && geoInfo.countries && geoInfo.countries.length > 0 ? (
@@ -408,7 +435,7 @@ export default function Settings({ onSessionInvalidated }) {
             ))}
           </div>
         ) : (
-          <p className="dim small">No country data loaded yet — enable geo blocking, add country codes above, save, then refresh.</p>
+          <p className="dim small">No country data loaded — countries are optional; blocked-IP and honeypot blocking above work without them. Add ISO codes above, save, then refresh to load country ranges.</p>
         )}
         {geoInfo && geoInfo.next_refresh && deepGet('geo_block.enabled', false) && (
           <p className="dim small" style={{ marginTop: 8 }}>
