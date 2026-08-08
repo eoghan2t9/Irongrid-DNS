@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/andybalholm/brotli"
 )
 
 // TestServeFromFSContentType guards the SPA fallback: refreshing a client-side
@@ -20,9 +22,10 @@ import (
 // TestServeFromFSAssetCachingAndGzip verifies the loading-speed behaviour of
 // static serving: hashed /assets/* files are immutable-cached (repeat loads
 // hit the browser cache), the HTML shell stays no-cache so new builds are
-// picked up, and compressible assets are gzipped when the client asks for it.
+// picked up, and compressible assets are served with the best encoding the
+// client accepts — Brotli when offered, otherwise gzip, else raw.
 func TestServeFromFSAssetCachingAndGzip(t *testing.T) {
-	big := strings.Repeat("const data = 'x'; ", 200) // > gzipThreshold bytes
+	big := strings.Repeat("const data = 'x'; ", 200) // > compressThreshold bytes
 	root := fstest.MapFS{
 		"index.html":         &fstest.MapFile{Data: []byte("<html>dashboard</html>")},
 		"assets/app-hash.js": &fstest.MapFile{Data: []byte(big)},
@@ -65,6 +68,27 @@ func TestServeFromFSAssetCachingAndGzip(t *testing.T) {
 	}
 	if string(uncompressed) != big {
 		t.Fatal("gzipped asset must round-trip to the original content")
+	}
+
+	// The same asset with brotli offered alongside gzip: br wins (the browser
+	// would pick it too), decodes back to the original, and beats gzip's size
+	// on real text.
+	rrB := httptest.NewRecorder()
+	reqB := httptest.NewRequest(http.MethodGet, "/assets/app-hash.js", nil)
+	reqB.Header.Set("Accept-Encoding", "br, gzip")
+	serveFromFS(rrB, reqB, root)
+	if ce := rrB.Header().Get("Content-Encoding"); ce != "br" {
+		t.Fatalf("asset with br+gzip: Content-Encoding = %q, want br (preferred)", ce)
+	}
+	ub, err := io.ReadAll(brotli.NewReader(bytes.NewReader(rrB.Body.Bytes())))
+	if err != nil {
+		t.Fatalf("brotli decode: %v", err)
+	}
+	if string(ub) != big {
+		t.Fatal("brotli asset must round-trip to the original content")
+	}
+	if rrB.Body.Len() >= rr2.Body.Len() {
+		t.Errorf("brotli size %d not smaller than gzip size %d", rrB.Body.Len(), rr2.Body.Len())
 	}
 
 	// Without Accept-Encoding the same asset is served raw.

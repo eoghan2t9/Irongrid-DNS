@@ -25,6 +25,7 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 
+	"github.com/andybalholm/brotli"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 )
 
@@ -237,14 +238,23 @@ func logRequests(next http.Handler) http.Handler {
 	})
 }
 
-// gzipPool reuses gzip writers for on-the-fly asset compression (the flate
-// encoder allocates non-trivially, so pooling it across requests matters on a
-// busy resolver).
+// gzipPool and brotliPool reuse compressors for on-the-fly asset compression
+// (both encoders allocate non-trivially, so pooling them across requests
+// matters on a busy resolver).
 var gzipPool = sync.Pool{New: func() any { return gzip.NewWriter(io.Discard) }}
+var brotliPool = sync.Pool{
+	New: func() any {
+		// Quality 5: brotli encodes noticeably slower than gzip at high
+		// qualities, and the immutable asset cache means each file is only
+		// compressed once per browser anyway — mid-range quality still
+		// beats gzip -9 on size with a fraction of the CPU.
+		return brotli.NewWriterOptions(io.Discard, brotli.WriterOptions{Quality: 5})
+	},
+}
 
-// gzipThreshold is the minimum response size worth compressing: gzipping a
-// tiny file costs CPU and round-trips for nothing.
-const gzipThreshold = 860
+// compressThreshold is the minimum response size worth compressing:
+// compressing a tiny file costs CPU and round-trips for nothing.
+const compressThreshold = 860
 
 // serveFromFS serves static assets, falling back to index.html for SPA routes.
 // Files are served directly (no http.FileServer) to avoid its /index.html
@@ -287,25 +297,57 @@ func serveFromFS(w http.ResponseWriter, r *http.Request, root fs.FS) {
 	} else {
 		w.Header().Set("Cache-Control", "no-cache")
 	}
-	// Compress text assets on the fly. The browser only pays for this once —
-	// the immutable cache serves every repeat load — and the response is
-	// built in memory first so a compression failure falls back to the raw
-	// bytes instead of a corrupt stream. DoH (/dns-query) never reaches this
-	// path; it is handled by its own mux entry before the router.
-	if len(data) > gzipThreshold && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") && isCompressible(ct) {
-		var buf bytes.Buffer
-		gz := gzipPool.Get().(*gzip.Writer)
-		gz.Reset(&buf)
-		_, werr := gz.Write(data)
-		cerr := gz.Close()
-		gzipPool.Put(gz)
-		if werr == nil && cerr == nil {
-			w.Header().Set("Content-Encoding", "gzip")
-			w.Write(buf.Bytes())
+	// Compress text assets on the fly, preferring Brotli when the client
+	// advertises it (any browser that lists both picks br first, and it
+	// encodes smaller than gzip). The browser only pays for this once — the
+	// immutable cache serves every repeat load — and the response is built
+	// in memory first so a compression failure falls back to the raw bytes
+	// instead of a corrupt stream. DoH (/dns-query) never reaches this path;
+	// it is handled by its own mux entry before the router.
+	if len(data) > compressThreshold && isCompressible(ct) {
+		enc := r.Header.Get("Accept-Encoding")
+		if strings.Contains(enc, "br") && writeBrotli(w, data) {
+			return
+		}
+		if strings.Contains(enc, "gzip") && writeGzip(w, data) {
 			return
 		}
 	}
 	w.Write(data)
+}
+
+// writeGzip compresses data into the response; false means the attempt failed
+// and the caller should fall back to the raw bytes.
+func writeGzip(w http.ResponseWriter, data []byte) bool {
+	var buf bytes.Buffer
+	gz := gzipPool.Get().(*gzip.Writer)
+	gz.Reset(&buf)
+	_, werr := gz.Write(data)
+	cerr := gz.Close()
+	gzipPool.Put(gz)
+	if werr != nil || cerr != nil {
+		return false
+	}
+	w.Header().Set("Content-Encoding", "gzip")
+	w.Write(buf.Bytes())
+	return true
+}
+
+// writeBrotli compresses data into the response; false means the attempt
+// failed and the caller should fall back to gzip or the raw bytes.
+func writeBrotli(w http.ResponseWriter, data []byte) bool {
+	var buf bytes.Buffer
+	br := brotliPool.Get().(*brotli.Writer)
+	br.Reset(&buf)
+	_, werr := br.Write(data)
+	cerr := br.Close()
+	brotliPool.Put(br)
+	if werr != nil || cerr != nil {
+		return false
+	}
+	w.Header().Set("Content-Encoding", "br")
+	w.Write(buf.Bytes())
+	return true
 }
 
 // isCompressible reports whether a content type is worth gzipping.

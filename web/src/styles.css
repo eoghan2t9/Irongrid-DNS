@@ -591,3 +591,26 @@ code { background: var(--bg2); padding: 2px 6px; border-radius: 3px; font-family
 .login-card.splash-card { animation: fade-in 0.2s ease; }
 .login-logo.logo-spin { animation: logo-spin 1.8s linear infinite; }
 @keyframes logo-spin { to { transform: rotate(360deg); } }
+
+/* Spinner shown while a lazy-loaded view's chunk is fetched. */
+.view-loading {
+  display: flex;
+  justify-content: center;
+  padding: 3.5rem 0;
+}
+.view-spinner {
+  width: 26px;
+  height: 26px;
+  border: 3px solid var(--border);
+  border-top-color: var(--cyan);
+  border-radius: 50%;
+  animation: logo-spin 0.8s linear infinite;
+}
+
+/* Error state shown by the view error boundary (e.g. a failed lazy chunk). */
+.view-error {
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--rose);
+}

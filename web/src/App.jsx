@@ -1,17 +1,21 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback, lazy, Suspense } from 'react'
 import { api, setAuthHandler, setCredentials, restoreCredentials, hasCredentials, clearCredentials } from './api'
+// Dashboard and UpdateChecker stay in the initial bundle: Dashboard is the
+// landing view (the first paint needs it eagerly) and UpdateChecker is tiny
+// and rendered in the topbar on every view. Every other view lazy-loads its
+// own chunk on first visit, so the initial payload stays small.
 import Dashboard from './components/Dashboard'
-import QueryLog from './components/QueryLog'
-import Blocklists from './components/Blocklists'
-import Lists from './components/Lists'
-import Rewrites from './components/Rewrites'
-import Tools from './components/Tools'
-import ClientGroups from './components/ClientGroups'
-import Tunnel from './components/Tunnel'
-import Settings from './components/Settings'
-import Tls from './components/Tls'
 import UpdateChecker from './components/UpdateChecker'
-import Changelog from './components/Changelog'
+const QueryLog = lazy(() => import('./components/QueryLog'))
+const Blocklists = lazy(() => import('./components/Blocklists'))
+const Lists = lazy(() => import('./components/Lists'))
+const Rewrites = lazy(() => import('./components/Rewrites'))
+const Tools = lazy(() => import('./components/Tools'))
+const ClientGroups = lazy(() => import('./components/ClientGroups'))
+const Tunnel = lazy(() => import('./components/Tunnel'))
+const Settings = lazy(() => import('./components/Settings'))
+const Tls = lazy(() => import('./components/Tls'))
+const Changelog = lazy(() => import('./components/Changelog'))
 
 // navSvg wraps every nav icon in the same stroke-only SVG shell (matching
 // the logout icon below) so they inherit color via currentColor — no glyph
@@ -244,17 +248,28 @@ export default function App() {
           </div>
         </header>
         <div className="content">
-          {view === 'dashboard' && <Dashboard onNavigate={navigate} />}
-          {view === 'log' && <QueryLog />}
-          {view === 'blocklists' && <Blocklists />}
-          {view === 'lists' && <Lists />}
-          {view === 'rewrites' && <Rewrites />}
-          {view === 'tools' && <Tools />}
-          {view === 'client-groups' && <ClientGroups />}
-          {view === 'tls' && <Tls />}
-          {view === 'tunnel' && <Tunnel />}
-          {view === 'changelog' && <Changelog />}
-          {view === 'settings' && <Settings onSessionInvalidated={handleSessionInvalidated} />}
+          {/* Suspense shows the spinner while a lazy view's chunk is being
+              fetched; the shell (sidebar/topbar) stays rendered, so switching
+              views never blanks the page or causes a layout jump. The error
+              boundary turns a failed chunk fetch (flaky network mid-
+              navigation) into a friendly reload button instead of a blank
+              screen — React.lazy caches the rejection, so retrying in place
+              can't re-fetch; a page reload is the honest recovery. */}
+          <ViewErrorBoundary>
+            <Suspense fallback={<ViewLoading />}>
+              {view === 'dashboard' && <Dashboard onNavigate={navigate} />}
+              {view === 'log' && <QueryLog />}
+              {view === 'blocklists' && <Blocklists />}
+              {view === 'lists' && <Lists />}
+              {view === 'rewrites' && <Rewrites />}
+              {view === 'tools' && <Tools />}
+              {view === 'client-groups' && <ClientGroups />}
+              {view === 'tls' && <Tls />}
+              {view === 'tunnel' && <Tunnel />}
+              {view === 'changelog' && <Changelog />}
+              {view === 'settings' && <Settings onSessionInvalidated={handleSessionInvalidated} />}
+            </Suspense>
+          </ViewErrorBoundary>
         </div>
       </main>
     </div>
@@ -271,6 +286,44 @@ function Splash() {
       </div>
     </div>
   )
+}
+
+// Shown briefly while a lazy-loaded view's chunk downloads. It keeps the
+// content area's height stable so the shell doesn't jump between views.
+function ViewLoading() {
+  return (
+    <div className="view-loading" role="status" aria-live="polite">
+      <span className="view-spinner" />
+    </div>
+  )
+}
+
+// Catches render errors in the view area — most importantly a failed lazy
+// chunk load, which would otherwise unmount the whole app to a blank screen.
+class ViewErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props)
+    this.state = { failed: false }
+  }
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+  componentDidCatch(err) {
+    console.error('view render error:', err)
+  }
+  render() {
+    if (this.state.failed) {
+      return (
+        <div className="view-loading view-error" role="alert">
+          <div>This view failed to load.</div>
+          <button className="btn ghost small" onClick={() => window.location.reload()}>
+            Reload
+          </button>
+        </div>
+      )
+    }
+    return this.props.children
+  }
 }
 
 function Login({ onLogin, notice }) {
