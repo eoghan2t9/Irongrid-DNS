@@ -171,8 +171,8 @@ func main() {
 		lists.ReloadAll()
 	}
 
-	// ---- query log ----
-	ql, err := querylog.New(cfg.Log.QueryLogFile, cfg.Log.RetentionDays, cfg.Log.BatchSize)
+	// ---- query log (Dragonfly stream, same tier as the DNS cache) ----
+	ql, err := querylog.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Log.RetentionDays, cfg.Log.BatchSize)
 	if err != nil {
 		log.Fatalf("query log: %v", err)
 	}

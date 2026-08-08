@@ -1,19 +1,24 @@
 // Package querylog stores every DNS request with its allow/block outcome in
-// a pure-Go SQLite database (no CGO, no external tools).
+// a Dragonfly Redis Stream. The stream replaces the old SQLite database so
+// the query log shares the same cache tier as DNS responses: one server to
+// run, one place to look when diagnosing, and cheap sharing across multiple
+// Irongrid instances. Entries are written asynchronously in batches so the
+// DNS hot path never blocks on a round trip.
 package querylog
 
 import (
 	"context"
-	"database/sql"
+	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
+	"log"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	_ "modernc.org/sqlite"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -23,13 +28,33 @@ const (
 	// logBatchSize flushes the writer once this many entries have queued.
 	logBatchSize = 256
 	// logFlushInterval is the maximum age of a queued entry before the
-	// writer flushes it in one transaction.
+	// writer flushes it in one pipelined round trip.
 	logFlushInterval = 100 * time.Millisecond
+	// streamKey is the single Dragonfly stream holding every logged query.
+	// XADD auto-IDs are "<ms>-<seq>", so entries are time-ordered and the
+	// newest ID is also the latest query.
+	streamKey = "irongrid:log"
+	// maxStreamEntries hard-caps the stream length so the log can never grow
+	// unbounded in Dragonfly's cache mode (which evicts under memory
+	// pressure) even if the hourly retention pruner is delayed. 250k entries
+	// covers roughly a day or two of heavy traffic — well past the
+	// dashboard's needs, and the retention pruner usually keeps it far lower.
+	maxStreamEntries = 250000
+	// maxQueryScan bounds how far Query walks back when its filters match
+	// nothing recent: worst case it reads this many stream entries before
+	// giving up, so a pathological filter can't stall the API.
+	maxQueryScan = 20000
+	// maxStatsScan bounds how far the time-window stats walk. Beyond this
+	// the counters under-report rather than burn CPU/bandwidth on the
+	// dashboard's 10-second poll.
+	maxStatsScan = 100000
 )
 
-// Entry is a single logged query.
+// Entry is a single logged query. ID is the Dragonfly stream ID, assigned on
+// read; it is a stable unique key (the dashboard uses it as the React list
+// key) rather than a monotonically increasing integer.
 type Entry struct {
-	ID             int64     `json:"id"`
+	ID             string    `json:"id"`
 	Time           time.Time `json:"time"`
 	Client         string    `json:"client"`
 	Domain         string    `json:"domain"`
@@ -42,80 +67,52 @@ type Entry struct {
 	Answers        int       `json:"answers"`
 }
 
-// Log is a concurrency-safe query logger backed by SQLite. Entries are
-// enqueued and written by a single background goroutine in batches (one
-// transaction per flush), so per-query disk I/O never sits on the DNS hot
-// path.
+// Log is a concurrency-safe query logger backed by a Dragonfly stream.
+// Entries are enqueued and written by a single background goroutine in
+// pipelined batches (one round trip per flush), so per-query Redis traffic
+// never sits on the DNS hot path.
 type Log struct {
-	db        *sql.DB
-	mu        sync.Mutex // serialises Exec/Prune (raw writes by callers)
+	client    *redis.Client
 	retention time.Duration
-	dir       string
 	batchSize int
 
 	entries chan Entry
 	done    chan struct{}
 	closed  atomic.Bool
 	wg      sync.WaitGroup
+
+	// lastFlushErr gates the flush-failure log line so a Dragonfly outage
+	// produces at most one line per minute instead of one every ~100ms (the
+	// writer flushes on a ticker even when the server is down).
+	lastFlushErr atomic.Int64
 }
 
-// New opens (creating if needed) the query log database. batchSize is the
-// number of entries committed per transaction; <= 0 uses the default.
-func New(path string, retentionDays int, batchSize int) (*Log, error) {
-	if path == "" {
-		return nil, fmt.Errorf("query log path required")
+// New connects to Dragonfly and returns a stream-backed query log. It shares
+// the same endpoint as the DNS cache but owns its connection pool, so a
+// cache reload (which closes and replaces the cache's client) can never kill
+// the log. batchSize is the number of entries committed per pipelined flush;
+// <= 0 uses the default.
+func New(addr, password string, db, retentionDays, batchSize int) (*Log, error) {
+	client := redis.NewClient(&redis.Options{
+		Addr:         addr,
+		Password:     password,
+		DB:           db,
+		DialTimeout:  5 * time.Second,
+		ReadTimeout:  5 * time.Second,
+		WriteTimeout: 5 * time.Second,
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := client.Ping(ctx).Err(); err != nil {
+		return nil, fmt.Errorf("dragonfly query log unreachable at %s: %w", addr, err)
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return nil, err
-	}
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		return nil, fmt.Errorf("open query log: %w", err)
-	}
-	db.SetMaxOpenConns(1) // modernc sqlite is single-writer; serialize writes
-
-	// WAL + NORMAL: batched commits skip per-write fsync without risking
-	// corruption (a crash may lose at most the last ~100ms of entries).
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
-		return nil, fmt.Errorf("enable WAL: %w", err)
-	}
-	if _, err := db.Exec(`PRAGMA synchronous=NORMAL`); err != nil {
-		return nil, fmt.Errorf("set synchronous=NORMAL: %w", err)
-	}
-	if _, err := db.Exec(`PRAGMA busy_timeout=5000`); err != nil {
-		return nil, fmt.Errorf("set busy_timeout: %w", err)
-	}
-
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS queries (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		ts INTEGER NOT NULL,
-		client TEXT NOT NULL,
-		domain TEXT NOT NULL,
-		qtype TEXT NOT NULL,
-		action TEXT NOT NULL,
-		reason TEXT NOT NULL DEFAULT '',
-		upstream TEXT NOT NULL DEFAULT '',
-		rt_ms INTEGER NOT NULL DEFAULT 0,
-		rcode INTEGER NOT NULL DEFAULT 0,
-		answers INTEGER NOT NULL DEFAULT 0
-	)`); err != nil {
-		return nil, fmt.Errorf("create query log table: %w", err)
-	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_queries_ts ON queries(ts)`); err != nil {
-		return nil, err
-	}
-	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idx_queries_domain ON queries(domain)`); err != nil {
-		return nil, err
-	}
-
 	bs := logBatchSize
 	if batchSize > 0 {
 		bs = batchSize
 	}
 	l := &Log{
-		db:        db,
+		client:    client,
 		retention: time.Duration(retentionDays) * 24 * time.Hour,
-		dir:       filepath.Dir(path),
 		batchSize: bs,
 		entries:   make(chan Entry, logQueueCap),
 		done:      make(chan struct{}),
@@ -125,9 +122,24 @@ func New(path string, retentionDays int, batchSize int) (*Log, error) {
 	return l, nil
 }
 
+// NewDisabled returns a logger with no backing store: Record drops entries
+// and Query/Stats return empty results. It exists for tests (and any caller
+// that needs the full Log API without a Redis-compatible server); the writer
+// goroutine is still started so Close behaves identically.
+func NewDisabled(retentionDays int) *Log {
+	l := &Log{
+		retention: time.Duration(retentionDays) * 24 * time.Hour,
+		entries:   make(chan Entry, logQueueCap),
+		done:      make(chan struct{}),
+	}
+	l.wg.Add(1)
+	go l.runWriter()
+	return l
+}
+
 // Record enqueues one query entry. It never blocks or slows query serving:
-// the background writer batches entries and commits them in a single
-// transaction. If the queue is full (or the log is closed), the entry is
+// the background writer batches entries and commits them in one pipelined
+// round trip. If the queue is full (or the log is closed), the entry is
 // dropped — logging must never break DNS.
 func (l *Log) Record(e Entry) {
 	if l.closed.Load() {
@@ -184,155 +196,254 @@ func (l *Log) runWriter() {
 	}
 }
 
-// writeBatch commits entries with one multi-row INSERT in a single
-// transaction — one commit per batch instead of one per query.
+// writeBatch appends entries to the stream in a single pipelined round trip.
+// Each entry is stored as one JSON field ("v") so a read is a single
+// Unmarshal. A failed flush (Dragonfly down, connection reset) logs the
+// error and moves on — the log must never break DNS, and at most the last
+// ~100ms of entries are at risk.
 func (l *Log) writeBatch(entries []Entry) {
-	if len(entries) == 0 {
+	if l.client == nil || len(entries) == 0 {
 		return
 	}
-	var sb strings.Builder
-	sb.WriteString(`INSERT INTO queries
-		(ts, client, domain, qtype, action, reason, upstream, rt_ms, rcode, answers) VALUES `)
-	args := make([]any, 0, len(entries)*10)
-	for i, e := range entries {
-		if i > 0 {
-			sb.WriteString(",")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pipe := l.client.Pipeline()
+	for i := range entries {
+		v, err := json.Marshal(&entries[i])
+		if err != nil {
+			continue
 		}
-		sb.WriteString("(?,?,?,?,?,?,?,?,?,?)")
-		args = append(args, e.Time.Unix(), e.Client, e.Domain, e.Type, e.Action,
-			e.Reason, e.Upstream, e.ResponseTimeMS, e.Rcode, e.Answers)
+		pipe.XAdd(ctx, &redis.XAddArgs{Stream: streamKey, Values: map[string]any{"v": v}})
 	}
-	tx, err := l.db.Begin()
-	if err != nil {
-		return
+	// Keep the stream bounded even if the hourly retention pruner is
+	// delayed; in Dragonfly's cache mode an unbounded stream could otherwise
+	// eat the whole 512MB budget.
+	pipe.XTrimMaxLen(ctx, streamKey, maxStreamEntries)
+	if _, err := pipe.Exec(ctx); err != nil {
+		// Rate-limited: a down Dragonfly would otherwise log every ~100ms.
+		// The entries are dropped either way — logging must never break DNS.
+		now := time.Now().UnixNano()
+		last := l.lastFlushErr.Load()
+		if last == 0 || now-last > int64(time.Minute) {
+			l.lastFlushErr.Store(now)
+			log.Printf("[querylog] stream flush failed: %v", err)
+		}
 	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(sb.String(), args...); err != nil {
-		// Drop the batch silently: logging must not break DNS.
-		return
-	}
-	_ = tx.Commit()
 }
 
-// Query fetches recent entries with optional filters and pagination.
+// entryFromMessage decodes a stream message into an Entry. The message ID
+// becomes the entry's stable ID; the payload is the JSON body stored at
+// write time. ok is false for malformed messages, which are skipped.
+func entryFromMessage(e *Entry, m redis.XMessage) bool {
+	if m.ID == "" {
+		return false
+	}
+	raw, ok := m.Values["v"].(string)
+	if !ok {
+		return false
+	}
+	if err := json.Unmarshal([]byte(raw), e); err != nil {
+		return false
+	}
+	e.ID = m.ID
+	return true
+}
+
+// matchesFilter applies the query log filters (empty values are wildcards).
+// The SQLite store did this in SQL; streams cannot filter server-side, so
+// the same semantics are replicated here: action/qtype are exact matches
+// and domain is a case-insensitive substring.
+func matchesFilter(e Entry, action, domain, qtype string) bool {
+	if action != "" && e.Action != action {
+		return false
+	}
+	if qtype != "" && !strings.EqualFold(e.Type, qtype) {
+		return false
+	}
+	if domain != "" && !strings.Contains(strings.ToLower(e.Domain), strings.ToLower(domain)) {
+		return false
+	}
+	return true
+}
+
+// Query fetches recent entries with optional filters and pagination, newest
+// first. Filters are applied in memory after reading from the stream,
+// walking back from the newest entry until offset+limit matches are found or
+// the scan bound is hit.
 func (l *Log) Query(ctx context.Context, limit, offset int, action, domain, qtype string) ([]Entry, error) {
-	q := `SELECT id, ts, client, domain, qtype, action, reason, upstream, rt_ms, rcode, answers
-	      FROM queries WHERE 1=1`
-	args := []any{}
-	if action != "" {
-		q += ` AND action = ?`
-		args = append(args, action)
+	if l.client == nil {
+		return nil, nil
 	}
-	if qtype != "" {
-		q += ` AND qtype = ?`
-		args = append(args, qtype)
+	if limit <= 0 || limit > 1000 {
+		limit = 100
 	}
-	if domain != "" {
-		q += ` AND domain LIKE ?`
-		args = append(args, "%"+domain+"%")
+	if offset < 0 {
+		offset = 0
 	}
-	q += ` ORDER BY id DESC LIMIT ? OFFSET ?`
-	args = append(args, limit, offset)
-
-	rows, err := l.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-
-	var out []Entry
-	for rows.Next() {
-		var e Entry
-		var ts int64
-		if err := rows.Scan(&e.ID, &ts, &e.Client, &e.Domain, &e.Type, &e.Action,
-			&e.Reason, &e.Upstream, &e.ResponseTimeMS, &e.Rcode, &e.Answers); err != nil {
+	want := offset + limit
+	var matches []Entry
+	start := "+" // newest stream ID
+	first := true
+	scanned := 0
+	for len(matches) < want && scanned < maxQueryScan {
+		// Request one extra message: a page shorter than requested proves
+		// the stream is exhausted, and (when continuing) the first message
+		// is the already-consumed one, which we skip.
+		const page = 1000
+		msgs, err := l.client.XRevRangeN(ctx, streamKey, start, "-", page+1).Result()
+		if err != nil {
 			return nil, err
 		}
-		e.Time = time.Unix(ts, 0)
-		out = append(out, e)
+		begin := 0
+		if !first && len(msgs) > 0 && msgs[0].ID == start {
+			begin = 1
+		}
+		if len(msgs) <= begin {
+			break
+		}
+		first = false
+		for _, m := range msgs[begin:] {
+			scanned++
+			var e Entry
+			if !entryFromMessage(&e, m) {
+				continue
+			}
+			if matchesFilter(e, action, domain, qtype) {
+				matches = append(matches, e)
+			}
+		}
+		if len(msgs) <= page { // fewer than a full page: the stream is exhausted
+			break
+		}
+		start = msgs[len(msgs)-1].ID
 	}
-	return out, rows.Err()
+	if len(matches) <= offset {
+		return []Entry{}, nil
+	}
+	end := offset + limit
+	if end > len(matches) {
+		end = len(matches)
+	}
+	return matches[offset:end], nil
 }
 
-// Stats returns aggregate counters for a time window.
-func (l *Log) Stats(ctx context.Context, since time.Time) (map[string]any, error) {
-	stats := map[string]any{
-		"total": 0, "allowed": 0, "blocked": 0, "cached": 0,
-		"avg_rt_ms": 0, "top_blocked": []TopDomain{}, "top_clients": []TopDomain{},
-	}
-	if l.db == nil {
-		return stats, nil
-	}
-	row := l.db.QueryRowContext(ctx,
-		`SELECT COUNT(*),
-		        SUM(CASE WHEN action='allowed' THEN 1 ELSE 0 END),
-		        SUM(CASE WHEN action='blocked' THEN 1 ELSE 0 END),
-		        SUM(CASE WHEN action='cached' THEN 1 ELSE 0 END),
-		        AVG(rt_ms)
-		 FROM queries WHERE ts >= ?`, since.Unix())
-	var total, allowed, blocked, cached sql.NullInt64
-	var avg sql.NullFloat64
-	if err := row.Scan(&total, &allowed, &blocked, &cached, &avg); err == nil {
-		stats["total"] = total.Int64
-		stats["allowed"] = allowed.Int64
-		stats["blocked"] = blocked.Int64
-		stats["cached"] = cached.Int64
-		stats["avg_rt_ms"] = avg.Float64
-	}
-
-	topBlocked, _ := l.top(ctx, "blocked", since, 10)
-	topClients, _ := l.top(ctx, "", since, 10)
-	stats["top_blocked"] = topBlocked
-	stats["top_clients"] = topClients
-	return stats, nil
-}
-
+// TopDomain is a domain (or client) with a count, used for the "top
+// blocked" and "top clients" aggregates.
 type TopDomain struct {
 	Domain string `json:"domain"`
 	Count  int64  `json:"count"`
 }
 
-func (l *Log) top(ctx context.Context, action string, since time.Time, n int) ([]TopDomain, error) {
-	q := `SELECT domain, COUNT(*) c FROM queries WHERE ts >= ?`
-	args := []any{since.Unix()}
-	if action != "" {
-		q += ` AND action = ?`
-		args = append(args, action)
+// topN returns the n entries with the highest counts, descending (ties
+// broken alphabetically for determinism).
+func topN(counts map[string]int64, n int) []TopDomain {
+	out := make([]TopDomain, 0, len(counts))
+	for d, c := range counts {
+		out = append(out, TopDomain{Domain: d, Count: c})
 	}
-	q += ` GROUP BY domain ORDER BY c DESC LIMIT ?`
-	args = append(args, n)
-	rows, err := l.db.QueryContext(ctx, q, args...)
-	if err != nil {
-		return nil, err
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Count != out[j].Count {
+			return out[i].Count > out[j].Count
+		}
+		return out[i].Domain < out[j].Domain
+	})
+	if len(out) > n {
+		out = out[:n]
 	}
-	defer rows.Close()
-	var out []TopDomain
-	for rows.Next() {
-		var td TopDomain
-		if err := rows.Scan(&td.Domain, &td.Count); err != nil {
+	return out
+}
+
+// Stats returns aggregate counters for a time window by walking the stream
+// entries recorded since. Stream auto-IDs embed the write timestamp, so the
+// window maps directly to a minimum ID and the walk starts there. The scan
+// is bounded (maxStatsScan): under extreme volume the counters under-report
+// rather than stall the dashboard's poll.
+func (l *Log) Stats(ctx context.Context, since time.Time) (map[string]any, error) {
+	// int64 literals so every path (including the disabled no-store return)
+	// yields the same value types the API's JSON consumers expect.
+	stats := map[string]any{
+		"total": int64(0), "allowed": int64(0), "blocked": int64(0), "cached": int64(0),
+		"avg_rt_ms": float64(0), "top_blocked": []TopDomain{}, "top_clients": []TopDomain{},
+	}
+	if l.client == nil {
+		return stats, nil
+	}
+	var total, allowed, blocked, cached int64
+	var rtSum float64
+	blockedCnt := map[string]int64{}
+	clientCnt := map[string]int64{}
+	start := strconv.FormatInt(since.UnixMilli(), 10) + "-0"
+	first := true
+	scanned := 0
+	for scanned < maxStatsScan {
+		const page = 1000
+		msgs, err := l.client.XRangeN(ctx, streamKey, start, "+", page+1).Result()
+		if err != nil {
 			return nil, err
 		}
-		out = append(out, td)
+		begin := 0
+		if !first && len(msgs) > 0 && msgs[0].ID == start {
+			begin = 1
+		}
+		if len(msgs) <= begin {
+			break
+		}
+		first = false
+		for _, m := range msgs[begin:] {
+			scanned++
+			var e Entry
+			if !entryFromMessage(&e, m) {
+				continue
+			}
+			total++
+			rtSum += float64(e.ResponseTimeMS)
+			switch e.Action {
+			case "allowed":
+				allowed++
+			case "blocked":
+				blocked++
+				blockedCnt[e.Domain]++
+			case "cached":
+				cached++
+			}
+			clientCnt[e.Client]++
+		}
+		if len(msgs) <= page {
+			break
+		}
+		start = msgs[len(msgs)-1].ID
 	}
-	return out, rows.Err()
+	if total > 0 {
+		stats["avg_rt_ms"] = rtSum / float64(total)
+	}
+	stats["total"] = total
+	stats["allowed"] = allowed
+	stats["blocked"] = blocked
+	stats["cached"] = cached
+	stats["top_blocked"] = topN(blockedCnt, 10)
+	stats["top_clients"] = topN(clientCnt, 10)
+	return stats, nil
 }
 
-// Exec runs a raw statement (used by the API to clear the log).
-func (l *Log) Exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.db.ExecContext(ctx, query, args...)
+// Clear deletes the entire stream (the UI "clear log" action).
+func (l *Log) Clear(ctx context.Context) error {
+	if l.client == nil {
+		return nil
+	}
+	return l.client.Del(ctx, streamKey).Err()
 }
 
-// Prune removes entries older than the retention window.
+// Prune removes entries older than the retention window. The stream's
+// time-ordered IDs make "delete everything before cutoff" a single XTRIM
+// MINID command.
 func (l *Log) Prune(ctx context.Context) {
-	if l.retention <= 0 {
+	if l.retention <= 0 || l.client == nil {
 		return
 	}
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	cutoff := time.Now().Add(-l.retention).Unix()
-	l.db.ExecContext(ctx, `DELETE FROM queries WHERE ts < ?`, cutoff)
+	cutoff := fmt.Sprintf("%d-0", time.Now().Add(-l.retention).UnixMilli())
+	if err := l.client.XTrimMinID(ctx, streamKey, cutoff).Err(); err != nil {
+		log.Printf("[querylog] prune failed: %v", err)
+	}
 }
 
 // StartPruner periodically prunes old entries.
@@ -352,12 +463,15 @@ func (l *Log) StartPruner(ctx context.Context) {
 }
 
 // Close stops the writer (flushing any pending entries) and closes the
-// database. Safe to call more than once.
+// connection pool. Safe to call more than once.
 func (l *Log) Close() error {
 	if !l.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 	close(l.done) // writer drains the queue and flushes the final batch
 	l.wg.Wait()
-	return l.db.Close()
+	if l.client != nil {
+		return l.client.Close()
+	}
+	return nil
 }

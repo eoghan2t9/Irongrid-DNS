@@ -89,6 +89,8 @@ export default function Dashboard({ onNavigate }) {
         ))}
       </div>
 
+      <CacheCard cache={stats.cache} />
+
       <RootHintsCard status={status} />
 
       <BlockedClientsCard />
@@ -160,6 +162,68 @@ export default function Dashboard({ onNavigate }) {
 // auto-blocks (persisted, firewall-dropped) and rate-limit auto-blocks —
 // each with a one-click unblock. It refreshes on the same cadence as the
 // dashboard's stat cards, so a fresh honeypot hit appears within seconds.
+// CacheCard shows how hard the two cache layers are working: the in-process
+// L1 (counters reset on restart) and Dragonfly's L2 (cumulative counters since
+// the Dragonfly process started, plus its memory/keys). This is what the
+// "Cache: online" sidebar dot doesn't tell you.
+function CacheCard({ cache }) {
+  if (!cache) return null
+  const l1 = cache.l1
+  const l2 = cache?.l2
+  const pct = (h, m) => {
+    const t = (h || 0) + (m || 0)
+    return t ? Math.round((100 * (h || 0)) / t) : null
+  }
+  const l1Rate = pct(l1?.hits, l1?.misses)
+  const l2Rate = pct(l2?.hits, l2?.misses)
+  const memUsed = l2?.used_memory || 0
+  const memMax = l2?.max_memory || 0
+  const memPct = memMax ? Math.min(100, Math.round((100 * memUsed) / memMax)) : null
+  const mb = (n) => (n ? (n / 1048576).toFixed(1) : '0')
+  return (
+    <div className="card">
+      <div className="row-between">
+        <h3 style={{ margin: 0 }}>Dragonfly cache</h3>
+        <span className="dim small">L1 in-process · L2 DragonflyDB</span>
+      </div>
+      <div className="kv-grid" style={{ marginTop: 8 }}>
+        <div className="kv-row">
+          <span className="kv-label">L1 hit rate</span>
+          <span className="kv-value">
+            {l1Rate == null ? '—' : `${l1Rate}%`}
+            {' '}<span className="dim small">({fmt(l1?.hits || 0)} of {fmt((l1?.hits || 0) + (l1?.misses || 0))} since restart)</span>
+          </span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">L2 hit rate</span>
+          <span className="kv-value">
+            {l2Rate == null ? '—' : `${l2Rate}%`}
+            {' '}<span className="dim small">cumulative since Dragonfly start</span>
+          </span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Memory</span>
+          <span className="kv-value">{mb(memUsed)} MB of {mb(memMax)} MB</span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Keys · expired · evicted</span>
+          <span className="kv-value">{fmt(l2?.keys)} · {fmt(l2?.expired)} · {fmt(l2?.evicted)}</span>
+        </div>
+      </div>
+      {memPct != null && (
+        <div className="proto-track" style={{ marginTop: 8 }} title={`${memPct}% of the Dragonfly memory budget in use`}>
+          <div className="proto-fill" style={{ width: `${memPct}%` }} />
+        </div>
+      )}
+      <div className="card-hint">
+        A low L2 hit rate is normal when most repeat queries are absorbed by L1
+        — L2 is the shared, restart-surviving layer (and the query log now
+        lives here too).
+      </div>
+    </div>
+  )
+}
+
 // BlockedClientsCard shows the clients currently blocked — honeypot
 // auto-blocks (persisted, firewall-dropped) and rate-limit auto-blocks —
 // each with one-click actions: report to AbuseIPDB (honeypot sources only —

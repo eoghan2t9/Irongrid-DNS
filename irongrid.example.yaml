@@ -47,7 +47,7 @@ cache:
   db: 0
   ttl: 6h                      # positive answer cache lifetime
   negative_ttl: 1m             # cached NXDOMAIN/SERVFAIL lifetime
-  # l1_entries: 512            # per-shard size of the in-process L1 cache in
+  l1_entries: 4096             # per-shard size of the in-process L1 cache in
                                # front of Dragonfly (0 disables it; hits then
                                # always round-trip to Redis)
 
@@ -92,10 +92,12 @@ filter:
   blacklist: []                # always block (domains, wildcards, IPs)
 
 log:
+  # The query log lives in Dragonfly (stream "irongrid:log"), not a file —
+  # query_log_file is kept only for backward compatibility and is ignored.
   query_log_file: "data/querylog.db"
   retention_days: 30
   verbose: true
-  # batch_size: 256            # entries per query-log transaction (0 = default)
+  # batch_size: 256            # entries per query-log stream flush (0 = default)
 
 web:
   username: "admin"

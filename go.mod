@@ -3,6 +3,8 @@ module github.com/eoghan2t9/Irongrid-DNS
 go 1.26
 
 require (
+	github.com/alicebob/miniredis/v2 v2.38.0
+	github.com/andybalholm/brotli v1.2.2
 	github.com/charmbracelet/huh v1.0.0
 	github.com/cloudflare/cloudflared v0.0.0-20260722163246-3a2b45c2a511
 	github.com/creack/pty v1.1.24
@@ -14,13 +16,11 @@ require (
 	golang.org/x/net v0.57.0
 	golang.org/x/term v0.45.0
 	gopkg.in/yaml.v3 v3.0.1
-	modernc.org/sqlite v1.56.0
 )
 
 require (
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/Masterminds/semver/v3 v3.5.0 // indirect
-	github.com/andybalholm/brotli v1.2.2 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
@@ -75,7 +75,6 @@ require (
 	github.com/muesli/cancelreader v0.2.2 // indirect
 	github.com/muesli/termenv v0.16.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
-	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/onsi/ginkgo/v2 v2.32.0 // indirect
 	github.com/philhofer/fwd v1.2.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
@@ -84,7 +83,6 @@ require (
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.70.1 // indirect
 	github.com/prometheus/procfs v0.21.1 // indirect
-	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/rs/zerolog v1.35.1 // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect
@@ -92,6 +90,7 @@ require (
 	github.com/tklauser/go-sysconf v0.4.0 // indirect
 	github.com/tklauser/numcpus v0.12.0 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
+	github.com/yuin/gopher-lua v1.1.1 // indirect
 	github.com/yusufpapurcu/wmi v1.2.4 // indirect
 	go.opentelemetry.io/auto/sdk v1.2.1 // indirect
 	go.opentelemetry.io/contrib/propagators v0.22.0 // indirect
@@ -116,10 +115,6 @@ require (
 	google.golang.org/protobuf v1.36.11 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
-	modernc.org/gc/v3 v3.1.5 // indirect
-	modernc.org/libc v1.74.4 // indirect
-	modernc.org/mathutil v1.7.1 // indirect
-	modernc.org/memory v1.11.0 // indirect
 	nhooyr.io/websocket v1.8.17 // indirect
 	zombiezen.com/go/capnproto2 v2.18.2+incompatible // indirect
 )

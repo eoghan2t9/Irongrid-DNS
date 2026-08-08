@@ -10,6 +10,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -25,6 +26,13 @@ type Cache struct {
 	prefix      string
 	ttl         time.Duration
 	negativeTTL time.Duration
+
+	// l1Hits/l1Misses count lookups answered (or missed) by the in-process
+	// L1 layer since process start, for the dashboard's cache card. They are
+	// counted once per logical query (Get/Lookup/GetNegative), not per key
+	// probed.
+	l1Hits   atomic.Int64
+	l1Misses atomic.Int64
 }
 
 // NewLocalOnly returns a Cache backed only by the in-process L1 layer, with
@@ -101,10 +109,63 @@ func (c *Cache) Stats(ctx context.Context) (map[string]string, error) {
 	for _, line := range strings.Split(info, "\n") {
 		line = strings.TrimSpace(line)
 		if i := strings.Index(line, ":"); i > 0 {
-			out[strings.TrimSpace(line[:i])] = strings.TrimSpace(line[i+1:])
+		out[strings.TrimSpace(line[:i])] = strings.TrimSpace(line[i+1:])
 		}
 	}
 	return out, nil
+}
+
+// L2Stats is a snapshot of Dragonfly's cumulative keyspace counters plus its
+// current memory and key count. Hits/misses/expired/evicted are cumulative
+// since the Dragonfly process started, not since this Irongrid process.
+type L2Stats struct {
+	Hits      int64
+	Misses    int64
+	Expired   int64
+	Evicted   int64
+	UsedBytes int64
+	MaxBytes  int64
+	Keys      int64
+}
+
+// L2Stats fetches the live Dragonfly INFO counters and DBSIZE.
+func (c *Cache) L2Stats(ctx context.Context) (L2Stats, error) {
+	var s L2Stats
+	if c.client == nil {
+		return s, fmt.Errorf("no L2 cache")
+	}
+	info, err := c.client.Info(ctx).Result()
+	if err != nil {
+		return s, err
+	}
+	fields := map[string]*int64{
+		"keyspace_hits":   &s.Hits,
+		"keyspace_misses": &s.Misses,
+		"expired_keys":    &s.Expired,
+		"evicted_keys":    &s.Evicted,
+		"used_memory":     &s.UsedBytes,
+		"maxmemory":       &s.MaxBytes,
+	}
+	for _, line := range strings.Split(info, "\n") {
+		line = strings.TrimSpace(line)
+		if i := strings.Index(line, ":"); i > 0 {
+		if dst, ok := fields[strings.TrimSpace(line[:i])]; ok {
+			if v, err := strconv.ParseInt(strings.TrimSpace(line[i+1:]), 10, 64); err == nil {
+				*dst = v
+			}
+		}
+		}
+	}
+	if n, err := c.client.DBSize(ctx).Result(); err == nil {
+		s.Keys = n
+	}
+	return s, nil
+}
+
+// L1Counters returns the in-process cache layer's hit/miss counts since
+// process start (both zero when the L1 layer is disabled).
+func (c *Cache) L1Counters() (hits, misses int64) {
+	return c.l1Hits.Load(), c.l1Misses.Load()
 }
 
 // ---- key handling ----
@@ -167,8 +228,10 @@ func (c *Cache) getPositive(ctx context.Context, h uint64) *dns.Msg {
 	}
 	now := time.Now()
 	if raw, ok := c.l1.get(key, now); ok {
+		c.l1Hits.Add(1)
 		return unpackEntry(raw)
 	}
+	c.l1Misses.Add(1)
 	raw, ok := c.l2Get(ctx, key)
 	if !ok {
 		return nil
@@ -203,11 +266,14 @@ func (c *Cache) Lookup(ctx context.Context, q dns.Question) (msg *dns.Msg, negat
 
 	if c.l1 != nil {
 		if raw, ok := c.l1.get(posKey, now); ok {
+			c.l1Hits.Add(1)
 			return unpackEntry(raw), false
 		}
 		if raw, ok := c.l1.get(negKey, now); ok {
+			c.l1Hits.Add(1)
 			return unpackNegative(raw), true
 		}
+		c.l1Misses.Add(1)
 	}
 	if c.client == nil {
 		return nil, false
@@ -370,8 +436,10 @@ func (c *Cache) getNegative(ctx context.Context, h uint64) *dns.Msg {
 	}
 	now := time.Now()
 	if raw, ok := c.l1.get(key, now); ok {
+		c.l1Hits.Add(1)
 		return unpackNegative(raw)
 	}
+	c.l1Misses.Add(1)
 	raw, ok := c.l2Get(ctx, key)
 	if !ok {
 		return nil

@@ -242,13 +242,15 @@ type BlocklistSpec struct {
 	LastUpdated time.Time `yaml:"-"`       // runtime state, not persisted here
 }
 
-// LogConfig controls the query log.
+// LogConfig controls the query log. The log lives in Dragonfly (Redis stream
+// "irongrid:log") — QueryLogFile is kept only for backward compatibility
+// with older configs and is ignored.
 type LogConfig struct {
 	QueryLogFile  string `yaml:"query_log_file"`
 	RetentionDays int    `yaml:"retention_days"`
 	Verbose       bool   `yaml:"verbose"`
 	// BatchSize is how many entries the async query-log writer commits per
-	// transaction. 0 uses the built-in default (256).
+	// pipelined stream flush. 0 uses the built-in default (256).
 	BatchSize int `yaml:"batch_size"`
 }
 
@@ -294,7 +296,7 @@ func Default() *Config {
 			DB:          0,
 			TTL:         6 * time.Hour,
 			NegativeTTL: 60 * time.Second,
-			L1Entries:   512,
+			L1Entries:   4096,
 		},
 		TLS: TLSConfig{
 			GenerateSelfSigned: true,

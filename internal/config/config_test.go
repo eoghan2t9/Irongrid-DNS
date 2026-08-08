@@ -10,8 +10,8 @@ import (
 // defaults: the L1 cache on (512 entries/shard) and a 256-entry log batch.
 func TestPerfTunablesDefaults(t *testing.T) {
 	c := Default()
-	if c.Cache.L1Entries != 512 {
-		t.Errorf("cache.l1_entries = %d, want default 512", c.Cache.L1Entries)
+	if c.Cache.L1Entries != 4096 {
+		t.Errorf("cache.l1_entries = %d, want default 4096", c.Cache.L1Entries)
 	}
 	if c.Log.BatchSize != 256 {
 		t.Errorf("log.batch_size = %d, want default 256", c.Log.BatchSize)

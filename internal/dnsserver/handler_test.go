@@ -3,10 +3,10 @@ package dnsserver
 import (
 	"context"
 	"net"
-	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/miekg/dns"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
@@ -381,7 +381,10 @@ func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 // dashboard surfaces auto-blocked clients via /api/geo/blocked instead.
 func TestHandlerHoneypotNotLogged(t *testing.T) {
 	addr := startUDPTestServer(t, "1.1.1.1", 0)
-	ql, err := querylog.New(filepath.Join(t.TempDir(), "q.db"), 30, 0)
+	// The query log now lives in a Dragonfly stream; miniredis provides the
+	// in-process Redis-compatible store so the log is real and queryable.
+	mr := miniredis.RunT(t)
+	ql, err := querylog.New(mr.Addr(), "", 0, 30, 0)
 	if err != nil {
 		t.Fatalf("querylog: %v", err)
 	}

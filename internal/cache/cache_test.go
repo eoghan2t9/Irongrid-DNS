@@ -110,6 +110,41 @@ func TestL1Flush(t *testing.T) {
 	}
 }
 
+// TestL1Counters verifies the dashboard's L1 hit/miss counters: a served
+// lookup counts as one hit and a missed lookup as one miss, counted once per
+// logical query even though Lookup probes two keys.
+func TestL1Counters(t *testing.T) {
+	c := l1onlyCache(time.Hour, time.Minute)
+	ctx := context.Background()
+
+	// A clean miss counts one miss.
+	if msg, _ := c.Lookup(ctx, aQuestion()); msg != nil {
+		t.Fatal("expected a miss before anything is cached")
+	}
+	if h, m := c.L1Counters(); h != 0 || m != 1 {
+		t.Fatalf("after first miss: hits=%d misses=%d, want 0/1", h, m)
+	}
+
+	// A served positive lookup counts one hit (Lookup probes pos+neg keys
+	// internally, so it must still count once).
+	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
+	if msg, negative := c.Lookup(ctx, aQuestion()); msg == nil || negative {
+		t.Fatal("expected a positive L1 hit")
+	}
+	if h, m := c.L1Counters(); h != 1 || m != 1 {
+		t.Fatalf("after hit: hits=%d misses=%d, want 1/1", h, m)
+	}
+
+	// Get (positive-only path) on an unknown question counts a miss.
+	other := dns.Question{Name: "other.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	if got := c.Get(ctx, other); got != nil {
+		t.Fatal("expected a miss")
+	}
+	if h, m := c.L1Counters(); h != 1 || m != 2 {
+		t.Fatalf("after extra miss: hits=%d misses=%d, want 1/2", h, m)
+	}
+}
+
 // BenchmarkL1Get measures the hot path: a pure in-memory cache hit with no
 // Redis round-trip.
 func BenchmarkL1Get(b *testing.B) {

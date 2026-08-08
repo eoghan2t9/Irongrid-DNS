@@ -8,7 +8,7 @@ const empty = () => ({
     doh_path: '/dns-query', web_listen: '', web_tls: false, web_redirect: false, web_redirect_port: 80, timeout_sec: 5,
   },
   upstreams: [],
-  cache: { addr: '', password: '', db: 0, ttl: '6h', negative_ttl: '1m' },
+  cache: { addr: '', password: '', db: 0, ttl: '6h', negative_ttl: '1m', l1_entries: 4096 },
   tls: { cert_file: '', key_file: '', generate_self_signed: true, self_signed_hosts: [], cert_dir: '', acme: { enabled: false, email: '', domains: [], staging: false, http01_port: 80, renew_before_days: 30, dns01: { provider: '', propagation_wait_sec: 60, cloudflare_token: '', digitalocean_token: '', hetzner_token: '', godaddy_key: '', godaddy_secret: '', aws_access_key_id: '', aws_secret_access_key: '' } } },
   filter: { block_response: 'nxdomain', block_ttl: 600, blocklists: [], whitelist: [], blacklist: [], auto_update: '24h' },
   log: { query_log_file: '', retention_days: 30, verbose: true },
@@ -526,12 +526,17 @@ export default function Settings({ onSessionInvalidated }) {
 
       <div className="card">
         <h3>Cache (Dragonfly)</h3>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          Dragonfly is the response cache <em>and</em> the query log's home. Watch live utilisation on the
+          dashboard's <strong>Dragonfly cache</strong> card.
+        </p>
         <div className="form-grid">
           {text('Address', 'cache.addr', null, 'localhost:6379')}
           {text('Password', 'cache.password', 'optional auth')}
           {number('DB index', 'cache.db')}
           {text('Positive TTL', 'cache.ttl', 'e.g. 6h, 30m, 1h30m')}
           {text('Negative TTL', 'cache.negative_ttl', 'e.g. 1m')}
+          {number('L1 entries (per shard)', 'cache.l1_entries', 'in-process cache depth in front of Dragonfly; 0 disables it')}
         </div>
       </div>
 
@@ -624,8 +629,12 @@ export default function Settings({ onSessionInvalidated }) {
 
       <div className="card">
         <h3>Query log</h3>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          The query log lives in <strong>Dragonfly</strong> (stream <code>irongrid:log</code>) alongside the DNS
+          cache — no separate database file. View and filter it on the <strong>Query Log</strong> page; retention
+          below prunes old entries automatically (hourly).
+        </p>
         <div className="form-grid">
-          {text('Log file', 'log.query_log_file', null, 'data/querylog.db')}
           {number('Retention (days)', 'log.retention_days')}
           {toggle('Verbose logging', 'log.verbose')}
         </div>

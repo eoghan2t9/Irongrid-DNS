@@ -123,7 +123,7 @@ startup service (systemd / launchd / Windows task).
 | ✅ **Allow list** | Whitelist entries override *any* blocklist, including IP addresses |
 | 🔎 **Fix a broken site** | Paste a URL; Irongrid scans the page's HTML for the domains your blocklists are blocking and whitelists them in one click |
 | 📜 **Blocklists** | Add unlimited remote/local lists, a global auto-update interval, one-click refresh, curated one-click presets |
-| 🪵 **Full query log** | Every allowed/blocked/cached request with client, reason, upstream, latency — stored in pure-Go SQLite |
+| 🪵 **Full query log** | Every allowed/blocked/cached request with client, reason, upstream, latency — stored in Dragonfly (Redis stream `irongrid:log`), sharing the cache tier |
 | 📊 **Dashboard** | Modern React UI: live stats, protocol breakdown, top blocked domains, log explorer, live config editing |
 | 🔄 **Built-in updater** | Checks GitHub Releases, pops up the changelog, offers the download |
 | 🔐 **TLS manager** | In-dashboard certificate management: view, generate self-signed, upload CA certs, download — applied live to DoT/DoH/DoQ |
@@ -149,7 +149,7 @@ startup service (systemd / launchd / Windows task).
   │  recursive     │  │
   DoQ:853 ────────► │                    │  whitelist │  └──────────┘  └───────────────┘  │
                     │                    ▼            │                │                   │
-                    │              Query log (SQLite)◄┴────────────────┘                   │
+                    │         Query log (Dragonfly)◄┴────────────────┘                   │
                     │  Dashboard (React, embedded) ◄── REST API ◄── cloudflared (embedded) │
                     └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -337,6 +337,8 @@ written automatically on first launch. Key options:
 | `server.listen_*` | Per-protocol listen addresses; empty string disables |
 | `upstreams` | Forwarders — `udp://`, `tcp://`, `tls://`, `https://`, `quic://`, or `recursive://` (resolves from the root servers itself, no forwarder involved — seeded with IANA's PGP-verified `named.root` hints; see [Recursive resolution](#recursive-resolution-recursive)) |
 | `cache.addr` | Dragonfly endpoint — **server will not start without it** |
+| `cache.l1_entries` | Per-shard depth of the in-process L1 cache in front of Dragonfly (default 4096; `0` disables it, so every lookup round-trips to Dragonfly). The dashboard's **Dragonfly cache** card shows L1/L2 hit rates and memory live |
+| `log.retention_days` | Query-log retention; old entries are pruned hourly from the Dragonfly stream. The log itself lives in Dragonfly (stream `irongrid:log`) — `log.query_log_file` is kept only for backward compatibility and ignored. **Upgrading from a SQLite-based build:** the log starts fresh in the stream; the old `data/querylog.db` file is left untouched on disk but no longer read |
 | `filter.blocklists` | Remote URLs or `file://` paths |
 | `filter.auto_update` | How often every enabled blocklist refreshes — one global interval, not per-list |
 | `filter.whitelist` | Always-allow entries (override blocklists, incl. IPs) |
@@ -443,8 +445,8 @@ The dashboard uses a JSON REST API (HTTP Basic auth):
 
 ```
 GET  /api/status            server, listeners, cache, tunnel, root-hints status
-GET  /api/stats             counters, protocol split, top blocked
-GET  /api/log?limit&action&domain&qtype   query log
+GET  /api/stats             counters, protocol split, top blocked, cache (L1 hits/misses + Dragonfly L2 hits/misses/memory/keys)
+GET  /api/log?limit&action&domain&qtype   query log (Dragonfly stream, newest first, in-memory filters)
 DELETE /api/log             clear query log
 GET/POST /api/lists         manage blocklists
 GET  /api/lists/catalog     curated blocklist & allow-list presets (used by the wizard and UI)

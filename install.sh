@@ -401,6 +401,7 @@ cache:
   db: 0
   ttl: 6h
   negative_ttl: 1m
+  l1_entries: 4096
 
 tls:
   cert_file: ""
@@ -418,7 +419,7 @@ filter:
   blacklist: []
 
 log:
-  query_log_file: "data/querylog.db"
+  query_log_file: "data/querylog.db"  # legacy; the log lives in Dragonfly (stream irongrid:log)
   retention_days: 30
   verbose: true
 

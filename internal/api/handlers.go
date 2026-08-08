@@ -269,6 +269,25 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 	for k, v := range h.DNS.Stats.ByProtocol {
 		proto[k] = v.Load()
 	}
+	// Cache utilisation for the dashboard card: L1 is the in-process layer
+	// (counters reset on restart), L2 is Dragonfly's cumulative INFO counters
+	// (since the Dragonfly process started).
+	cacheStats := map[string]any{"l1": nil, "l2": nil}
+	if h.Cache != nil {
+		l1h, l1m := h.Cache.L1Counters()
+		cacheStats["l1"] = map[string]any{"hits": l1h, "misses": l1m}
+		if s, err := h.Cache.L2Stats(ctx); err == nil {
+			cacheStats["l2"] = map[string]any{
+				"hits":        s.Hits,
+				"misses":      s.Misses,
+				"expired":     s.Expired,
+				"evicted":     s.Evicted,
+				"used_memory": s.UsedBytes,
+				"max_memory":  s.MaxBytes,
+				"keys":        s.Keys,
+			}
+		}
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"query": stats,
 		"counters": map[string]int64{
@@ -281,6 +300,7 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 		},
 		"protocol": proto,
 		"filter":   h.Engine.Stats(),
+		"cache":    cacheStats,
 	})
 }
 
@@ -302,8 +322,8 @@ func (h *Handler) getLog(ctx context.Context, w http.ResponseWriter, r *http.Req
 }
 
 func (h *Handler) clearLog(ctx context.Context, w http.ResponseWriter) {
-	// Truncate via SQLite; simplest robust approach is a destructive delete.
-	if _, err := h.Log.Exec(ctx, "DELETE FROM queries"); err != nil {
+	// Drop the whole stream: the query log now lives in Dragonfly.
+	if err := h.Log.Clear(ctx); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
