@@ -36,7 +36,7 @@ func waitFor(t *testing.T, l *Log, n int) []Entry {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		entries, err := l.Query(context.Background(), n+10, 0, "", "", "")
+		entries, err := l.Query(context.Background(), n+10, 0, "", "", "", "")
 		if err != nil {
 			t.Fatalf("Query: %v", err)
 		}
@@ -72,7 +72,7 @@ func TestRecordFlushesOnClose(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer r.Close()
-	entries, err := r.Query(context.Background(), 100, 0, "", "", "")
+	entries, err := r.Query(context.Background(), 100, 0, "", "", "", "")
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestQueryOrderAndFilters(t *testing.T) {
 			entries[0].Domain, entries[3].Domain)
 	}
 
-	blocked, err := l.Query(context.Background(), 100, 0, "blocked", "", "")
+	blocked, err := l.Query(context.Background(), 100, 0, "blocked", "", "", "")
 	if err != nil {
 		t.Fatalf("Query blocked: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestQueryOrderAndFilters(t *testing.T) {
 		t.Fatalf("blocked filter matched %d, want 2", len(blocked))
 	}
 
-	byDomain, err := l.Query(context.Background(), 100, 0, "", "bbb", "")
+	byDomain, err := l.Query(context.Background(), 100, 0, "", "bbb", "", "")
 	if err != nil {
 		t.Fatalf("Query domain: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestQueryOrderAndFilters(t *testing.T) {
 	}
 
 	// Pagination: offset 1, limit 2 over 4 entries -> the middle two.
-	page, err := l.Query(context.Background(), 2, 1, "", "", "")
+	page, err := l.Query(context.Background(), 2, 1, "", "", "", "")
 	if err != nil {
 		t.Fatalf("Query page: %v", err)
 	}
@@ -152,12 +152,90 @@ func TestQueryNoMatch(t *testing.T) {
 	l, _ := newTestLog(t, 30)
 	l.Record(entry("aaa.com.", "allowed"))
 	waitFor(t, l, 1)
-	got, err := l.Query(context.Background(), 100, 0, "blocked", "", "")
+	got, err := l.Query(context.Background(), 100, 0, "blocked", "", "", "")
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
 	if got == nil || len(got) != 0 {
 		t.Fatalf("no-match filter returned %v, want empty slice", got)
+	}
+}
+
+// TestQueryClientFilter verifies the exact-match client (source IP) filter,
+// the mechanism behind the dashboard's click-through top-clients rows.
+func TestQueryClientFilter(t *testing.T) {
+	l, _ := newTestLog(t, 30)
+	e1 := entry("a.com.", "allowed")
+	e1.Client = "203.0.113.9"
+	e2 := entry("b.com.", "allowed")
+	e2.Client = "203.0.113.9"
+	e3 := entry("c.com.", "blocked")
+	e3.Client = "198.51.100.7"
+	l.Record(e1)
+	l.Record(e2)
+	l.Record(e3)
+	waitFor(t, l, 3)
+
+	got, err := l.Query(context.Background(), 100, 0, "", "", "", "203.0.113.9")
+	if err != nil {
+		t.Fatalf("Query client: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("client filter matched %d, want 2", len(got))
+	}
+	for _, e := range got {
+		if e.Client != "203.0.113.9" {
+			t.Fatalf("client filter leaked entry from %s", e.Client)
+		}
+	}
+	// Combined with another filter: exact action AND exact client.
+	blocked, err := l.Query(context.Background(), 100, 0, "blocked", "", "", "203.0.113.9")
+	if err != nil {
+		t.Fatalf("Query client+action: %v", err)
+	}
+	if len(blocked) != 0 {
+		t.Fatalf("combined filter matched %d, want 0", len(blocked))
+	}
+}
+
+// TestHourly verifies the 24-slot per-hour series: the current hour counts
+// the entries recorded so far, blocked entries are bucketed separately, and
+// the series is always exactly 24 slots ending at the current hour.
+func TestHourly(t *testing.T) {
+	l, _ := newTestLog(t, 30)
+	l.Record(entry("ads.com.", "blocked"))
+	l.Record(entry("ok.com.", "allowed"))
+	waitFor(t, l, 2)
+
+	hours, err := l.Hourly(context.Background(), time.Now().Add(-24*time.Hour))
+	if err != nil {
+		t.Fatalf("Hourly: %v", err)
+	}
+	if len(hours) != 24 {
+		t.Fatalf("Hourly returned %d slots, want 24", len(hours))
+	}
+	// Slots are hourly and ordered oldest -> newest.
+	for i := 1; i < len(hours); i++ {
+		a, _ := time.Parse(time.RFC3339, hours[i-1].Hour)
+		b, _ := time.Parse(time.RFC3339, hours[i].Hour)
+		if b.Sub(a) != time.Hour {
+			t.Fatalf("slot gap at %d: %s -> %s", i, hours[i-1].Hour, hours[i].Hour)
+		}
+	}
+	// The newest slot is the current hour and holds both fresh entries.
+	last := hours[len(hours)-1]
+	want := time.Now().Truncate(time.Hour)
+	if got, _ := time.Parse(time.RFC3339, last.Hour); !got.Equal(want) {
+		t.Fatalf("last slot %s, want current hour %s", last.Hour, want.Format(time.RFC3339))
+	}
+	if last.Total != 2 || last.Blocked != 1 {
+		t.Fatalf("current hour = total %d / blocked %d, want 2/1", last.Total, last.Blocked)
+	}
+	// All other slots are empty (zero-filled, not missing).
+	for i := 0; i < len(hours)-1; i++ {
+		if hours[i].Total != 0 || hours[i].Blocked != 0 {
+			t.Fatalf("slot %d unexpectedly non-empty: %+v", i, hours[i])
+		}
 	}
 }
 
@@ -213,7 +291,7 @@ func TestClear(t *testing.T) {
 	if err := l.Clear(context.Background()); err != nil {
 		t.Fatalf("Clear: %v", err)
 	}
-	entries, err := l.Query(context.Background(), 100, 0, "", "", "")
+	entries, err := l.Query(context.Background(), 100, 0, "", "", "", "")
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -231,7 +309,7 @@ func TestPruneKeepsFreshEntries(t *testing.T) {
 	}
 	waitFor(t, l, 5)
 	l.Prune(context.Background())
-	entries, err := l.Query(context.Background(), 100, 0, "", "", "")
+	entries, err := l.Query(context.Background(), 100, 0, "", "", "", "")
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -254,7 +332,7 @@ func TestDisabledMode(t *testing.T) {
 	l := NewDisabled(30)
 	defer l.Close()
 	l.Record(entry("example.com.", "allowed"))
-	entries, err := l.Query(context.Background(), 100, 0, "", "", "")
+	entries, err := l.Query(context.Background(), 100, 0, "", "", "", "")
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}

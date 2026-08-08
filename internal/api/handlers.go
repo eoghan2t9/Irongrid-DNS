@@ -278,6 +278,12 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 	if st, err := h.Log.Stats(ctx, todayStart()); err == nil {
 		queryToday = st
 	}
+	// Per-hour volume for the dashboard's 24h sparkline. Best-effort like
+	// query_today: a slow stream must not stall the rest of the stats.
+	var queryHourly any
+	if hb, err := h.Log.Hourly(ctx, time.Now().Add(-24*time.Hour)); err == nil {
+		queryHourly = hb
+	}
 	proto := map[string]int64{}
 	for k, v := range h.DNS.Stats.ByProtocol {
 		proto[k] = v.Load()
@@ -315,6 +321,7 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 		"filter":      h.Engine.Stats(),
 		"cache":       cacheStats,
 		"query_today": queryToday,
+		"query_hourly": queryHourly,
 	})
 }
 
@@ -327,7 +334,7 @@ func (h *Handler) getLog(ctx context.Context, w http.ResponseWriter, r *http.Req
 		limit = 100
 	}
 	offset, _ := strconv.Atoi(q.Get("offset"))
-	entries, err := h.Log.Query(ctx, limit, offset, q.Get("action"), q.Get("domain"), q.Get("qtype"))
+	entries, err := h.Log.Query(ctx, limit, offset, q.Get("action"), q.Get("domain"), q.Get("qtype"), q.Get("client"))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

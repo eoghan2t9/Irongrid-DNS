@@ -417,7 +417,7 @@ func TestHandlerHoneypotNotLogged(t *testing.T) {
 	// The async log writer flushes on a 100ms ticker; poll briefly.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		entries, err := ql.Query(context.Background(), 100, 0, "", "", "")
+		entries, err := ql.Query(context.Background(), 100, 0, "", "", "", "")
 		if err != nil {
 			t.Fatalf("query log read: %v", err)
 		}

@@ -64,4 +64,13 @@ func TestGetStatsShape(t *testing.T) {
 			t.Fatalf("query_today missing field %q: %v", k, qt)
 		}
 	}
+	// query_hourly is the 24-slot sparkline series; with the disabled log it
+	// is present but empty (the dashboard hides the chart in that case).
+	qh, ok := out["query_hourly"].([]any)
+	if !ok {
+		t.Fatalf("stats missing query_hourly array: %v", out)
+	}
+	if len(qh) != 0 {
+		t.Fatalf("disabled log query_hourly = %v, want empty", qh)
+	}
 }

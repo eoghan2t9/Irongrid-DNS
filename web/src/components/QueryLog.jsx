@@ -13,6 +13,10 @@ export default function QueryLog() {
   const [action, setAction] = useState('')
   const [domain, setDomain] = useState('')
   const [qtype, setQtype] = useState('')
+  // The client filter can be pre-set via ?client=… in the URL — the
+  // dashboard's top-client rows deep-link here — so seed it from the
+  // address bar on mount.
+  const [client, setClient] = useState(() => new URLSearchParams(window.location.search).get('client') || '')
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [busy, setBusy] = useState(false)
 
@@ -20,13 +24,13 @@ export default function QueryLog() {
     if (busy) return
     setBusy(true)
     try {
-      const res = await api.log({ limit: 200, action, domain, qtype })
+      const res = await api.log({ limit: 200, action, domain, qtype, client })
       setEntries(res.entries || [])
     } catch (e) {
       /* ignore transient */
     }
     setBusy(false)
-  }, [action, domain, qtype])
+  }, [action, domain, qtype, client])
 
   useEffect(() => {
     load()
@@ -37,6 +41,24 @@ export default function QueryLog() {
     const t = setInterval(load, 5000)
     return () => clearInterval(t)
   }, [autoRefresh, load])
+
+  // Back/forward: if the URL's client filter changes (e.g. back from a
+  // deep-linked client view to the plain log), re-sync the filter state.
+  useEffect(() => {
+    const onPop = () => setClient(new URLSearchParams(window.location.search).get('client') || '')
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
+
+  // setClientFilter keeps the filter in the address bar so it survives a
+  // refresh and stays shareable, without a page reload.
+  const setClientFilter = (v) => {
+    setClient(v)
+    const u = new URL(window.location)
+    if (v) u.searchParams.set('client', v)
+    else u.searchParams.delete('client')
+    window.history.replaceState(null, '', u)
+  }
 
   const clearLog = async () => {
     if (!confirm('Clear the entire query log?')) return
@@ -69,6 +91,13 @@ export default function QueryLog() {
             placeholder="Type (A, AAAA, TXT…)"
             value={qtype}
             onChange={(e) => setQtype(e.target.value)}
+          />
+          <input
+            className="input"
+            placeholder="Client IP…"
+            value={client}
+            onChange={(e) => setClientFilter(e.target.value)}
+            title="Filter by source client IP (exact match)"
           />
           <label className="toggle-label">
             <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />

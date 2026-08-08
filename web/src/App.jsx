@@ -99,13 +99,18 @@ export default function App() {
   const [initializing, setInitializing] = useState(true)
 
   const navigate = (id) => {
-    setView(id)
+    // id may carry a query string (e.g. 'log?client=1.2.3.4' when the
+    // dashboard deep-links into a filtered query log); the view is the path
+    // part and the query rides along in the URL so the target view can read
+    // it on mount (and refresh/re-share keeps the filter).
+    const [base, query] = id.split('?')
+    setView(base)
     setNavOpen(false)
     // Keep the URL in sync so back/forward navigate between views. Avoid
     // pushing a duplicate entry when the path already matches (e.g. the
     // topbar title click on the same view).
-    const path = id === 'dashboard' ? '/' : '/' + id
-    if (window.location.pathname !== path) {
+    const path = (base === 'dashboard' ? '/' : '/' + base) + (query ? '?' + query : '')
+    if (window.location.pathname + window.location.search !== path) {
       window.history.pushState(null, '', path)
     }
   }

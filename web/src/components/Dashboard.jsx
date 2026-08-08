@@ -135,7 +135,7 @@ export default function Dashboard({ onNavigate }) {
         </div>
       </div>
 
-      <QueryLogCard today={stats.query_today} q24={q} />
+      <QueryLogCard today={stats.query_today} q24={q} hourly={stats.query_hourly} onNavigate={onNavigate} />
 
       <div className="card">
         <h3>Quick actions</h3>
@@ -234,11 +234,14 @@ function CacheCard({ cache }) {
 }
 
 // QueryLogCard summarises what the Dragonfly query-log stream recorded: the
-// volume and outcome split since local midnight, plus the busiest clients —
-// all computed server-side from the same stream the Query Log page reads.
-function QueryLogCard({ today, q24 }) {
+// volume and outcome split since local midnight, a 24h volume sparkline, and
+// the busiest clients — all computed server-side from the same stream the
+// Query Log page reads. Top-client rows deep-link to the query log filtered
+// to that client.
+function QueryLogCard({ today, q24, hourly, onNavigate }) {
   const t = today || {}
   const clients = t.top_clients || []
+  const openClient = (ip) => onNavigate && onNavigate('log?client=' + encodeURIComponent(ip))
   return (
     <div className="card">
       <div className="row-between">
@@ -263,20 +266,69 @@ function QueryLogCard({ today, q24 }) {
           <span className="kv-value">{fmt(q24?.total || 0)}</span>
         </div>
       </div>
+      <Sparkline data={hourly} />
       {clients.length > 0 && (
         <>
           <h4 style={{ margin: '14px 0 8px' }}>Top clients today</h4>
           <div className="top-list">
             {clients.slice(0, 8).map((c, i) => (
-              <div className="top-row" key={c.domain}>
+              <div
+                className="top-row top-row-click"
+                key={c.domain}
+                role="button"
+                tabIndex={0}
+                title={`Show ${c.domain}'s queries in the query log`}
+                onClick={() => openClient(c.domain)}
+                onKeyDown={(e) => e.key === 'Enter' && openClient(c.domain)}
+              >
                 <span className="top-rank">{i + 1}</span>
                 <span className="top-domain" title={c.domain}>{c.domain}</span>
                 <span className="top-count">{fmt(c.count)}</span>
+                <span className="top-go" aria-hidden="true">›</span>
               </div>
             ))}
           </div>
+          <div className="card-hint">Click a client to open its queries in the query log.</div>
         </>
       )}
+    </div>
+  )
+}
+
+// Sparkline renders the last 24 hours of query volume as bars (total in the
+// base tone, blocked overlaid in rose), with per-hour tooltips. Hours with
+// no traffic stay empty so quiet gaps are visible.
+function Sparkline({ data }) {
+  if (!data || data.length === 0) return null
+  const max = Math.max(...data.map((d) => d.total), 1)
+  const H = 56
+  const W = 240
+  const bw = W / data.length
+  const bh = (n) => (n ? Math.max(2, Math.round((n / max) * (H - 6))) : 0)
+  return (
+    <div>
+      <svg
+        className="spark-svg"
+        viewBox={`0 0 ${W} ${H}`}
+        preserveAspectRatio="none"
+        role="img"
+        aria-label="Queries per hour over the last 24 hours"
+      >
+        {data.map((d, i) => (
+          <g key={d.hour}>
+            <title>{`${new Date(d.hour).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} — ${fmt(d.total)} query${d.total === 1 ? '' : 's'}${d.blocked ? ` (${fmt(d.blocked)} blocked)` : ''}`}</title>
+            <rect className="spark-total" x={i * bw + 0.5} y={H - bh(d.total)} width={bw - 1} height={bh(d.total)} rx={1} />
+            {d.blocked > 0 && (
+              <rect className="spark-blocked" x={i * bw + 0.5} y={H - bh(d.blocked)} width={bw - 1} height={bh(d.blocked)} rx={1} />
+            )}
+          </g>
+        ))}
+      </svg>
+      <div className="spark-legend">
+        <span><i className="spark-legend-total" /> queries</span>
+        <span><i className="spark-legend-blocked" /> blocked</span>
+        <span className="dim small">per hour · last 24h</span>
+      </div>
     </div>
   )
 }

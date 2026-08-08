@@ -251,9 +251,11 @@ func entryFromMessage(e *Entry, m redis.XMessage) bool {
 
 // matchesFilter applies the query log filters (empty values are wildcards).
 // The SQLite store did this in SQL; streams cannot filter server-side, so
-// the same semantics are replicated here: action/qtype are exact matches
-// and domain is a case-insensitive substring.
-func matchesFilter(e Entry, action, domain, qtype string) bool {
+// the same semantics are replicated here: action/qtype/client are exact
+// matches and domain is a case-insensitive substring. client is the source
+// IP exactly as recorded, so clicking a top client on the dashboard shows
+// precisely that client's queries.
+func matchesFilter(e Entry, action, domain, qtype, client string) bool {
 	if action != "" && e.Action != action {
 		return false
 	}
@@ -263,6 +265,9 @@ func matchesFilter(e Entry, action, domain, qtype string) bool {
 	if domain != "" && !strings.Contains(strings.ToLower(e.Domain), strings.ToLower(domain)) {
 		return false
 	}
+	if client != "" && e.Client != client {
+		return false
+	}
 	return true
 }
 
@@ -270,7 +275,7 @@ func matchesFilter(e Entry, action, domain, qtype string) bool {
 // first. Filters are applied in memory after reading from the stream,
 // walking back from the newest entry until offset+limit matches are found or
 // the scan bound is hit.
-func (l *Log) Query(ctx context.Context, limit, offset int, action, domain, qtype string) ([]Entry, error) {
+func (l *Log) Query(ctx context.Context, limit, offset int, action, domain, qtype, client string) ([]Entry, error) {
 	if l.client == nil {
 		return nil, nil
 	}
@@ -308,7 +313,7 @@ func (l *Log) Query(ctx context.Context, limit, offset int, action, domain, qtyp
 			if !entryFromMessage(&e, m) {
 				continue
 			}
-			if matchesFilter(e, action, domain, qtype) {
+			if matchesFilter(e, action, domain, qtype, client) {
 				matches = append(matches, e)
 			}
 		}
@@ -423,6 +428,80 @@ func (l *Log) Stats(ctx context.Context, since time.Time) (map[string]any, error
 	stats["top_blocked"] = topN(blockedCnt, 10)
 	stats["top_clients"] = topN(clientCnt, 10)
 	return stats, nil
+}
+
+// HourBucket is one hour's query volume for the dashboard's 24h sparkline.
+// Hour is the RFC3339 timestamp of the start of the bucket's hour.
+type HourBucket struct {
+	Hour    string `json:"hour"`
+	Total   int64  `json:"total"`
+	Blocked int64  `json:"blocked"`
+}
+
+// Hourly buckets query volume into the 24 one-hour slots ending at the
+// current hour, oldest first, walking the stream newest-first so a scan
+// bound (extreme volume) can only under-count the oldest hours, never the
+// most recent ones. Empty hours are filled with zeros so the frontend always
+// receives a fixed-length series.
+func (l *Log) Hourly(ctx context.Context, since time.Time) ([]HourBucket, error) {
+	out := []HourBucket{}
+	if l.client == nil {
+		return out, nil
+	}
+	now := time.Now()
+	endSlot := now.Truncate(time.Hour)
+	startSlot := endSlot.Add(-23 * time.Hour)
+	total := make([]int64, 24)
+	blocked := make([]int64, 24)
+
+	// Newest-first walk from "+" down to the since ID (inclusive), so the
+	// current hour's bar is always complete even if the scan is bounded.
+	min := strconv.FormatInt(since.UnixMilli(), 10) + "-0"
+	start := "+"
+	first := true
+	scanned := 0
+	for scanned < maxStatsScan {
+		const page = 1000
+		msgs, err := l.client.XRevRangeN(ctx, streamKey, start, min, page+1).Result()
+		if err != nil {
+			return nil, err
+		}
+		begin := 0
+		if !first && len(msgs) > 0 && msgs[0].ID == start {
+			begin = 1
+		}
+		if len(msgs) <= begin {
+			break
+		}
+		first = false
+		for _, m := range msgs[begin:] {
+			scanned++
+			var e Entry
+			if !entryFromMessage(&e, m) {
+				continue
+			}
+			idx := int(e.Time.Truncate(time.Hour).Sub(startSlot) / time.Hour)
+			if idx < 0 || idx >= 24 {
+				continue
+			}
+			total[idx]++
+			if e.Action == "blocked" {
+				blocked[idx]++
+			}
+		}
+		if len(msgs) <= page {
+			break
+		}
+		start = msgs[len(msgs)-1].ID
+	}
+	for i := 0; i < 24; i++ {
+		out = append(out, HourBucket{
+			Hour:    startSlot.Add(time.Duration(i) * time.Hour).Format(time.RFC3339),
+			Total:   total[i],
+			Blocked: blocked[i],
+		})
+	}
+	return out, nil
 }
 
 // Clear deletes the entire stream (the UI "clear log" action).
