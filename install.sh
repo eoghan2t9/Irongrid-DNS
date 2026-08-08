@@ -214,12 +214,14 @@ DFLY_STARTED=0
 # --maxmemory must be >= 256MiB per proactor thread; 2 threads x 256MiB =
 # 512mb. Pinning --proactor_threads makes the flag combination valid on any
 # machine (the default of one thread per core can exceed it).
-DFLY_FLAGS="--port=6379 --bind=127.0.0.1 --cache_mode=true --maxmemory=512mb --proactor_threads=2"
+DFLY_FLAGS="--port=6379 --bind=127.0.0.1 --cache_mode=true --maxmemory=512mb --proactor_threads=2 --snapshot_cron=\"0 * * * *\" --dbfilename=irongrid-dump"
 # In Docker the container must NOT bind to 127.0.0.1 — docker-proxy reaches
 # the container via its eth0 IP, so --bind would make the published port
 # refuse connections. The host-side -p 127.0.0.1:6379:6379 mapping already
 # keeps the port private.
-DFLY_DOCKER_FLAGS="--port=6379 --cache_mode=true --maxmemory=512mb --proactor_threads=2"
+# --snapshot_cron + --dbfilename give hourly persistence (the query log and
+# cache survive a hard crash; a graceful restart snapshots anyway).
+DFLY_DOCKER_FLAGS="--port=6379 --cache_mode=true --maxmemory=512mb --proactor_threads=2 --snapshot_cron=\"0 * * * *\" --dbfilename=irongrid-dump"
 
 # 1 if a Redis-compatible server answers PING on the given local port.
 # The read is bounded (-t) so a socket that accepts but is still initialising
@@ -334,6 +336,7 @@ install_dragonfly_docker() {
     docker rm -f dragonfly >/dev/null 2>&1 || true
     docker run -d --name dragonfly --restart unless-stopped \
       -p 127.0.0.1:6379:6379 \
+      -v "$DFLY_DATA:/data" \
       "$DFLY_IMAGE" $DFLY_DOCKER_FLAGS >/dev/null
     if wait_for_dragonfly; then DFLY_STARTED=1; fi
   else
@@ -343,7 +346,7 @@ install_dragonfly_docker() {
     else
       echo "   Install Docker Desktop (WSL2 backend): https://www.docker.com/products/docker-desktop/"
     fi
-    echo "   then run:  docker run -d --name dragonfly --restart unless-stopped -p 127.0.0.1:6379:6379 $DFLY_IMAGE $DFLY_DOCKER_FLAGS"
+    echo "   then run:  docker run -d --name dragonfly --restart unless-stopped -p 127.0.0.1:6379:6379 -v \"\$DFLY_DATA:/data\" $DFLY_IMAGE $DFLY_DOCKER_FLAGS"
   fi
 }
 
