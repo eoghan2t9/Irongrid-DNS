@@ -447,6 +447,7 @@ The dashboard uses a JSON REST API (HTTP Basic auth):
 GET  /api/status            server, listeners, cache, tunnel, root-hints status
 GET  /api/stats             counters, protocol split, top blocked, cache (L1 hits/misses + Dragonfly L2 hits/misses/memory/keys), query_today (since-midnight log stats), query_hourly (24 per-hour buckets for the dashboard sparkline)
 GET  /api/log?limit&action&domain&qtype&client   query log (Dragonfly stream, newest first, in-memory filters; client is an exact source-IP match used by the dashboard's click-through top-client rows)
+GET  /api/log/hostnames?ips=a,b,c   reverse-DNS (PTR) names for client IPs, cached (positive 1h / negative 15m), resolved via the configured upstreams
 DELETE /api/log             clear query log
 GET/POST /api/lists         manage blocklists
 GET  /api/lists/catalog     curated blocklist & allow-list presets (used by the wizard and UI)

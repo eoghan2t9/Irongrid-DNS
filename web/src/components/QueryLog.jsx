@@ -19,6 +19,31 @@ export default function QueryLog() {
   const [client, setClient] = useState(() => new URLSearchParams(window.location.search).get('client') || '')
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [busy, setBusy] = useState(false)
+  // Reverse-DNS names for the client IPs on this page, resolved lazily via
+  // /api/log/hostnames (server-cached) and dropped when the client scrolls
+  // out of the loaded window.
+  const [hosts, setHosts] = useState({})
+
+  // Resolve hostnames for the unique client IPs of the currently loaded
+  // entries. The server caches results (positive 1h / negative 15m), so the
+  // 5-second auto-refresh stays cheap.
+  useEffect(() => {
+    const ips = [...new Set(entries.map((e) => e.client).filter(Boolean))].slice(0, 40)
+    if (!ips.length) return
+    let live = true
+    api.hostnames(ips)
+      .then((res) => {
+        if (!live) return
+        const names = res.hostnames || {}
+        setHosts((prev) => {
+          const cur = {}
+          for (const e of entries) if (prev[e.client]) cur[e.client] = prev[e.client]
+          return { ...cur, ...names }
+        })
+      })
+      .catch(() => {})
+    return () => { live = false }
+  }, [entries])
 
   const load = useCallback(async () => {
     if (busy) return
@@ -128,7 +153,10 @@ export default function QueryLog() {
               {entries.map((e) => (
                 <tr key={e.id}>
                   <td className="mono dim">{fmtTime(e.time)}</td>
-                  <td className="mono">{e.client}</td>
+                  <td>
+                    <div className="mono">{e.client}</div>
+                    {hosts[e.client] && <div className="dim small client-host" title={hosts[e.client]}>{hosts[e.client]}</div>}
+                  </td>
                   <td className="domain-cell" title={e.domain}>{e.domain}</td>
                   <td><span className="chip">{e.type}</span></td>
                   <td>

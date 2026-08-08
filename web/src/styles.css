@@ -439,6 +439,9 @@ body {
 .spark-legend-total { background: var(--cyan); opacity: 0.45; }
 .spark-legend-blocked { background: var(--rose); }
 
+/* Reverse-DNS hostname under a client IP */
+.client-host { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; line-height: 1.4; }
+
 .quick-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
 /* ---------- settings form ---------- */

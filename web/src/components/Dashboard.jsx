@@ -348,11 +348,25 @@ function BlockedClientsCard() {
   const [msg, setMsg] = useState('')
   const [asn, setAsn] = useState({}) // ip -> { asn, name, holder, prefix } | 'loading'
   const [reporting, setReporting] = useState({}) // ip -> bool
+  // Reverse-DNS names for the blocked client IPs (server-cached lookups).
+  const [hosts, setHosts] = useState({})
 
   const load = useCallback(async () => {
     try { setHoney((await api.geoBlocked()).blocked || []) } catch { /* optional */ }
     try { setRate((await api.rateBlocked()).blocked || []) } catch { /* optional */ }
   }, [])
+
+  // Resolve hostnames for the currently blocked clients so it's clear who is
+  // hammering. The server caches PTR results, so the 10s refresh is cheap.
+  useEffect(() => {
+    const ips = [...new Set([...honey, ...rate.map((b) => b.ip)].filter(Boolean))].slice(0, 40)
+    if (!ips.length) return
+    let live = true
+    api.hostnames(ips)
+      .then((res) => { if (live) setHosts((prev) => ({ ...prev, ...(res.hostnames || {}) })) })
+      .catch(() => {})
+    return () => { live = false }
+  }, [honey, rate])
 
   useEffect(() => {
     load()
@@ -490,7 +504,10 @@ function BlockedClientsCard() {
               {honey.map((ip) => (
                 <div key={ip}>
                   <div className="list-row">
-                    <span className="mono">{ip}</span>
+                    <div style={{ minWidth: 0 }}>
+                      <div className="mono">{ip}</div>
+                      {hosts[ip] && <div className="dim small client-host" title={hosts[ip]}>{hosts[ip]}</div>}
+                    </div>
                     <button className="btn small" type="button" onClick={() => report(ip)} disabled={reporting[ip]}>
                       {reporting[ip] ? 'Reporting…' : 'Report'}
                     </button>
@@ -513,7 +530,8 @@ function BlockedClientsCard() {
                 <div key={b.ip}>
                   <div className="list-row" style={{ alignItems: 'flex-start' }}>
                     <div style={{ minWidth: 0 }}>
-                      <span className="mono">{b.ip}</span>
+                      <div className="mono">{b.ip}</div>
+                      {hosts[b.ip] && <div className="dim small client-host" title={hosts[b.ip]}>{hosts[b.ip]}</div>}
                       {b.blocked_until && (
                         <span className="dim small">
                           {' '}· blocked until {new Date(b.blocked_until).toLocaleString()}
