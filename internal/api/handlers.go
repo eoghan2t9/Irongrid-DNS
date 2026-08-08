@@ -63,10 +63,13 @@ type Handler struct {
 	Cache     *cache.Cache
 	Log       *querylog.Log
 
-	// hostOnce/hosts back the cached reverse-DNS lookups for the query-log
-	// and blocked-clients views (see hostname.go).
+	// hostOnce/hosts and asnOnce/asns back the cached reverse-DNS and
+	// BGP/ISP-owner lookups for the query-log and blocked-clients views
+	// (see hostname.go and asn.go).
 	hostOnce sync.Once
 	hosts    *hostCache
+	asnOnce  sync.Once
+	asns     *asnCache
 	DNS       *dnsserver.Handler
 	Tunnel    *tunnel.Manager
 	Upstreams []*upstream.Upstream
@@ -118,6 +121,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.clearLog(ctx, w)
 	case len(parts) == 2 && parts[0] == "log" && parts[1] == "hostnames" && r.Method == http.MethodGet:
 		h.logHostnames(w, r)
+	case len(parts) == 2 && parts[0] == "log" && parts[1] == "asn" && r.Method == http.MethodGet:
+		h.logASN(w, r)
 	case len(parts) == 1 && parts[0] == "lists" && r.Method == http.MethodGet:
 		h.getLists(w)
 	case len(parts) == 1 && parts[0] == "lists" && r.Method == http.MethodPost:

@@ -19,13 +19,15 @@ export default function QueryLog() {
   const [client, setClient] = useState(() => new URLSearchParams(window.location.search).get('client') || '')
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [busy, setBusy] = useState(false)
-  // Reverse-DNS names for the client IPs on this page, resolved lazily via
-  // /api/log/hostnames (server-cached) and dropped when the client scrolls
-  // out of the loaded window.
+  // Reverse-DNS names and BGP/ISP owner info for the client IPs on this
+  // page, resolved lazily via /api/log/hostnames + /api/log/asn (both
+  // server-cached) and dropped when a client scrolls out of the loaded
+  // window.
   const [hosts, setHosts] = useState({})
+  const [asns, setAsns] = useState({})
 
-  // Resolve hostnames for the unique client IPs of the currently loaded
-  // entries. The server caches results (positive 1h / negative 15m), so the
+  // Resolve hostnames + ISP info for the unique client IPs of the currently
+  // loaded entries. The server caches results (PTR 1h/15m, ASN 24h), so the
   // 5-second auto-refresh stays cheap.
   useEffect(() => {
     const ips = [...new Set(entries.map((e) => e.client).filter(Boolean))].slice(0, 40)
@@ -39,6 +41,17 @@ export default function QueryLog() {
           const cur = {}
           for (const e of entries) if (prev[e.client]) cur[e.client] = prev[e.client]
           return { ...cur, ...names }
+        })
+      })
+      .catch(() => {})
+    api.asnInfo(ips)
+      .then((res) => {
+        if (!live) return
+        const infos = res.asn || {}
+        setAsns((prev) => {
+          const cur = {}
+          for (const e of entries) if (prev[e.client]) cur[e.client] = prev[e.client]
+          return { ...cur, ...infos }
         })
       })
       .catch(() => {})
@@ -142,6 +155,7 @@ export default function QueryLog() {
               <tr>
                 <th>Time</th>
                 <th>Client</th>
+                <th>ISP</th>
                 <th>Domain</th>
                 <th>Type</th>
                 <th>Action</th>
@@ -156,6 +170,15 @@ export default function QueryLog() {
                   <td>
                     <div className="mono">{e.client}</div>
                     {hosts[e.client] && <div className="dim small client-host" title={hosts[e.client]}>{hosts[e.client]}</div>}
+                  </td>
+                  <td className="dim small">
+                    {asns[e.client]?.asn ? (
+                      <span className="client-host" title={`${asns[e.client].asn} · ${asns[e.client].holder || asns[e.client].name || ''}${asns[e.client].prefix ? ` · ${asns[e.client].prefix}` : ''}`}>
+                        {asns[e.client].asn} · {asns[e.client].holder || asns[e.client].name}
+                      </span>
+                    ) : (
+                      <span className="dim">—</span>
+                    )}
                   </td>
                   <td className="domain-cell" title={e.domain}>{e.domain}</td>
                   <td><span className="chip">{e.type}</span></td>

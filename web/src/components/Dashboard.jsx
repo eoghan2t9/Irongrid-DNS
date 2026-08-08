@@ -348,22 +348,28 @@ function BlockedClientsCard() {
   const [msg, setMsg] = useState('')
   const [asn, setAsn] = useState({}) // ip -> { asn, name, holder, prefix } | 'loading'
   const [reporting, setReporting] = useState({}) // ip -> bool
-  // Reverse-DNS names for the blocked client IPs (server-cached lookups).
+  // Reverse-DNS names + BGP/ISP owner for the blocked client IPs
+  // (server-cached lookups, so the 10s refresh stays cheap).
   const [hosts, setHosts] = useState({})
+  const [asns, setAsns] = useState({}) // ip -> { asn, name, holder, prefix }
 
   const load = useCallback(async () => {
     try { setHoney((await api.geoBlocked()).blocked || []) } catch { /* optional */ }
     try { setRate((await api.rateBlocked()).blocked || []) } catch { /* optional */ }
   }, [])
 
-  // Resolve hostnames for the currently blocked clients so it's clear who is
-  // hammering. The server caches PTR results, so the 10s refresh is cheap.
+  // Resolve hostnames + ISP owner for the currently blocked clients so it's
+  // clear who is hammering. The server caches PTR results (1h/15m) and ASN
+  // lookups (24h), so the 10s refresh is cheap.
   useEffect(() => {
     const ips = [...new Set([...honey, ...rate.map((b) => b.ip)].filter(Boolean))].slice(0, 40)
     if (!ips.length) return
     let live = true
     api.hostnames(ips)
       .then((res) => { if (live) setHosts((prev) => ({ ...prev, ...(res.hostnames || {}) })) })
+      .catch(() => {})
+    api.asnInfo(ips)
+      .then((res) => { if (live) setAsns((prev) => ({ ...prev, ...(res.asn || {}) })) })
       .catch(() => {})
     return () => { live = false }
   }, [honey, rate])
@@ -507,6 +513,11 @@ function BlockedClientsCard() {
                     <div style={{ minWidth: 0 }}>
                       <div className="mono">{ip}</div>
                       {hosts[ip] && <div className="dim small client-host" title={hosts[ip]}>{hosts[ip]}</div>}
+                      {asns[ip]?.asn && (
+                        <div className="dim small client-host" title={`${asns[ip].asn} · ${asns[ip].holder || asns[ip].name || ''}${asns[ip].prefix ? ` · ${asns[ip].prefix}` : ''}`}>
+                          {asns[ip].asn} · {asns[ip].holder || asns[ip].name}
+                        </div>
+                      )}
                     </div>
                     <button className="btn small" type="button" onClick={() => report(ip)} disabled={reporting[ip]}>
                       {reporting[ip] ? 'Reporting…' : 'Report'}
@@ -532,6 +543,11 @@ function BlockedClientsCard() {
                     <div style={{ minWidth: 0 }}>
                       <div className="mono">{b.ip}</div>
                       {hosts[b.ip] && <div className="dim small client-host" title={hosts[b.ip]}>{hosts[b.ip]}</div>}
+                      {asns[b.ip]?.asn && (
+                        <div className="dim small client-host" title={`${asns[b.ip].asn} · ${asns[b.ip].holder || asns[b.ip].name || ''}${asns[b.ip].prefix ? ` · ${asns[b.ip].prefix}` : ''}`}>
+                          {asns[b.ip].asn} · {asns[b.ip].holder || asns[b.ip].name}
+                        </div>
+                      )}
                       {b.blocked_until && (
                         <span className="dim small">
                           {' '}· blocked until {new Date(b.blocked_until).toLocaleString()}

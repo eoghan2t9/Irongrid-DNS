@@ -76,6 +76,11 @@ export const api = {
     if (!list.length) return Promise.resolve({ hostnames: {} })
     return request('/api/log/hostnames?ips=' + encodeURIComponent(list.join(',')))
   },
+  asnInfo: (ips) => {
+    const list = (ips || []).filter(Boolean)
+    if (!list.length) return Promise.resolve({ asn: {} })
+    return request('/api/log/asn?ips=' + encodeURIComponent(list.join(',')))
+  },
   lists: () => request('/api/lists'),
   catalog: () => request('/api/lists/catalog'),
   addList: (body) => request('/api/lists', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
