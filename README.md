@@ -445,7 +445,7 @@ The dashboard uses a JSON REST API (HTTP Basic auth):
 
 ```
 GET  /api/status            server, listeners, cache, tunnel, root-hints status
-GET  /api/stats             counters, protocol split, top blocked, cache (L1 hits/misses + Dragonfly L2 hits/misses/memory/keys)
+GET  /api/stats             counters, protocol split, top blocked, cache (L1 hits/misses + Dragonfly L2 hits/misses/memory/keys), query_today (since-midnight log stats)
 GET  /api/log?limit&action&domain&qtype   query log (Dragonfly stream, newest first, in-memory filters)
 DELETE /api/log             clear query log
 GET/POST /api/lists         manage blocklists

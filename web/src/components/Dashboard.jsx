@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api'
 
 const fmt = (n) => (n ?? 0).toLocaleString()
@@ -135,6 +135,8 @@ export default function Dashboard({ onNavigate }) {
         </div>
       </div>
 
+      <QueryLogCard today={stats.query_today} q24={q} />
+
       <div className="card">
         <h3>Quick actions</h3>
         <div className="quick-actions">
@@ -158,10 +160,6 @@ export default function Dashboard({ onNavigate }) {
   )
 }
 
-// BlockedClientsCard shows the clients currently blocked — honeypot
-// auto-blocks (persisted, firewall-dropped) and rate-limit auto-blocks —
-// each with a one-click unblock. It refreshes on the same cadence as the
-// dashboard's stat cards, so a fresh honeypot hit appears within seconds.
 // CacheCard shows how hard the two cache layers are working: the in-process
 // L1 (counters reset on restart) and Dragonfly's L2 (cumulative counters since
 // the Dragonfly process started, plus its memory/keys). This is what the
@@ -169,13 +167,22 @@ export default function Dashboard({ onNavigate }) {
 function CacheCard({ cache }) {
   if (!cache) return null
   const l1 = cache.l1
-  const l2 = cache?.l2
+  const l2 = cache.l2
+  // First-seen L2 snapshot (cumulative since Dragonfly started): the delta
+  // against it is the hit-rate of traffic since THIS page loaded, which is
+  // what the card should reflect — the all-time ratio is dominated by the
+  // DDoS flood's write-once queries. A ref, not state: no re-render needed.
+  const baseRef = useRef(null)
+  if (l2 && !baseRef.current) baseRef.current = { hits: l2.hits, misses: l2.misses }
   const pct = (h, m) => {
     const t = (h || 0) + (m || 0)
     return t ? Math.round((100 * (h || 0)) / t) : null
   }
   const l1Rate = pct(l1?.hits, l1?.misses)
-  const l2Rate = pct(l2?.hits, l2?.misses)
+  const dH = baseRef.current ? Math.max(0, (l2?.hits || 0) - baseRef.current.hits) : null
+  const dM = baseRef.current ? Math.max(0, (l2?.misses || 0) - baseRef.current.misses) : null
+  const l2Rate = pct(dH, dM)
+  const l2AllTime = pct(l2?.hits, l2?.misses)
   const memUsed = l2?.used_memory || 0
   const memMax = l2?.max_memory || 0
   const memPct = memMax ? Math.min(100, Math.round((100 * memUsed) / memMax)) : null
@@ -198,7 +205,7 @@ function CacheCard({ cache }) {
           <span className="kv-label">L2 hit rate</span>
           <span className="kv-value">
             {l2Rate == null ? '—' : `${l2Rate}%`}
-            {' '}<span className="dim small">cumulative since Dragonfly start</span>
+            {' '}<span className="dim small">({fmt(dH ?? 0)} of {fmt((dH ?? 0) + (dM ?? 0))} since page load)</span>
           </span>
         </div>
         <div className="kv-row">
@@ -216,10 +223,60 @@ function CacheCard({ cache }) {
         </div>
       )}
       <div className="card-hint">
-        A low L2 hit rate is normal when most repeat queries are absorbed by L1
-        — L2 is the shared, restart-surviving layer (and the query log now
-        lives here too).
+        The L2 rate above is for traffic since this page loaded; all-time it is{' '}
+        {l2AllTime == null ? '—' : `${l2AllTime}%`} (since Dragonfly started). A low
+        all-time rate is normal — the flood wrote millions of one-off queries — and
+        most repeat queries are absorbed by L1 anyway. L2 is the shared,
+        restart-surviving layer, and the query log lives here too.
       </div>
+    </div>
+  )
+}
+
+// QueryLogCard summarises what the Dragonfly query-log stream recorded: the
+// volume and outcome split since local midnight, plus the busiest clients —
+// all computed server-side from the same stream the Query Log page reads.
+function QueryLogCard({ today, q24 }) {
+  const t = today || {}
+  const clients = t.top_clients || []
+  return (
+    <div className="card">
+      <div className="row-between">
+        <h3 style={{ margin: 0 }}>Query log</h3>
+        <span className="dim small">live from Dragonfly</span>
+      </div>
+      <div className="kv-grid" style={{ marginTop: 8 }}>
+        <div className="kv-row">
+          <span className="kv-label">Queries today</span>
+          <span className="kv-value">{fmt(t.total || 0)}</span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Allowed · blocked · cached</span>
+          <span className="kv-value">{fmt(t.allowed || 0)} · {fmt(t.blocked || 0)} · {fmt(t.cached || 0)}</span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Avg latency today</span>
+          <span className="kv-value">{(t.avg_rt_ms || 0).toFixed(2)} ms</span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Queries last 24h</span>
+          <span className="kv-value">{fmt(q24?.total || 0)}</span>
+        </div>
+      </div>
+      {clients.length > 0 && (
+        <>
+          <h4 style={{ margin: '14px 0 8px' }}>Top clients today</h4>
+          <div className="top-list">
+            {clients.slice(0, 8).map((c, i) => (
+              <div className="top-row" key={c.domain}>
+                <span className="top-rank">{i + 1}</span>
+                <span className="top-domain" title={c.domain}>{c.domain}</span>
+                <span className="top-count">{fmt(c.count)}</span>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
     </div>
   )
 }

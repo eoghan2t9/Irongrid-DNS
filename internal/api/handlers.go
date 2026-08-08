@@ -258,12 +258,25 @@ func (h *Handler) getStatus(w http.ResponseWriter) {
 	})
 }
 
+// todayStart returns local midnight — the "today" window for the dashboard's
+// query-log card.
+func todayStart() time.Time {
+	now := time.Now()
+	return time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+}
+
 func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
-	days := 1
-	stats, err := h.Log.Stats(ctx, time.Now().Add(-time.Duration(days)*24*time.Hour))
+	stats, err := h.Log.Stats(ctx, time.Now().Add(-24*time.Hour))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
+	}
+	// A second window since local midnight for the dashboard's "queries
+	// today" headline. Best-effort: a failure here must not break the rest
+	// of the stats response.
+	var queryToday any
+	if st, err := h.Log.Stats(ctx, todayStart()); err == nil {
+		queryToday = st
 	}
 	proto := map[string]int64{}
 	for k, v := range h.DNS.Stats.ByProtocol {
@@ -298,9 +311,10 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 			"errors":   h.DNS.Stats.Errors.Load(),
 			"honeypot": h.DNS.Stats.Honeypot.Load(),
 		},
-		"protocol": proto,
-		"filter":   h.Engine.Stats(),
-		"cache":    cacheStats,
+		"protocol":    proto,
+		"filter":      h.Engine.Stats(),
+		"cache":       cacheStats,
+		"query_today": queryToday,
 	})
 }
 
