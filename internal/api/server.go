@@ -2,6 +2,8 @@
 package api
 
 import (
+	"bytes"
+	"compress/gzip"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -10,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"log"
 	"mime"
@@ -234,6 +237,15 @@ func logRequests(next http.Handler) http.Handler {
 	})
 }
 
+// gzipPool reuses gzip writers for on-the-fly asset compression (the flate
+// encoder allocates non-trivially, so pooling it across requests matters on a
+// busy resolver).
+var gzipPool = sync.Pool{New: func() any { return gzip.NewWriter(io.Discard) }}
+
+// gzipThreshold is the minimum response size worth compressing: gzipping a
+// tiny file costs CPU and round-trips for nothing.
+const gzipThreshold = 860
+
 // serveFromFS serves static assets, falling back to index.html for SPA routes.
 // Files are served directly (no http.FileServer) to avoid its /index.html
 // redirect behaviour, which would loop with client-side routing.
@@ -263,8 +275,54 @@ func serveFromFS(w http.ResponseWriter, r *http.Request, root fs.FS) {
 		ct = "application/octet-stream"
 	}
 	w.Header().Set("Content-Type", ct)
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Vary", "Accept-Encoding")
+	// Hashed build assets (Vite emits every content-hashed file under
+	// /assets/, e.g. index-ffi044S1.js) are immutable: the filename changes
+	// on every build, so a year-long cache is safe and repeat dashboard
+	// loads become pure browser-cache hits. The HTML shell itself stays
+	// no-cache so a new build's index.html (and its fresh asset hashes) is
+	// picked up on the very next request.
+	if !fallback && strings.HasPrefix(path, "assets/") {
+		w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+	} else {
+		w.Header().Set("Cache-Control", "no-cache")
+	}
+	// Compress text assets on the fly. The browser only pays for this once —
+	// the immutable cache serves every repeat load — and the response is
+	// built in memory first so a compression failure falls back to the raw
+	// bytes instead of a corrupt stream. DoH (/dns-query) never reaches this
+	// path; it is handled by its own mux entry before the router.
+	if len(data) > gzipThreshold && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") && isCompressible(ct) {
+		var buf bytes.Buffer
+		gz := gzipPool.Get().(*gzip.Writer)
+		gz.Reset(&buf)
+		_, werr := gz.Write(data)
+		cerr := gz.Close()
+		gzipPool.Put(gz)
+		if werr == nil && cerr == nil {
+			w.Header().Set("Content-Encoding", "gzip")
+			w.Write(buf.Bytes())
+			return
+		}
+	}
 	w.Write(data)
+}
+
+// isCompressible reports whether a content type is worth gzipping.
+func isCompressible(ct string) bool {
+	switch {
+	case strings.HasPrefix(ct, "text/"),
+		ct == "application/javascript",
+		ct == "text/javascript",
+		ct == "application/json",
+		strings.HasSuffix(ct, "+json"),
+		ct == "application/xml",
+		strings.HasSuffix(ct, "+xml"),
+		ct == "image/svg+xml",
+		ct == "application/wasm":
+		return true
+	}
+	return false
 }
 
 // writeJSON is a small helper.

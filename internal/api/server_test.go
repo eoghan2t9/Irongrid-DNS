@@ -1,6 +1,9 @@
 package api
 
 import (
+	"bytes"
+	"compress/gzip"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
@@ -14,6 +17,67 @@ import (
 // index.html. The fallback must be served as text/html — serving it as
 // application/octet-stream makes browsers download the page as a file instead
 // of rendering it (regression test for the "refresh downloads a file" bug).
+// TestServeFromFSAssetCachingAndGzip verifies the loading-speed behaviour of
+// static serving: hashed /assets/* files are immutable-cached (repeat loads
+// hit the browser cache), the HTML shell stays no-cache so new builds are
+// picked up, and compressible assets are gzipped when the client asks for it.
+func TestServeFromFSAssetCachingAndGzip(t *testing.T) {
+	big := strings.Repeat("const data = 'x'; ", 200) // > gzipThreshold bytes
+	root := fstest.MapFS{
+		"index.html":         &fstest.MapFile{Data: []byte("<html>dashboard</html>")},
+		"assets/app-hash.js": &fstest.MapFile{Data: []byte(big)},
+	}
+
+	// The HTML shell: no-cache, never compressed, Vary advertised.
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Accept-Encoding", "gzip")
+	serveFromFS(rr, req, root)
+	if cc := rr.Header().Get("Cache-Control"); cc != "no-cache" {
+		t.Errorf("index Cache-Control = %q, want no-cache", cc)
+	}
+	if ce := rr.Header().Get("Content-Encoding"); ce != "" {
+		t.Errorf("index Content-Encoding = %q, want none", ce)
+	}
+	if v := rr.Header().Get("Vary"); v != "Accept-Encoding" {
+		t.Errorf("index Vary = %q, want Accept-Encoding", v)
+	}
+
+	// A hashed asset with gzip accepted: immutable cache + gzipped body that
+	// round-trips to the original.
+	rr2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/assets/app-hash.js", nil)
+	req2.Header.Set("Accept-Encoding", "gzip")
+	serveFromFS(rr2, req2, root)
+	if cc := rr2.Header().Get("Cache-Control"); cc != "public, max-age=31536000, immutable" {
+		t.Errorf("asset Cache-Control = %q, want immutable", cc)
+	}
+	if ce := rr2.Header().Get("Content-Encoding"); ce != "gzip" {
+		t.Fatalf("asset Content-Encoding = %q, want gzip", ce)
+	}
+	zr, err := gzip.NewReader(bytes.NewReader(rr2.Body.Bytes()))
+	if err != nil {
+		t.Fatalf("gzip reader: %v", err)
+	}
+	uncompressed, err := io.ReadAll(zr)
+	if err != nil {
+		t.Fatalf("gunzip: %v", err)
+	}
+	if string(uncompressed) != big {
+		t.Fatal("gzipped asset must round-trip to the original content")
+	}
+
+	// Without Accept-Encoding the same asset is served raw.
+	rr3 := httptest.NewRecorder()
+	serveFromFS(rr3, httptest.NewRequest(http.MethodGet, "/assets/app-hash.js", nil), root)
+	if ce := rr3.Header().Get("Content-Encoding"); ce != "" {
+		t.Errorf("asset without accept-encoding: Content-Encoding = %q, want none", ce)
+	}
+	if rr3.Body.String() != big {
+		t.Fatal("uncompressed asset must match the original bytes")
+	}
+}
+
 func TestServeFromFSContentType(t *testing.T) {
 	root := fstest.MapFS{
 		"index.html":    &fstest.MapFile{Data: []byte("<html>dashboard</html>")},
