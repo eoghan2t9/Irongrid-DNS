@@ -170,7 +170,9 @@ geo_block:
                               # sources can be spoofed, so enabling this
                               # lets a spoofing attacker permanently block
                               # an innocent victim; only for trusted networks
-  allowlist: []              # client IPs/CIDRs that are never geo-blocked
+  allowlist: []              # client IPs/CIDRs that are never blocked — not by
+                              # country geo-blocking, the explicit IP list, or
+                              # honeypot auto-blocks (put your own servers here)
   # base_url: ""             # override the CIDR data source (default
                               # ipverse/rir-ip; file:// paths supported)
   auto_update: 168h          # how often country data re-fetches (0 = never)

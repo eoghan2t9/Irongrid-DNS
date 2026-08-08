@@ -8,7 +8,7 @@ import (
 )
 
 func TestBannerConfiguredIPs(t *testing.T) {
-	b := NewBanner("", []string{"38.11.106.3", "203.0.113.0/24", "2001:db8::/32", "not-an-ip"}, nil)
+	b := NewBanner("", nil, []string{"38.11.106.3", "203.0.113.0/24", "2001:db8::/32", "not-an-ip"}, nil)
 	if !b.Blocked("38.11.106.3") {
 		t.Error("explicit IP must be blocked")
 	}
@@ -33,7 +33,7 @@ func TestBannerHoneypotAutoBlockPersistsAndReloads(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blocked-ips.txt")
 	var fired []string
-	b := NewBanner(path, nil, []string{"trap.example.com."})
+	b := NewBanner(path, nil, nil, []string{"trap.example.com."})
 	b.OnBlock = func(ip string) { fired = append(fired, ip) }
 
 	if !b.LookupHoneypot("trap.example.com") {
@@ -79,7 +79,7 @@ func TestBannerHoneypotAutoBlockPersistsAndReloads(t *testing.T) {
 		t.Fatalf("persisted file missing the blocked IP:\n%s", data)
 	}
 	// A rebuilt banner (config reload / restart) re-reads the file.
-	b2 := NewBanner(path, nil, nil)
+	b2 := NewBanner(path, nil, nil, nil)
 	if !b2.Blocked("38.11.106.3") {
 		t.Fatal("rebuilt banner must reload the persisted auto-block")
 	}
@@ -91,7 +91,7 @@ func TestBannerHoneypotAutoBlockPersistsAndReloads(t *testing.T) {
 func TestBannerUnblock(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blocked-ips.txt")
-	b := NewBanner(path, []string{"198.51.100.7"}, nil)
+	b := NewBanner(path, nil, []string{"198.51.100.7"}, nil)
 	if err := b.Block("203.0.113.9"); err != nil {
 		t.Fatalf("Block: %v", err)
 	}
@@ -118,8 +118,64 @@ func TestBannerUnblock(t *testing.T) {
 	}
 }
 
+// TestBannerAllowlistNeverBlocked verifies that allowlisted clients are
+// exempt from every block source: the configured IP list, honeypot
+// auto-blocks (Block is a no-op and OnBlock never fires, so the firewall is
+// never told to drop them), and persisted auto-block entries left over from
+// before the allowlist existed.
+func TestBannerAllowlistNeverBlocked(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "blocked-ips.txt")
+	var fired []string
+	// The same IP is both configured-blocked and allowlisted: allowlist wins.
+	b := NewBanner(path, []string{"198.51.100.9"}, []string{"198.51.100.9", "203.0.113.0/24"}, []string{"trap.example.com"})
+	b.OnBlock = func(ip string) { fired = append(fired, ip) }
+	if b.Blocked("198.51.100.9") {
+		t.Fatal("allowlisted client must not be blocked even when configured in ips")
+	}
+	// A non-allowlisted member of a configured CIDR is still blocked.
+	if !b.Blocked("203.0.113.42") {
+		t.Fatal("configured CIDR must still block non-allowlisted clients")
+	}
+	// A honeypot hit from the allowlisted client must not auto-block it.
+	if err := b.Block("198.51.100.9"); err != nil {
+		t.Fatalf("Block: %v", err)
+	}
+	if b.Blocked("198.51.100.9") {
+		t.Fatal("allowlisted client auto-blocked by a honeypot hit")
+	}
+	if len(fired) != 0 {
+		t.Fatalf("OnBlock fired for an allowlisted client: %v", fired)
+	}
+	// A honeypot hit from a non-allowlisted client still auto-blocks.
+	if err := b.Block("203.0.113.42"); err != nil {
+		t.Fatalf("Block non-allowlisted: %v", err)
+	}
+	if len(fired) != 1 || fired[0] != "203.0.113.42" {
+		t.Fatalf("OnBlock fired %v, want [203.0.113.42]", fired)
+	}
+	if b.Blocked("198.51.100.9") {
+		t.Fatal("allowlisted client blocked after another client's honeypot hit")
+	}
+
+	// A rebuilt banner (restart) skips a persisted auto-block of the
+	// allowlisted IP: it must not load it as blocked or list it.
+	if err := os.WriteFile(path, []byte("# auto\n198.51.100.9\n"), 0o644); err != nil {
+		t.Fatalf("write file: %v", err)
+	}
+	b2 := NewBanner(path, []string{"198.51.100.9"}, nil, []string{"trap.example.com"})
+	if b2.Blocked("198.51.100.9") {
+		t.Fatal("rebuilt banner must not block an allowlisted IP from the persisted file")
+	}
+	for _, e := range b2.List() {
+		if e == "198.51.100.9" {
+			t.Fatal("allowlisted IP must not appear in List()")
+		}
+	}
+}
+
 func TestBannerBlockRejectsCIDR(t *testing.T) {
-	b := NewBanner("", nil, nil)
+	b := NewBanner("", nil, nil, nil)
 	// Auto-blocks are bare IPs only; a CIDR is refused (defence in depth —
 	// the handler only ever passes client source IPs).
 	if err := b.Block("203.0.113.0/24"); err == nil {

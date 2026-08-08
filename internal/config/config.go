@@ -89,7 +89,11 @@ type GeoBlockConfig struct {
 	Enabled bool `yaml:"enabled"`
 	// Countries are ISO 3166-1 alpha-2 codes (uppercase), e.g. RU, CN, KP.
 	Countries []string `yaml:"countries"`
-	// Allowlist is a set of client IPs/CIDRs that are never geo-blocked.
+	// Allowlist is a set of client IPs/CIDRs that are never blocked — not by
+	// country geo-blocking, not by the explicit IP block list, and not by
+	// honeypot auto-blocks (a honeypot query from an allowlisted client is
+	// refused but never auto-blocks or firewall-drops the source). Put the
+	// operator's own servers here so whitelisting is absolute.
 	Allowlist []string `yaml:"allowlist"`
 	// IPs is a set of client IPs/CIDRs that are always blocked, regardless
 	// of country — the "block this specific client/netblock" list (e.g.

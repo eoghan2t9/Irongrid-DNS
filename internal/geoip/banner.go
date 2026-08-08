@@ -23,21 +23,32 @@ type Banner struct {
 	auto      map[string]bool // raw entries added at runtime (unblockable)
 	honeypots map[string]bool // lowercase honeypot domains, no trailing dot
 	path      string          // persistence file for auto-blocked entries
+	// allow holds the never-blocked client IPs/CIDRs. An allowlisted client
+	// passes every block source: geo countries, the configured IP list, and
+	// honeypot auto-blocks (a honeypot hit refuses the query but never
+	// auto-blocks or firewall-drops an allowlisted source). This is what
+	// makes the operator's own servers genuinely whitelisted.
+	allow []*net.IPNet
 
 	// OnBlock is invoked (never under the lock) after a honeypot hit
 	// auto-blocks a client, so main can push the IP into the host firewall.
 	OnBlock func(ip string)
 }
 
-// NewBanner returns a banner that always blocks the configured IPs/CIDRs and
-// treats the configured domains as honeypots. Runtime auto-blocks are loaded
-// from path when present (best-effort; a missing file is fine).
-func NewBanner(path string, ips, honeypots []string) *Banner {
+// NewBanner returns a banner that always blocks the configured IPs/CIDRs,
+// never blocks the allowlisted IPs/CIDRs, and treats the configured domains
+// as honeypots. Runtime auto-blocks are loaded from path when present
+// (best-effort; a missing file is fine). Allowlist entries are honoured over
+// the configured IP list and persisted auto-blocks alike.
+func NewBanner(path string, allowlist, ips, honeypots []string) *Banner {
 	b := &Banner{
 		raw:       map[string]bool{},
 		auto:      map[string]bool{},
 		honeypots: map[string]bool{},
 		path:      path,
+	}
+	for _, e := range allowlist {
+		b.addAllow(e)
 	}
 	for _, e := range ips {
 		b.addRaw(strings.TrimSpace(e), false)
@@ -85,7 +96,41 @@ func (b *Banner) addRaw(e string, runtime bool) {
 	b.nets = append(b.nets, n)
 }
 
+// addAllow parses and records an allowlist entry (IP or CIDR), skipping
+// invalid entries.
+func (b *Banner) addAllow(e string) {
+	e = strings.TrimSpace(e)
+	if e == "" {
+		return
+	}
+	_, n, err := net.ParseCIDR(e)
+	if err != nil {
+		ip := net.ParseIP(e)
+		if ip == nil {
+			return
+		}
+		bits := 32
+		if ip.To4() == nil {
+			bits = 128
+		}
+		n = &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)}
+	}
+	b.allow = append(b.allow, n)
+}
+
+// allowed reports whether ip is on the allowlist; caller holds the lock.
+func (b *Banner) allowed(ip net.IP) bool {
+	for _, n := range b.allow {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
 // Blocked reports whether clientIP is on the banner's block list.
+// Allowlisted clients are never blocked — not by the configured IP list and
+// not by a persisted honeypot auto-block.
 func (b *Banner) Blocked(clientIP string) bool {
 	ip := net.ParseIP(clientIP)
 	if ip == nil {
@@ -93,6 +138,9 @@ func (b *Banner) Blocked(clientIP string) bool {
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	if b.allowed(ip) {
+		return false
+	}
 	for _, n := range b.nets {
 		if n.Contains(ip) {
 			return true
@@ -144,6 +192,13 @@ func (b *Banner) Block(ip string) error {
 	}
 	raw := parsed.String()
 	b.mu.Lock()
+	// An allowlisted source is never auto-blocked: the honeypot query is
+	// refused at the DNS layer but the client (the operator's own server)
+	// must not be dropped from the network.
+	if b.allowed(parsed) {
+		b.mu.Unlock()
+		return nil
+	}
 	if b.raw[raw] {
 		b.mu.Unlock()
 		return nil
@@ -250,6 +305,12 @@ func (b *Banner) loadAuto() {
 	for _, ln := range strings.Split(string(data), "\n") {
 		ln = strings.TrimSpace(ln)
 		if ln == "" || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		// Allowlisted entries are skipped: an operator's own server that was
+		// auto-blocked before being allowlisted must not stay on the list
+		// (and thus keep showing as blocked / feeding the firewall).
+		if ip := net.ParseIP(ln); ip != nil && b.allowed(ip) {
 			continue
 		}
 		b.addRaw(ln, true)

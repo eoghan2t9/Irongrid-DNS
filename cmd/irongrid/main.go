@@ -316,7 +316,7 @@ func main() {
 		// auto-blocks (loaded from a persisted file so they survive
 		// restarts/reloads). A honeypot hit pushes the client straight into
 		// the host firewall's drop set via OnBlock.
-		banner := geoip.NewBanner(filepath.Join(geoDir, "blocked-ips.txt"), g.IPs, g.Honeypots)
+		banner := geoip.NewBanner(filepath.Join(geoDir, "blocked-ips.txt"), g.Allowlist, g.IPs, g.Honeypots)
 		handler.SetIPBanner(banner)
 		// Opt-in: let plain-UDP honeypot hits auto-block their source too
 		// (off by default — spoofed UDP must not be able to block victims).

@@ -104,7 +104,7 @@ func TestAbuseReportHandlerBadIP(t *testing.T) {
 
 func TestAbuseExportCSV(t *testing.T) {
 	dnsH := dnsserver.NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, 5)
-	banner := geoip.NewBanner("", nil, []string{"trap.example.com"})
+	banner := geoip.NewBanner("", nil, nil, []string{"trap.example.com"})
 	if err := banner.Block("203.0.113.9"); err != nil {
 		t.Fatalf("banner.Block: %v", err)
 	}

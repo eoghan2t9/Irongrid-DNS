@@ -299,7 +299,7 @@ func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
 
 	var autoBlocked []string
-	banner := geoip.NewBanner("", []string{"38.11.106.3"}, []string{"trap.example.com"})
+	banner := geoip.NewBanner("", nil, []string{"38.11.106.3"}, []string{"trap.example.com"})
 	banner.OnBlock = func(ip string) { autoBlocked = append(autoBlocked, ip) }
 	h.SetIPBanner(banner)
 
@@ -375,6 +375,51 @@ func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 	}
 }
 
+// TestHandlerAllowlistedClientNotHoneypotBlocked verifies the end-to-end
+// guarantee behind the allowlist: an allowlisted client that queries a
+// honeypot domain over a trusted transport is refused (honeypots are never
+// answered) but is NOT auto-blocked — it keeps resolving normal domains, and
+// the banner's OnBlock never fires so the firewall is never told to drop it.
+// The same query from a non-allowlisted client auto-blocks as usual.
+func TestHandlerAllowlistedClientNotHoneypotBlocked(t *testing.T) {
+	addr := startUDPTestServer(t, "1.1.1.1", 0)
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
+	var autoBlocked []string
+	banner := geoip.NewBanner("", []string{"203.0.113.9"}, nil, []string{"trap.example.com"})
+	banner.OnBlock = func(ip string) { autoBlocked = append(autoBlocked, ip) }
+	h.SetIPBanner(banner)
+
+	q := func(name string) *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion(name, dns.TypeA)
+		return m
+	}
+	// Honeypot query over TCP from the allowlisted client: refused, not blocked.
+	fw := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
+	h.ServeDNSWithProto(fw, q("trap.example.com."), "tcp")
+	if fw.msg == nil || fw.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("honeypot query: expected REFUSED, got %v", fw.msg)
+	}
+	if len(autoBlocked) != 0 {
+		t.Fatalf("allowlisted client was auto-blocked: %v", autoBlocked)
+	}
+	if b := h.CurrentIPBanner(); b != nil && b.Blocked("203.0.113.9") {
+		t.Fatal("allowlisted client reported blocked after honeypot query")
+	}
+	// A normal query from the allowlisted client still resolves.
+	ok := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
+	h.ServeDNS(ok, q("example.com."))
+	if ok.msg == nil || len(ok.msg.Answer) == 0 {
+		t.Fatalf("allowlisted client's normal query failed: %v", ok.msg)
+	}
+	// Control: the same honeypot query from a non-allowlisted client auto-blocks.
+	ctrl := &fakeWriter{ip: net.ParseIP("198.51.100.42")}
+	h.ServeDNSWithProto(ctrl, q("trap.example.com."), "tcp")
+	if len(autoBlocked) != 1 || autoBlocked[0] != "198.51.100.42" {
+		t.Fatalf("control client OnBlock fired %v, want [198.51.100.42]", autoBlocked)
+	}
+}
+
 // TestHandlerHoneypotNotLogged verifies that honeypot hits — the apex and
 // random subdomains under the trap — are never written to the query log, while
 // a normal query is logged as usual. Honeypot traffic is attack traffic; the
@@ -390,7 +435,7 @@ func TestHandlerHoneypotNotLogged(t *testing.T) {
 	}
 	defer ql.Close()
 	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, ql, "nxdomain", 600, 5*time.Second)
-	banner := geoip.NewBanner("", nil, []string{"trap.example.com"})
+	banner := geoip.NewBanner("", nil, nil, []string{"trap.example.com"})
 	h.SetIPBanner(banner)
 
 	q := func(name string) *dns.Msg {
@@ -440,7 +485,7 @@ func TestHandlerHoneypotNotLogged(t *testing.T) {
 func TestHandlerHoneypotTrustUDP(t *testing.T) {
 	addr := startUDPTestServer(t, "1.1.1.1", 0)
 	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
-	banner := geoip.NewBanner("", nil, []string{"trap.example.com"})
+	banner := geoip.NewBanner("", nil, nil, []string{"trap.example.com"})
 	var autoBlocked []string
 	banner.OnBlock = func(ip string) { autoBlocked = append(autoBlocked, ip) }
 	h.SetIPBanner(banner)
