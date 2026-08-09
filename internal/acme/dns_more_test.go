@@ -43,10 +43,10 @@ func TestDigitalOceanPresentAndCleanup(t *testing.T) {
 				t.Errorf("bad create payload: %v", b)
 			}
 			created["_acme-challenge"] = true
-			json.NewEncoder(w).Encode(map[string]any{"domain_record": map[string]any{"id": 7, "type": "TXT"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"domain_record": map[string]any{"id": 7, "type": "TXT"}})
 		case r.Method == http.MethodGet && r.URL.Path == "/domains/example.com/records":
 			recs := []map[string]any{{"id": 7, "type": "TXT", "name": "_acme-challenge.example.com.", "data": "val123"}}
-			json.NewEncoder(w).Encode(map[string]any{"domain_records": recs})
+			_ = json.NewEncoder(w).Encode(map[string]any{"domain_records": recs})
 		case r.Method == http.MethodDelete && r.URL.Path == "/domains/example.com/records/7":
 			created["_acme-challenge"] = false
 			w.WriteHeader(http.StatusNoContent)
@@ -57,7 +57,7 @@ func TestDigitalOceanPresentAndCleanup(t *testing.T) {
 				return
 			}
 			zoneChecked = true
-			json.NewEncoder(w).Encode(map[string]any{"domain": map[string]any{"name": "example.com"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"domain": map[string]any{"name": "example.com"}})
 		default:
 			t.Errorf("unexpected DO request: %s %s", r.Method, r.URL.Path)
 		}
@@ -98,7 +98,7 @@ func TestHetznerPresentAndCleanup(t *testing.T) {
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/zones":
 			zones := []map[string]any{{"id": "zone-1", "name": "example.com"}}
-			json.NewEncoder(w).Encode(map[string]any{"zones": zones})
+			_ = json.NewEncoder(w).Encode(map[string]any{"zones": zones})
 		case r.Method == http.MethodPost && r.URL.Path == "/records":
 			var b map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&b)
@@ -106,10 +106,10 @@ func TestHetznerPresentAndCleanup(t *testing.T) {
 				t.Errorf("bad create payload: %v", b)
 			}
 			createdID = "rec-1"
-			json.NewEncoder(w).Encode(map[string]any{"record": map[string]any{"id": "rec-1", "type": "TXT"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"record": map[string]any{"id": "rec-1", "type": "TXT"}})
 		case r.Method == http.MethodGet && r.URL.Path == "/records":
 			recs := []map[string]any{{"id": "rec-1", "type": "TXT", "name": "_acme-challenge.dns", "value": "val123"}}
-			json.NewEncoder(w).Encode(map[string]any{"records": recs})
+			_ = json.NewEncoder(w).Encode(map[string]any{"records": recs})
 		case r.Method == http.MethodDelete && r.URL.Path == "/records/rec-1":
 			createdID = ""
 			w.WriteHeader(http.StatusOK)
@@ -154,7 +154,7 @@ func TestGoDaddyPresentAndCleanup(t *testing.T) {
 		defer mu.Unlock()
 		switch {
 		case r.Method == http.MethodGet && r.URL.Path == "/domains/example.com":
-			json.NewEncoder(w).Encode(map[string]any{"domainId": "x"})
+			_ = json.NewEncoder(w).Encode(map[string]any{"domainId": "x"})
 		case r.Method == http.MethodPut && r.URL.Path == "/domains/example.com/records/TXT/_acme-challenge":
 			var body []map[string]any
 			_ = json.NewDecoder(r.Body).Decode(&body)
@@ -209,7 +209,7 @@ func TestRoute53PresentAndCleanup(t *testing.T) {
 		case r.Method == http.MethodGet && r.URL.Path == "/hostedzone":
 			zones := `<ListHostedZonesByNameResponse><HostedZones><HostedZone><Id>/hostedzone/Z123</Id><Name>example.com.</Name></HostedZone></HostedZones></ListHostedZonesByNameResponse>`
 			w.Header().Set("Content-Type", "application/xml")
-			w.Write([]byte(zones))
+			_, _ = w.Write([]byte(zones))
 		case r.Method == http.MethodPost && r.URL.Path == "/hostedzone/Z123/rrset":
 			raw, _ := io.ReadAll(r.Body)
 			body := string(raw)
@@ -227,7 +227,7 @@ func TestRoute53PresentAndCleanup(t *testing.T) {
 				changes = append(changes, "DELETE")
 			}
 			w.Header().Set("Content-Type", "application/xml")
-			w.Write([]byte(`<ChangeResourceRecordSetsResponse><ChangeInfo><Status>PENDING</Status></ChangeInfo></ChangeResourceRecordSetsResponse>`))
+			_, _ = w.Write([]byte(`<ChangeResourceRecordSetsResponse><ChangeInfo><Status>PENDING</Status></ChangeInfo></ChangeResourceRecordSetsResponse>`))
 		default:
 			t.Errorf("unexpected Route53 request: %s %s", r.Method, r.URL.Path)
 		}

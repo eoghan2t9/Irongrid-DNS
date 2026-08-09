@@ -159,11 +159,14 @@ func (m *Manager) Serve() error {
 		return fmt.Errorf("acme: cannot listen on %s for the HTTP-01 challenge (Let's Encrypt validates your domain on port 80): %w", addr, err)
 	}
 	m.ln = ln
-	m.srv = &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !m.HandleChallenge(w, r) {
-			http.NotFound(w, r)
-		}
-	})}
+	m.srv = &http.Server{
+		ReadHeaderTimeout: 10 * time.Second, // gosec G112: bound slow-header clients
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if !m.HandleChallenge(w, r) {
+				http.NotFound(w, r)
+			}
+		}),
+	}
 	go func() {
 		if err := m.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("[acme] challenge server on %s stopped: %v", addr, err)
@@ -253,8 +256,7 @@ func (m *Manager) Issue(ctx context.Context) error {
 	}
 
 	// 1. Register the account (idempotent).
-	acct := &acme.Account{Contact: []string{"mailto:" + m.email}}
-	acct, err := client.Register(ctx, acct, acme.AcceptTOS)
+	_, err := client.Register(ctx, &acme.Account{Contact: []string{"mailto:" + m.email}}, acme.AcceptTOS)
 	if err != nil {
 		// ErrAccountAlreadyExists is fine: we can proceed with the existing account.
 		if err != acme.ErrAccountAlreadyExists {
@@ -366,7 +368,7 @@ func (m *Manager) Issue(ctx context.Context) error {
 		m.noteErr(err)
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(m.dir, "cert.pem"), certPEM, 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(m.dir, "cert.pem"), certPEM, 0o600); err != nil {
 		m.noteErr(err)
 		return err
 	}

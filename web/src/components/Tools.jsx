@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import { useState } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast'
 import SiteScanner from './SiteScanner'

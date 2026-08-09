@@ -331,5 +331,5 @@ func (b *Banner) persist(entries []string) error {
 	for _, e := range entries {
 		sb.WriteString(e + "\n")
 	}
-	return os.WriteFile(b.path, []byte(sb.String()), 0o644)
+	return os.WriteFile(b.path, []byte(sb.String()), 0o600)
 }

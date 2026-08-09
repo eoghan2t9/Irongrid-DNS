@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast'
 import SiteScanner from './SiteScanner'

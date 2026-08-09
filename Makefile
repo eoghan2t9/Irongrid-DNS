@@ -1,4 +1,4 @@
-.PHONY: all web build run install test vet docker docker-up release clean
+.PHONY: all web build run install test lint vuln docker docker-up release clean
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.1.0)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
@@ -44,10 +44,18 @@ release: web
 	cd dist && $(SHA256) irongrid-* > SHA256SUMS.txt
 	ls -lh dist
 
-## test: run all Go tests and vet
+## test: run all Go tests (with the race detector) and vet
 test:
 	go vet ./...
-	go test ./...
+	go test -race ./...
+
+## lint: run golangci-lint over the Go codebase (pinned, see .golangci.yml)
+lint:
+	go run github.com/golangci/golangci-lint/cmd/golangci-lint@v2.12.2 run ./...
+
+## vuln: scan the Go dependency tree for known CVEs (golang.org/x/vuln)
+vuln:
+	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
 ## docker: build the container image
 docker:

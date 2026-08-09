@@ -67,7 +67,7 @@ func TestAccountKeyPersisted(t *testing.T) {
 	m := New(Options{Email: "a@b.c", Domains: []string{"example.com"}, CertDir: dir})
 	k1 := mustAccountKey(m)
 	k2 := mustAccountKey(m)
-	if k1.D.Cmp(k2.D) != 0 {
+	if !k1.Equal(k2) {
 		t.Error("account key should be stable across calls (persisted)")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "acme-account.key")); err != nil {

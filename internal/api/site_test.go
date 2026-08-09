@@ -23,7 +23,7 @@ func TestSiteCheck(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		io.WriteString(w, `<html><head><title>Demo</title></head><body>
+		_, _ = io.WriteString(w, `<html><head><title>Demo</title></head><body>
 			<script src="https://ads.example.com/pixel.js"></script>
 			<script src="/local.js"></script>
 			<img src="https://tracker.example.net/t.png">
@@ -136,12 +136,12 @@ func TestSiteRedirectGuard(t *testing.T) {
 
 func TestSiteCheckTruncatesBigPages(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, "<html><body>")
+		_, _ = io.WriteString(w, "<html><body>")
 		chunk := strings.Repeat("<b>x</b>", 1024) // ~8 KiB per write
 		for written := int64(len(chunk)); written < int64(siteMaxBody)+1024; written += int64(len(chunk)) {
-			io.WriteString(w, chunk)
+			_, _ = io.WriteString(w, chunk)
 		}
-		io.WriteString(w, "</body></html>")
+		_, _ = io.WriteString(w, "</body></html>")
 	}))
 	defer srv.Close()
 
@@ -172,7 +172,7 @@ func TestSiteCheckNonHTML(t *testing.T) {
 	// page-host-only result, not an error.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Write([]byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xff})
+		_, _ = w.Write([]byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xff})
 	}))
 	defer srv.Close()
 
@@ -207,7 +207,7 @@ func TestSiteCheckRouteDispatch(t *testing.T) {
 	eng.Compile()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		io.WriteString(w, `<script src="https://ads.example.com/p.js"></script>`)
+		_, _ = io.WriteString(w, `<script src="https://ads.example.com/p.js"></script>`)
 	}))
 	defer srv.Close()
 

@@ -35,12 +35,12 @@ func (m *mockCloudflare) handle(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet && r.URL.Path == "/zones" {
 		name := r.URL.Query().Get("name")
 		if !strings.HasSuffix(name, "example.com") {
-			json.NewEncoder(w).Encode(cfResponse{Success: true, Result: json.RawMessage("[]")})
+			_ = json.NewEncoder(w).Encode(cfResponse{Success: true, Result: json.RawMessage("[]")})
 			return
 		}
 		res := []cfZone{{ID: "zone-1", Name: "example.com"}}
 		b, _ := json.Marshal(res)
-		json.NewEncoder(w).Encode(cfResponse{Success: true, Result: b})
+		_ = json.NewEncoder(w).Encode(cfResponse{Success: true, Result: b})
 		return
 	}
 
@@ -57,7 +57,7 @@ func (m *mockCloudflare) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		m.records = append(m.records, rec)
 		b, _ := json.Marshal(rec)
-		json.NewEncoder(w).Encode(cfResponse{Success: true, Result: b})
+		_ = json.NewEncoder(w).Encode(cfResponse{Success: true, Result: b})
 		return
 	}
 
@@ -71,7 +71,7 @@ func (m *mockCloudflare) handle(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		b, _ := json.Marshal(out)
-		json.NewEncoder(w).Encode(cfResponse{Success: true, Result: b})
+		_ = json.NewEncoder(w).Encode(cfResponse{Success: true, Result: b})
 		return
 	}
 
@@ -84,7 +84,7 @@ func (m *mockCloudflare) handle(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
-		json.NewEncoder(w).Encode(cfResponse{Success: true, Result: json.RawMessage("null")})
+		_ = json.NewEncoder(w).Encode(cfResponse{Success: true, Result: json.RawMessage("null")})
 		return
 	}
 

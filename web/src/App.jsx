@@ -89,7 +89,6 @@ const viewFromPath = () => {
 export default function App() {
   const [view, setView] = useState(viewFromPath)
   const [status, setStatus] = useState(null)
-  const [authed, setAuthed] = useState(hasCredentials())
   const [showLogin, setShowLogin] = useState(!hasCredentials())
   const [navOpen, setNavOpen] = useState(false)
   const [loginNotice, setLoginNotice] = useState('')
@@ -126,8 +125,7 @@ export default function App() {
     try {
       const s = await api.status()
       setStatus(s)
-      setAuthed(true)
-    } catch (e) {
+    } catch {
       /* not authed yet */
     }
   }, [])
@@ -156,7 +154,6 @@ export default function App() {
     setCredentials(user, pass)
     // Direct call so a wrong password surfaces an error on the login form.
     await api.status()
-    setAuthed(true)
     setShowLogin(false)
     setLoginNotice('')
   }
@@ -169,7 +166,6 @@ export default function App() {
       /* cookie may already be invalid — local clear still logs out */
     }
     clearCredentials()
-    setAuthed(false)
     setShowLogin(true)
   }
 
@@ -179,7 +175,6 @@ export default function App() {
   // Sign out locally and ask the user to sign in again.
   const handleSessionInvalidated = (message) => {
     clearCredentials()
-    setAuthed(false)
     setLoginNotice(message || 'Your sign-in details changed — all sessions were signed out. Please sign in again.')
     setShowLogin(true)
   }

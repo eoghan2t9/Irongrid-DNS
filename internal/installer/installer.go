@@ -359,14 +359,14 @@ func (w *wizard) askCache() error {
 				Value(&w.a.cacheAddr).
 				Validate(func(s string) error {
 					if strings.TrimSpace(s) == "" {
-						return fmt.Errorf("Dragonfly address is required")
+						return fmt.Errorf("dragonfly address is required")
 					}
 					return nil
 				}), huh.NewInput().
 				Title("Dragonfly password").
 				Description("Leave empty if Dragonfly has no auth.").
 				Placeholder("(optional)").
-				Password(true).
+				EchoMode(huh.EchoModePassword).
 				Value(&w.a.cachePass),
 		),
 	).Run()
@@ -453,7 +453,7 @@ func (w *wizard) askWeb() error {
 				}),
 			huh.NewInput().
 				Title("Password").
-				Password(true).
+				EchoMode(huh.EchoModePassword).
 				Value(&w.a.webPass).
 				Validate(func(s string) error {
 					if len(s) < 8 {
@@ -463,7 +463,7 @@ func (w *wizard) askWeb() error {
 				}),
 			huh.NewInput().
 				Title("Confirm password").
-				Password(true).
+				EchoMode(huh.EchoModePassword).
 				Value(&w.a.webConfirm).
 				Validate(func(s string) error {
 					if s != w.a.webPass {
@@ -493,22 +493,22 @@ func (w *wizard) askTLS() error {
 func (w *wizard) askConfirm() error {
 	a := w.a
 	var summary strings.Builder
-	summary.WriteString(fmt.Sprintf("Deployment : %s\n", a.deploy))
-	summary.WriteString(fmt.Sprintf("Service    : %s\n", a.service))
-	summary.WriteString(fmt.Sprintf("Protocols  : %s\n", strings.Join(a.protos, ", ")))
-	summary.WriteString(fmt.Sprintf("Upstreams  : %s\n", strings.Join(a.upstreams(), ", ")))
+	fmt.Fprintf(&summary, "Deployment : %s\n", a.deploy)
+	fmt.Fprintf(&summary, "Service    : %s\n", a.service)
+	fmt.Fprintf(&summary, "Protocols  : %s\n", strings.Join(a.protos, ", "))
+	fmt.Fprintf(&summary, "Upstreams  : %s\n", strings.Join(a.upstreams(), ", "))
 	cacheLine := a.cacheAddr
 	if a.deploy == "native" && a.installDragonfly {
 		cacheLine += " (Dragonfly will be installed & started)"
 	}
-	summary.WriteString(fmt.Sprintf("Cache      : %s\n", cacheLine))
-	summary.WriteString(fmt.Sprintf("Blocklists : %d selected\n", len(a.blocklists)))
-	summary.WriteString(fmt.Sprintf("Whitelists : %d presets\n", len(a.whitelists)))
+	fmt.Fprintf(&summary, "Cache      : %s\n", cacheLine)
+	fmt.Fprintf(&summary, "Blocklists : %d selected\n", len(a.blocklists))
+	fmt.Fprintf(&summary, "Whitelists : %d presets\n", len(a.whitelists))
 	dashURL := "http://host:8080"
 	if a.webOnDoHPort {
 		dashURL = "https://host (shared with DoH)"
 	}
-	summary.WriteString(fmt.Sprintf("Dashboard  : %s / %s  → %s\n", a.webUser, "********", dashURL))
+	fmt.Fprintf(&summary, "Dashboard  : %s / %s  → %s\n", a.webUser, "********", dashURL)
 	return w.newForm(
 		huh.NewGroup(
 			huh.NewNote().

@@ -1,4 +1,3 @@
-import React from 'react'
 
 // rich turns the GitHub changelog's **bold** and [label](url) into nodes.
 export function rich(text) {

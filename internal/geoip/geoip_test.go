@@ -85,8 +85,8 @@ func TestManagerRefreshFromSource(t *testing.T) {
 	if err := os.MkdirAll(ruDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(ruDir, "ipv4-aggregated.txt"), []byte("93.0.0.0/8\n"), 0o644)
-	os.WriteFile(filepath.Join(ruDir, "ipv6-aggregated.txt"), []byte("2001:db8::/32\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(ruDir, "ipv4-aggregated.txt"), []byte("93.0.0.0/8\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(ruDir, "ipv6-aggregated.txt"), []byte("2001:db8::/32\n"), 0o644)
 
 	m := NewManager(dir, "file://"+src)
 	b, err := m.Refresh(context.Background(), []string{"RU"}, nil)
@@ -120,8 +120,8 @@ func TestManagerRefreshFromSource(t *testing.T) {
 func TestManagerHTTPFallbackToCache(t *testing.T) {
 	dir := t.TempDir()
 	// Seed the disk cache (as a previous successful refresh would have).
-	os.WriteFile(filepath.Join(dir, "CN.ipv4.txt"), []byte("1.0.1.0/24\n"), 0o644)
-	os.WriteFile(filepath.Join(dir, "CN.ipv6.txt"), nil, 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "CN.ipv4.txt"), []byte("1.0.1.0/24\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "CN.ipv6.txt"), nil, 0o644)
 
 	// A source that always fails must not lose the cached data.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

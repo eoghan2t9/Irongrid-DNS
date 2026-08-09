@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { renderMarkdown } from '../markdown'
 
@@ -84,7 +84,7 @@ export default function UpdateChecker({ onNavigate }) {
               window.location.reload()
               return
             }
-          } catch (e) {
+          } catch {
             // service still down — keep polling
           }
           if (Date.now() < deadline) {

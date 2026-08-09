@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"net/url"
@@ -175,7 +176,13 @@ func Parse(spec string) (*Upstream, error) {
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
 		}
-		http2.ConfigureTransport(transport)
+		// HTTP/2 on the DoH transport is best-effort: ConfigureTransport only
+		// errors when the transport already pins NextProtos (never the case
+		// here), and DoH over HTTP/1.1 works fine — so log and continue
+		// instead of failing the upstream over a non-fatal limitation.
+		if cErr := http2.ConfigureTransport(transport); cErr != nil {
+			log.Printf("[upstream] %s: HTTP/2 unavailable (%v) — using HTTP/1.1", u.Host, cErr)
+		}
 		u.client = &http.Client{Transport: transport, Timeout: 10 * time.Second}
 	}
 	return u, nil

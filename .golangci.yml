@@ -1,0 +1,42 @@
+# golangci-lint v2 configuration.
+# Docs: https://golangci-lint.run/  ·  version pinned in the Makefile and CI.
+version: "2"
+
+linters:
+  # none keeps the set explicit — enable exactly what we want below.
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - misspell
+    - gosec
+  settings:
+    staticcheck:
+      checks: ["all"]
+  exclusions:
+    # Lax: files carrying a "Code generated ... DO NOT EDIT" header are skipped.
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      # G115 (integer-overflow conversions) here is bounded by construction —
+      # cache-entry timestamps, DNS's 64 KB message limit and cgroup memory
+      # sizes never approach the flagged integer boundaries. Audited rather
+      # than patched with widening casts that add no safety.
+      - linters:
+          - gosec
+        text: "integer overflow conversion"
+      # Test helpers intentionally exercise odd patterns (fuzzing payloads,
+      # miniredis, fake servers) — don't flag them.
+      - path: (.+)_test\.go
+        linters:
+          - gosec
+
+run:
+  timeout: 5m

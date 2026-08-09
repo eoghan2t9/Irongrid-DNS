@@ -37,7 +37,7 @@ func (m *Manager) startDoH(addr, path string) error {
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			io.WriteString(w, dohLandingPage)
+			_, _ = io.WriteString(w, dohLandingPage)
 			return
 		}
 		http.NotFound(w, r)

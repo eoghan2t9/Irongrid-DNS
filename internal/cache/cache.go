@@ -459,7 +459,7 @@ func (c *Cache) Set(ctx context.Context, q dns.Question, m *dns.Msg, capTTL time
 	if m == nil || len(m.Answer) == 0 {
 		return
 	}
-	var min uint32 = ^uint32(0)
+	var min = ^uint32(0)
 	for _, rr := range m.Answer {
 		if rr.Header().Ttl < min {
 			min = rr.Header().Ttl

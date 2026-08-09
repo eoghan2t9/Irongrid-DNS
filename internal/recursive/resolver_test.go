@@ -83,7 +83,7 @@ func startFakeServer(t *testing.T, listenAddr string, z *fakeZone) (string, func
 		if rrs, ok := z.answers[name]; ok {
 			m.Authoritative = true
 			m.Answer = rrs
-			w.WriteMsg(m)
+			_ = w.WriteMsg(m)
 			return
 		}
 		for _, d := range z.allDelegates() {
@@ -97,7 +97,7 @@ func startFakeServer(t *testing.T, listenAddr string, z *fakeZone) (string, func
 				a, _ := dns.NewRR(d.ns + " 300 IN A " + host)
 				m.Extra = []dns.RR{a}
 			}
-			w.WriteMsg(m)
+			_ = w.WriteMsg(m)
 			return
 		}
 		// NXDOMAIN with an authoritative SOA, like a real authoritative
@@ -106,9 +106,9 @@ func startFakeServer(t *testing.T, listenAddr string, z *fakeZone) (string, func
 		m.Rcode = dns.RcodeNameError
 		soa, _ := dns.NewRR(z.name + " 300 IN SOA ns.invalid. admin.invalid. 1 3600 900 604800 300")
 		m.Ns = []dns.RR{soa}
-		w.WriteMsg(m)
+		_ = w.WriteMsg(m)
 	})}
-	go srv.ActivateAndServe()
+	go func() { _ = srv.ActivateAndServe() }()
 	t.Cleanup(func() { _ = srv.Shutdown() })
 	return pc.LocalAddr().String(), func() { _ = srv.Shutdown() }
 }

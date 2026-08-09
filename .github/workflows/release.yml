@@ -26,16 +26,30 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      - name: Build the dashboard (embedded into the binary)
+      - name: Lint, test and build the dashboard (embedded into the binary)
         run: |
           cd web
-          npm install --no-audit --no-fund
+          npm ci --no-audit --no-fund
+          npm run lint
+          npm test
           npm run build
 
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
           go-version: '1.26'
+          # Cache the Go module + build caches so every job doesn't compile
+          # the world from scratch.
+          cache: true
+
+      - name: Lint (golangci-lint)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+
+      - name: Scan for known vulnerabilities (govulncheck)
+        run: |
+          go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
       - name: Derive version metadata
         id: meta
@@ -65,10 +79,10 @@ jobs:
           done
           cd dist && sha256sum irongrid-* > SHA256SUMS.txt
 
-      - name: Verify tests (incl. PTY-driven installer E2E)
+      - name: Verify tests (race detector, incl. PTY-driven installer E2E)
         run: |
           go vet ./...
-          go test ./internal/installer/ -run TestRunEndToEnd -v
+          go test -race ./...
 
       - name: Smoke-test the linux binary
         run: |

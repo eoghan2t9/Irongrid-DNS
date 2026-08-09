@@ -267,6 +267,11 @@ func (m *Manager) Status() []CountryStatus {
 // ipverse keeps its per-country directories lowercase ("country/ru/"), so
 // the code is lowercased for the URL regardless of how it was configured.
 func (m *Manager) fetchCountry(ctx context.Context, cc string) ([]byte, []byte, error) {
+	// Country codes are ISO 3166-1 alpha-2; anything longer (e.g. a path
+	// separator) would be a traversal attempt on the cache dir (G703).
+	if len(cc) != 2 {
+		return nil, nil, fmt.Errorf("invalid country code %q", cc)
+	}
 	dir := strings.ToLower(cc)
 	v4, err4 := m.fetchURL(ctx, m.baseURL+"/"+dir+"/ipv4-aggregated.txt", filepath.Join(m.dir, cc+".ipv4.txt"))
 	v6, err6 := m.fetchURL(ctx, m.baseURL+"/"+dir+"/ipv6-aggregated.txt", filepath.Join(m.dir, cc+".ipv6.txt"))
@@ -322,5 +327,7 @@ func (m *Manager) persist(path string, content []byte) error {
 	if err := os.MkdirAll(m.dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, content, 0o644)
+	//nolint:gosec // G703: path is built only from validated 2-letter country
+	// codes (see fetchCountry), joined under m.dir.
+	return os.WriteFile(path, content, 0o600)
 }

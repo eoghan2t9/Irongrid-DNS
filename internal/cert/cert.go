@@ -186,7 +186,7 @@ func Generate(dir string, hosts []string, keyType string, keyBits, days int) (*I
 	}
 	certPath := filepath.Join(dir, "cert.pem")
 	keyPath := filepath.Join(dir, "key.pem")
-	if err := os.WriteFile(certPath, certPEM, 0o644); err != nil {
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
 		return nil, err
 	}
 	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {

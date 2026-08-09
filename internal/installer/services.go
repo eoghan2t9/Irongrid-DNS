@@ -199,7 +199,7 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 `, binaryPath(), configPath, dataDir, dataDir, binDir)
 	f := filepath.Join(dir, "irongrid.service")
-	if err := os.WriteFile(f, []byte(unit), 0o644); err != nil {
+	if err := os.WriteFile(f, []byte(unit), 0o600); err != nil {
 		return nil, err
 	}
 	fmt.Fprintln(w.out)
@@ -241,7 +241,7 @@ func writeLaunchd(w *wizard, dir, configPath, dataDir string) ([]string, error) 
 `, label, binaryPath(), configPath, dataDir, dataDir,
 		filepath.Join(dataDir, "irongrid.log"), filepath.Join(dataDir, "irongrid.log"))
 	f := filepath.Join(dir, label+".plist")
-	if err := os.WriteFile(f, []byte(plist), 0o644); err != nil {
+	if err := os.WriteFile(f, []byte(plist), 0o600); err != nil {
 		return nil, err
 	}
 	fmt.Fprintln(w.out)
@@ -264,7 +264,7 @@ schtasks /Create /TN IrongridDNS /TR "\"%s\" -config \"%s\" -data \"%s\"" /SC ON
 schtasks /Run /TN IrongridDNS
 `, binaryPath(), configPath, dataDir)
 	f := filepath.Join(dir, "install-irongrid-service.bat")
-	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+	if err := os.WriteFile(f, []byte(script), 0o600); err != nil {
 		return nil, err
 	}
 	fmt.Fprintln(w.out)
@@ -314,7 +314,7 @@ volumes:
   dragonfly-data:
 `, cfgName, cfgName)
 	f := filepath.Join(dir, "docker-compose.yml")
-	if err := os.WriteFile(f, []byte(compose), 0o644); err != nil {
+	if err := os.WriteFile(f, []byte(compose), 0o600); err != nil {
 		return nil, err
 	}
 	fmt.Fprintln(w.out)

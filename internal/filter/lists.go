@@ -16,7 +16,6 @@ import (
 // periodic refresh loop.
 type ListManager struct {
 	mu     sync.Mutex
-	specs  []ListSpec // user-configured lists
 	store  map[string]*StoredList
 	engine *Engine
 	dir    string
@@ -211,10 +210,16 @@ func (m *ListManager) persist(id string, content []byte) error {
 	if m.dir == "" {
 		return nil
 	}
+	// The list ID becomes a filename; reject anything that could escape the
+	// cache dir via path traversal (G703).
+	if id == "" || strings.ContainsAny(id, "/\\") || id == "." || id == ".." {
+		return fmt.Errorf("invalid list id %q", id)
+	}
 	if err := os.MkdirAll(m.dir, 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(m.dir, id+".txt"), content, 0o644)
+	//nolint:gosec // G703: id is validated above (no separators, not . or ..).
+	return os.WriteFile(filepath.Join(m.dir, id+".txt"), content, 0o600)
 }
 
 // LoadCached restores previously persisted list content on startup.

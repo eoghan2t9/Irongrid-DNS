@@ -38,7 +38,7 @@ func withAbuseIPDBMock(t *testing.T, wantKey string, status int, body string) *h
 			t.Error("comment form must not be empty")
 		}
 		w.WriteHeader(status)
-		w.Write([]byte(body))
+		_, _ = w.Write([]byte(body))
 	}))
 	t.Cleanup(srv.Close)
 	old := abuseIPDBReportURL
@@ -151,10 +151,10 @@ func TestAbuseExportCSV(t *testing.T) {
 func withRIPEstatMocks(t *testing.T) {
 	t.Helper()
 	ni := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{"asn":"AS15169","prefix":"8.8.8.0/24","name":"GOOGLE","country":"US"}}`))
+		_, _ = w.Write([]byte(`{"data":{"asn":"AS15169","prefix":"8.8.8.0/24","name":"GOOGLE","country":"US"}}`))
 	}))
 	ao := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte(`{"data":{"asn":"15169","holder":"Google LLC"}}`))
+		_, _ = w.Write([]byte(`{"data":{"asn":"15169","holder":"Google LLC"}}`))
 	}))
 	t.Cleanup(ni.Close)
 	t.Cleanup(ao.Close)

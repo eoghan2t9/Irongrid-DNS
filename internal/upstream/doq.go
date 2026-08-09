@@ -113,7 +113,9 @@ func doQStream(ctx context.Context, conn quic.Connection, m *dns.Msg) (*dns.Msg,
 		return nil, fmt.Errorf("doq read length: %w", err)
 	}
 	msgLen := binary.BigEndian.Uint16(lenBuf[:])
-	if msgLen == 0 || msgLen > 65535 {
+	// msgLen is already uint16, so it can't exceed 65535 — only the zero
+	// (empty message) case is worth rejecting (staticcheck SA4003).
+	if msgLen == 0 {
 		return nil, fmt.Errorf("doq invalid message length %d", msgLen)
 	}
 	msgBuf := make([]byte, msgLen)

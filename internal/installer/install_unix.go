@@ -13,6 +13,9 @@ import (
 // runPrivileged executes a command as root — directly when already root,
 // otherwise via sudo (non-interactive first, then prompting when stdin is a
 // terminal so `curl | bash` installs never hang on a password prompt).
+// never user input; exec runs them without a shell.
+//
+//nolint:gosec // G204: args are package-literal commands (systemctl etc.),
 func runPrivileged(args ...string) error {
 	if os.Geteuid() == 0 {
 		return exec.Command(args[0], args[1:]...).Run()

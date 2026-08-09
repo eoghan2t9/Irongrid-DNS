@@ -16,7 +16,7 @@ import (
 	"testing"
 	"time"
 
-	"golang.org/x/crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp"
 )
 
 // sampleRootHints mirrors the structure of the real named.root — all 13
@@ -205,7 +205,7 @@ func TestVerifyRootHintsFlow(t *testing.T) {
 	entity := testSigningEntity(t)
 	keyring := openpgp.EntityList{entity}
 	verify := func(sig, signed []byte) error {
-		_, err := openpgp.CheckDetachedSignature(keyring, bytes.NewReader(signed), bytes.NewReader(sig))
+		_, err := openpgp.CheckDetachedSignature(keyring, bytes.NewReader(signed), bytes.NewReader(sig), nil)
 		return err
 	}
 
@@ -272,7 +272,7 @@ func TestHintsManager(t *testing.T) {
 	cachePath := filepath.Join(dir, "root-hints.txt")
 
 	verify := func(sig, signed []byte) error {
-		_, err := openpgp.CheckDetachedSignature(keyring, bytes.NewReader(signed), bytes.NewReader(sig))
+		_, err := openpgp.CheckDetachedSignature(keyring, bytes.NewReader(signed), bytes.NewReader(sig), nil)
 		return err
 	}
 	m := &HintsManager{url: srv.URL, cachePath: cachePath, interval: time.Hour, verify: verify}

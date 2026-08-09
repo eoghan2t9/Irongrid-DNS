@@ -279,7 +279,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		m := new(dns.Msg)
 		m.Response = true
 		m.Rcode = dns.RcodeFormatError
-		w.WriteMsg(m)
+		_ = w.WriteMsg(m)
 		return
 	}
 
@@ -296,7 +296,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		refused := new(dns.Msg)
 		refused.SetReply(r)
 		refused.Rcode = dns.RcodeRefused
-		w.WriteMsg(refused)
+		_ = w.WriteMsg(refused)
 		return
 	}
 
@@ -325,7 +325,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			refused.SetReply(r)
 			refused.Rcode = dns.RcodeRefused
 			h.record(client, qname, q, action, reason, "", start, refused)
-			w.WriteMsg(refused)
+			_ = w.WriteMsg(refused)
 			return
 		}
 	}
@@ -354,6 +354,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		trusted := proto == "tcp" || proto == "dot" || proto == "doh" || proto == "doq"
 		if client != "" && (trusted || trustUDP) {
 			if err := ipbanner.Block(client); err != nil {
+				//nolint:gosec // G706: client is a socket-derived IP, no control chars
 				log.Printf("[geo] honeypot: blocking client %s: %v", client, err)
 			}
 		}
@@ -362,7 +363,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		refused := new(dns.Msg)
 		refused.SetReply(r)
 		refused.Rcode = dns.RcodeRefused
-		w.WriteMsg(refused)
+		_ = w.WriteMsg(refused)
 		return
 	}
 
@@ -374,7 +375,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			if ans := filter.BuildAnswer(r, rules, q.Name, q.Qtype); ans != nil {
 				h.Stats.Allowed.Add(1)
 				h.record(client, qname, q, "rewrite", "local-dns", "", start, ans)
-				w.WriteMsg(ans)
+				_ = w.WriteMsg(ans)
 				return
 			}
 			// The name matched but not this record type: NODATA is the
@@ -382,7 +383,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			// blocklist/cache/upstream lookup.
 			h.Stats.Allowed.Add(1)
 			h.record(client, qname, q, "rewrite", "local-dns-nodata", "", start, m)
-			w.WriteMsg(m)
+			_ = w.WriteMsg(m)
 			return
 		}
 	}
@@ -406,7 +407,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 		h.Stats.Blocked.Add(1)
 		h.record(client, qname, q, "blocked", decision.Reason, "", start, blocked)
-		w.WriteMsg(blocked)
+		_ = w.WriteMsg(blocked)
 		return
 	} // 4. Cache lookup (only for standard record types). Cached messages carry
 	//    the ID of the original query, so rebase to this request's ID.
@@ -433,7 +434,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 				reason = "cache-negative"
 			}
 			h.record(client, qname, q, "cached", reason, "", start, hit.Msg)
-			w.WriteMsg(hit.Msg)
+			_ = w.WriteMsg(hit.Msg)
 			return
 		}
 		if hit.Msg != nil {
@@ -492,7 +493,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		capTTL(stale, staleServeTTL)
 		h.Stats.Cached.Add(1)
 		h.record(client, qname, q, "cached", "stale", usedUp, start, stale)
-		w.WriteMsg(stale)
+		_ = w.WriteMsg(stale)
 		return
 	}
 	if err != nil || resp == nil {
@@ -509,7 +510,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			capTTL(stale, staleServeTTL)
 			h.Stats.Cached.Add(1)
 			h.record(client, qname, q, "cached", "stale", usedUp, start, stale)
-			w.WriteMsg(stale)
+			_ = w.WriteMsg(stale)
 			return
 		}
 		h.Stats.Errors.Add(1)
@@ -519,7 +520,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			errStr = err.Error()
 		}
 		h.record(client, qname, q, "error", errStr, usedUp, start, m)
-		w.WriteMsg(m)
+		_ = w.WriteMsg(m)
 		return
 	}
 
@@ -531,7 +532,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		h.Stats.Errors.Add(1)
 		m.Rcode = dns.RcodeServerFailure
 		h.record(client, qname, q, "error", "dnssec: upstream did not authenticate the answer", usedUp, start, m)
-		w.WriteMsg(m)
+		_ = w.WriteMsg(m)
 		return
 	}
 
@@ -541,7 +542,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 		h.Stats.Blocked.Add(1)
 		h.record(client, qname, q, "blocked", reason, usedUp, start, blocked)
-		w.WriteMsg(blocked)
+		_ = w.WriteMsg(blocked)
 		return
 	}
 
@@ -569,7 +570,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 
 	h.Stats.Allowed.Add(1)
 	h.record(client, qname, q, "allowed", "", usedUp, start, resp)
-	w.WriteMsg(resp)
+	_ = w.WriteMsg(resp)
 }
 
 func (h *Handler) record(client, qname string, q dns.Question, action, reason, upstreamName string, start time.Time, m *dns.Msg) {

@@ -49,10 +49,6 @@ type Engine struct {
 	userBlacklist []string
 	userWhitelist []string
 
-	// Default entries supplied programmatically (e.g. safe-mode essentials).
-	// Kept for future use; currently empty.
-	builtin []string
-
 	totalBlockedDomains int
 	totalIPRules        int
 }

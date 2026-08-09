@@ -16,10 +16,10 @@ import (
 
 // Endpoints are package vars so tests can point them at httptest servers.
 var (
-	abuseIPDBReportURL    = "https://api.abuseipdb.com/api/v2/report"
-	ripestatNetworkInfo   = "https://stat.ripe.net/data/network-info/data.json"
-	ripestatASOverview    = "https://stat.ripe.net/data/as-overview/data.json"
-	abuseHTTPClient       = &http.Client{Timeout: 15 * time.Second}
+	abuseIPDBReportURL  = "https://api.abuseipdb.com/api/v2/report"
+	ripestatNetworkInfo = "https://stat.ripe.net/data/network-info/data.json"
+	ripestatASOverview  = "https://stat.ripe.net/data/as-overview/data.json"
+	abuseHTTPClient     = &http.Client{Timeout: 15 * time.Second}
 	// abuseIPDBCategoryDDoS is AbuseIPDB category 4 (DDoS Attack) — the
 	// closest fit for a DNS flood against the resolver. See
 	// https://www.abuseipdb.com/categories.
@@ -166,10 +166,14 @@ func (h *Handler) abuseASN(w http.ResponseWriter, r *http.Request) {
 // optional second call does not fail the lookup.
 func lookupASN(ctx context.Context, ip string) (asnInfo, error) {
 	var info asnInfo
+	//nolint:gosec // G704 SSRF: ip was validated with net.ParseIP by the caller
+	// (abuseASN) before lookupASN is reached — it is a literal IP, not a URL.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ripestatNetworkInfo+"?resource="+url.QueryEscape(ip), nil)
 	if err != nil {
 		return info, err
 	}
+	//nolint:gosec // G704 SSRF: req targets a fixed package-level endpoint URL
+	// with an IP-only query param (validated by the caller).
 	resp, err := abuseHTTPClient.Do(req)
 	if err != nil {
 		return info, fmt.Errorf("RIPEstat network-info: %w", err)
@@ -191,6 +195,8 @@ func lookupASN(ctx context.Context, ip string) (asnInfo, error) {
 		return info, fmt.Errorf("no routing information available for %s", ip)
 	}
 
+	//nolint:gosec // G704 SSRF: the ASN string comes from RIPEstat's own
+	// network-info response, not from user input.
 	req2, err := http.NewRequestWithContext(ctx, http.MethodGet,
 		ripestatASOverview+"?resource="+url.QueryEscape(strings.TrimPrefix(info.ASN, "AS")), nil)
 	if err != nil {

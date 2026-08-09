@@ -31,7 +31,7 @@ func startUDPTestServer(t *testing.T, ip string, delay time.Duration) string {
 			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
 			A:   net.ParseIP(ip),
 		})
-		w.WriteMsg(m)
+		_ = w.WriteMsg(m)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {

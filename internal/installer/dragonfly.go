@@ -157,6 +157,7 @@ func ensureDragonflyNative(addr string, out io.Writer) error {
 		return err
 	}
 	dst := filepath.Join(binDir, "dragonfly")
+	//nolint:gosec // the installed binary must be executable (0o755)
 	if err := os.WriteFile(dst, bin, 0o755); err != nil {
 		return fmt.Errorf("install dragonfly binary: %w", err)
 	}
@@ -186,7 +187,7 @@ func ensureDragonflyNative(addr string, out io.Writer) error {
 		fmt.Fprintf(out, "  ✓ Dragonfly running at %s (log: %s)\n", addr, logPath)
 		return nil
 	}
-	return fmt.Errorf("Dragonfly started but did not answer at %s — see %s", addr, logPath)
+	return fmt.Errorf("dragonfly started but did not answer at %s — see %s", addr, logPath)
 }
 
 // extractDragonflyBinary pulls the "dragonfly-<arch>" file out of the release
@@ -225,12 +226,13 @@ func extractDragonflyBinary(r io.Reader, arch string) ([]byte, error) {
 func ensureDragonflyDocker(addr string, out io.Writer) error {
 	_, port := splitHostPort(addr)
 	if _, err := exec.LookPath("docker"); err != nil {
-		return fmt.Errorf("Docker is required on %s — install Docker Desktop, then run:\n"+
+		return fmt.Errorf("docker is required on %s — install Docker Desktop, then run:\n"+
 			"    docker run -d --name dragonfly --restart unless-stopped -p 127.0.0.1:%s:6379 %s",
 			runtime.GOOS, port, dflyImage)
 	}
 	_ = exec.Command("docker", "rm", "-f", "dragonfly").Run()
 	fmt.Fprintf(out, "  … starting Dragonfly in Docker (port %s)\n", port)
+	//nolint:gosec // fixed docker command, literal args, no shell interpolation
 	cmd := exec.Command("docker", "run", "-d", "--name", "dragonfly", "--restart", "unless-stopped",
 		"-p", "127.0.0.1:"+port+":6379", dflyImage,
 		"--cache_mode=true", "--maxmemory=512mb", "--proactor_threads=2", "--port=6379")
@@ -243,7 +245,7 @@ func ensureDragonflyDocker(addr string, out io.Writer) error {
 		fmt.Fprintf(out, "  ✓ Dragonfly running at %s (container: dragonfly)\n", addr)
 		return nil
 	}
-	return fmt.Errorf("Dragonfly container started but did not answer at %s", addr)
+	return fmt.Errorf("dragonfly container started but did not answer at %s", addr)
 }
 
 // waitForRedis polls addr until it answers PING or the deadline passes.

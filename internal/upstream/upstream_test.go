@@ -268,10 +268,10 @@ func TestRecursiveUpstreamDispatches(t *testing.T) {
 			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
 			A:   net.ParseIP("203.0.113.9"),
 		})
-		w.WriteMsg(m)
+		_ = w.WriteMsg(m)
 	})}
-	go srv.ActivateAndServe()
-	t.Cleanup(func() { srv.Shutdown() })
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
 
 	u := NewRecursive([]string{pc.LocalAddr().String()})
 	r, err := u.Query(context.Background(), aQuery())

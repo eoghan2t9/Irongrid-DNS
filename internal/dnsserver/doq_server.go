@@ -55,7 +55,7 @@ func (m *Manager) DoQAddr() string {
 }
 
 func (m *Manager) handleDoQConn(conn quic.Connection) {
-	defer conn.CloseWithError(0, "")
+	defer func() { _ = conn.CloseWithError(0, "") }()
 	for {
 		stream, err := conn.AcceptStream(context.Background())
 		if err != nil {
@@ -73,7 +73,9 @@ func (m *Manager) handleDoQStream(stream quic.Stream, remote net.Addr) {
 		return
 	}
 	msgLen := binary.BigEndian.Uint16(lenBuf[:])
-	if msgLen == 0 || msgLen > 65535 {
+	// msgLen is already uint16, so it can't exceed 65535 — only the zero
+	// (empty message) case is worth rejecting (staticcheck SA4003).
+	if msgLen == 0 {
 		return
 	}
 	msgBuf := make([]byte, msgLen)

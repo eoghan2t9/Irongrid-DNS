@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 
 const fmtTime = (iso) => {
@@ -64,7 +64,7 @@ export default function QueryLog() {
     try {
       const res = await api.log({ limit: 200, action, domain, qtype, client })
       setEntries(res.entries || [])
-    } catch (e) {
+    } catch {
       /* ignore transient */
     }
     setBusy(false)

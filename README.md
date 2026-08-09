@@ -668,10 +668,25 @@ requires Node `^20.19 || >=22.12`). The Docker build uses `node:22-alpine`
 and `golang:1.26-alpine` automatically.
 
 ```bash
-make test     # go vet + go test (includes a DoQ round-trip integration test)
+make test     # go vet + go test -race (race detector on, incl. the DoQ round-trip + PTY installer E2E)
+make lint     # golangci-lint (errcheck, govet, staticcheck, unused, misspell, gosec — see .golangci.yml)
+make vuln     # govulncheck — scan the Go dependency tree for known CVEs
 make web      # install deps and rebuild the React dashboard
 make build    # rebuild the binary with the dashboard embedded
 ```
+
+Frontend checks run separately from `web/`:
+
+```bash
+cd web
+npm run lint    # ESLint (react-hooks + react-refresh rules)
+npm test        # Vitest unit + component tests (jsdom)
+npm run build   # Vite production build (views are code-split; `REPORT=1` emits a bundle-size report)
+```
+
+The release workflow gates on all of the above: `npm ci` + lint + tests +
+build, golangci-lint, govulncheck, `go vet` and the full `go test -race`
+suite before any binaries are published.
 
 ## License
 

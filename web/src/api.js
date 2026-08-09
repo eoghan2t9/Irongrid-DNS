@@ -41,7 +41,7 @@ async function request(path, options = {}) {
   let resp
   try {
     resp = await fetch(path, { ...options, headers })
-  } catch (err) {
+  } catch {
     // A raw fetch() throw ("Failed to fetch") is a connection-level failure,
     // not an HTTP error — most often the browser's pooled HTTP/2 connection
     // going stale while the tab was backgrounded (minimised, laptop sleep,

@@ -166,6 +166,8 @@ func (a *App) issueSessionWith(w http.ResponseWriter, user, secret string, secur
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(payload))
 	val := payload + "." + hex.EncodeToString(mac.Sum(nil))
+	//nolint:gosec // G124: Secure is deliberately conditional — the dashboard
+	// also serves plain HTTP on trusted LANs and would otherwise lock users out.
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    val,
@@ -233,7 +235,10 @@ func logRequests(next http.Handler) http.Handler {
 		start := time.Now()
 		next.ServeHTTP(w, r)
 		if strings.HasPrefix(r.URL.Path, "/api/") {
-			log.Printf("[api] %s %s (%s)", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
+			// r.URL.Path is decoded, so a request to /api/%0A… would inject a
+			// newline into the log — strip control characters first (G706).
+			//nolint:gosec // G706: the path is sanitized by sanitizeLogString.
+			log.Printf("[api] %s %s (%s)", r.Method, sanitizeLogString(r.URL.Path), time.Since(start).Round(time.Millisecond))
 		}
 	})
 }
@@ -313,7 +318,9 @@ func serveFromFS(w http.ResponseWriter, r *http.Request, root fs.FS) {
 			return
 		}
 	}
-	w.Write(data)
+	//nolint:gosec // G705: content comes from the embedded frontend FS (or
+	// index.html fallback), never from attacker-controlled input.
+	_, _ = w.Write(data)
 }
 
 // writeGzip compresses data into the response; false means the attempt failed
@@ -329,7 +336,7 @@ func writeGzip(w http.ResponseWriter, data []byte) bool {
 		return false
 	}
 	w.Header().Set("Content-Encoding", "gzip")
-	w.Write(buf.Bytes())
+	_, _ = w.Write(buf.Bytes())
 	return true
 }
 
@@ -346,7 +353,7 @@ func writeBrotli(w http.ResponseWriter, data []byte) bool {
 		return false
 	}
 	w.Header().Set("Content-Encoding", "br")
-	w.Write(buf.Bytes())
+	_, _ = w.Write(buf.Bytes())
 	return true
 }
 
@@ -365,6 +372,17 @@ func isCompressible(ct string) bool {
 		return true
 	}
 	return false
+}
+
+// sanitizeLogString removes control characters so attacker-controlled values
+// (e.g. URL paths) can't forge log lines.
+func sanitizeLogString(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // writeJSON is a small helper.

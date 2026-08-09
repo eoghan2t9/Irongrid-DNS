@@ -485,7 +485,9 @@ func (h *Handler) getListContent(w http.ResponseWriter, id string) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/plain")
-	w.Write(content)
+	//nolint:gosec // G705: served as text/plain to the operator's own dashboard;
+	// blocklist content is never executed as HTML.
+	_, _ = w.Write(content)
 }
 
 // getCatalog serves the curated blocklist/whitelist presets.
@@ -1596,7 +1598,7 @@ func (h *Handler) uploadTLS(w http.ResponseWriter, r *http.Request) {
 	}
 	certPath := filepath.Join(dir, "custom-cert.pem")
 	keyPath := filepath.Join(dir, "custom-key.pem")
-	if err := os.WriteFile(certPath, []byte(p.CertPEM), 0o644); err != nil {
+	if err := os.WriteFile(certPath, []byte(p.CertPEM), 0o600); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -1678,7 +1680,7 @@ func (h *Handler) downloadCert(w http.ResponseWriter) {
 	}
 	w.Header().Set("Content-Type", "application/x-pem-file")
 	w.Header().Set("Content-Disposition", `attachment; filename="irongrid-cert.pem"`)
-	w.Write(data)
+	_, _ = w.Write(data)
 }
 
 // ---- updates ----
@@ -1884,6 +1886,7 @@ func (h *Handler) logout(w http.ResponseWriter) {
 	h.cfgMu.Lock()
 	secure := h.Cfg.Server.WebTLS
 	h.cfgMu.Unlock()
+	//nolint:gosec // G124: Secure mirrors the login cookie (plain-HTTP LAN mode).
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    "",

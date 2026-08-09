@@ -579,7 +579,8 @@ func main() {
 		// challenge tokens on this same listener instead of redirecting them.
 		redirect := httpsRedirect(httpsPort)
 		ns := &http.Server{
-			Addr: addr,
+			Addr:              addr,
+			ReadHeaderTimeout: 10 * time.Second, // gosec G112: bound slow-header clients
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if m := acmeMgr.Load(); m != nil && m.HandleChallenge(w, r) {
 					return
@@ -859,6 +860,10 @@ func httpsRedirect(httpsPort string) http.HandlerFunc {
 			target += ":" + httpsPort
 		}
 		target += r.URL.RequestURI()
+		//nolint:gosec // G710 open redirect: the target host is the Host
+		// header the client itself sent, so this can only ever redirect a
+		// client to the host it already asked for — not an attacker-chosen
+		// site.
 		http.Redirect(w, r, target, http.StatusMovedPermanently)
 	}
 }

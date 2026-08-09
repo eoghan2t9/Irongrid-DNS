@@ -72,9 +72,7 @@ func splitRule(raw string) (domain string, exactOnly bool, isException bool, ok 
 	// Strip trailing ^ used by some lists without the || prefix.
 	line = strings.TrimSuffix(line, "^")
 	// Strip "*." wildcard prefix.
-	if strings.HasPrefix(line, "*.") {
-		line = strings.TrimPrefix(line, "*.")
-	}
+	line = strings.TrimPrefix(line, "*.")
 	// Strip leading "." subtree marker.
 	line = strings.TrimPrefix(line, ".")
 

@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/crypto/openpgp"
+	"github.com/ProtonMail/go-crypto/openpgp"
 )
 
 // RootHintsURL is the authoritative root-server hints file published by
@@ -109,7 +109,7 @@ func VerifyRootHints(sig, signed []byte) error {
 	if rootHintsKeyring == nil {
 		return fmt.Errorf("embedded root hints verification key is corrupt (fingerprint %s)", RootHintsKeyFP)
 	}
-	entity, err := openpgp.CheckDetachedSignature(rootHintsKeyring, bytes.NewReader(signed), bytes.NewReader(sig))
+	entity, err := openpgp.CheckDetachedSignature(rootHintsKeyring, bytes.NewReader(signed), bytes.NewReader(sig), nil)
 	if err != nil {
 		return err
 	}
@@ -281,7 +281,7 @@ func loadRootHints(ctx context.Context, url, cachePath string, verify func(sig, 
 			if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err == nil {
 				// Only verified content is ever persisted, so the cache
 				// stays trustworthy by construction.
-				_ = os.WriteFile(cachePath, data, 0o644)
+				_ = os.WriteFile(cachePath, data, 0o600)
 			}
 		}
 		return hints, "live", true, ""

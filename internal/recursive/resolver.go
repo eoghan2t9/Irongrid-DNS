@@ -131,7 +131,9 @@ func (r *Resolver) resolve(ctx context.Context, q dns.Question, cnameDepth, nsDe
 		}
 		visited[nextZone] = true
 		r.cacheDelegation(nextZone, nextServers, ttl)
-		zone, servers = nextZone, nextServers
+		// zone is only read via the visited map above; only servers feeds the
+		// next hop (staticcheck ineffassign).
+		servers = nextServers
 	}
 	return nil, fmt.Errorf("recursive: exceeded %d referral hops resolving %s", maxHops, q.Name)
 }

@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api'
 
 const fmt = (n) => (n ?? 0).toLocaleString()
@@ -219,13 +219,25 @@ function PerformanceCard({ latency, counters, avg24 }) {
 // (some consecutive failures but still being tried) or cooling down (skipped
 // until the cooldown re-arms so queries fail fast instead of stalling).
 function UpstreamsCard({ upstreams }) {
+  const hasCooldown = (upstreams || []).some((u) => u && !u.available)
+  // Live "re-arms in Ns" countdown: the clock is read inside the interval
+  // callback (never during render, per the purity rule) and stored in state.
+  const [now, setNow] = useState(0)
+  useEffect(() => {
+    if (!hasCooldown) return
+    setNow(Date.now())
+    const t = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(t)
+  }, [hasCooldown])
   if (!upstreams || upstreams.length === 0) return null
   const state = (u) => {
     if (!u.available) return { cls: 'badge-error', label: 'cooling down' }
     if (u.fails > 0) return { cls: 'badge-warn', label: `degraded · ${u.fails} consecutive fails` }
     return { cls: 'badge-allowed', label: 'healthy' }
   }
-  const secs = (u) => (u.cooldown_until ? Math.max(0, Math.round((new Date(u.cooldown_until) - Date.now()) / 1000)) : 0)
+  // now is 0 until the effect's first tick; guard so the very first frame
+  // never computes a bogus epoch-based countdown.
+  const secs = (u) => (now && u.cooldown_until ? Math.max(0, Math.round((new Date(u.cooldown_until) - now) / 1000)) : 0)
   return (
     <div className="card">
       <div className="row-between">
@@ -259,22 +271,35 @@ function UpstreamsCard({ upstreams }) {
 // the Dragonfly process started, plus its memory/keys). This is what the
 // "Cache: online" sidebar dot doesn't tell you.
 function CacheCard({ cache }) {
-  if (!cache) return null
-  const l1 = cache.l1
-  const l2 = cache.l2
   // First-seen L2 snapshot (cumulative since Dragonfly started): the delta
   // against it is the hit-rate of traffic since THIS page loaded, which is
   // what the card should reflect — the all-time ratio is dominated by the
-  // DDoS flood's write-once queries. A ref, not state: no re-render needed.
+  // DDoS flood's write-once queries. The base is snapshotted in an effect
+  // (refs must not be touched during render) and the delta is derived there
+  // too, into state. Declared above the early return so the hooks stay
+  // unconditional.
   const baseRef = useRef(null)
-  if (l2 && !baseRef.current) baseRef.current = { hits: l2.hits, misses: l2.misses }
+  const [l2Delta, setL2Delta] = useState(null) // { hits, misses } since page load
+  const l2 = cache?.l2
+  // All hooks run unconditionally (before the early return) so the hook
+  // order is stable across renders.
+  useEffect(() => {
+    if (!l2) return
+    if (!baseRef.current) baseRef.current = { hits: l2.hits, misses: l2.misses }
+    setL2Delta({
+      hits: Math.max(0, (l2.hits || 0) - baseRef.current.hits),
+      misses: Math.max(0, (l2.misses || 0) - baseRef.current.misses),
+    })
+  }, [l2])
+  if (!cache) return null
+  const l1 = cache.l1
   const pct = (h, m) => {
     const t = (h || 0) + (m || 0)
     return t ? Math.round((100 * (h || 0)) / t) : null
   }
   const l1Rate = pct(l1?.hits, l1?.misses)
-  const dH = baseRef.current ? Math.max(0, (l2?.hits || 0) - baseRef.current.hits) : null
-  const dM = baseRef.current ? Math.max(0, (l2?.misses || 0) - baseRef.current.misses) : null
+  const dH = l2Delta ? l2Delta.hits : null
+  const dM = l2Delta ? l2Delta.misses : null
   const l2Rate = pct(dH, dM)
   const l2AllTime = pct(l2?.hits, l2?.misses)
   const memUsed = l2?.used_memory || 0

@@ -95,7 +95,7 @@ func fakeRelease(t *testing.T, body string, status int) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(status)
-		w.Write([]byte(body))
+		_, _ = w.Write([]byte(body))
 	}))
 }
 
@@ -216,9 +216,9 @@ func installTestServer(t *testing.T, bin []byte, goodSum bool) *httptest.Server 
 		    {"name":"SHA256SUMS.txt","browser_download_url":%q,"size":100}
 		  ]}`, name, srv.URL+"/binary", len(bin), srv.URL+"/sums")
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(body))
+		_, _ = w.Write([]byte(body))
 	})
-	mux.HandleFunc("/binary", func(w http.ResponseWriter, r *http.Request) { w.Write(bin) })
+	mux.HandleFunc("/binary", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(bin) })
 	mux.HandleFunc("/sums", func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintf(w, "%s  %s\n", want, name)
 	})
@@ -278,9 +278,9 @@ func releaseWithoutSums(t *testing.T, bin []byte) *httptest.Server {
 		body := fmt.Sprintf(`{"tag_name":"v9.9.9","assets":[{"name":%q,"browser_download_url":%q,"size":%d}]}`,
 			name, srv.URL+"/binary", len(bin))
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(body))
+		_, _ = w.Write([]byte(body))
 	})
-	mux.HandleFunc("/binary", func(w http.ResponseWriter, r *http.Request) { w.Write(bin) })
+	mux.HandleFunc("/binary", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(bin) })
 	srv = httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv
