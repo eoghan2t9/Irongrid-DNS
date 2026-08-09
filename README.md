@@ -1,10 +1,75 @@
+<p align="center">
+  <img src="assets/banner.svg" width="100%" alt="Irongrid DNS — fast, private, self-hosted, ad-blocking DNS server">
+</p>
+
+<p align="center">
+  <a href="https://github.com/eoghan2t9/Irongrid-DNS/releases"><img src="https://img.shields.io/github/v/release/eoghan2t9/Irongrid-DNS?style=flat-square&label=release&color=4a90e2" alt="Latest release"></a>
+  <a href="go.mod"><img src="https://img.shields.io/github/go-mod/go-version/eoghan2t9/Irongrid-DNS?style=flat-square&label=go&color=2fa84f" alt="Go version"></a>
+  <a href=".github/workflows/release.yml"><img src="https://img.shields.io/github/actions/workflow/status/eoghan2t9/Irongrid-DNS/release.yml?style=flat-square&label=release%20build&color=d99a1b" alt="Release build"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/eoghan2t9/Irongrid-DNS?style=flat-square&color=8f8f8b" alt="Apache-2.0 license"></a>
+  <img src="https://img.shields.io/badge/platform-Linux%20%E2%80%A2%20macOS%20%E2%80%A2%20Windows-626260?style=flat-square" alt="Linux, macOS, Windows">
+</p>
+
 # Irongrid DNS
 
 A fast, self-hosted, ad-blocking DNS server written in pure Go — a single
 self-contained binary with a modern web dashboard. Built to replace slow
 commercial ad-blocking DNS with sub-millisecond local responses.
 
-## Install in one line
+## Highlights
+
+| ⚡ **Sub-millisecond** | 🛡️ **Ad blocking** | 🌐 **All protocols** | 🕵️ **Private by design** |
+|---|---|---|---|
+| Dragonfly-backed response cache, typical answers served in < 1 ms | hosts, Adblock & wildcard lists with one-click allow-list overrides | DNS over **UDP · TCP · DoT · DoH · DoQ** on one server | `recursive://` resolves from the root servers itself — no third-party resolver ever sees your queries |
+
+| 📊 **Full dashboard** | 🔐 **TLS made easy** | 🧩 **One binary** | 🐳 **Runs anywhere** |
+|---|---|---|---|
+| Live stats, query log, per-client policy, geo blocking, threat intel | Self-signed or Let's Encrypt auto-issuance (HTTP-01 **and** DNS-01) | Dashboard + cloudflared + ACME compiled in — no external installs | Linux, macOS, Windows (static binary) plus Docker + Dragonfly Compose |
+
+## Screenshots
+
+| **Sign in** | **Dashboard** |
+|---|---|
+| ![Irongrid DNS sign-in page](assets/screenshots/01-login.png) | ![Irongrid DNS dashboard: live stats, top clients, blocked domains and 24-hour sparkline](assets/screenshots/02-dashboard.png) |
+
+**Query log** — every allowed, blocked and cached request with client, reason, upstream and latency.
+
+![Irongrid DNS query log](assets/screenshots/03-query-log.png)
+
+**Blocklists** — curated one-click presets with a global auto-refresh.
+
+![Irongrid DNS blocklists](assets/screenshots/04-blocklists.png)
+
+## Table of contents
+
+- [Screenshots](#screenshots)
+- [Quick start](#quick-start)
+  - [Dragonfly is included](#dragonfly-is-included)
+  - [What the one-line installer does](#what-the-one-line-installer-does)
+  - [After installing](#after-installing)
+- [Update in one line](#update-in-one-line)
+- [Features](#features)
+- [Architecture](#architecture)
+- [Installation options](#installation-options)
+  - [1. Interactive TUI wizard (recommended)](#1-interactive-tui-wizard-recommended)
+  - [2. Docker Compose (Dragonfly included)](#2-docker-compose-dragonfly-included)
+  - [3. Native (Go 1.26+)](#3-native-go-126)
+  - [Dashboard on port 443, shared with DoH](#dashboard-on-port-443-shared-with-doh)
+  - [Pre-made blocklist & allow-list presets](#pre-made-blocklist--allow-list-presets)
+  - [Wizard: auto-start Dragonfly](#wizard-auto-start-dragonfly)
+  - [Scripted / unattended installs](#scripted--unattended-installs)
+- [Built-in updater](#built-in-updater)
+- [Building releases](#building-releases)
+- [Configuration](#configuration)
+- [Recursive resolution (`recursive://`)](#recursive-resolution-recursive)
+- [Fix a broken site](#fix-a-broken-site)
+- [Cloudflare Tunnel (baked in)](#cloudflare-tunnel-baked-in)
+  - [Android Private DNS setup](#android-private-dns-setup)
+- [API](#api)
+- [Development](#development)
+- [License](#license)
+
+## Quick start
 
 **Linux / macOS** (amd64 & arm64 — downloads the latest release, verifies the
 SHA-256 checksum, installs to `/usr/local/bin`, installs + starts
@@ -22,13 +87,6 @@ followed by the interactive setup wizard):
 ```powershell
 irm https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.ps1 | iex
 ```
-
-The wizard handles the **whole install** — Dragonfly, the config, binary
-placement and the startup service — and launches automatically whenever an
-interactive terminal is detected (it re-opens `/dev/tty`, so it also works
-when piped via `curl … | bash` from a terminal). In non-interactive contexts
-(CI, Docker) — or with `--no-wizard` / `-NoWizard` — it is skipped and the
-installer's built-in Dragonfly + default-config + service steps run instead.
 
 **Docker** (compose bundle with Dragonfly included):
 
@@ -50,6 +108,11 @@ docker run -d --name irongrid --restart unless-stopped \
   -v "$PWD/irongrid.yaml:/app/irongrid.yaml:ro" \
   ghcr.io/eoghan2t9/irongrid-dns:latest
 ```
+
+> [!NOTE]
+> **DragonflyDB is a hard requirement** — the server refuses to start without
+> it. The one-line installers install and start it for you, so you don't have
+> to think about it.
 
 ### Dragonfly is included
 
@@ -87,6 +150,15 @@ curl -fsSL https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install
   --config /etc/irongrid/irongrid.yaml --data /var/lib/irongrid --no-service
 ```
 
+> [!TIP]
+> The wizard handles the **whole install** — Dragonfly, the config, binary
+> placement and the startup service — and launches automatically whenever an
+> interactive terminal is detected (it re-opens `/dev/tty`, so it also works
+> when piped via `curl … | bash` from a terminal). In non-interactive
+> contexts (CI, Docker) — or with `--no-wizard` / `-NoWizard` — it is skipped
+> and the installer's built-in Dragonfly + default-config + service steps run
+> instead.
+
 ### After installing
 
 1. **Dragonfly and the service are already running** — the dashboard is at
@@ -119,7 +191,7 @@ startup service (systemd / launchd / Windows task).
 | ⚡ **Performance** | DragonflyDB-backed response cache (hard requirement), typical answers served in < 1 ms |
 | 🌐 **All protocols** | DNS over **UDP**, **TCP**, **TLS (DoT)**, **HTTPS (DoH, RFC 8484)** and **QUIC (DoQ, RFC 9250)** |
 | 🧭 **Recursive mode** | `recursive://` upstream resolves from the root servers itself, no forwarder involved — seeded from IANA's authoritative `named.root` (PGP-verified, weekly refresh, offline fallback) |
-| 🛡️ **Blocking** | Hosts files, Adblock syntax (`\|\|domain^`, `@@` exceptions), plain domains, wildcards (`*.domain`), and IP rules |
+| 🛡️ **Blocking** | Hosts files, Adblock syntax (`\\|\\|domain^`, `@@` exceptions), plain domains, wildcards (`*.domain`), and IP rules |
 | ✅ **Allow list** | Whitelist entries override *any* blocklist, including IP addresses |
 | 🔎 **Fix a broken site** | Paste a URL; Irongrid scans the page's HTML for the domains your blocklists are blocking and whitelists them in one click |
 | 📜 **Blocklists** | Add unlimited remote/local lists, a global auto-update interval, one-click refresh, curated one-click presets |
@@ -141,16 +213,16 @@ startup service (systemd / launchd / Windows task).
 
 ```
                     ┌─────────────────────────── Irongrid DNS ───────────────────────────┐
-                    │                                                                     │
+                    │                                                                    │
   UDP:53 ─────────► │  ┌──────────┐   ┌────────────┐   ┌───────────┐   ┌───────────────┐  │
   TCP:53 ─────────► │  │  Listener │──►│  Filter    │──►│  Cache    │──►│  Upstreams    │  │
   DoT:853 ────────► │  │  (5 protos)│  │  engine    │  │  Dragonfly│  │  udp/tcp/tls/  │  │
   DoH:443 ────────► │  └──────────┘   └────────────┘  │  (Redis)   │  │  https/quic/   │  │
-  │  recursive     │  │
-  DoQ:853 ────────► │                    │  whitelist │  └──────────┘  └───────────────┘  │
-                    │                    ▼            │                │                   │
-                    │         Query log (Dragonfly)◄┴────────────────┘                   │
-                    │  Dashboard (React, embedded) ◄── REST API ◄── cloudflared (embedded) │
+  DoQ:853 ────────► │                      ▲          │            │  │  recursive     │  │
+                    │                      │ whitelist│            │  └───────────────┘  │
+                    │                      └──────────┘            │                     │
+                    │         Query log (Dragonfly) ◄────────────────┘                   │
+                    │  Dashboard (React, embedded) ◄── REST API ◄── cloudflared (embedded)│
                     └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -436,8 +508,9 @@ tunnel:
    - **Manual**: set `tls.cert_file`/`tls.key_file` to your Let's Encrypt / CA cert.
 4. On your phone: **Settings → Network & internet → Private DNS → Private DNS provider hostname** → `dns.example.com`.
 
-To verify the certificate is trusted, download it from the TLS page (`GET /api/tls/cert`) and check its
-issuer — a Let's Encrypt chain means phones will accept it without extra steps.
+> [!TIP]
+> To verify the certificate is trusted, download it from the TLS page (`GET /api/tls/cert`) and check its
+> issuer — a Let's Encrypt chain means phones will accept it without extra steps.
 
 ## API
 
