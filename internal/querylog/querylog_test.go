@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/redis/go-redis/v9"
 )
 
 func entry(domain, action string) Entry {
@@ -143,6 +144,43 @@ func TestQueryOrderAndFilters(t *testing.T) {
 	if page[0].Domain != entries[1].Domain || page[1].Domain != entries[2].Domain {
 		t.Fatalf("pagination out of order: got %s,%s want %s,%s",
 			page[0].Domain, page[1].Domain, entries[1].Domain, entries[2].Domain)
+	}
+}
+
+// TestWalkStreamStrictBound verifies walkStream's scan bound is enforced
+// inside the page: even when a single page holds more messages than the
+// bound, exactly max messages are handed to the callback — the shared helper
+// behind Query/Stats/Hourly/StatsBundle must never overshoot by a page.
+func TestWalkStreamStrictBound(t *testing.T) {
+	l, _ := newTestLog(t, 30)
+	for i := 0; i < 30; i++ {
+		l.Record(entry("a.com.", "allowed"))
+	}
+	waitFor(t, l, 30)
+
+	// Bound of 10 with a page of 1000: the single page holds all 30
+	// messages, yet the callback must see exactly 10.
+	count := 0
+	if err := l.walkStream(context.Background(), true, "+", "-", 10, 1000, func(m redis.XMessage) bool {
+		count++
+		return true
+	}); err != nil {
+		t.Fatalf("walkStream: %v", err)
+	}
+	if count != 10 {
+		t.Fatalf("walkStream handed %d messages to the callback, want 10 (strict bound)", count)
+	}
+
+	// The callback's false return also stops the walk early.
+	stopped := 0
+	if err := l.walkStream(context.Background(), true, "+", "-", 1000, 1000, func(m redis.XMessage) bool {
+		stopped++
+		return stopped < 3
+	}); err != nil {
+		t.Fatalf("walkStream early-exit: %v", err)
+	}
+	if stopped != 3 {
+		t.Fatalf("walkStream callback saw %d messages, want 3 (early exit)", stopped)
 	}
 }
 

@@ -48,6 +48,15 @@ const (
 	// the counters under-report rather than burn CPU/bandwidth on the
 	// dashboard's 10-second poll.
 	maxStatsScan = 100000
+	// queryPage is the fetch size for the interactive query-log walk: it
+	// only ever needs up to a page of entries, so a small page keeps each
+	// request's response small.
+	queryPage = 1000
+	// aggPage is the fetch size for the aggregate walks (Stats, Hourly,
+	// StatsBundle): those scan deep into the stream (up to maxStatsScan
+	// entries), so a bigger page means fewer round trips — 100k/5000 = 20
+	// worst case, vs 100 at the old 1000-entry page.
+	aggPage = 5000
 
 	// aggCacheTTL and aggCacheBucket back the Stats/Hourly/StatsBundle
 	// result cache. Each /api/stats poll used to trigger up to three full
@@ -314,6 +323,58 @@ func entryFromMessage(e *Entry, m redis.XMessage) bool {
 	return true
 }
 
+// walkStream pages through the stream from start towards stop (reverse for a
+// newest-first walk, forward otherwise), calling fn for every message in
+// range. It returns when fn returns false (the caller found what it needed),
+// the stream is exhausted, or max messages have been scanned — the bound is
+// strict, enforced inside the page so a single oversized page can't overshoot
+// by up to page entries. The boundary message shared between consecutive
+// pages is skipped (each page asks for page+1 messages so a short page proves
+// exhaustion). Every walk in this file shares this one paging shape; they
+// differ only in direction, bounds and what fn does per message. Callers on
+// a disabled log (nil client) never reach here — the public methods guard
+// first — but the guard is kept so the helper itself can't nil-deref.
+func (l *Log) walkStream(ctx context.Context, reverse bool, start, stop string, max, page int, fn func(m redis.XMessage) bool) error {
+	if l.client == nil {
+		return nil
+	}
+	first := true
+	scanned := 0
+	for scanned < max {
+		var (
+			msgs []redis.XMessage
+			err  error
+		)
+		if reverse {
+			msgs, err = l.client.XRevRangeN(ctx, streamKey, start, stop, int64(page+1)).Result()
+		} else {
+			msgs, err = l.client.XRangeN(ctx, streamKey, start, stop, int64(page+1)).Result()
+		}
+		if err != nil {
+			return err
+		}
+		begin := 0
+		if !first && len(msgs) > 0 && msgs[0].ID == start {
+			begin = 1
+		}
+		if len(msgs) <= begin {
+			return nil
+		}
+		first = false
+		for _, m := range msgs[begin:] {
+			scanned++
+			if !fn(m) || scanned >= max {
+				return nil
+			}
+		}
+		if len(msgs) <= page { // fewer than a full page: the stream is exhausted
+			return nil
+		}
+		start = msgs[len(msgs)-1].ID
+	}
+	return nil
+}
+
 // matchesFilter applies the query log filters (empty values are wildcards).
 // The SQLite store did this in SQL; streams cannot filter server-side, so
 // the same semantics are replicated here: action/qtype/client are exact
@@ -360,40 +421,23 @@ func (l *Log) Query(ctx context.Context, limit, offset int, action, domain, qtyp
 	// with the filter set, it would otherwise allocate once per entry walked.
 	domainLower := strings.ToLower(domain)
 	var matches []Entry
-	start := "+" // newest stream ID
-	first := true
-	scanned := 0
-	for len(matches) < want && scanned < maxQueryScan {
-		// Request one extra message: a page shorter than requested proves
-		// the stream is exhausted, and (when continuing) the first message
-		// is the already-consumed one, which we skip.
-		const page = 1000
-		msgs, err := l.client.XRevRangeN(ctx, streamKey, start, "-", page+1).Result()
-		if err != nil {
-			return nil, err
+	// Walk newest-first, stopping as soon as the wanted page is full — the
+	// old loop kept decoding the rest of the page it had already fetched, so
+	// a default 100-row view decoded up to 1000 entries every request.
+	if err := l.walkStream(ctx, true, "+", "-", maxQueryScan, queryPage, func(m redis.XMessage) bool {
+		var e Entry
+		if !entryFromMessage(&e, m) {
+			return true
 		}
-		begin := 0
-		if !first && len(msgs) > 0 && msgs[0].ID == start {
-			begin = 1
-		}
-		if len(msgs) <= begin {
-			break
-		}
-		first = false
-		for _, m := range msgs[begin:] {
-			scanned++
-			var e Entry
-			if !entryFromMessage(&e, m) {
-				continue
-			}
-			if matchesFilter(e, action, domainLower, qtype, client) {
-				matches = append(matches, e)
+		if matchesFilter(e, action, domainLower, qtype, client) {
+			matches = append(matches, e)
+			if len(matches) >= want {
+				return false // page full: no point scanning further
 			}
 		}
-		if len(msgs) <= page { // fewer than a full page: the stream is exhausted
-			break
-		}
-		start = msgs[len(msgs)-1].ID
+		return true
+	}); err != nil {
+		return nil, err
 	}
 	if len(matches) <= offset {
 		return []Entry{}, nil
@@ -462,45 +506,26 @@ func (l *Log) Stats(ctx context.Context, since time.Time) (map[string]any, error
 	blockedCnt := map[string]int64{}
 	clientCnt := map[string]int64{}
 	start := strconv.FormatInt(since.UnixMilli(), 10) + "-0"
-	first := true
-	scanned := 0
-	for scanned < maxStatsScan {
-		const page = 1000
-		msgs, err := l.client.XRangeN(ctx, streamKey, start, "+", page+1).Result()
-		if err != nil {
-			return nil, err
+	if err := l.walkStream(ctx, false, start, "+", maxStatsScan, aggPage, func(m redis.XMessage) bool {
+		var e Entry
+		if !entryFromMessage(&e, m) {
+			return true
 		}
-		begin := 0
-		if !first && len(msgs) > 0 && msgs[0].ID == start {
-			begin = 1
+		total++
+		rtSum += float64(e.ResponseTimeMS)
+		switch e.Action {
+		case "allowed":
+			allowed++
+		case "blocked":
+			blocked++
+			blockedCnt[e.Domain]++
+		case "cached":
+			cached++
 		}
-		if len(msgs) <= begin {
-			break
-		}
-		first = false
-		for _, m := range msgs[begin:] {
-			scanned++
-			var e Entry
-			if !entryFromMessage(&e, m) {
-				continue
-			}
-			total++
-			rtSum += float64(e.ResponseTimeMS)
-			switch e.Action {
-			case "allowed":
-				allowed++
-			case "blocked":
-				blocked++
-				blockedCnt[e.Domain]++
-			case "cached":
-				cached++
-			}
-			clientCnt[e.Client]++
-		}
-		if len(msgs) <= page {
-			break
-		}
-		start = msgs[len(msgs)-1].ID
+		clientCnt[e.Client]++
+		return true
+	}); err != nil {
+		return nil, err
 	}
 	if total > 0 {
 		stats["avg_rt_ms"] = rtSum / float64(total)
@@ -546,42 +571,22 @@ func (l *Log) Hourly(ctx context.Context, since time.Time) ([]HourBucket, error)
 	// Newest-first walk from "+" down to the since ID (inclusive), so the
 	// current hour's bar is always complete even if the scan is bounded.
 	min := strconv.FormatInt(since.UnixMilli(), 10) + "-0"
-	start := "+"
-	first := true
-	scanned := 0
-	for scanned < maxStatsScan {
-		const page = 1000
-		msgs, err := l.client.XRevRangeN(ctx, streamKey, start, min, page+1).Result()
-		if err != nil {
-			return nil, err
+	if err := l.walkStream(ctx, true, "+", min, maxStatsScan, aggPage, func(m redis.XMessage) bool {
+		var e Entry
+		if !entryFromMessage(&e, m) {
+			return true
 		}
-		begin := 0
-		if !first && len(msgs) > 0 && msgs[0].ID == start {
-			begin = 1
+		idx := int(e.Time.Truncate(time.Hour).Sub(startSlot) / time.Hour)
+		if idx < 0 || idx >= 24 {
+			return true
 		}
-		if len(msgs) <= begin {
-			break
+		total[idx]++
+		if e.Action == "blocked" {
+			blocked[idx]++
 		}
-		first = false
-		for _, m := range msgs[begin:] {
-			scanned++
-			var e Entry
-			if !entryFromMessage(&e, m) {
-				continue
-			}
-			idx := int(e.Time.Truncate(time.Hour).Sub(startSlot) / time.Hour)
-			if idx < 0 || idx >= 24 {
-				continue
-			}
-			total[idx]++
-			if e.Action == "blocked" {
-				blocked[idx]++
-			}
-		}
-		if len(msgs) <= page {
-			break
-		}
-		start = msgs[len(msgs)-1].ID
+		return true
+	}); err != nil {
+		return nil, err
 	}
 	for i := 0; i < 24; i++ {
 		out = append(out, HourBucket{
@@ -644,76 +649,47 @@ func (l *Log) StatsBundle(ctx context.Context, since, today time.Time) (*StatsBu
 	// Newest-first walk from "+" down to the 24h bound (inclusive), same
 	// shape as Hourly: a scan bound can only miss the oldest entries.
 	min := strconv.FormatInt(since.UnixMilli(), 10) + "-0"
-	start := "+"
-	first := true
-	scanned := 0
-	for scanned < maxStatsScan {
-		const page = 5000
-		msgs, err := l.client.XRevRangeN(ctx, streamKey, start, min, page+1).Result()
-		if err != nil {
-			return nil, err
+	if err := l.walkStream(ctx, true, "+", min, maxStatsScan, aggPage, func(m redis.XMessage) bool {
+		var e Entry
+		if !entryFromMessage(&e, m) {
+			return true
 		}
-		begin := 0
-		if !first && len(msgs) > 0 && msgs[0].ID == start {
-			begin = 1
+		total24++
+		rtSum24 += float64(e.ResponseTimeMS)
+		switch e.Action {
+		case "allowed":
+			allowed24++
+		case "blocked":
+			blocked24++
+			blockedCnt[e.Domain]++
+		case "cached":
+			cached24++
 		}
-		if len(msgs) <= begin {
-			break
-		}
-		first = false
-		for _, m := range msgs[begin:] {
-			scanned++
-			var e Entry
-			if !entryFromMessage(&e, m) {
-				if scanned >= maxStatsScan {
-					break
-				}
-				continue
-			}
-			// Enforce the bound strictly inside the page too (the outer loop
-			// condition alone would let one oversized page overshoot by up
-			// to page entries).
-			if scanned >= maxStatsScan {
-				break
-			}
-			total24++
-			rtSum24 += float64(e.ResponseTimeMS)
+		clientCnt[e.Client]++
+		if !e.Time.Before(today) {
+			todayTotal++
+			rtSumToday += float64(e.ResponseTimeMS)
 			switch e.Action {
 			case "allowed":
-				allowed24++
+				todayAllowed++
 			case "blocked":
-				blocked24++
-				blockedCnt[e.Domain]++
+				todayBlocked++
+				todayBlockedCnt[e.Domain]++
 			case "cached":
-				cached24++
+				todayCached++
 			}
-			clientCnt[e.Client]++
-			if !e.Time.Before(today) {
-				todayTotal++
-				rtSumToday += float64(e.ResponseTimeMS)
-				switch e.Action {
-				case "allowed":
-					todayAllowed++
-				case "blocked":
-					todayBlocked++
-					todayBlockedCnt[e.Domain]++
-				case "cached":
-					todayCached++
-				}
-				todayClientCnt[e.Client]++
-			}
-			idx := int(e.Time.Truncate(time.Hour).Sub(startSlot) / time.Hour)
-			if idx >= 0 && idx < 24 {
-				total[idx]++
-				if e.Action == "blocked" {
-					blocked[idx]++
-				}
+			todayClientCnt[e.Client]++
+		}
+		idx := int(e.Time.Truncate(time.Hour).Sub(startSlot) / time.Hour)
+		if idx >= 0 && idx < 24 {
+			total[idx]++
+			if e.Action == "blocked" {
+				blocked[idx]++
 			}
 		}
-		if len(msgs) <= page {
-			break
-		}
-		start = msgs[len(msgs)-1].ID
+		return true
+	}); err != nil {
+		return nil, err
 	}
 
 	stats := emptyStats()
