@@ -54,6 +54,9 @@ cache:
                               # known good answer instead of SERVFAIL (0 disables)
   prefetch: true              # refresh hot entries in the background just before
                               # they expire, so the next query hits the cache
+  lookup_timeout: 150ms       # max time a cache read may take on the DNS hot path
+                              # before the query proceeds to the upstream
+                              # (0 = built-in 150ms default)
 
 
 tls:

@@ -190,6 +190,11 @@ type CacheConfig struct {
 	// expire, so the next query finds a warm answer instead of paying an
 	// upstream round trip.
 	Prefetch bool `yaml:"prefetch"`
+	// LookupTimeout bounds the L2 (Dragonfly) cache read on the DNS hot
+	// path: if the cache can't answer within this budget the query proceeds
+	// straight to the upstream instead of stalling behind a slow cache tier.
+	// 0 uses the built-in default (150ms).
+	LookupTimeout time.Duration `yaml:"lookup_timeout"`
 }
 
 // TLSConfig controls certificates used by DoT, DoH and DoQ (and the web UI
@@ -306,13 +311,14 @@ func Default() *Config {
 			"udp://8.8.8.8:53",
 		},
 		Cache: CacheConfig{
-			Addr:        "localhost:6379",
-			DB:          0,
-			TTL:         6 * time.Hour,
-			NegativeTTL: 60 * time.Second,
-			L1Entries:   4096,
-			ServeStale:  5 * time.Minute,
-			Prefetch:    true,
+			Addr:          "localhost:6379",
+			DB:            0,
+			TTL:           6 * time.Hour,
+			NegativeTTL:   60 * time.Second,
+			L1Entries:     4096,
+			ServeStale:    5 * time.Minute,
+			Prefetch:      true,
+			LookupTimeout: 150 * time.Millisecond,
 		},
 		TLS: TLSConfig{
 			GenerateSelfSigned: true,
@@ -429,6 +435,9 @@ func (c *Config) validate() error {
 	}
 	if c.Cache.ServeStale < 0 {
 		return fmt.Errorf("cache.serve_stale must be >= 0 (0 disables serve-stale)")
+	}
+	if c.Cache.LookupTimeout < 0 {
+		return fmt.Errorf("cache.lookup_timeout must be >= 0 (0 uses the built-in default)")
 	}
 	if c.Log.BatchSize < 0 {
 		return fmt.Errorf("log.batch_size must be >= 0 (0 uses the default)")

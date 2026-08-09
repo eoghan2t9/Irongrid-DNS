@@ -420,3 +420,15 @@ func (u *Upstream) queryDoQ(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 
 // Fails returns the consecutive failure counter (reset on every success).
 func (u *Upstream) Fails() int64 { return u.fails.Load() }
+
+// CooldownUntil returns when an open circuit re-arms, or nil when the
+// circuit is closed (no cooldown scheduled). Exposed for the dashboard's
+// upstream-health view.
+func (u *Upstream) CooldownUntil() *time.Time {
+	ns := u.cooldownUntil.Load()
+	if ns == 0 {
+		return nil
+	}
+	t := time.Unix(0, ns)
+	return &t
+}

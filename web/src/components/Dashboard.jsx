@@ -89,6 +89,10 @@ export default function Dashboard({ onNavigate }) {
         ))}
       </div>
 
+      <PerformanceCard latency={stats.latency} counters={c} avg24={q.avg_rt_ms} />
+
+      <UpstreamsCard upstreams={stats.upstreams} />
+
       <CacheCard cache={stats.cache} />
 
       <RootHintsCard status={status} />
@@ -156,6 +160,96 @@ export default function Dashboard({ onNavigate }) {
       </div>
 
       <AcmeCard acme={tls?.acme} onNavigate={onNavigate} onRenewed={load} />
+    </div>
+  )
+}
+
+// PerformanceCard shows the response-time percentiles the recent latency
+// work targets: p50/p95/p99 estimated from an in-process histogram of every
+// query (since restart), the 24h average from the query log, and the share
+// of queries answered from cache.
+function PerformanceCard({ latency, counters, avg24 }) {
+  const total = counters?.total || 0
+  const cached = counters?.cached || 0
+  const hitRate = total ? Math.round((100 * cached) / total) : null
+  const f = (v) => (v ? `${v.toFixed(1)} ms` : '—')
+  const cells = [
+    { k: 'p50', v: latency?.p50, hint: 'median' },
+    { k: 'p95', v: latency?.p95, hint: 'slowest 5%' },
+    { k: 'p99', v: latency?.p99, hint: 'tail — watch this' },
+  ]
+  return (
+    <div className="card">
+      <div className="row-between">
+        <h3 style={{ margin: 0 }}>Performance</h3>
+        <span className="dim small">{fmt(latency?.count || 0)} queries since restart</span>
+      </div>
+      <div className="latency-row">
+        {cells.map((cell) => (
+          <div className="latency-cell" key={cell.k}>
+            <div className="latency-value">{f(cell.v)}</div>
+            <div className="latency-label">{cell.k.toUpperCase()} · <span className="dim">{cell.hint}</span></div>
+          </div>
+        ))}
+      </div>
+      <div className="kv-grid" style={{ marginTop: 8 }}>
+        <div className="kv-row">
+          <span className="kv-label">Avg latency (24h)</span>
+          <span className="kv-value">{(avg24 || 0).toFixed(2)} ms</span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Cache hit rate</span>
+          <span className="kv-value">
+            {hitRate == null ? '—' : `${hitRate}%`}
+            {' '}<span className="dim small">({fmt(cached)} of {fmt(total)} queries served from cache)</span>
+          </span>
+        </div>
+      </div>
+      <div className="card-hint">
+        Percentiles are estimated from an in-process histogram (blocked, cached and
+        upstream-served queries all count). A p99 spike usually means an upstream round
+        trip or a serve-stale fallback; prefetch and serve-stale keep repeat queries in
+        the low buckets.
+      </div>
+    </div>
+  )
+}
+
+// UpstreamsCard shows each upstream's circuit-breaker state: healthy, degraded
+// (some consecutive failures but still being tried) or cooling down (skipped
+// until the cooldown re-arms so queries fail fast instead of stalling).
+function UpstreamsCard({ upstreams }) {
+  if (!upstreams || upstreams.length === 0) return null
+  const state = (u) => {
+    if (!u.available) return { cls: 'badge-error', label: 'cooling down' }
+    if (u.fails > 0) return { cls: 'badge-warn', label: `degraded · ${u.fails} consecutive fails` }
+    return { cls: 'badge-allowed', label: 'healthy' }
+  }
+  const secs = (u) => (u.cooldown_until ? Math.max(0, Math.round((new Date(u.cooldown_until) - Date.now()) / 1000)) : 0)
+  return (
+    <div className="card">
+      <div className="row-between">
+        <h3 style={{ margin: 0 }}>Upstreams</h3>
+        <span className="dim small">circuit-breaker health</span>
+      </div>
+      <div className="top-list" style={{ marginTop: 8 }}>
+        {upstreams.map((u) => {
+          const s = state(u)
+          return (
+            <div className="top-row" key={u.name}>
+              <span className={`badge ${s.cls}`}>{s.label}</span>
+              <span className="top-domain mono" title={u.name}>{u.name}</span>
+              <span className="dim small" style={{ marginLeft: 'auto' }}>{u.transport}</span>
+              {!u.available && <span className="top-count dim small">re-arms in {secs(u)}s</span>}
+            </div>
+          )
+        })}
+      </div>
+      <div className="card-hint">
+        After 3 consecutive failures an upstream is skipped for 30s instead of
+        burning its full timeout on every query; any success resets it. While
+        cooling down, queries fail fast to the next upstream or serve-stale.
+      </div>
     </div>
   )
 }

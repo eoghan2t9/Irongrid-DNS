@@ -332,6 +332,8 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 		"protocol":     proto,
 		"filter":       h.Engine.Stats(),
 		"cache":        cacheStats,
+		"latency":      h.DNS.LatencySummary(),
+		"upstreams":    h.DNS.UpstreamHealth(),
 		"query_today":  queryToday,
 		"query_hourly": queryHourly,
 	})
@@ -739,14 +741,15 @@ type serverPayload struct {
 }
 
 type cachePayload struct {
-	Addr        string `json:"addr"`
-	Password    string `json:"password"`
-	DB          int    `json:"db"`
-	TTL         string `json:"ttl"`
-	NegativeTTL string `json:"negative_ttl"`
-	L1Entries   int    `json:"l1_entries"`
-	ServeStale  string `json:"serve_stale"`
-	Prefetch    bool   `json:"prefetch"`
+	Addr          string `json:"addr"`
+	Password      string `json:"password"`
+	DB            int    `json:"db"`
+	TTL           string `json:"ttl"`
+	NegativeTTL   string `json:"negative_ttl"`
+	L1Entries     int    `json:"l1_entries"`
+	ServeStale    string `json:"serve_stale"`
+	Prefetch      bool   `json:"prefetch"`
+	LookupTimeout string `json:"lookup_timeout"` // cache-read budget on the hot path; "" = default 150ms
 }
 
 type tlsPayload struct {
@@ -855,14 +858,15 @@ func payloadFromConfig(c *config.Config) configPayload {
 		},
 		Upstreams: c.Upstreams,
 		Cache: cachePayload{
-			Addr:        c.Cache.Addr,
-			Password:    c.Cache.Password,
-			DB:          c.Cache.DB,
-			TTL:         c.Cache.TTL.String(),
-			NegativeTTL: c.Cache.NegativeTTL.String(),
-			L1Entries:   c.Cache.L1Entries,
-			ServeStale:  durationOrEmpty(c.Cache.ServeStale),
-			Prefetch:    c.Cache.Prefetch,
+			Addr:          c.Cache.Addr,
+			Password:      c.Cache.Password,
+			DB:            c.Cache.DB,
+			TTL:           c.Cache.TTL.String(),
+			NegativeTTL:   c.Cache.NegativeTTL.String(),
+			L1Entries:     c.Cache.L1Entries,
+			ServeStale:    durationOrEmpty(c.Cache.ServeStale),
+			Prefetch:      c.Cache.Prefetch,
+			LookupTimeout: durationOrEmpty(c.Cache.LookupTimeout),
 		},
 		TLS: tlsPayload{
 			CertFile:           c.TLS.CertFile,
@@ -979,6 +983,10 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cache.serve_stale: %w", err)
 	}
+	lookupTimeout, err := parseDur(p.Cache.LookupTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("cache.lookup_timeout: %w", err)
+	}
 	blocklistAutoUpdate, err := parseDur(p.Filter.AutoUpdate)
 	if err != nil {
 		return nil, fmt.Errorf("filter.auto_update: %w", err)
@@ -1018,14 +1026,15 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 		},
 		Upstreams: p.Upstreams,
 		Cache: config.CacheConfig{
-			Addr:        p.Cache.Addr,
-			Password:    p.Cache.Password,
-			DB:          p.Cache.DB,
-			TTL:         ttl,
-			NegativeTTL: negTTL,
-			L1Entries:   p.Cache.L1Entries,
-			ServeStale:  serveStale,
-			Prefetch:    p.Cache.Prefetch,
+			Addr:          p.Cache.Addr,
+			Password:      p.Cache.Password,
+			DB:            p.Cache.DB,
+			TTL:           ttl,
+			NegativeTTL:   negTTL,
+			L1Entries:     p.Cache.L1Entries,
+			ServeStale:    serveStale,
+			Prefetch:      p.Cache.Prefetch,
+			LookupTimeout: lookupTimeout,
 		},
 		TLS: config.TLSConfig{
 			CertFile:           p.TLS.CertFile,
@@ -1176,6 +1185,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	}
 	h.DNS.SetBlockPolicy(cfg.Filter.BlockResponse, cfg.Filter.BlockTTL)
 	h.DNS.SetTimeout(time.Duration(cfg.Server.TimeoutSec) * time.Second)
+	h.DNS.SetCacheLookupTimeout(cfg.Cache.LookupTimeout)
 	h.Cfg.Filter.Whitelist = cfg.Filter.Whitelist
 	h.Cfg.Filter.Blacklist = cfg.Filter.Blacklist
 	h.applyUserLists()
