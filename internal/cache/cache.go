@@ -18,6 +18,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// defaultLookupTimeout is the budget for the L2 (Dragonfly) read on the DNS
+// hot path when the config leaves cache.lookup_timeout at 0. Dragonfly is an
+// accelerator, not the source of truth: if it can't answer within this
+// budget the query proceeds straight to the upstream instead of stalling
+// behind a slow or down cache tier.
+const defaultLookupTimeout = 150 * time.Millisecond
+
 // Cache is a two-layer response cache: a fast in-process L1 in front of the
 // Dragonfly/Redis L2. The L2 is authoritative for the fleet (and survives
 // restarts); the L1 makes local hits a pure map lookup.
@@ -27,6 +34,11 @@ type Cache struct {
 	prefix      string
 	ttl         time.Duration
 	negativeTTL time.Duration
+	// lookupTimeout bounds the L2 read on the lookup path (see
+	// defaultLookupTimeout); 0 means the default. Set via SetLookupTimeout
+	// (config live-apply, from the API goroutine) and read lock-free on the
+	// hot path — an atomic keeps that race-free.
+	lookupTimeout atomic.Int64 // nanoseconds
 
 	// prefetch, when set, is invoked in the background for hot positive
 	// entries near the end of their cache lifetime so the next query finds a
@@ -184,6 +196,20 @@ func (c *Cache) L1Counters() (hits, misses int64) {
 	return c.l1Hits.Load(), c.l1Misses.Load()
 }
 
+// SetLookupTimeout hot-swaps the L2 read budget (config live-apply); <= 0
+// restores the built-in default.
+func (c *Cache) SetLookupTimeout(d time.Duration) {
+	c.lookupTimeout.Store(int64(d))
+}
+
+// budget returns the effective L2 read budget for the lookup path.
+func (c *Cache) budget() time.Duration {
+	if d := time.Duration(c.lookupTimeout.Load()); d > 0 {
+		return d
+	}
+	return defaultLookupTimeout
+}
+
 // ---- key handling ----
 
 // keyHash is a fast, deterministic 64-bit fingerprint of a question. It must
@@ -235,25 +261,24 @@ func (c *Cache) Get(ctx context.Context, q dns.Question) *dns.Msg {
 }
 
 func (c *Cache) getPositive(ctx context.Context, h uint64) *dns.Msg {
-	key := c.msgKey(h)
 	if c.l1 == nil {
-		if raw, ok := c.l2Get(ctx, key); ok {
-			return unpackEntry(raw)
+		if raw, ok := c.l2Get(ctx, c.msgKey(h)); ok {
+			return unpackEntry(raw, time.Now())
 		}
 		return nil
 	}
 	now := time.Now()
-	if raw, _, stale, ok := c.l1.get(key, now); ok && !stale {
+	if raw, _, stale, ok := c.l1.get(h, false, now); ok && !stale {
 		c.l1Hits.Add(1)
-		return unpackEntry(raw)
+		return unpackEntry(raw, now)
 	}
 	c.l1Misses.Add(1)
-	raw, ok := c.l2Get(ctx, key)
+	raw, ok := c.l2Get(ctx, c.msgKey(h))
 	if !ok {
 		return nil
 	}
-	c.l1.set(key, raw, c.ttl, now)
-	return unpackEntry(raw)
+	c.l1.set(h, false, raw, c.ttl, now)
+	return unpackEntry(raw, now)
 }
 
 // LookupResult is the outcome of a cache lookup. Msg is nil on a miss.
@@ -296,19 +321,19 @@ func (c *Cache) EnablePrefetch(fn func(ctx context.Context, q dns.Question)) {
 }
 
 // maybePrefetch schedules a background refresh when a served positive entry is
-// within prefetchLead of its expiry. At most one refresh is in flight per key
-// (prefetching sync.Map), and the goroutine is fully best-effort — a failure
-// just leaves the now-stale entry to serve-stale or upstream on the next miss.
-func (c *Cache) maybePrefetch(q dns.Question, remaining time.Duration) {
+// within prefetchLead of its expiry. At most one refresh is in flight per
+// question hash (prefetching sync.Map), and the goroutine is fully
+// best-effort — a failure just leaves the now-stale entry to serve-stale or
+// upstream on the next miss.
+func (c *Cache) maybePrefetch(q dns.Question, h uint64, remaining time.Duration) {
 	if c.prefetch == nil || remaining <= 0 || remaining > c.prefetchLead() {
 		return
 	}
-	key := c.msgKey(keyHash(q))
-	if _, loaded := c.prefetching.LoadOrStore(key, struct{}{}); loaded {
+	if _, loaded := c.prefetching.LoadOrStore(h, struct{}{}); loaded {
 		return
 	}
 	go func() {
-		defer c.prefetching.Delete(key)
+		defer c.prefetching.Delete(h)
 		ctx, cancel := context.WithTimeout(context.Background(), prefetchTimeout)
 		defer cancel()
 		c.prefetch(ctx, q)
@@ -316,12 +341,14 @@ func (c *Cache) maybePrefetch(q dns.Question, remaining time.Duration) {
 }
 
 // Lookup checks both the positive and negative entries for q, hashing the
-// question once and reusing it for both. L1 (in-process, no network) is
-// checked for each first; only when nothing fresh is found locally does
-// this touch L2, and then it fetches both keys in a single Redis MGET
-// instead of two sequential GETs — a domain this instance has never seen
-// before (an L1 miss on both) would otherwise pay for two round trips to
-// Dragonfly before the query ever reaches upstream.
+// question once and reusing it for both. It is the DNS hot path, so L1
+// (in-process, no network) is probed without allocating anything — no key
+// string, no context. Only when nothing fresh is found locally does this
+// touch L2, and then it fetches both keys in a single Redis MGET (instead of
+// two sequential GETs) bounded by the configured lookup budget — a domain
+// this instance has never seen before (an L1 miss on both) would otherwise
+// pay for two round trips to Dragonfly before the query ever reaches
+// upstream.
 //
 // A fresh positive hit near the end of its lifetime also schedules a
 // background prefetch so the next query finds a warm entry (see
@@ -332,30 +359,33 @@ func (c *Cache) maybePrefetch(q dns.Question, remaining time.Duration) {
 // fresh L2 entry wins over the stale one. Only when neither layer has fresh
 // data is the stale entry reported (LookupResult.Stale) so the handler can
 // answer from it if re-resolution fails.
-func (c *Cache) Lookup(ctx context.Context, q dns.Question) LookupResult {
+func (c *Cache) Lookup(q dns.Question) LookupResult {
 	h := keyHash(q)
-	posKey := c.msgKey(h)
-	negKey := c.negKey(h)
 	now := time.Now()
 
 	var staleMsg *dns.Msg
 	var staleNeg bool
 
 	if c.l1 != nil {
-		if raw, remaining, stale, ok := c.l1.get(posKey, now); ok && !stale {
+		posRaw, posRemaining, posStale, posOK := c.l1.get(h, false, now)
+		if posOK && !posStale {
 			c.l1Hits.Add(1)
-			c.maybePrefetch(q, remaining)
-			return LookupResult{Msg: unpackEntry(raw)}
-		} else if raw, _, stale, ok := c.l1.get(negKey, now); ok && !stale {
-			c.l1Hits.Add(1)
-			return LookupResult{Msg: unpackNegative(raw), Negative: true}
+			c.maybePrefetch(q, h, posRemaining)
+			return LookupResult{Msg: unpackEntry(posRaw, now)}
 		}
-		// Nothing fresh: remember a stale entry (pos or neg) as the
-		// RFC 8767 fallback for when L2 and the upstream both fail.
-		if raw, _, _, ok := c.l1.get(posKey, now); ok {
-			staleMsg = unpackEntry(raw)
-		} else if raw, _, _, ok := c.l1.get(negKey, now); ok {
-			staleMsg = unpackNegative(raw)
+		negRaw, _, negStale, negOK := c.l1.get(h, true, now)
+		if negOK && !negStale {
+			c.l1Hits.Add(1)
+			return LookupResult{Msg: unpackNegative(negRaw), Negative: true}
+		}
+		// Nothing fresh: a stale pos or neg entry (already probed above — no
+		// need to re-fetch it) is the RFC 8767 fallback for when L2 and the
+		// upstream both fail.
+		switch {
+		case posOK && posStale:
+			staleMsg = unpackEntry(posRaw, now)
+		case negOK && negStale:
+			staleMsg = unpackNegative(negRaw)
 			staleNeg = true
 		}
 		c.l1Misses.Add(1)
@@ -366,7 +396,12 @@ func (c *Cache) Lookup(ctx context.Context, q dns.Question) LookupResult {
 		}
 		return LookupResult{}
 	}
-	vals, err := c.client.MGet(ctx, posKey, negKey).Result()
+	// L1 miss: one MGET to Dragonfly for both keys. The budget context is
+	// created only here — never on the hit path — so a slow or down cache
+	// tier can't stall the query beyond the budget.
+	ctx, cancel := context.WithTimeout(context.Background(), c.budget())
+	defer cancel()
+	vals, err := c.client.MGet(ctx, c.msgKey(h), c.negKey(h)).Result()
 	if err != nil {
 		if staleMsg != nil {
 			return LookupResult{Msg: staleMsg, Negative: staleNeg, Stale: true}
@@ -382,16 +417,16 @@ func (c *Cache) Lookup(ctx context.Context, q dns.Question) LookupResult {
 	}
 	if posRaw != nil {
 		if c.l1 != nil {
-			c.l1.set(posKey, posRaw, c.ttl, now)
+			c.l1.set(h, false, posRaw, c.ttl, now)
 		}
-		return LookupResult{Msg: unpackEntry(posRaw)}
+		return LookupResult{Msg: unpackEntry(posRaw, now)}
 	}
 	if negRaw != nil {
 		if c.l1 != nil {
 			// A fresh negative supersedes any stale positive in L1 so the
 			// stale one can't keep shadowing the neg key on later lookups.
-			c.l1.del(posKey)
-			c.l1.set(negKey, negRaw, c.negativeTTL, now)
+			c.l1.del(h, false)
+			c.l1.set(h, true, negRaw, c.negativeTTL, now)
 		}
 		return LookupResult{Msg: unpackNegative(negRaw), Negative: true}
 	}
@@ -430,8 +465,10 @@ func (c *Cache) l2Get(ctx context.Context, key string) ([]byte, bool) {
 
 // unpackEntry decodes a stored positive entry (8-byte store timestamp +
 // packed DNS message) and rebases answer TTLs to the remaining lifetime
-// (floor at 1 so clients don't cache a zero-TTL answer as immortal).
-func unpackEntry(raw []byte) *dns.Msg {
+// (floor at 1 so clients don't cache a zero-TTL answer as immortal). now is
+// the same clock read the caller already took for the cache probe, so a hit
+// doesn't pay for a second time.Now().
+func unpackEntry(raw []byte, now time.Time) *dns.Msg {
 	if len(raw) <= cacheEntryPrefixLen {
 		return nil
 	}
@@ -440,7 +477,7 @@ func unpackEntry(raw []byte) *dns.Msg {
 	if err := m.Unpack(raw[cacheEntryPrefixLen:]); err != nil {
 		return nil
 	}
-	elapsed := time.Now().Unix() - stored
+	elapsed := now.Unix() - stored
 	for _, rr := range m.Answer {
 		if elapsed > 0 && rr.Header().Ttl > uint32(elapsed) {
 			rr.Header().Ttl -= uint32(elapsed)
@@ -486,12 +523,12 @@ func (c *Cache) Set(ctx context.Context, q dns.Question, m *dns.Msg, capTTL time
 	now := time.Now()
 	binary.BigEndian.PutUint64(buf[:cacheEntryPrefixLen], uint64(now.Unix()))
 	copy(buf[cacheEntryPrefixLen:], packed)
-	key := c.msgKey(keyHash(q))
+	h := keyHash(q)
 	if c.l1 != nil {
-		c.l1.set(key, buf, ttl, now)
+		c.l1.set(h, false, buf, ttl, now)
 	}
 	if c.client != nil {
-		c.client.Set(ctx, key, buf, ttl)
+		c.client.Set(ctx, c.msgKey(h), buf, ttl)
 	}
 }
 
@@ -514,13 +551,13 @@ func (c *Cache) SetNegative(ctx context.Context, q dns.Question, m *dns.Msg, ttl
 	if err != nil {
 		return
 	}
-	key := c.negKey(keyHash(q))
+	h := keyHash(q)
 	now := time.Now()
 	if c.l1 != nil {
-		c.l1.set(key, raw, ttl, now)
+		c.l1.set(h, true, raw, ttl, now)
 	}
 	if c.client != nil {
-		c.client.Set(ctx, key, raw, ttl)
+		c.client.Set(ctx, c.negKey(h), raw, ttl)
 	}
 }
 
@@ -530,24 +567,23 @@ func (c *Cache) GetNegative(ctx context.Context, q dns.Question) *dns.Msg {
 }
 
 func (c *Cache) getNegative(ctx context.Context, h uint64) *dns.Msg {
-	key := c.negKey(h)
 	if c.l1 == nil {
-		if raw, ok := c.l2Get(ctx, key); ok {
+		if raw, ok := c.l2Get(ctx, c.negKey(h)); ok {
 			return unpackNegative(raw)
 		}
 		return nil
 	}
 	now := time.Now()
-	if raw, _, stale, ok := c.l1.get(key, now); ok && !stale {
+	if raw, _, stale, ok := c.l1.get(h, true, now); ok && !stale {
 		c.l1Hits.Add(1)
 		return unpackNegative(raw)
 	}
 	c.l1Misses.Add(1)
-	raw, ok := c.l2Get(ctx, key)
+	raw, ok := c.l2Get(ctx, c.negKey(h))
 	if !ok {
 		return nil
 	}
-	c.l1.set(key, raw, c.negativeTTL, now)
+	c.l1.set(h, true, raw, c.negativeTTL, now)
 	return unpackNegative(raw)
 }
 

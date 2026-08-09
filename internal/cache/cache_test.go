@@ -118,7 +118,7 @@ func TestL1Counters(t *testing.T) {
 	ctx := context.Background()
 
 	// A clean miss counts one miss.
-	if res := c.Lookup(ctx, aQuestion()); res.Msg != nil {
+	if res := c.Lookup(aQuestion()); res.Msg != nil {
 		t.Fatal("expected a miss before anything is cached")
 	}
 	if h, m := c.L1Counters(); h != 0 || m != 1 {
@@ -128,7 +128,7 @@ func TestL1Counters(t *testing.T) {
 	// A served positive lookup counts one hit (Lookup probes pos+neg keys
 	// internally, so it must still count once).
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
-	if res := c.Lookup(ctx, aQuestion()); res.Msg == nil || res.Negative || res.Stale {
+	if res := c.Lookup(aQuestion()); res.Msg == nil || res.Negative || res.Stale {
 		t.Fatal("expected a fresh positive L1 hit")
 	}
 	if h, m := c.L1Counters(); h != 1 || m != 1 {
@@ -157,11 +157,25 @@ func BenchmarkL1Get(b *testing.B) {
 	}
 }
 
+// BenchmarkLookupL1Hit measures the handler's actual cache path (Lookup): a
+// pure L1 hit — no key-string building, no context, no Redis. The remaining
+// allocations are dominated by m.Unpack decoding the stored answer into a
+// dns.Msg (the payload every hit must produce), not by the probe itself.
+func BenchmarkLookupL1Hit(b *testing.B) {
+	c := l1onlyCache(time.Hour, time.Minute)
+	q := aQuestion()
+	c.Set(context.Background(), q, aResponse("1.2.3.4", 3600), 0)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		c.Lookup(q)
+	}
+}
+
 func TestLookupL1Positive(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
 	ctx := context.Background()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
-	res := c.Lookup(ctx, aQuestion())
+	res := c.Lookup(aQuestion())
 	if res.Msg == nil {
 		t.Fatal("expected a hit")
 	}
@@ -177,7 +191,7 @@ func TestLookupL1Negative(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
 	ctx := context.Background()
 	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
-	res := c.Lookup(ctx, aQuestion())
+	res := c.Lookup(aQuestion())
 	if res.Msg == nil {
 		t.Fatal("expected a hit")
 	}
@@ -192,7 +206,7 @@ func TestLookupL1Negative(t *testing.T) {
 // reaching upstream.
 func TestLookupMissWithNilClient(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
-	res := c.Lookup(context.Background(), aQuestion())
+	res := c.Lookup(aQuestion())
 	if res.Msg != nil || res.Negative {
 		t.Fatalf("expected a clean miss, got msg=%v negative=%v", res.Msg, res.Negative)
 	}
@@ -208,7 +222,7 @@ func TestLookupStale(t *testing.T) {
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
 
 	time.Sleep(400 * time.Millisecond)
-	res := c.Lookup(ctx, aQuestion())
+	res := c.Lookup(aQuestion())
 	if res.Msg == nil {
 		t.Fatal("expected the stale entry to still be servable")
 	}
@@ -222,7 +236,7 @@ func TestLookupStale(t *testing.T) {
 	// Once the serve-stale window itself passes the entry is evicted, and
 	// the next lookup is a plain miss.
 	time.Sleep(2200 * time.Millisecond)
-	if res := c.Lookup(ctx, aQuestion()); res.Msg != nil {
+	if res := c.Lookup(aQuestion()); res.Msg != nil {
 		t.Fatal("entry should miss once the serve-stale window passes")
 	}
 }
@@ -241,7 +255,7 @@ func TestPrefetchNearExpiry(t *testing.T) {
 
 	// Fresh entry with ~5s of life left: no prefetch.
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
-	if res := c.Lookup(ctx, aQuestion()); res.Msg == nil {
+	if res := c.Lookup(aQuestion()); res.Msg == nil {
 		t.Fatal("expected a hit")
 	}
 	select {
@@ -252,7 +266,7 @@ func TestPrefetchNearExpiry(t *testing.T) {
 
 	// Wait until the entry is within the 1s prefetch lead, then trigger.
 	time.Sleep(4200 * time.Millisecond)
-	if res := c.Lookup(ctx, aQuestion()); res.Msg == nil {
+	if res := c.Lookup(aQuestion()); res.Msg == nil {
 		t.Fatal("expected a hit")
 	}
 	select {

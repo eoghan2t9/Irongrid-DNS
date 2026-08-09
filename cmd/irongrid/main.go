@@ -200,7 +200,7 @@ func main() {
 		dfly.EnablePrefetch(handler.Refresh)
 	}
 	// Cache-read budget on the hot path (cache.lookup_timeout; 0 = default).
-	handler.SetCacheLookupTimeout(cfg.Cache.LookupTimeout)
+	dfly.SetLookupTimeout(cfg.Cache.LookupTimeout)
 	handler.SetRewriter(dnsserver.BuildRewriter(cfg.Rewrites))
 	handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
 	handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
@@ -735,7 +735,7 @@ func main() {
 		handler.SetUpstreams(newUps)
 		handler.SetBlockPolicy(cfg.Filter.BlockResponse, cfg.Filter.BlockTTL)
 		handler.SetTimeout(time.Duration(cfg.Server.TimeoutSec) * time.Second)
-		handler.SetCacheLookupTimeout(cfg.Cache.LookupTimeout)
+		newCache.SetLookupTimeout(cfg.Cache.LookupTimeout)
 		handler.SetRewriter(dnsserver.BuildRewriter(cfg.Rewrites))
 		handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
 		handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))

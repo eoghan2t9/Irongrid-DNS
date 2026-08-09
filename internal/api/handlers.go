@@ -1179,7 +1179,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	}
 	h.DNS.SetBlockPolicy(cfg.Filter.BlockResponse, cfg.Filter.BlockTTL)
 	h.DNS.SetTimeout(time.Duration(cfg.Server.TimeoutSec) * time.Second)
-	h.DNS.SetCacheLookupTimeout(cfg.Cache.LookupTimeout)
+	h.Cache.SetLookupTimeout(cfg.Cache.LookupTimeout)
 	h.Cfg.Filter.Whitelist = cfg.Filter.Whitelist
 	h.Cfg.Filter.Blacklist = cfg.Filter.Blacklist
 	h.applyUserLists()

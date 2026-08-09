@@ -23,13 +23,6 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
 
-// cacheLookupTimeout is the default budget for the cache read on the DNS hot
-// path (overridable via CacheLookupTimeout / cache.lookup_timeout).
-// Dragonfly is an accelerator, not the source of truth: if it can't answer
-// within this budget the query proceeds straight to the upstream instead of
-// stalling behind a slow or down cache tier.
-const cacheLookupTimeout = 150 * time.Millisecond
-
 // Stats aggregates runtime counters exposed via the API.
 type Stats struct {
 	Total   atomic.Int64
@@ -77,10 +70,6 @@ type Handler struct {
 	TrustUDP        bool
 	DNSSECEnabled   bool
 	DNSSECRequireAD bool
-	// CacheLookupTimeout bounds the L2 (Dragonfly) cache read on the hot
-	// path; <= 0 means the built-in default (cacheLookupTimeout).
-	CacheLookupTimeout time.Duration
-
 	// latency is the in-process response-time histogram backing the
 	// dashboard's Performance card percentiles (see latencyHist).
 	latency latencyHist
@@ -157,13 +146,6 @@ func (h *Handler) SetTimeout(d time.Duration) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.Timeout = d
-}
-
-// SetCacheLookupTimeout hot-swaps the cache-read budget (config live-apply).
-func (h *Handler) SetCacheLookupTimeout(d time.Duration) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.CacheLookupTimeout = d
 }
 
 // SetRewriter hot-swaps the local DNS records (config live-apply).
@@ -272,7 +254,6 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	trustUDP := h.TrustUDP
 	dnssecEnabled := h.DNSSECEnabled
 	dnssecRequireAD := h.DNSSECRequireAD
-	cacheBudget := h.CacheLookupTimeout
 	h.mu.RUnlock()
 
 	if r == nil || len(r.Question) == 0 {
@@ -420,12 +401,11 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	// re-resolution below fails.
 	var stale *dns.Msg
 	if cache != nil && !isMetaQuery(q) {
-		if cacheBudget <= 0 {
-			cacheBudget = cacheLookupTimeout
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), cacheBudget)
-		hit := cache.Lookup(ctx, q)
-		cancel()
+		// Lookup is context-free: the L1 hit path allocates nothing, and the
+		// L2 read is bounded by the cache's own lookup budget (see
+		// cache.defaultLookupTimeout), so a slow or down cache tier can't
+		// stall the query.
+		hit := cache.Lookup(q)
 		if hit.Msg != nil && !hit.Stale {
 			hit.Msg.Id = r.Id
 			h.Stats.Cached.Add(1)
