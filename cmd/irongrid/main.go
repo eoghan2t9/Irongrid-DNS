@@ -94,7 +94,7 @@ func main() {
 	defer stop()
 
 	// ---- Dragonfly cache (hard requirement) ----
-	dfly, err := cache.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Cache.TTL, cfg.Cache.NegativeTTL, cfg.Cache.L1Entries)
+	dfly, err := cache.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Cache.TTL, cfg.Cache.NegativeTTL, cfg.Cache.ServeStale, cfg.Cache.L1Entries)
 	if err != nil {
 		log.Fatalf("cache: %v\n\nDragonfly is a hard requirement — start it (see docker-compose.yml) and retry.", err)
 	}
@@ -193,6 +193,12 @@ func main() {
 		cfg.Filter.BlockResponse, cfg.Filter.BlockTTL,
 		time.Duration(cfg.Server.TimeoutSec)*time.Second,
 	)
+	// Prefetch: the cache refreshes hot entries in the background shortly
+	// before they expire, resolving through the handler's current upstreams
+	// (which reload swaps atomically). Gated on cache.prefetch.
+	if cfg.Cache.Prefetch {
+		dfly.EnablePrefetch(handler.Refresh)
+	}
 	handler.SetRewriter(dnsserver.BuildRewriter(cfg.Rewrites))
 	handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
 	handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
@@ -661,9 +667,12 @@ func main() {
 
 		// 1. Cache: connect to the new endpoint first; keep the old one on
 		//    failure so a bad config never takes the server down.
-		newCache, err := cache.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Cache.TTL, cfg.Cache.NegativeTTL, cfg.Cache.L1Entries)
+		newCache, err := cache.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Cache.TTL, cfg.Cache.NegativeTTL, cfg.Cache.ServeStale, cfg.Cache.L1Entries)
 		if err != nil {
 			return fmt.Errorf("cache: %w", err)
+		}
+		if cfg.Cache.Prefetch {
+			newCache.EnablePrefetch(handler.Refresh)
 		}
 		// 2. TLS: reload certificates before touching the listeners.
 		newTLS, err := cert.LoadOrGenerate(cfg.TLS.CertFile, cfg.TLS.KeyFile, cfg.TLS.CertDir, cfg.TLS.SelfSignedHosts)

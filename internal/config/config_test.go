@@ -16,6 +16,12 @@ func TestPerfTunablesDefaults(t *testing.T) {
 	if c.Log.BatchSize != 256 {
 		t.Errorf("log.batch_size = %d, want default 256", c.Log.BatchSize)
 	}
+	if c.Cache.ServeStale != 5*time.Minute {
+		t.Errorf("cache.serve_stale = %v, want default 5m", c.Cache.ServeStale)
+	}
+	if !c.Cache.Prefetch {
+		t.Error("cache.prefetch should default to true")
+	}
 }
 
 // TestPerfTunablesValidation verifies negative values are rejected.
@@ -24,6 +30,11 @@ func TestPerfTunablesValidation(t *testing.T) {
 	c.Cache.L1Entries = -1
 	if err := c.Validate(); err == nil {
 		t.Error("negative cache.l1_entries accepted")
+	}
+	c = validBase()
+	c.Cache.ServeStale = -time.Minute
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "serve_stale") {
+		t.Errorf("err = %v, want negative cache.serve_stale rejected", err)
 	}
 	c = validBase()
 	c.Log.BatchSize = -1

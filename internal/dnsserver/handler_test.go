@@ -564,7 +564,7 @@ func TestRaceUpstreamsAllFail(t *testing.T) {
 // `go test -race` covers that property).
 func TestHandlerCacheWriteDoesNotBlockResponse(t *testing.T) {
 	addr := startUDPTestServer(t, "1.1.1.1", 0)
-	c := cache.NewLocalOnly(time.Hour, time.Minute, 512)
+	c := cache.NewLocalOnly(time.Hour, time.Minute, 512, 0)
 	h := NewHandler(filter.NewEngine(), c, []*upstream.Upstream{
 		{Transport: upstream.UDP, Addr: addr},
 	}, nil, "nxdomain", 600, 5*time.Second)
@@ -587,4 +587,135 @@ func TestHandlerCacheWriteDoesNotBlockResponse(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("cached entry never appeared after the response was written")
+}
+
+// TestHandlerServeStale verifies RFC 8767 serve-stale end to end: an answer
+// cached from a healthy upstream is still served — from the expired entry —
+// once the upstream dies, instead of SERVFAIL. The stale answer is fast (the
+// dead upstream's timeout is not waited out) and its TTLs are capped low so
+// clients don't cache the stale data.
+func TestHandlerServeStale(t *testing.T) {
+	addr := startUDPTestServer(t, "1.1.1.1", 0)
+	c := cache.NewLocalOnly(300*time.Millisecond, time.Minute, 512, 5*time.Second)
+	h := NewHandler(filter.NewEngine(), c, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: addr},
+	}, nil, "nxdomain", 600, 5*time.Second)
+
+	q := func() *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("example.com.", dns.TypeA)
+		return m
+	}
+	// Populate the cache from a healthy upstream.
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, q())
+	if fw.msg == nil || len(fw.msg.Answer) == 0 {
+		t.Fatalf("expected a fresh answer, got %v", fw.msg)
+	}
+
+	// Let the entry expire into its serve-stale window, then kill the
+	// upstream so re-resolution fails and the handler must answer from the
+	// expired entry.
+	time.Sleep(400 * time.Millisecond)
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	deadAddr := pc.LocalAddr().String()
+	pc.Close()
+	h.SetUpstreams([]*upstream.Upstream{{Transport: upstream.UDP, Addr: deadAddr}})
+
+	start := time.Now()
+	fw2 := &fakeWriter{}
+	h.ServeDNS(fw2, q())
+	if fw2.msg == nil || len(fw2.msg.Answer) == 0 {
+		t.Fatalf("expected a stale answer, got %v", fw2.msg)
+	}
+	if a, ok := fw2.msg.Answer[0].(*dns.A); !ok || !a.A.Equal(net.ParseIP("1.1.1.1")) {
+		t.Fatalf("stale answer = %v, want 1.1.1.1", fw2.msg.Answer[0])
+	}
+	if ttl := fw2.msg.Answer[0].Header().Ttl; ttl > staleServeTTL {
+		t.Fatalf("stale answer TTL = %d, want <= %d so clients don't cache it", ttl, staleServeTTL)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("stale answer took %s — the dead upstream's timeout was waited out", elapsed)
+	}
+}
+
+// TestHandlerSingleUpstreamCooldownFastFail verifies the circuit breaker end
+// to end: a single upstream that has failed 3 times in a row is skipped
+// immediately (fail fast into SERVFAIL) instead of letting every query wait
+// out the full timeout against a dead server.
+func TestHandlerSingleUpstreamCooldownFastFail(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	deadAddr := pc.LocalAddr().String()
+	pc.Close()
+
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: deadAddr},
+	}, nil, "nxdomain", 600, 5*time.Second)
+	q := func() *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("example.com.", dns.TypeA)
+		return m
+	}
+	// Trip the circuit: connection-refused on loopback fails fast.
+	for i := 0; i < 3; i++ {
+		fw := &fakeWriter{}
+		h.ServeDNS(fw, q())
+		if fw.msg == nil || fw.msg.Rcode != dns.RcodeServerFailure {
+			t.Fatalf("failure %d: expected SERVFAIL, got %v", i+1, fw.msg)
+		}
+	}
+	// Circuit open: the next query must fail immediately via the cooldown
+	// skip rather than attempting (and timing out against) the upstream.
+	start := time.Now()
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, q())
+	if fw.msg == nil || fw.msg.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("cooldown query: expected SERVFAIL, got %v", fw.msg)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("cooldown query took %s — expected an immediate fail-fast", elapsed)
+	}
+}
+
+// TestCapTTL verifies the serve-stale TTL cap applies across every section
+// (Answer, Ns, Extra) while leaving the OPT pseudo-record untouched — its
+// TTL field carries extended-rcode/DO flags, not a lifetime.
+func TestCapTTL(t *testing.T) {
+	m := new(dns.Msg)
+	m.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: "a.example.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600}, A: net.ParseIP("1.2.3.4")}}
+	m.Ns = []dns.RR{&dns.SOA{Hdr: dns.RR_Header{Name: "example.", Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 3600}}}
+	m.Extra = []dns.RR{
+		&dns.TXT{Hdr: dns.RR_Header{Name: "b.example.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 7200}, Txt: []string{"x"}},
+	}
+	opt := new(dns.OPT)
+	opt.Hdr.Name = "."
+	opt.Hdr.Rrtype = dns.TypeOPT
+	opt.Hdr.Class = 4096
+	opt.SetDo(true)
+	opt.Hdr.Ttl = 0x00008000 // extended rcode + version + DO flag bits
+	m.Extra = append(m.Extra, opt)
+
+	capTTL(m, 30)
+
+	if got := m.Answer[0].Header().Ttl; got != 30 {
+		t.Errorf("answer TTL = %d, want 30", got)
+	}
+	if got := m.Ns[0].Header().Ttl; got != 30 {
+		t.Errorf("Ns (SOA) TTL = %d, want 30 so clients don't cache stale negatives long", got)
+	}
+	if got := m.Extra[0].Header().Ttl; got != 30 {
+		t.Errorf("Extra TTL = %d, want 30", got)
+	}
+	if !opt.Do() {
+		t.Error("OPT DO flag was corrupted by capTTL")
+	}
+	if got := opt.Hdr.Ttl; got != 0x00008000 {
+		t.Errorf("OPT TTL/flags = %#x, want untouched 0x00008000", got)
+	}
 }

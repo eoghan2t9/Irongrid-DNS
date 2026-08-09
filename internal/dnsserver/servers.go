@@ -5,11 +5,24 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
+)
+
+const (
+	// udpSocketBuffer is the SO_RCVBUF/SO_SNDBUF size for the DNS UDP
+	// listener. Under bursts the kernel's default buffer drops datagrams
+	// and the client pays a retransmit round trip — the biggest avoidable
+	// latency cost on a busy LAN.
+	udpSocketBuffer = 2 << 20 // 2 MiB
+	// udpMaxPacketSize is the largest datagram the reader accepts (large
+	// EDNS0 queries), vs miekg/dns's 512-byte default which silently
+	// truncates anything bigger.
+	udpMaxPacketSize = 4096
 )
 
 // protoHandler tags every query with the listener's protocol so stats stay
@@ -88,6 +101,32 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 	if tcp {
 		// Tag TCP queries with the right protocol for stats.
 		handler = protoHandler{m.handler, "tcp"}
+	}
+	if !tcp {
+		// UDP: create the socket ourselves so the kernel receive/send
+		// buffers can be raised (miekg/dns dials its own listener with the
+		// OS defaults otherwise). ActivateAndServe is used because
+		// ListenAndServe would replace the injected PacketConn with its
+		// own socket.
+		pc, err := net.ListenPacket("udp", addr)
+		if err != nil {
+			m.results <- Listener{Proto: proto, Addr: addr, Err: err}
+			return
+		}
+		if uc, ok := pc.(*net.UDPConn); ok {
+			_ = uc.SetReadBuffer(udpSocketBuffer)
+			_ = uc.SetWriteBuffer(udpSocketBuffer)
+		}
+		srv := &dns.Server{Net: "udp", PacketConn: pc, UDPSize: udpMaxPacketSize, Handler: handler}
+		m.servers = append(m.servers, srv)
+		go func() {
+			log.Printf("[dns] %s listener on %s", proto, addr)
+			if err := srv.ActivateAndServe(); err != nil {
+				log.Printf("[dns] %s listener on %s stopped: %v", proto, addr, err)
+				m.results <- Listener{Proto: proto, Addr: addr, Err: err}
+			}
+		}()
+		return
 	}
 	srv := &dns.Server{Addr: addr, Net: netw, Handler: handler}
 	m.servers = append(m.servers, srv)

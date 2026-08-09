@@ -348,3 +348,40 @@ func TestUpstreamCloseDrainsPoolAndQUICConn(t *testing.T) {
 		t.Fatal("quicConn still set after Close")
 	}
 }
+
+// TestCircuitBreaker verifies the consecutive-failure circuit: three failures
+// open it (Available false), a success closes it, and an open circuit re-arms
+// once the cooldown elapses so the next query probes the upstream again.
+func TestCircuitBreaker(t *testing.T) {
+	u := &Upstream{Transport: UDP, Addr: "127.0.0.1:1"}
+	for i := 0; i < circuitOpenFails; i++ {
+		u.markResult(context.DeadlineExceeded)
+	}
+	if u.Available() {
+		t.Fatal("expected the circuit to be open after circuitOpenFails consecutive failures")
+	}
+	if u.Fails() != circuitOpenFails {
+		t.Fatalf("Fails() = %d, want %d", u.Fails(), circuitOpenFails)
+	}
+
+	u.markResult(nil)
+	if !u.Available() {
+		t.Fatal("expected a success to close the circuit")
+	}
+	if u.Fails() != 0 {
+		t.Fatalf("Fails() = %d after success, want 0", u.Fails())
+	}
+
+	// Reopen, then let the cooldown elapse: the circuit re-arms and the
+	// upstream becomes tryable again.
+	for i := 0; i < circuitOpenFails; i++ {
+		u.markResult(context.DeadlineExceeded)
+	}
+	if u.Available() {
+		t.Fatal("expected the circuit to be open again")
+	}
+	u.cooldownUntil.Store(time.Now().Add(-time.Second).UnixNano())
+	if !u.Available() {
+		t.Fatal("expected the circuit to re-arm once the cooldown elapsed")
+	}
+}

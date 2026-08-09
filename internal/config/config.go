@@ -180,6 +180,16 @@ type CacheConfig struct {
 	// L1Entries is the per-shard entry capacity of the in-process L1 cache
 	// layered in front of Dragonfly. 0 disables the L1 entirely.
 	L1Entries int `yaml:"l1_entries"`
+	// ServeStale (RFC 8767) keeps an L1 entry answerable for this long past
+	// its expiry, so a query whose upstream resolution fails (outage,
+	// timeout, all upstreams in cooldown) is answered from the last known
+	// good data instead of SERVFAIL. The stale answer's TTLs are floored at
+	// 1 so no client caches it. 0 disables serve-stale.
+	ServeStale time.Duration `yaml:"serve_stale"`
+	// Prefetch refreshes hot entries in the background shortly before they
+	// expire, so the next query finds a warm answer instead of paying an
+	// upstream round trip.
+	Prefetch bool `yaml:"prefetch"`
 }
 
 // TLSConfig controls certificates used by DoT, DoH and DoQ (and the web UI
@@ -301,6 +311,8 @@ func Default() *Config {
 			TTL:         6 * time.Hour,
 			NegativeTTL: 60 * time.Second,
 			L1Entries:   4096,
+			ServeStale:  5 * time.Minute,
+			Prefetch:    true,
 		},
 		TLS: TLSConfig{
 			GenerateSelfSigned: true,
@@ -414,6 +426,9 @@ func (c *Config) validate() error {
 	}
 	if c.Cache.L1Entries < 0 {
 		return fmt.Errorf("cache.l1_entries must be >= 0 (0 disables the in-memory cache)")
+	}
+	if c.Cache.ServeStale < 0 {
+		return fmt.Errorf("cache.serve_stale must be >= 0 (0 disables serve-stale)")
 	}
 	if c.Log.BatchSize < 0 {
 		return fmt.Errorf("log.batch_size must be >= 0 (0 uses the default)")

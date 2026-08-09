@@ -12,7 +12,7 @@ import (
 // l1onlyCache builds a Cache with only the in-memory L1 layer (nil Redis
 // client), so the fast path is fully exercised offline.
 func l1onlyCache(ttl, negTTL time.Duration) *Cache {
-	return &Cache{client: nil, l1: newL1(512), prefix: "irongrid:dns:", ttl: ttl, negativeTTL: negTTL}
+	return &Cache{client: nil, l1: newL1(512, 0), prefix: "irongrid:dns:", ttl: ttl, negativeTTL: negTTL}
 }
 
 func aQuestion() dns.Question {
@@ -118,7 +118,7 @@ func TestL1Counters(t *testing.T) {
 	ctx := context.Background()
 
 	// A clean miss counts one miss.
-	if msg, _ := c.Lookup(ctx, aQuestion()); msg != nil {
+	if res := c.Lookup(ctx, aQuestion()); res.Msg != nil {
 		t.Fatal("expected a miss before anything is cached")
 	}
 	if h, m := c.L1Counters(); h != 0 || m != 1 {
@@ -128,8 +128,8 @@ func TestL1Counters(t *testing.T) {
 	// A served positive lookup counts one hit (Lookup probes pos+neg keys
 	// internally, so it must still count once).
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
-	if msg, negative := c.Lookup(ctx, aQuestion()); msg == nil || negative {
-		t.Fatal("expected a positive L1 hit")
+	if res := c.Lookup(ctx, aQuestion()); res.Msg == nil || res.Negative || res.Stale {
+		t.Fatal("expected a fresh positive L1 hit")
 	}
 	if h, m := c.L1Counters(); h != 1 || m != 1 {
 		t.Fatalf("after hit: hits=%d misses=%d, want 1/1", h, m)
@@ -161,12 +161,15 @@ func TestLookupL1Positive(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
 	ctx := context.Background()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
-	msg, negative := c.Lookup(ctx, aQuestion())
-	if msg == nil {
+	res := c.Lookup(ctx, aQuestion())
+	if res.Msg == nil {
 		t.Fatal("expected a hit")
 	}
-	if negative {
+	if res.Negative {
 		t.Fatal("expected a positive hit, got negative")
+	}
+	if res.Stale {
+		t.Fatal("expected a fresh hit, got stale")
 	}
 }
 
@@ -174,11 +177,11 @@ func TestLookupL1Negative(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
 	ctx := context.Background()
 	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
-	msg, negative := c.Lookup(ctx, aQuestion())
-	if msg == nil {
+	res := c.Lookup(ctx, aQuestion())
+	if res.Msg == nil {
 		t.Fatal("expected a hit")
 	}
-	if !negative {
+	if !res.Negative {
 		t.Fatal("expected a negative hit")
 	}
 }
@@ -189,9 +192,76 @@ func TestLookupL1Negative(t *testing.T) {
 // reaching upstream.
 func TestLookupMissWithNilClient(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
-	msg, negative := c.Lookup(context.Background(), aQuestion())
-	if msg != nil || negative {
-		t.Fatalf("expected a clean miss, got msg=%v negative=%v", msg, negative)
+	res := c.Lookup(context.Background(), aQuestion())
+	if res.Msg != nil || res.Negative {
+		t.Fatalf("expected a clean miss, got msg=%v negative=%v", res.Msg, res.Negative)
+	}
+}
+
+// TestLookupStale verifies an entry past its cache TTL but inside the
+// serve-stale window is reported with Stale=true (still decodable), and is
+// reported as a plain miss once the stale window itself passes.
+func TestLookupStale(t *testing.T) {
+	c := l1onlyCache(300*time.Millisecond, time.Minute)
+	c.l1.staleTTL = 2 * time.Second
+	ctx := context.Background()
+	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
+
+	time.Sleep(400 * time.Millisecond)
+	res := c.Lookup(ctx, aQuestion())
+	if res.Msg == nil {
+		t.Fatal("expected the stale entry to still be servable")
+	}
+	if !res.Stale {
+		t.Fatal("expected Stale=true inside the serve-stale window")
+	}
+	if res.Negative {
+		t.Fatal("stale entry should still be reported as positive")
+	}
+
+	// Once the serve-stale window itself passes the entry is evicted, and
+	// the next lookup is a plain miss.
+	time.Sleep(2200 * time.Millisecond)
+	if res := c.Lookup(ctx, aQuestion()); res.Msg != nil {
+		t.Fatal("entry should miss once the serve-stale window passes")
+	}
+}
+
+// TestPrefetchNearExpiry verifies a background refresh is scheduled when a
+// positive entry is served close to its cache-lifetime end, and that a fresh
+// entry with plenty of life left does not trigger one.
+func TestPrefetchNearExpiry(t *testing.T) {
+	c := l1onlyCache(5*time.Second, time.Minute) // lead = 1s
+	ctx := context.Background()
+
+	prefetched := make(chan dns.Question, 1)
+	c.EnablePrefetch(func(cctx context.Context, q dns.Question) {
+		prefetched <- q
+	})
+
+	// Fresh entry with ~5s of life left: no prefetch.
+	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
+	if res := c.Lookup(ctx, aQuestion()); res.Msg == nil {
+		t.Fatal("expected a hit")
+	}
+	select {
+	case q := <-prefetched:
+		t.Fatalf("prefetch fired too early for %s", q.Name)
+	default:
+	}
+
+	// Wait until the entry is within the 1s prefetch lead, then trigger.
+	time.Sleep(4200 * time.Millisecond)
+	if res := c.Lookup(ctx, aQuestion()); res.Msg == nil {
+		t.Fatal("expected a hit")
+	}
+	select {
+	case q := <-prefetched:
+		if q.Name != aQuestion().Name {
+			t.Fatalf("prefetched %s, want %s", q.Name, aQuestion().Name)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a prefetch once the entry neared expiry")
 	}
 }
 

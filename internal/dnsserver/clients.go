@@ -30,19 +30,34 @@ type clientEntry struct {
 	policy *ClientPolicy
 }
 
+// maxPolicyCache bounds the per-IP resolution cache. When full it resets —
+// the table is cheap to rebuild and a reset only costs a few lookups.
+const maxPolicyCache = 4096
+
 // ClientRouter resolves a client IP to the first matching group's policy —
 // groups are evaluated in the order SetPolicies received them. Safe for
 // concurrent use; SetPolicies fully replaces the routing table so config
 // reloads are atomic from a reader's perspective.
+//
+// Resolve is on the DNS hot path (every query), so results are cached per
+// client IP: the first query from a client does the ParseIP + CIDR scan,
+// subsequent ones are a map lookup. SetPolicies clears the cache since the
+// routing table changed.
 type ClientRouter struct {
 	mu      sync.RWMutex
 	entries []clientEntry
+	// cache maps client IP string -> resolved policy. A nil value is a
+	// cached "no group matches" so repeat lookups for unmatched clients
+	// skip the scan too.
+	cache map[string]*ClientPolicy
 }
 
 // NewClientRouter returns a router with no groups (Resolve always misses).
-func NewClientRouter() *ClientRouter { return &ClientRouter{} }
+func NewClientRouter() *ClientRouter {
+	return &ClientRouter{cache: map[string]*ClientPolicy{}}
+}
 
-// SetPolicies replaces the routing table.
+// SetPolicies replaces the routing table and clears the per-IP cache.
 func (cr *ClientRouter) SetPolicies(groups []GroupCIDRs) {
 	entries := make([]clientEntry, 0, len(groups))
 	for _, g := range groups {
@@ -71,6 +86,7 @@ func (cr *ClientRouter) SetPolicies(groups []GroupCIDRs) {
 	}
 	cr.mu.Lock()
 	cr.entries = entries
+	cr.cache = map[string]*ClientPolicy{}
 	cr.mu.Unlock()
 }
 
@@ -82,13 +98,32 @@ func (cr *ClientRouter) Resolve(client string) *ClientPolicy {
 		return nil
 	}
 	cr.mu.RLock()
-	defer cr.mu.RUnlock()
+	if p, ok := cr.cache[client]; ok {
+		cr.mu.RUnlock()
+		return p
+	}
+	cr.mu.RUnlock()
+
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	if p, ok := cr.cache[client]; ok { // double-checked: another goroutine filled it
+		return p
+	}
+	var p *ClientPolicy
 	for _, e := range cr.entries {
 		for _, n := range e.nets {
 			if n.Contains(ip) {
-				return e.policy
+				p = e.policy
+				break
 			}
 		}
+		if p != nil {
+			break
+		}
 	}
-	return nil
+	if len(cr.cache) >= maxPolicyCache {
+		cr.cache = map[string]*ClientPolicy{}
+	}
+	cr.cache[client] = p
+	return p
 }

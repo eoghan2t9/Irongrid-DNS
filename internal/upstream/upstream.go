@@ -29,6 +29,16 @@ import (
 // same as before pooling existed.
 const upstreamPoolSize = 8
 
+// Circuit breaker: after circuitOpenFails consecutive failures an upstream
+// is skipped for circuitCooldown instead of letting every query burn its
+// full timeout against a dead or unreachable server. The first query after
+// the cooldown elapses probes it again; any success closes the circuit and
+// resets the failure count.
+const (
+	circuitOpenFails = 3
+	circuitCooldown  = 30 * time.Second
+)
+
 // Transport identifies the wire protocol used to reach an upstream.
 type Transport string
 
@@ -49,7 +59,19 @@ type Upstream struct {
 	URL       *url.URL
 	client    *http.Client // for DoH (its own internal connection pool)
 	tlsConf   *tls.Config  // for DoT/DoH/DoQ
-	fails     atomic.Int64
+
+	// fails is the consecutive-failure count driving the circuit breaker;
+	// cooldownUntil (unix nanos, 0 = closed) is when an open circuit re-arms.
+	fails         atomic.Int64
+	cooldownUntil atomic.Int64
+
+	// Reusable transport clients. dns.Client is safe for concurrent use
+	// (each Exchange dials its own connection), so one per transport avoids
+	// allocating a fresh client on every query. nil for transports that
+	// don't use them (Recursive, and HTTPS which has its own http.Client).
+	udpClient *dns.Client
+	tcpClient *dns.Client
+	dotClient *dns.Client
 
 	// connPool holds warm TCP/DoT connections (nil for other transports).
 	// TCP and — worse — DoT pay for a full connection setup (a TLS
@@ -130,6 +152,14 @@ func Parse(spec string) (*Upstream, error) {
 	case TCP, TLS:
 		u.connPool = make(chan *dns.Conn, upstreamPoolSize)
 	}
+	switch u.Transport {
+	case UDP:
+		u.udpClient = &dns.Client{Net: "udp", Timeout: 8 * time.Second}
+	case TCP:
+		u.tcpClient = &dns.Client{Net: "tcp", Timeout: 8 * time.Second}
+	case TLS:
+		u.dotClient = &dns.Client{Net: "tcp-tls", TLSConfig: u.tlsConf, Timeout: 8 * time.Second}
+	}
 	if u.Transport == HTTPS {
 		path := parsed.Path
 		if path == "" {
@@ -156,8 +186,12 @@ func Parse(spec string) (*Upstream, error) {
 func NewWithTLS(transport Transport, addr, host string, tlsConf *tls.Config) *Upstream {
 	u := &Upstream{Transport: transport, Addr: addr, Host: host, tlsConf: tlsConf}
 	switch u.Transport {
-	case TCP, TLS:
+	case TCP:
 		u.connPool = make(chan *dns.Conn, upstreamPoolSize)
+		u.tcpClient = &dns.Client{Net: "tcp", Timeout: 8 * time.Second}
+	case TLS:
+		u.connPool = make(chan *dns.Conn, upstreamPoolSize)
+		u.dotClient = &dns.Client{Net: "tcp-tls", TLSConfig: tlsConf, Timeout: 8 * time.Second}
 	case HTTPS:
 		u.client = &http.Client{Timeout: 10 * time.Second}
 	}
@@ -213,33 +247,45 @@ func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns
 	if !tcp {
 		// UDP is connectionless — there's no handshake to amortize, so
 		// pooling buys nothing (a fresh "dial" is just a local socket()).
-		c := &dns.Client{Net: "udp", Timeout: 8 * time.Second}
-		r, _, err := c.ExchangeContext(ctx, m, u.Addr)
-		if err != nil {
-			u.fails.Add(1)
+		c := u.udpClient
+		if c == nil {
+			c = &dns.Client{Net: "udp", Timeout: 8 * time.Second}
 		}
+		r, _, err := c.ExchangeContext(ctx, m, u.Addr)
+		u.markResult(err)
 		return r, err
 	}
-	c := &dns.Client{Net: "tcp", Timeout: 8 * time.Second}
+	c := u.tcpClient
+	if c == nil {
+		c = &dns.Client{Net: "tcp", Timeout: 8 * time.Second}
+	}
 	return u.pooledExchange(ctx, m, c)
 }
 
 func (u *Upstream) queryDoT(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
-	c := &dns.Client{Net: "tcp-tls", TLSConfig: u.tlsConf, Timeout: 8 * time.Second}
+	c := u.dotClient
+	if c == nil {
+		c = &dns.Client{Net: "tcp-tls", TLSConfig: u.tlsConf, Timeout: 8 * time.Second}
+	}
 	return u.pooledExchange(ctx, m, c)
 }
 
 // pooledExchange runs m over client, reusing a warm connection from the
 // upstream's pool when one is available and dialing fresh otherwise. For
-// DoT in particular this avoids a full TLS handshake per query.
+// DoT in particular this avoids a full TLS handshake per query. Success and
+// failure are fed to the circuit breaker (markResult) so a warm-connection
+// hiccup that ultimately recovers on a fresh dial still counts as one
+// failure, and a fully recovered upstream resets its counter.
 func (u *Upstream) pooledExchange(ctx context.Context, m *dns.Msg, client *dns.Client) (*dns.Msg, error) {
 	if conn := u.getConn(); conn != nil {
 		r, _, err := client.ExchangeWithConnContext(ctx, m, conn)
 		if err == nil {
+			u.markResult(nil)
 			u.putConn(conn)
 			return r, nil
 		}
 		conn.Close()
+		u.markResult(err)
 		// The pooled connection may have gone stale while idle (the
 		// upstream closed it, a NAT dropped it, a restart on their end) —
 		// fall through to a fresh dial rather than failing the query over
@@ -247,17 +293,43 @@ func (u *Upstream) pooledExchange(ctx context.Context, m *dns.Msg, client *dns.C
 	}
 	conn, err := client.DialContext(ctx, u.Addr)
 	if err != nil {
-		u.fails.Add(1)
+		u.markResult(err)
 		return nil, err
 	}
 	r, _, err := client.ExchangeWithConnContext(ctx, m, conn)
 	if err != nil {
-		u.fails.Add(1)
+		u.markResult(err)
 		conn.Close()
 		return nil, err
 	}
+	u.markResult(nil)
 	u.putConn(conn)
 	return r, nil
+}
+
+// markResult feeds the circuit breaker: a success closes the circuit and
+// resets the consecutive-failure count; a failure increments it and, once it
+// crosses circuitOpenFails, opens the circuit until circuitCooldown elapses.
+func (u *Upstream) markResult(err error) {
+	if err == nil {
+		u.fails.Store(0)
+		u.cooldownUntil.Store(0)
+		return
+	}
+	if u.fails.Add(1) >= circuitOpenFails {
+		u.cooldownUntil.Store(time.Now().Add(circuitCooldown).UnixNano())
+	}
+}
+
+// Available reports whether the upstream should be tried for a query: it is
+// unavailable only while its circuit is open (circuitOpenFails+ consecutive
+// failures inside the cooldown window). The first query after the cooldown
+// elapses probes it again; a success closes the circuit.
+func (u *Upstream) Available() bool {
+	if u.fails.Load() < circuitOpenFails {
+		return true
+	}
+	return time.Now().UnixNano() >= u.cooldownUntil.Load()
 }
 
 // getConn pops a warm connection from the pool, or returns nil if none are
@@ -319,7 +391,7 @@ func (u *Upstream) queryDoH(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	req.Header.Set("Accept", "application/dns-message")
 	resp, err := u.client.Do(req)
 	if err != nil {
-		u.fails.Add(1)
+		u.markResult(err)
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -328,12 +400,15 @@ func (u *Upstream) queryDoH(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
 	if err != nil {
+		u.markResult(err)
 		return nil, err
 	}
 	r := new(dns.Msg)
 	if err := r.Unpack(body); err != nil {
+		u.markResult(err)
 		return nil, err
 	}
+	u.markResult(nil)
 	return r, nil
 }
 
@@ -343,5 +418,5 @@ func (u *Upstream) queryDoQ(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	return queryDoQClient(ctx, u, m)
 }
 
-// Fails returns the consecutive failure counter.
+// Fails returns the consecutive failure counter (reset on every success).
 func (u *Upstream) Fails() int64 { return u.fails.Load() }

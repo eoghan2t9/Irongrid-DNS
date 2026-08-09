@@ -20,11 +20,12 @@ import (
 func queryDoQClient(ctx context.Context, u *Upstream, m *dns.Msg) (*dns.Msg, error) {
 	conn, err := u.getQUICConn(ctx)
 	if err != nil {
-		u.fails.Add(1)
+		u.markResult(err)
 		return nil, fmt.Errorf("doq dial: %w", err)
 	}
 	r, err := doQStream(ctx, conn, m)
 	if err == nil {
+		u.markResult(nil)
 		return r, nil
 	}
 	// The connection may have died between queries (idle timeout, network
@@ -33,15 +34,16 @@ func queryDoQClient(ctx context.Context, u *Upstream, m *dns.Msg) (*dns.Msg, err
 	u.dropQUICConn(conn)
 	conn, err = u.getQUICConn(ctx)
 	if err != nil {
-		u.fails.Add(1)
+		u.markResult(err)
 		return nil, fmt.Errorf("doq redial: %w", err)
 	}
 	r, err = doQStream(ctx, conn, m)
 	if err != nil {
-		u.fails.Add(1)
+		u.markResult(err)
 		u.dropQUICConn(conn)
 		return nil, err
 	}
+	u.markResult(nil)
 	return r, nil
 }
 

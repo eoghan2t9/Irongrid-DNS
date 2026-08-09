@@ -8,7 +8,7 @@ const empty = () => ({
     doh_path: '/dns-query', web_listen: '', web_tls: false, web_redirect: false, web_redirect_port: 80, timeout_sec: 5,
   },
   upstreams: [],
-  cache: { addr: '', password: '', db: 0, ttl: '6h', negative_ttl: '1m', l1_entries: 4096 },
+  cache: { addr: '', password: '', db: 0, ttl: '6h', negative_ttl: '1m', l1_entries: 4096, serve_stale: '5m', prefetch: true },
   tls: { cert_file: '', key_file: '', generate_self_signed: true, self_signed_hosts: [], cert_dir: '', acme: { enabled: false, email: '', domains: [], staging: false, http01_port: 80, renew_before_days: 30, dns01: { provider: '', propagation_wait_sec: 60, cloudflare_token: '', digitalocean_token: '', hetzner_token: '', godaddy_key: '', godaddy_secret: '', aws_access_key_id: '', aws_secret_access_key: '' } } },
   filter: { block_response: 'nxdomain', block_ttl: 600, blocklists: [], whitelist: [], blacklist: [], auto_update: '24h' },
   log: { query_log_file: '', retention_days: 30, verbose: true },
@@ -537,6 +537,8 @@ export default function Settings({ onSessionInvalidated }) {
           {text('Positive TTL', 'cache.ttl', 'e.g. 6h, 30m, 1h30m')}
           {text('Negative TTL', 'cache.negative_ttl', 'e.g. 1m')}
           {number('L1 entries (per shard)', 'cache.l1_entries', 'in-process cache depth in front of Dragonfly; 0 disables it')}
+          {text('Serve stale', 'cache.serve_stale', 'keep entries answerable this long past expiry (RFC 8767) — used when the upstream is unreachable; 0 disables', '5m')}
+          {toggle('Prefetch hot entries', 'cache.prefetch')}
         </div>
       </div>
 

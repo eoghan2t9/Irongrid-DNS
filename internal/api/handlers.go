@@ -58,18 +58,18 @@ type Handler struct {
 		NeedsRenewal() bool
 	}
 
-	Engine    *filter.Engine
-	Lists     *filter.ListManager
-	Cache     *cache.Cache
-	Log       *querylog.Log
+	Engine *filter.Engine
+	Lists  *filter.ListManager
+	Cache  *cache.Cache
+	Log    *querylog.Log
 
 	// hostOnce/hosts and asnOnce/asns back the cached reverse-DNS and
 	// BGP/ISP-owner lookups for the query-log and blocked-clients views
 	// (see hostname.go and asn.go).
-	hostOnce sync.Once
-	hosts    *hostCache
-	asnOnce  sync.Once
-	asns     *asnCache
+	hostOnce  sync.Once
+	hosts     *hostCache
+	asnOnce   sync.Once
+	asns      *asnCache
 	DNS       *dnsserver.Handler
 	Tunnel    *tunnel.Manager
 	Upstreams []*upstream.Upstream
@@ -329,10 +329,10 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 			"errors":   h.DNS.Stats.Errors.Load(),
 			"honeypot": h.DNS.Stats.Honeypot.Load(),
 		},
-		"protocol":    proto,
-		"filter":      h.Engine.Stats(),
-		"cache":       cacheStats,
-		"query_today": queryToday,
+		"protocol":     proto,
+		"filter":       h.Engine.Stats(),
+		"cache":        cacheStats,
+		"query_today":  queryToday,
 		"query_hourly": queryHourly,
 	})
 }
@@ -745,6 +745,8 @@ type cachePayload struct {
 	TTL         string `json:"ttl"`
 	NegativeTTL string `json:"negative_ttl"`
 	L1Entries   int    `json:"l1_entries"`
+	ServeStale  string `json:"serve_stale"`
+	Prefetch    bool   `json:"prefetch"`
 }
 
 type tlsPayload struct {
@@ -859,6 +861,8 @@ func payloadFromConfig(c *config.Config) configPayload {
 			TTL:         c.Cache.TTL.String(),
 			NegativeTTL: c.Cache.NegativeTTL.String(),
 			L1Entries:   c.Cache.L1Entries,
+			ServeStale:  durationOrEmpty(c.Cache.ServeStale),
+			Prefetch:    c.Cache.Prefetch,
 		},
 		TLS: tlsPayload{
 			CertFile:           c.TLS.CertFile,
@@ -971,6 +975,10 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("cache.negative_ttl: %w", err)
 	}
+	serveStale, err := parseDur(p.Cache.ServeStale)
+	if err != nil {
+		return nil, fmt.Errorf("cache.serve_stale: %w", err)
+	}
 	blocklistAutoUpdate, err := parseDur(p.Filter.AutoUpdate)
 	if err != nil {
 		return nil, fmt.Errorf("filter.auto_update: %w", err)
@@ -1016,6 +1024,8 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			TTL:         ttl,
 			NegativeTTL: negTTL,
 			L1Entries:   p.Cache.L1Entries,
+			ServeStale:  serveStale,
+			Prefetch:    p.Cache.Prefetch,
 		},
 		TLS: config.TLSConfig{
 			CertFile:           p.TLS.CertFile,

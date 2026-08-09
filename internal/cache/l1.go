@@ -14,10 +14,16 @@ import (
 const l1Shards = 256
 
 // l1Entry stores the packed response (with the 8-byte store-timestamp prefix
-// for positive entries) plus its expiry so reads can rebase TTLs.
+// for positive entries) plus its expiry so reads can rebase TTLs. staleUntil
+// extends the entry's life beyond expiry so RFC 8767-style serve-stale can
+// answer from it during an upstream outage; the stale window only ever keeps
+// data that was previously cached locally — Dragonfly expires its copies at
+// the same TTL, so an expired L1 entry is never stale-able again after this
+// window passes and the next cold miss just resolves upstream.
 type l1Entry struct {
-	raw     []byte
-	expires time.Time
+	raw        []byte
+	expires    time.Time
+	staleUntil time.Time // expires + staleTTL; serves stale before this
 }
 
 type l1Shard struct {
@@ -26,13 +32,15 @@ type l1Shard struct {
 }
 
 type l1Cache struct {
-	shards [l1Shards]*l1Shard
-	cap    int // per-shard entry cap (0 = unlimited)
+	shards   [l1Shards]*l1Shard
+	cap      int           // per-shard entry cap (0 = unlimited)
+	staleTTL time.Duration // how long past expiry entries remain stale-servable
 }
 
-// newL1 creates the sharded cache with a per-shard entry capacity.
-func newL1(capPerShard int) *l1Cache {
-	c := &l1Cache{cap: capPerShard}
+// newL1 creates the sharded cache with a per-shard entry capacity and the
+// serve-stale window applied to every stored entry (0 disables serve-stale).
+func newL1(capPerShard int, staleTTL time.Duration) *l1Cache {
+	c := &l1Cache{cap: capPerShard, staleTTL: staleTTL}
 	for i := range c.shards {
 		c.shards[i] = &l1Shard{m: make(map[string]l1Entry, 16)}
 	}
@@ -49,21 +57,29 @@ func (c *l1Cache) shard(key string) *l1Shard {
 	return c.shards[h&(l1Shards-1)]
 }
 
-// get returns the stored raw bytes for key, or ok=false on miss/expiry.
-// Expired entries are evicted lazily on read.
-func (c *l1Cache) get(key string, now time.Time) ([]byte, bool) {
+// get returns the stored raw bytes for key. The three outcomes are:
+//   - ok=true, stale=false: a fresh hit, remaining is the time left on the
+//     cache lifetime (used for prefetch decisions);
+//   - ok=true, stale=true: the entry has expired but is still within its
+//     serve-stale window (remaining is 0) — the caller may serve it if
+//     re-resolution fails;
+//   - ok=false: a miss; entries past their stale window are evicted lazily.
+func (c *l1Cache) get(key string, now time.Time) (raw []byte, remaining time.Duration, stale bool, ok bool) {
 	s := c.shard(key)
 	s.mu.RLock()
 	e, ok := s.m[key]
 	s.mu.RUnlock()
 	if !ok {
-		return nil, false
+		return nil, 0, false, false
 	}
-	if !now.Before(e.expires) {
-		c.del(key)
-		return nil, false
+	if now.Before(e.expires) {
+		return e.raw, e.expires.Sub(now), false, true
 	}
-	return e.raw, true
+	if now.Before(e.staleUntil) {
+		return e.raw, 0, true, true
+	}
+	c.del(key)
+	return nil, 0, false, false
 }
 
 // set stores raw under key with a TTL. When a shard is at capacity the
@@ -82,7 +98,7 @@ func (c *l1Cache) set(key string, raw []byte, ttl time.Duration, now time.Time) 
 			break
 		}
 	}
-	s.m[key] = l1Entry{raw: raw, expires: now.Add(ttl)}
+	s.m[key] = l1Entry{raw: raw, expires: now.Add(ttl), staleUntil: now.Add(ttl + c.staleTTL)}
 }
 
 func (c *l1Cache) del(key string) {

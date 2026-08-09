@@ -26,7 +26,7 @@ func TestGetStatsShape(t *testing.T) {
 		Log:    ql,
 		DNS:    dnsserver.NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, 5),
 		Engine: filter.NewEngine(),
-		Cache:  cache.NewLocalOnly(time.Hour, time.Minute, 512),
+		Cache:  cache.NewLocalOnly(time.Hour, time.Minute, 512, 0),
 	}
 	rr := httptest.NewRecorder()
 	h.getStats(context.Background(), rr)

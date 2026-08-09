@@ -22,13 +22,19 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
 
+// cacheLookupTimeout bounds the cache read on the DNS hot path. Dragonfly is
+// an accelerator, not the source of truth: if it can't answer within this
+// budget the query proceeds straight to the upstream instead of stalling
+// behind a slow or down cache tier.
+const cacheLookupTimeout = 150 * time.Millisecond
+
 // Stats aggregates runtime counters exposed via the API.
 type Stats struct {
-	Total      atomic.Int64
-	Blocked    atomic.Int64
-	Allowed    atomic.Int64
-	Cached     atomic.Int64
-	Errors     atomic.Int64
+	Total   atomic.Int64
+	Blocked atomic.Int64
+	Allowed atomic.Int64
+	Cached  atomic.Int64
+	Errors  atomic.Int64
 	// Honeypot counts refused trap-domain hits (attack traffic). It is not
 	// part of the query log — honeypot hits are never logged — so this is
 	// the only place an active flood remains observable.
@@ -51,16 +57,16 @@ type Handler struct {
 
 	// mu guards the hot-swappable settings below so the API can live-apply
 	// config changes without a restart.
-	mu              sync.RWMutex
-	Upstreams       []*upstream.Upstream
-	BlockResponse   string
-	BlockTTL        uint32
-	Timeout         time.Duration
-	Rewriter        *filter.Rewriter // local DNS records; never nil, may be empty
-	ClientRouter    *ClientRouter    // per-client policy; never nil, may be empty
-	RateLimiter     *RateLimiter     // nil disables rate limiting
-	Geo             *geoip.Blocker   // nil disables geo-blocking
-	IPBanner        *geoip.Banner    // nil disables IP/honeypot blocking
+	mu            sync.RWMutex
+	Upstreams     []*upstream.Upstream
+	BlockResponse string
+	BlockTTL      uint32
+	Timeout       time.Duration
+	Rewriter      *filter.Rewriter // local DNS records; never nil, may be empty
+	ClientRouter  *ClientRouter    // per-client policy; never nil, may be empty
+	RateLimiter   *RateLimiter     // nil disables rate limiting
+	Geo           *geoip.Blocker   // nil disables geo-blocking
+	IPBanner      *geoip.Banner    // nil disables IP/honeypot blocking
 	// TrustUDP opt-in: when true, a honeypot hit over plain UDP auto-blocks
 	// its source address too. Off by default — a UDP source can be spoofed,
 	// so enabling this lets a spoofing attacker permanently block an
@@ -385,59 +391,107 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		h.record(client, qname, q, "blocked", decision.Reason, "", start, blocked)
 		w.WriteMsg(blocked)
 		return
-	}
-
-	// 4. Cache lookup (only for standard record types). Cached messages carry
+	} // 4. Cache lookup (only for standard record types). Cached messages carry
 	//    the ID of the original query, so rebase to this request's ID.
 	// Lookup hashes the question once and checks positive then negative
 	// entries, instead of two independent Get/GetNegative calls that each
-	// re-derived the same key.
+	// re-derived the same key. The budget is deliberately short: if
+	// Dragonfly is slow or down, the query must reach the upstream rather
+	// than stall. A hit may also be stale (RFC 8767): an entry past its TTL
+	// but still within its serve-stale window, which we only answer from if
+	// re-resolution below fails.
+	var stale *dns.Msg
 	if cache != nil && !isMetaQuery(q) {
-		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-		cached, negative := cache.Lookup(ctx, q)
+		ctx, cancel := context.WithTimeout(context.Background(), cacheLookupTimeout)
+		hit := cache.Lookup(ctx, q)
 		cancel()
-		if cached != nil {
-			cached.Id = r.Id
+		if hit.Msg != nil && !hit.Stale {
+			hit.Msg.Id = r.Id
 			h.Stats.Cached.Add(1)
 			reason := "cache"
-			if negative {
+			if hit.Negative {
 				reason = "cache-negative"
 			}
-			h.record(client, qname, q, "cached", reason, "", start, cached)
-			w.WriteMsg(cached)
+			h.record(client, qname, q, "cached", reason, "", start, hit.Msg)
+			w.WriteMsg(hit.Msg)
 			return
+		}
+		if hit.Msg != nil {
+			stale = hit.Msg
 		}
 	}
 
 	// 5. Forward to upstreams. Multiple upstreams are raced concurrently so
-	//    the fastest healthy one answers; a single upstream is queried
-	//    directly to avoid goroutine overhead. When DNSSEC is enabled the
-	//    outgoing query carries the DO (DNSSEC OK) bit, asking a validating
-	//    upstream to do the work — see DNSSECConfig's doc comment for why
-	//    this resolver trusts the upstream rather than validating locally.
+	// the fastest healthy one answers; a single upstream is queried
+	// directly to avoid goroutine overhead. The outgoing query always
+	// advertises EDNS0 (4096 bytes; the DO bit only when DNSSEC is
+	// enabled) — without it the upstream caps its UDP answer at 512 bytes
+	// and large records fall back to a TCP round trip. The query is copied
+	// so the client's message is never mutated. Upstreams whose circuit is
+	// open (consecutive failures inside the cooldown window) are skipped so
+	// a dead server can't burn its full timeout on every query; a single
+	// upstream in cooldown fails fast into serve-stale/SERVFAIL below.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	upstreamQuery := r
-	if dnssecEnabled {
-		upstreamQuery = r.Copy()
-		upstreamQuery.SetEdns0(4096, true)
-	}
+	upstreamQuery := r.Copy()
+	upstreamQuery.SetEdns0(4096, dnssecEnabled)
 	var (
 		resp   *dns.Msg
 		usedUp string
 		err    error
 	)
 	if len(upstreams) == 1 {
-		resp, err = upstreams[0].Query(ctx, upstreamQuery)
-		if err == nil && resp != nil {
+		if upstreams[0].Available() {
+			resp, err = upstreams[0].Query(ctx, upstreamQuery)
+			if err == nil && resp != nil {
+				usedUp = upstreams[0].Name()
+			} else if err != nil {
+				log.Printf("[dns] upstream %s failed: %v", upstreams[0].Name(), err)
+			}
+		} else {
 			usedUp = upstreams[0].Name()
-		} else if err != nil {
-			log.Printf("[dns] upstream %s failed: %v", upstreams[0].Name(), err)
+			err = fmt.Errorf("upstream %s in failure cooldown", upstreams[0].Name())
 		}
 	} else {
-		resp, usedUp, err = raceUpstreams(ctx, upstreams, upstreamQuery)
+		avail := make([]*upstream.Upstream, 0, len(upstreams))
+		for _, u := range upstreams {
+			if u.Available() {
+				avail = append(avail, u)
+			}
+		}
+		if len(avail) == 0 {
+			err = fmt.Errorf("all upstreams in failure cooldown")
+		} else {
+			resp, usedUp, err = raceUpstreams(ctx, avail, upstreamQuery)
+		}
+	}
+	// RFC 8767: an upstream that *answers* SERVFAIL is also a resolution
+	// failure — serve stale rather than propagating the failure.
+	if err == nil && resp != nil && resp.Rcode == dns.RcodeServerFailure && stale != nil {
+		stale.Id = r.Id
+		capTTL(stale, staleServeTTL)
+		h.Stats.Cached.Add(1)
+		h.record(client, qname, q, "cached", "stale", usedUp, start, stale)
+		w.WriteMsg(stale)
+		return
 	}
 	if err != nil || resp == nil {
+		// Serve-stale: re-resolution failed but a previously cached answer
+		// is still within its stale window. Answering from it beats
+		// SERVFAIL; its TTLs are capped so no client caches the stale data
+		// long (RFC 8767 recommends a short TTL on stale answers). Note
+		// that this bypasses the DNSSEC requireAD check below — a stale
+		// answer was validated when first cached if requireAD was on then;
+		// serving it during an outage is the deliberate availability
+		// trade-off of serve-stale.
+		if stale != nil {
+			stale.Id = r.Id
+			capTTL(stale, staleServeTTL)
+			h.Stats.Cached.Add(1)
+			h.record(client, qname, q, "cached", "stale", usedUp, start, stale)
+			w.WriteMsg(stale)
+			return
+		}
 		h.Stats.Errors.Add(1)
 		m.Rcode = dns.RcodeServerFailure
 		errStr := "no upstream available"
@@ -576,6 +630,73 @@ func raceUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*
 		lastErr = fmt.Errorf("no upstream returned a response")
 	}
 	return nil, "", lastErr
+}
+
+// Refresh re-resolves q via the current upstreams and re-caches the result.
+// It is the cache's prefetch callback: invoked in the background for hot
+// entries near the end of their lifetime so the next query finds a fresh
+// answer instead of paying an upstream round trip. Best-effort — failures
+// are dropped (the entry is expiring anyway and the normal resolution path
+// handles the next query).
+func (h *Handler) Refresh(ctx context.Context, q dns.Question) {
+	h.mu.RLock()
+	ups := h.Upstreams
+	cache := h.Cache
+	h.mu.RUnlock()
+	if len(ups) == 0 || cache == nil {
+		return
+	}
+	m := new(dns.Msg)
+	m.SetQuestion(q.Name, q.Qtype)
+	m.RecursionDesired = true
+	var (
+		resp *dns.Msg
+		err  error
+	)
+	if len(ups) == 1 {
+		resp, err = ups[0].Query(ctx, m)
+	} else {
+		resp, _, err = raceUpstreams(ctx, ups, m)
+	}
+	if err != nil || resp == nil {
+		return
+	}
+	if len(resp.Answer) > 0 {
+		cache.Set(ctx, q, resp, 0)
+	} else {
+		cache.SetNegative(ctx, q, resp, 0)
+	}
+}
+
+// staleServeTTL caps the TTLs of a serve-stale answer (RFC 8767 section 5:
+// stale answers should carry a small TTL so clients re-resolve quickly).
+const staleServeTTL = 30
+
+// capTTL floors every record's TTL at max across Answer, Ns and Extra — a
+// stale negative answer's SOA in the Authority section would otherwise let a
+// client cache the negative for its original (long) TTL. The OPT pseudo-
+// record in the additional section is skipped: its TTL field carries
+// extended-rcode / version / DO flags, not a lifetime, and rewriting it
+// would corrupt those flags.
+func capTTL(m *dns.Msg, max uint32) {
+	for _, rr := range m.Answer {
+		if rr.Header().Ttl > max {
+			rr.Header().Ttl = max
+		}
+	}
+	for _, rr := range m.Ns {
+		if rr.Header().Ttl > max {
+			rr.Header().Ttl = max
+		}
+	}
+	for _, rr := range m.Extra {
+		if _, ok := rr.(*dns.OPT); ok {
+			continue
+		}
+		if rr.Header().Ttl > max {
+			rr.Header().Ttl = max
+		}
+	}
 }
 
 func isMetaQuery(q dns.Question) bool {

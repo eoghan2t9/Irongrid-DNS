@@ -46,10 +46,15 @@ cache:
   password: ""                 # set if Dragonfly requires auth
   db: 0
   ttl: 6h                      # positive answer cache lifetime
-  negative_ttl: 1m             # cached NXDOMAIN/SERVFAIL lifetime
-  l1_entries: 4096             # per-shard size of the in-process L1 cache in
-                               # front of Dragonfly (0 disables it; hits then
-                               # always round-trip to Redis)
+  negative_ttl: 1m             # cached NXDOMAIN/SERVFAIL lifetime  l1_entries: 4096             # per-shard size of the in-process L1 cache in
+                              # front of Dragonfly (0 disables it; hits then
+                              # always round-trip to Redis)
+  serve_stale: 5m             # RFC 8767: keep entries answerable this long past
+                              # their TTL so an upstream outage serves the last
+                              # known good answer instead of SERVFAIL (0 disables)
+  prefetch: true              # refresh hot entries in the background just before
+                              # they expire, so the next query hits the cache
+
 
 tls:
   cert_file: ""                # PEM cert chain for DoT/DoH/DoQ ("" = self-signed)

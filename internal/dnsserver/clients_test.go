@@ -61,6 +61,38 @@ func TestClientRouterSetPoliciesReplacesTable(t *testing.T) {
 	}
 }
 
+// TestClientRouterCacheInvalidatedOnSetPolicies verifies the per-IP result
+// cache is cleared whenever the routing table is replaced: a policy change
+// for the same client must take effect on the very next query, not be served
+// from the cached pre-reload result.
+func TestClientRouterCacheInvalidatedOnSetPolicies(t *testing.T) {
+	a := &ClientPolicy{GroupID: "a", Engine: filter.NewEngine()}
+	b := &ClientPolicy{GroupID: "b", Engine: filter.NewEngine()}
+	cr := NewClientRouter()
+	cr.SetPolicies([]GroupCIDRs{{CIDRs: []string{"192.168.0.0/16"}, Policy: a}})
+
+	if p := cr.Resolve("192.168.1.1"); p == nil || p.GroupID != "a" {
+		t.Fatalf("expected policy a, got %v", p)
+	}
+	if p := cr.Resolve("10.0.0.9"); p != nil {
+		t.Fatalf("unmatched client should be cached as nil, got %v", p)
+	}
+
+	// Reconfigure: the same CIDR now maps to b, and 10.0.0.0/8 is added.
+	cr.SetPolicies([]GroupCIDRs{
+		{CIDRs: []string{"192.168.0.0/16"}, Policy: b},
+		{CIDRs: []string{"10.0.0.0/8"}, Policy: b},
+	})
+
+	if p := cr.Resolve("192.168.1.1"); p == nil || p.GroupID != "b" {
+		t.Fatalf("cached policy a was served after SetPolicies, got %v", p)
+	}
+	// The previously cached nil must also be invalidated.
+	if p := cr.Resolve("10.0.0.9"); p == nil || p.GroupID != "b" {
+		t.Fatalf("cached nil was served after SetPolicies, got %v", p)
+	}
+}
+
 func TestClientRouterInvalidClientIP(t *testing.T) {
 	a := &ClientPolicy{GroupID: "a", Engine: filter.NewEngine()}
 	cr := NewClientRouter()
