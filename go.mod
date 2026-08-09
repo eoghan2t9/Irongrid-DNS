@@ -7,7 +7,7 @@ require (
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/andybalholm/brotli v1.2.2
 	github.com/charmbracelet/huh v1.0.0
-	github.com/cloudflare/cloudflared v0.0.0-20260722163246-3a2b45c2a511
+	github.com/cloudflare/cloudflared v0.0.0-20260807163836-73f535b57bb7
 	github.com/creack/pty v1.1.24
 	github.com/miekg/dns v1.1.72
 	github.com/quic-go/quic-go v0.61.0
