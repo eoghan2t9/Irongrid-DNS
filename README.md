@@ -10,6 +10,21 @@
   <img src="https://img.shields.io/badge/platform-Linux%20%E2%80%A2%20macOS%20%E2%80%A2%20Windows-626260?style=flat-square" alt="Linux, macOS, Windows">
 </p>
 
+<p align="center">
+  <a href="https://github.com/eoghan2t9/Irongrid-DNS/stargazers"><img src="https://img.shields.io/github/stars/eoghan2t9/Irongrid-DNS?style=flat-square&label=stars&color=e2b93b" alt="GitHub stars"></a>
+  <a href="https://github.com/eoghan2t9/Irongrid-DNS/forks"><img src="https://img.shields.io/github/forks/eoghan2t9/Irongrid-DNS?style=flat-square&label=forks&color=4a90e2" alt="GitHub forks"></a>
+  <a href="https://github.com/eoghan2t9/Irongrid-DNS/graphs/contributors"><img src="https://img.shields.io/github/contributors/eoghan2t9/Irongrid-DNS?style=flat-square&label=contributors&color=2fa84f" alt="Contributors"></a>
+  <a href="https://github.com/eoghan2t9/Irongrid-DNS/commits/main"><img src="https://img.shields.io/github/last-commit/eoghan2t9/Irongrid-DNS?style=flat-square&label=last%20commit&color=626260" alt="Last commit"></a>
+  <a href="https://github.com/eoghan2t9/Irongrid-DNS"><img src="https://img.shields.io/github/repo-size/eoghan2t9/Irongrid-DNS?style=flat-square&label=repo%20size&color=d99a1b" alt="Repository size"></a>
+</p>
+
+<p align="center">
+  <a href="#quick-start"><img src="https://img.shields.io/badge/-Quick_start-2fa84f?style=for-the-badge" alt="Quick start"></a>
+  <a href="#features"><img src="https://img.shields.io/badge/-Features-4a90e2?style=for-the-badge" alt="Features"></a>
+  <a href="#api"><img src="https://img.shields.io/badge/-API-8f8f8b?style=for-the-badge" alt="API"></a>
+  <a href="#development"><img src="https://img.shields.io/badge/-Development-d99a1b?style=for-the-badge" alt="Development"></a>
+</p>
+
 # Irongrid DNS
 
 A fast, self-hosted, ad-blocking DNS server written in pure Go — a single
@@ -516,6 +531,9 @@ tunnel:
 
 The dashboard uses a JSON REST API (HTTP Basic auth):
 
+<details>
+<summary><b>📡 Browse all endpoints</b> — click to expand</summary>
+
 ```
 GET  /api/status            server, listeners, cache, tunnel, root-hints status
 GET  /api/stats             counters, protocol split, top blocked, cache (L1 hits/misses + Dragonfly L2 hits/misses/memory/keys), query_today (since-midnight log stats), query_hourly (24 per-hour buckets for the dashboard sparkline)
@@ -557,6 +575,8 @@ GET  /api/tls/cert          download the active certificate (for clients to trus
 POST /api/tls/acme/issue    trigger an immediate Let's Encrypt issuance/renewal (HTTP-01 or DNS-01)
 ```
 
+</details>
+
 ### Root-hints status
 
 When a `recursive://` upstream is configured, `GET /api/status` includes a
@@ -595,6 +615,9 @@ same fields.
 
 ### TLS config reference
 
+<details>
+<summary><b>🔐 Full <code>tls</code> config</b> — click to expand</summary>
+
 ```yaml
 server:
   web_tls: false            # serve the dashboard + API over HTTPS (uses the TLS cert)
@@ -623,6 +646,8 @@ tls:
       # aws_secret_access_key: ""
       propagation_wait_sec: 60      #   wait for TXT records to propagate
 ```
+
+</details>
 
 **HTTP-01 vs DNS-01:** HTTP-01 needs the domain to answer on port 80 at this server. DNS-01
 creates a `_acme-challenge` TXT record through your DNS provider's API and works anywhere —
