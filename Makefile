@@ -50,8 +50,11 @@ test:
 	go test -race ./...
 
 ## lint: run golangci-lint over the Go codebase (pinned, see .golangci.yml)
+# golangci-lint v2 lives under the /v2 module path; the v1-style
+# github.com/golangci/golangci-lint/cmd/golangci-lint@v2.12.2 reference
+# fails with "unknown revision cmd/golangci-lint/v2.12.2".
 lint:
-	go run github.com/golangci/golangci-lint/cmd/golangci-lint@v2.12.2 run ./...
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...
 
 ## vuln: scan the Go dependency tree for known CVEs (golang.org/x/vuln)
 vuln:

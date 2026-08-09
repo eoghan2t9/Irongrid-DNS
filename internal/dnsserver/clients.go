@@ -92,11 +92,10 @@ func (cr *ClientRouter) SetPolicies(groups []GroupCIDRs) {
 
 // Resolve returns the policy for the first group whose CIDRs contain client,
 // or nil when no group matches (callers fall back to the global policy).
+// On the DNS hot path, so the cache is checked before ParseIP: a cached hit
+// (the common case — every query from an established client) skips the parse
+// and the CIDR scan entirely.
 func (cr *ClientRouter) Resolve(client string) *ClientPolicy {
-	ip := net.ParseIP(client)
-	if ip == nil {
-		return nil
-	}
 	cr.mu.RLock()
 	if p, ok := cr.cache[client]; ok {
 		cr.mu.RUnlock()
@@ -104,6 +103,10 @@ func (cr *ClientRouter) Resolve(client string) *ClientPolicy {
 	}
 	cr.mu.RUnlock()
 
+	ip := net.ParseIP(client)
+	if ip == nil {
+		return nil
+	}
 	cr.mu.Lock()
 	defer cr.mu.Unlock()
 	if p, ok := cr.cache[client]; ok { // double-checked: another goroutine filled it

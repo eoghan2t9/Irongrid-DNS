@@ -48,23 +48,39 @@ const (
 	// the counters under-report rather than burn CPU/bandwidth on the
 	// dashboard's 10-second poll.
 	maxStatsScan = 100000
+
+	// aggCacheTTL and aggCacheBucket back the Stats/Hourly/StatsBundle
+	// result cache. Each /api/stats poll used to trigger up to three full
+	// stream walks (24h stats, today stats, hourly); StatsBundle now serves
+	// all three from ONE walk. A walk is bounded by maxStatsScan entries and
+	// paged in 5000-entry round trips — still too expensive to repeat every
+	// 10s. The cache reuses a result for aggCacheTTL across polls and
+	// quantizes the window(s) to aggCacheBucket so consecutive polls (which
+	// each pass a fresh time.Now()) share one entry: a value computed from
+	// an equal-or-earlier since always covers the requested window, so
+	// serving it is always correct.
+	aggCacheTTL    = 30 * time.Second
+	aggCacheBucket = 30 * time.Second
 )
 
 // Entry is a single logged query. ID is the Dragonfly stream ID, assigned on
 // read; it is a stable unique key (the dashboard uses it as the React list
 // key) rather than a monotonically increasing integer.
 type Entry struct {
-	ID             string    `json:"id"`
-	Time           time.Time `json:"time"`
-	Client         string    `json:"client"`
-	Domain         string    `json:"domain"`
-	Type           string    `json:"type"`   // A, AAAA, TXT...
-	Action         string    `json:"action"` // "allowed", "blocked", "cached", "error"
-	Reason         string    `json:"reason"`
-	Upstream       string    `json:"upstream"`
-	ResponseTimeMS int64     `json:"response_time_ms"`
-	Rcode          int       `json:"rcode"`
-	Answers        int       `json:"answers"`
+	ID     string    `json:"id"`
+	Time   time.Time `json:"time"`
+	Client string    `json:"client"`
+	// Domain is stored lowercase: the DNS handler lowercases the qname
+	// before recording, so filter matching and top-blocked keys can compare
+	// directly without per-entry normalization.
+	Domain         string `json:"domain"`
+	Type           string `json:"type"`   // A, AAAA, TXT...
+	Action         string `json:"action"` // "allowed", "blocked", "cached", "error"
+	Reason         string `json:"reason"`
+	Upstream       string `json:"upstream"`
+	ResponseTimeMS int64  `json:"response_time_ms"`
+	Rcode          int    `json:"rcode"`
+	Answers        int    `json:"answers"`
 }
 
 // Log is a concurrency-safe query logger backed by a Dragonfly stream.
@@ -85,6 +101,12 @@ type Log struct {
 	// produces at most one line per minute instead of one every ~100ms (the
 	// writer flushes on a ticker even when the server is down).
 	lastFlushErr atomic.Int64
+
+	// statsCache/hourlyCache/bundleCache short-circuit repeated dashboard
+	// polls — see the aggCache* constants. Zero values are ready to use.
+	statsCache  aggCache[map[string]any]
+	hourlyCache aggCache[[]HourBucket]
+	bundleCache aggCache[StatsBundle]
 }
 
 // New connects to Dragonfly and returns a stream-backed query log. It shares
@@ -135,6 +157,49 @@ func NewDisabled(retentionDays int) *Log {
 	l.wg.Add(1)
 	go l.runWriter()
 	return l
+}
+
+// aggCache is a tiny TTL cache for one aggregate value. sinceKey is the
+// `since` argument quantized to aggCacheBucket seconds, so near-identical
+// windows (every poll passes a fresh time.Now()) share an entry. All methods
+// are safe for concurrent use; the cached value itself is immutable once set
+// (callers only read it, e.g. via JSON encoding).
+type aggCache[T any] struct {
+	mu       sync.Mutex
+	sinceKey int64
+	at       time.Time
+	val      T
+}
+
+// get returns the cached value when it matches sinceKey and is still within
+// aggCacheTTL.
+func (c *aggCache[T]) get(sinceKey int64) (T, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.sinceKey != sinceKey || time.Since(c.at) > aggCacheTTL {
+		var zero T
+		return zero, false
+	}
+	return c.val, true
+}
+
+func (c *aggCache[T]) set(sinceKey int64, val T) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sinceKey = sinceKey
+	c.at = time.Now()
+	c.val = val
+}
+
+// clear drops any cached value so the next call re-scans the stream (used by
+// Clear: after the stream is deleted, a cached pre-clear result must not be
+// served). sinceKey is set to -1 — unreachable for any real since (always
+// Unix time, >= 0) — so the get's key check alone guarantees a miss.
+func (c *aggCache[T]) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.sinceKey = -1
+	c.at = time.Time{}
 }
 
 // Record enqueues one query entry. It never blocks or slows query serving:
@@ -255,14 +320,19 @@ func entryFromMessage(e *Entry, m redis.XMessage) bool {
 // matches and domain is a case-insensitive substring. client is the source
 // IP exactly as recorded, so clicking a top client on the dashboard shows
 // precisely that client's queries.
-func matchesFilter(e Entry, action, domain, qtype, client string) bool {
+//
+// domain is expected pre-lowercased by Query (the constant part of the
+// substring check, hoisted out of the per-entry loop), and stored domains
+// are lowercase too (see Entry.Domain), so the substring check compares
+// directly — no per-entry ToLower.
+func matchesFilter(e Entry, action, domainLower, qtype, client string) bool {
 	if action != "" && e.Action != action {
 		return false
 	}
 	if qtype != "" && !strings.EqualFold(e.Type, qtype) {
 		return false
 	}
-	if domain != "" && !strings.Contains(strings.ToLower(e.Domain), strings.ToLower(domain)) {
+	if domainLower != "" && !strings.Contains(e.Domain, domainLower) {
 		return false
 	}
 	if client != "" && e.Client != client {
@@ -286,6 +356,9 @@ func (l *Log) Query(ctx context.Context, limit, offset int, action, domain, qtyp
 		offset = 0
 	}
 	want := offset + limit
+	// Hoist the constant lowercase of the domain filter out of the loop:
+	// with the filter set, it would otherwise allocate once per entry walked.
+	domainLower := strings.ToLower(domain)
 	var matches []Entry
 	start := "+" // newest stream ID
 	first := true
@@ -313,7 +386,7 @@ func (l *Log) Query(ctx context.Context, limit, offset int, action, domain, qtyp
 			if !entryFromMessage(&e, m) {
 				continue
 			}
-			if matchesFilter(e, action, domain, qtype, client) {
+			if matchesFilter(e, action, domainLower, qtype, client) {
 				matches = append(matches, e)
 			}
 		}
@@ -337,6 +410,15 @@ func (l *Log) Query(ctx context.Context, limit, offset int, action, domain, qtyp
 type TopDomain struct {
 	Domain string `json:"domain"`
 	Count  int64  `json:"count"`
+}
+
+// emptyStats returns a zeroed stats map with the exact value types the API's
+// JSON consumers expect (int64 counters, float64 average, non-nil top lists).
+func emptyStats() map[string]any {
+	return map[string]any{
+		"total": int64(0), "allowed": int64(0), "blocked": int64(0), "cached": int64(0),
+		"avg_rt_ms": float64(0), "top_blocked": []TopDomain{}, "top_clients": []TopDomain{},
+	}
 }
 
 // topN returns the n entries with the highest counts, descending (ties
@@ -364,14 +446,16 @@ func topN(counts map[string]int64, n int) []TopDomain {
 // is bounded (maxStatsScan): under extreme volume the counters under-report
 // rather than stall the dashboard's poll.
 func (l *Log) Stats(ctx context.Context, since time.Time) (map[string]any, error) {
-	// int64 literals so every path (including the disabled no-store return)
-	// yields the same value types the API's JSON consumers expect.
-	stats := map[string]any{
-		"total": int64(0), "allowed": int64(0), "blocked": int64(0), "cached": int64(0),
-		"avg_rt_ms": float64(0), "top_blocked": []TopDomain{}, "top_clients": []TopDomain{},
-	}
+	stats := emptyStats()
 	if l.client == nil {
 		return stats, nil
+	}
+	// Serve a recent result for the same (quantized) window instead of
+	// re-walking the stream: the dashboard polls every 10s, so polls within
+	// one bucket share a single scan.
+	sinceKey := since.Unix() / int64(aggCacheBucket/time.Second)
+	if v, ok := l.statsCache.get(sinceKey); ok {
+		return v, nil
 	}
 	var total, allowed, blocked, cached int64
 	var rtSum float64
@@ -427,6 +511,7 @@ func (l *Log) Stats(ctx context.Context, since time.Time) (map[string]any, error
 	stats["cached"] = cached
 	stats["top_blocked"] = topN(blockedCnt, 10)
 	stats["top_clients"] = topN(clientCnt, 10)
+	l.statsCache.set(sinceKey, stats)
 	return stats, nil
 }
 
@@ -447,6 +532,10 @@ func (l *Log) Hourly(ctx context.Context, since time.Time) ([]HourBucket, error)
 	out := []HourBucket{}
 	if l.client == nil {
 		return out, nil
+	}
+	sinceKey := since.Unix() / int64(aggCacheBucket/time.Second)
+	if v, ok := l.hourlyCache.get(sinceKey); ok {
+		return v, nil
 	}
 	now := time.Now()
 	endSlot := now.Truncate(time.Hour)
@@ -501,6 +590,163 @@ func (l *Log) Hourly(ctx context.Context, since time.Time) ([]HourBucket, error)
 			Blocked: blocked[i],
 		})
 	}
+	l.hourlyCache.set(sinceKey, out)
+	return out, nil
+}
+
+// StatsBundle is the dashboard's full aggregate set — the 24h stats, the
+// since-midnight "today" stats and the 24-slot hourly series. The three
+// blocks are just different projections of the same stream entries, so
+// StatsBundle computes them in ONE walk instead of the three the dashboard
+// poll used to perform.
+type StatsBundle struct {
+	Stats  map[string]any
+	Today  map[string]any
+	Hourly []HourBucket
+}
+
+// StatsBundle computes the dashboard's aggregate set from a single walk of
+// the stream (see StatsBundle). since is the 24h window bound and today the
+// since-midnight bound (local midnight, supplied by the caller — querylog
+// doesn't know the server's timezone). The walk is newest-first so a scan
+// bound (maxStatsScan) can only under-count the OLDEST entries in the
+// window: the current hour and the today block — what the dashboard shows
+// first — are always complete. The result is cached for aggCacheTTL keyed
+// on both quantized windows.
+func (l *Log) StatsBundle(ctx context.Context, since, today time.Time) (*StatsBundle, error) {
+	if l.client == nil {
+		return &StatsBundle{Stats: emptyStats(), Today: emptyStats(), Hourly: []HourBucket{}}, nil
+	}
+	// Key on both windows: today advances at local midnight, and serving a
+	// pre-midnight "today" block just after midnight would be stale until
+	// the next bucket (<= aggCacheBucket). Packing both Unix-bucket values
+	// into one int64 is unambiguous while each fits in 32 bits (centuries).
+	sinceKey := since.Unix() / int64(aggCacheBucket/time.Second)
+	todayKey := today.Unix() / int64(aggCacheBucket/time.Second)
+	cacheKey := (todayKey << 32) | sinceKey
+	if v, ok := l.bundleCache.get(cacheKey); ok {
+		return &v, nil
+	}
+
+	now := time.Now()
+	endSlot := now.Truncate(time.Hour)
+	startSlot := endSlot.Add(-23 * time.Hour)
+	total := make([]int64, 24)
+	blocked := make([]int64, 24)
+	var total24, allowed24, blocked24, cached24 int64
+	var todayTotal, todayAllowed, todayBlocked, todayCached int64
+	var rtSum24, rtSumToday float64
+	blockedCnt := map[string]int64{}
+	clientCnt := map[string]int64{}
+	todayBlockedCnt := map[string]int64{}
+	todayClientCnt := map[string]int64{}
+
+	// Newest-first walk from "+" down to the 24h bound (inclusive), same
+	// shape as Hourly: a scan bound can only miss the oldest entries.
+	min := strconv.FormatInt(since.UnixMilli(), 10) + "-0"
+	start := "+"
+	first := true
+	scanned := 0
+	for scanned < maxStatsScan {
+		const page = 5000
+		msgs, err := l.client.XRevRangeN(ctx, streamKey, start, min, page+1).Result()
+		if err != nil {
+			return nil, err
+		}
+		begin := 0
+		if !first && len(msgs) > 0 && msgs[0].ID == start {
+			begin = 1
+		}
+		if len(msgs) <= begin {
+			break
+		}
+		first = false
+		for _, m := range msgs[begin:] {
+			scanned++
+			var e Entry
+			if !entryFromMessage(&e, m) {
+				if scanned >= maxStatsScan {
+					break
+				}
+				continue
+			}
+			// Enforce the bound strictly inside the page too (the outer loop
+			// condition alone would let one oversized page overshoot by up
+			// to page entries).
+			if scanned >= maxStatsScan {
+				break
+			}
+			total24++
+			rtSum24 += float64(e.ResponseTimeMS)
+			switch e.Action {
+			case "allowed":
+				allowed24++
+			case "blocked":
+				blocked24++
+				blockedCnt[e.Domain]++
+			case "cached":
+				cached24++
+			}
+			clientCnt[e.Client]++
+			if !e.Time.Before(today) {
+				todayTotal++
+				rtSumToday += float64(e.ResponseTimeMS)
+				switch e.Action {
+				case "allowed":
+					todayAllowed++
+				case "blocked":
+					todayBlocked++
+					todayBlockedCnt[e.Domain]++
+				case "cached":
+					todayCached++
+				}
+				todayClientCnt[e.Client]++
+			}
+			idx := int(e.Time.Truncate(time.Hour).Sub(startSlot) / time.Hour)
+			if idx >= 0 && idx < 24 {
+				total[idx]++
+				if e.Action == "blocked" {
+					blocked[idx]++
+				}
+			}
+		}
+		if len(msgs) <= page {
+			break
+		}
+		start = msgs[len(msgs)-1].ID
+	}
+
+	stats := emptyStats()
+	if total24 > 0 {
+		stats["avg_rt_ms"] = rtSum24 / float64(total24)
+	}
+	stats["total"] = total24
+	stats["allowed"] = allowed24
+	stats["blocked"] = blocked24
+	stats["cached"] = cached24
+	stats["top_blocked"] = topN(blockedCnt, 10)
+	stats["top_clients"] = topN(clientCnt, 10)
+
+	todayStats := emptyStats()
+	if todayTotal > 0 {
+		todayStats["avg_rt_ms"] = rtSumToday / float64(todayTotal)
+	}
+	todayStats["total"] = todayTotal
+	todayStats["allowed"] = todayAllowed
+	todayStats["blocked"] = todayBlocked
+	todayStats["cached"] = todayCached
+	todayStats["top_blocked"] = topN(todayBlockedCnt, 10)
+	todayStats["top_clients"] = topN(todayClientCnt, 10)
+
+	out := &StatsBundle{Stats: stats, Today: todayStats}
+	for i := 0; i < 24; i++ {
+		out.Hourly = append(out.Hourly, HourBucket{
+			Hour:    startSlot.Add(time.Duration(i) * time.Hour).Format(time.RFC3339),
+			Total:   total[i],
+			Blocked: blocked[i],
+		})
+	}
+	l.bundleCache.set(cacheKey, *out)
 	return out, nil
 }
 
@@ -509,6 +755,11 @@ func (l *Log) Clear(ctx context.Context) error {
 	if l.client == nil {
 		return nil
 	}
+	// Drop cached aggregates too, or the next poll would serve the pre-clear
+	// numbers until the TTL expires.
+	l.statsCache.clear()
+	l.hourlyCache.clear()
+	l.bundleCache.clear()
 	return l.client.Del(ctx, streamKey).Err()
 }
 

@@ -281,6 +281,179 @@ func TestStats(t *testing.T) {
 	}
 }
 
+// TestStatsCache verifies the aggregate TTL cache: a second call with the
+// same (quantized) window is served from the cache — an entry recorded
+// between the two calls is not reflected — while a different window
+// recomputes fresh, and Clear invalidates the cache so a post-clear poll
+// re-scans the (now empty) stream.
+func TestStatsCache(t *testing.T) {
+	l, _ := newTestLog(t, 30)
+	l.Record(entry("a.com.", "allowed"))
+	waitFor(t, l, 1)
+
+	since := time.Now().Add(-24 * time.Hour)
+	first, err := l.Stats(context.Background(), since)
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if first["total"].(int64) != 1 {
+		t.Fatalf("first total = %v, want 1", first["total"])
+	}
+
+	// Record two more entries and flush; the same window must still return
+	// the cached total of 1 (no re-scan), proving the cache path was taken.
+	l.Record(entry("b.com.", "blocked"))
+	l.Record(entry("b.com.", "blocked"))
+	waitFor(t, l, 3)
+	second, err := l.Stats(context.Background(), since)
+	if err != nil {
+		t.Fatalf("Stats cached: %v", err)
+	}
+	if second["total"].(int64) != 1 {
+		t.Fatalf("cached total = %v, want 1 (cache must not re-scan)", second["total"])
+	}
+
+	// A different window recomputes instead of reusing the cached value.
+	future, err := l.Stats(context.Background(), time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("Stats future: %v", err)
+	}
+	if future["total"].(int64) != 0 {
+		t.Fatalf("future window total = %v, want 0", future["total"])
+	}
+
+	// Clear must invalidate the cache: the next poll re-scans the empty
+	// stream rather than serving the pre-clear totals.
+	if err := l.Clear(context.Background()); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	after, err := l.Stats(context.Background(), since)
+	if err != nil {
+		t.Fatalf("Stats after clear: %v", err)
+	}
+	if after["total"].(int64) != 0 {
+		t.Fatalf("post-clear total = %v, want 0 (cache must be invalidated)", after["total"])
+	}
+}
+
+// TestHourlyCache verifies Hourly results are cached the same way: the second
+// call with the same window returns the pre-recorded bucket totals.
+func TestHourlyCache(t *testing.T) {
+	l, _ := newTestLog(t, 30)
+	l.Record(entry("a.com.", "allowed"))
+	waitFor(t, l, 1)
+
+	since := time.Now().Add(-24 * time.Hour)
+	first, err := l.Hourly(context.Background(), since)
+	if err != nil {
+		t.Fatalf("Hourly: %v", err)
+	}
+	if got := first[len(first)-1].Total; got != 1 {
+		t.Fatalf("first current-hour total = %d, want 1", got)
+	}
+
+	// Two more entries flushed; the cached series (same window) must keep the
+	// original bucket total of 1.
+	l.Record(entry("b.com.", "blocked"))
+	l.Record(entry("b.com.", "blocked"))
+	waitFor(t, l, 3)
+	second, err := l.Hourly(context.Background(), since)
+	if err != nil {
+		t.Fatalf("Hourly cached: %v", err)
+	}
+	if got := second[len(second)-1].Total; got != 1 {
+		t.Fatalf("cached current-hour total = %d, want 1 (cache must not re-scan)", got)
+	}
+}
+
+// TestStatsBundle verifies the single-walk aggregate: the 24h block counts
+// every recorded entry, the today block only those since local midnight, and
+// the hourly series ends at the current hour — plus the same TTL-cache and
+// Clear-invalidation behavior as the standalone Stats/Hourly results.
+func TestStatsBundle(t *testing.T) {
+	l, _ := newTestLog(t, 30)
+	// One entry 25h ago: inside the 24h window (written now, so its stream
+	// ID is current) but always before today's midnight — 25h is more than
+	// any time-of-day elapsed since midnight. One entry now.
+	old := entry("old.example.com.", "blocked")
+	old.Time = time.Now().Add(-25 * time.Hour)
+	l.Record(old)
+	l.Record(entry("new.example.com.", "allowed"))
+	waitFor(t, l, 2)
+
+	now := time.Now()
+	since := now.Add(-24 * time.Hour)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	b, err := l.StatsBundle(context.Background(), since, today)
+	if err != nil {
+		t.Fatalf("StatsBundle: %v", err)
+	}
+	if b.Stats["total"].(int64) != 2 {
+		t.Fatalf("24h total = %v, want 2", b.Stats["total"])
+	}
+	// The 25h-old entry is inside the 24h window but before today.
+	if b.Today["total"].(int64) != 1 {
+		t.Fatalf("today total = %v, want 1", b.Today["total"])
+	}
+	if b.Today["blocked"].(int64) != 0 || b.Today["allowed"].(int64) != 1 {
+		t.Fatalf("today counters = %v", b.Today)
+	}
+	if len(b.Hourly) != 24 {
+		t.Fatalf("hourly slots = %d, want 24", len(b.Hourly))
+	}
+	if last := b.Hourly[len(b.Hourly)-1]; last.Total != 1 || last.Blocked != 0 {
+		t.Fatalf("current-hour bucket = %+v, want total 1 / blocked 0", last)
+	}
+	// The today block's top lists are wired to the same walk.
+	if tc := b.Today["top_clients"].([]TopDomain); len(tc) != 1 || tc[0].Count != 1 {
+		t.Fatalf("today top_clients = %v, want 127.0.0.1 x1", tc)
+	}
+	if tb := b.Today["top_blocked"].([]TopDomain); len(tb) != 0 {
+		t.Fatalf("today top_blocked = %v, want empty", tb)
+	}
+
+	// Cache: another entry flushed; the same (quantized) windows must still
+	// serve the pre-existing totals without re-scanning.
+	l.Record(entry("c.example.com.", "allowed"))
+	waitFor(t, l, 3)
+	b2, err := l.StatsBundle(context.Background(), since, today)
+	if err != nil {
+		t.Fatalf("StatsBundle cached: %v", err)
+	}
+	if b2.Stats["total"].(int64) != 2 {
+		t.Fatalf("cached 24h total = %v, want 2 (cache must not re-scan)", b2.Stats["total"])
+	}
+
+	// Clear must invalidate the cache so the next poll re-scans the stream.
+	if err := l.Clear(context.Background()); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	b3, err := l.StatsBundle(context.Background(), since, today)
+	if err != nil {
+		t.Fatalf("StatsBundle after clear: %v", err)
+	}
+	if b3.Stats["total"].(int64) != 0 || b3.Today["total"].(int64) != 0 {
+		t.Fatalf("post-clear totals = %v / %v, want 0/0", b3.Stats["total"], b3.Today["total"])
+	}
+}
+
+// TestStatsBundleDisabled verifies the no-store path returns zeroed blocks
+// (the API's stats response still carries the expected shapes).
+func TestStatsBundleDisabled(t *testing.T) {
+	l := NewDisabled(30)
+	defer l.Close()
+	now := time.Now()
+	b, err := l.StatsBundle(context.Background(), now.Add(-24*time.Hour),
+		time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()))
+	if err != nil {
+		t.Fatalf("StatsBundle: %v", err)
+	}
+	if b.Stats["total"].(int64) != 0 || b.Today["total"].(int64) != 0 || len(b.Hourly) != 0 {
+		t.Fatalf("disabled bundle = %+v, want zeros", b)
+	}
+}
+
 // TestClear verifies the whole stream is deleted.
 func TestClear(t *testing.T) {
 	l, _ := newTestLog(t, 30)

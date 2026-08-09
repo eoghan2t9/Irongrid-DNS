@@ -278,23 +278,15 @@ func todayStart() time.Time {
 }
 
 func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
-	stats, err := h.Log.Stats(ctx, time.Now().Add(-24*time.Hour))
+	// One stream walk (newest-first, cached for aggCacheTTL) serves all
+	// three aggregate blocks — the 24h stats, the since-midnight "today"
+	// stats and the 24-slot hourly series. They used to be three separate
+	// paged walks of the same stream on every 10s poll; a failure now means
+	// the stream is unreachable, so all three would have failed anyway.
+	bundle, err := h.Log.StatsBundle(ctx, time.Now().Add(-24*time.Hour), todayStart())
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
-	}
-	// A second window since local midnight for the dashboard's "queries
-	// today" headline. Best-effort: a failure here must not break the rest
-	// of the stats response.
-	var queryToday any
-	if st, err := h.Log.Stats(ctx, todayStart()); err == nil {
-		queryToday = st
-	}
-	// Per-hour volume for the dashboard's 24h sparkline. Best-effort like
-	// query_today: a slow stream must not stall the rest of the stats.
-	var queryHourly any
-	if hb, err := h.Log.Hourly(ctx, time.Now().Add(-24*time.Hour)); err == nil {
-		queryHourly = hb
 	}
 	proto := map[string]int64{}
 	for k, v := range h.DNS.Stats.ByProtocol {
@@ -320,7 +312,7 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"query": stats,
+		"query": bundle.Stats,
 		"counters": map[string]int64{
 			"total":    h.DNS.Stats.Total.Load(),
 			"blocked":  h.DNS.Stats.Blocked.Load(),
@@ -334,8 +326,8 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 		"cache":        cacheStats,
 		"latency":      h.DNS.LatencySummary(),
 		"upstreams":    h.DNS.UpstreamHealth(),
-		"query_today":  queryToday,
-		"query_hourly": queryHourly,
+		"query_today":  bundle.Today,
+		"query_hourly": bundle.Hourly,
 	})
 }
 
