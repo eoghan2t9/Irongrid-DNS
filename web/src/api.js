@@ -99,6 +99,7 @@ export const api = {
   toolsAXFR: (domain) => request('/api/tools/axfr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain }) }),
   toolsSubdomains: (domain) => request('/api/tools/subdomains', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain }) }),
   flushCache: () => request('/api/cache/flush', { method: 'POST' }),
+  warmCache: () => request('/api/cache/warm', { method: 'POST' }),
   rateBlocked: () => request('/api/rate/blocked'),
   rateUnblock: (ip) => request('/api/rate/unblock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) }),
   geoStatus: () => request('/api/geo/status'),

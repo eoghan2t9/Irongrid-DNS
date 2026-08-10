@@ -436,6 +436,43 @@ func (c *Cache) Lookup(q dns.Question) LookupResult {
 	return LookupResult{}
 }
 
+// Fresh reports whether q is already answered by a fresh (positive or
+// negative) entry in either cache layer. Unlike Lookup it does not count the
+// probe in the L1 hit/miss counters and does not schedule a background
+// prefetch. It exists for the cache warmer's freshness probe: warming
+// traffic must not skew the dashboard's cache hit-rate cards, and a
+// near-expiry entry should be refreshed by the warmer (or prefetch) rather
+// than have the probe itself trigger a refresh and then get skipped.
+func (c *Cache) Fresh(q dns.Question) bool {
+	h := keyHash(q)
+	now := time.Now()
+	if c.l1 != nil {
+		if raw, _, stale, ok := c.l1.get(h, false, now); ok && !stale && len(raw) > 0 {
+			return true
+		}
+		if raw, _, stale, ok := c.l1.get(h, true, now); ok && !stale && len(raw) > 0 {
+			return true
+		}
+	}
+	if c.client == nil {
+		return false
+	}
+	// L1 miss: one budgeted MGET for both keys, exactly like Lookup — a
+	// present L2 key is fresh by construction (Redis expires it at its TTL).
+	ctx, cancel := context.WithTimeout(context.Background(), c.budget())
+	defer cancel()
+	vals, err := c.client.MGet(ctx, c.msgKey(h), c.negKey(h)).Result()
+	if err != nil {
+		return false
+	}
+	for _, v := range vals {
+		if v != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // decodeMGetResult interprets the [positive, negative] result of an MGET
 // against the two keys for one question, as go-redis returns it: a present
 // key comes back as a string, a missing key as nil. ok is false when

@@ -95,6 +95,8 @@ export default function Dashboard({ onNavigate }) {
 
       <CacheCard cache={stats.cache} />
 
+      <WarmerCard warmer={stats.warmer} onWarmed={load} />
+
       <RootHintsCard status={status} />
 
       <TuningCard status={status} />
@@ -349,6 +351,83 @@ function CacheCard({ cache }) {
         all-time rate is normal — the flood wrote millions of one-off queries — and
         most repeat queries are absorbed by L1 anyway. L2 is the shared,
         restart-surviving layer, and the query log lives here too.
+      </div>
+    </div>
+  )
+}
+
+// WarmerCard shows the proactive cache warmer's state: how many active
+// domains the last passes considered, how many answers were written to the
+// cache (A + AAAA), how many were skipped (blocked / rewritten / already
+// fresh) and how many resolutions failed. Off it explains how to turn it on.
+function WarmerCard({ warmer, onWarmed }) {
+  const [busy, setBusy] = useState(false)
+  if (!warmer) return null
+  if (!warmer.enabled) {
+    return (
+      <div className="card">
+        <div className="row-between">
+          <h3 style={{ margin: 0 }}>Cache warmer</h3>
+          <span className="badge badge-warn">off</span>
+        </div>
+        <p className="dim small" style={{ margin: '8px 0 0' }}>
+          Pre-cache answers for every domain your network queried in the last 24h, so a
+          restart or cache flush doesn&apos;t leave the first query for each domain cold.
+          Enable it under <strong>Settings → Cache warmer</strong>.
+        </p>
+      </div>
+    )
+  }
+  const warmNow = async () => {
+    if (busy) return
+    setBusy(true)
+    try {
+      await api.warmCache()
+      onWarmed && onWarmed()
+    } catch {
+      // Best-effort kick: the next 10s poll reflects the warmer state anyway.
+    } finally {
+      setBusy(false)
+    }
+  }
+  return (
+    <div className="card">
+      <div className="row-between">
+        <h3 style={{ margin: 0 }}>Cache warmer</h3>
+        <div className="row">
+          <span className="badge badge-allowed">on</span>
+          <button className="btn small" type="button" onClick={warmNow} disabled={busy} title="Kick a warming pass now (e.g. right after flushing the cache)">
+            {busy ? 'Warming…' : 'Warm now'}
+          </button>
+        </div>
+      </div>
+      <div className="kv-grid" style={{ marginTop: 8 }}>
+        <div className="kv-row">
+          <span className="kv-label">Last pass</span>
+          <span className="kv-value">{warmer.last_run ? new Date(warmer.last_run).toLocaleString() : '—'}</span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Passes</span>
+          <span className="kv-value">{fmt(warmer.runs)}</span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Domains considered</span>
+          <span className="kv-value">{fmt(warmer.domains)}</span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Warmed · skipped · failed</span>
+          <span className="kv-value">{fmt(warmer.warmed)} · {fmt(warmer.skipped)} · {fmt(warmer.failed)}</span>
+        </div>
+      </div>
+      {warmer.last_error && (
+        <div className="error-text small" style={{ marginTop: 8 }}>⚠ {warmer.last_error}</div>
+      )}
+      <div className="card-hint">
+        Each pass takes the domains queried in the lookback window from the query log
+        and re-resolves them (A + AAAA) through your upstreams into Dragonfly.
+        <strong>Skipped</strong> covers blocked / rewritten domains plus questions the
+        cache already answers fresh; <strong>failed</strong> is upstream or cache write
+        errors. Fresh probes don&apos;t count toward the cache hit-rate cards above.
       </div>
     </div>
   )

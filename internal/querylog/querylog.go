@@ -48,6 +48,11 @@ const (
 	// the counters under-report rather than burn CPU/bandwidth on the
 	// dashboard's 10-second poll.
 	maxStatsScan = 100000
+	// maxWarmScan bounds the ActiveDomains walk used by the cache warmer.
+	// It runs every warmer interval (default 15m), not on a 10s poll, and
+	// a pass should see as much of the active set as the stream retains, so
+	// it is the full stream cap rather than the stats poll's budget.
+	maxWarmScan = maxStreamEntries
 	// queryPage is the fetch size for the interactive query-log walk: it
 	// only ever needs up to a page of entries, so a small page keeps each
 	// request's response small.
@@ -724,6 +729,44 @@ func (l *Log) StatsBundle(ctx context.Context, since, today time.Time) (*StatsBu
 	}
 	l.bundleCache.set(cacheKey, *out)
 	return out, nil
+}
+
+// ActiveDomains returns the unique domains recorded since, ordered by query
+// count descending (ties alphabetical). limit caps the result (<= 0 = every
+// domain in the window, bounded by the stream scan cap). Only "allowed" and
+// "cached" actions count: blocked domains are re-blocked by the filter anyway
+// (warming them would waste upstream traffic and leak the query), rewrites are
+// answered locally without touching the cache, and errors have nothing to
+// cache. This is the cache warmer's source of "currently active domains".
+func (l *Log) ActiveDomains(ctx context.Context, since time.Time, limit int) ([]TopDomain, error) {
+	if l.client == nil {
+		return []TopDomain{}, nil
+	}
+	counts := map[string]int64{}
+	start := strconv.FormatInt(since.UnixMilli(), 10) + "-0"
+	if err := l.walkStream(ctx, false, start, "+", maxWarmScan, aggPage, func(m redis.XMessage) bool {
+		var e Entry
+		if !entryFromMessage(&e, m) {
+			return true
+		}
+		if e.Domain == "" {
+			return true
+		}
+		switch e.Action {
+		case "allowed", "cached":
+			counts[e.Domain]++
+		}
+		return true
+	}); err != nil {
+		return nil, err
+	}
+	if len(counts) == 0 {
+		return []TopDomain{}, nil
+	}
+	if limit <= 0 {
+		limit = len(counts)
+	}
+	return topN(counts, limit), nil
 }
 
 // Clear deletes the entire stream (the UI "clear log" action).

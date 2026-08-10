@@ -33,6 +33,30 @@ type Config struct {
 	GeoBlock     GeoBlockConfig  `yaml:"geo_block"`
 	Abuse        AbuseConfig     `yaml:"abuse"`
 	DNSSEC       DNSSECConfig    `yaml:"dnssec"`
+	Warmer       WarmerConfig    `yaml:"warmer"`
+}
+
+// WarmerConfig is the proactive cache warmer: a background loop that scans
+// the query log for the domains queried within Lookback and pre-resolves
+// them (A + AAAA) through the current upstreams into the cache, so a restart
+// or cache flush doesn't leave the first query for each domain cold. A pass
+// runs immediately at boot and then every Interval; each pass only refreshes
+// entries that are missing, expired or inside their serve-stale window, so
+// steady-state upstream traffic is low. Off by default because warming uses
+// the upstreams even when nobody is asking.
+type WarmerConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Interval between passes; 0 uses the default (15m).
+	Interval time.Duration `yaml:"interval"`
+	// Lookback is how far back into the query log a pass looks for active
+	// domains; 0 uses the default (24h).
+	Lookback time.Duration `yaml:"lookback"`
+	// MaxDomains caps the number of domains warmed per pass (0 = every
+	// domain in the lookback window, up to the query-log scan bound).
+	MaxDomains int `yaml:"max_domains"`
+	// Concurrency bounds how many upstream resolutions run in parallel per
+	// pass; 0 uses the default (8).
+	Concurrency int `yaml:"concurrency"`
 }
 
 // RewriteSpec is a local DNS record: a domain answered directly by Irongrid
@@ -360,6 +384,13 @@ func Default() *Config {
 			Enabled:   false,
 			RequireAD: true,
 		},
+		Warmer: WarmerConfig{
+			Enabled:     false,
+			Interval:    15 * time.Minute,
+			Lookback:    24 * time.Hour,
+			MaxDomains:  5000,
+			Concurrency: 8,
+		},
 	}
 }
 
@@ -441,6 +472,18 @@ func (c *Config) validate() error {
 	}
 	if c.Log.BatchSize < 0 {
 		return fmt.Errorf("log.batch_size must be >= 0 (0 uses the default)")
+	}
+	if c.Warmer.Interval < 0 {
+		return fmt.Errorf("warmer.interval must be >= 0 (0 uses the default)")
+	}
+	if c.Warmer.Lookback < 0 {
+		return fmt.Errorf("warmer.lookback must be >= 0 (0 uses the default)")
+	}
+	if c.Warmer.MaxDomains < 0 {
+		return fmt.Errorf("warmer.max_domains must be >= 0 (0 = every domain in the lookback window)")
+	}
+	if c.Warmer.Concurrency < 0 {
+		return fmt.Errorf("warmer.concurrency must be >= 0 (0 uses the default)")
 	}
 	if c.Server.ListenUDP == "" && c.Server.ListenTCP == "" &&
 		c.Server.ListenDoT == "" && c.Server.ListenDoH == "" && c.Server.ListenDoQ == "" {

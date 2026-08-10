@@ -20,6 +20,7 @@ const empty = () => ({
   geo_block: { enabled: false, countries: [], allowlist: [], ips: [], honeypots: [], base_url: '', auto_update: '168h', trust_udp: false },
   abuse: { abuseipdb_key: '' },
   dnssec: { enabled: false, require_ad: true },
+  warmer: { enabled: false, interval: '15m', lookback: '24h', max_domains: 5000, concurrency: 8 },
 })
 
 export default function Settings({ onSessionInvalidated }) {
@@ -540,6 +541,25 @@ export default function Settings({ onSessionInvalidated }) {
           {text('Serve stale', 'cache.serve_stale', 'keep entries answerable this long past expiry (RFC 8767) — used when the upstream is unreachable; 0 disables', '5m')}
           {toggle('Prefetch hot entries', 'cache.prefetch')}
           {text('Cache lookup timeout', 'cache.lookup_timeout', 'how long a Dragonfly read may take on the hot path before the query goes straight upstream; empty = 150ms default', '150ms')}
+        </div>
+      </div>
+
+      <div className="card">
+        <h3>Cache warmer</h3>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          Proactively pre-caches answers for every domain your network queried within
+          the <strong>lookback</strong> window (read from the query log), so a restart
+          or cache flush doesn&apos;t leave the first query for each domain cold. A pass runs
+          once at boot, then every <strong>interval</strong>, resolving only entries that
+          are missing, expired or inside their serve-stale window. Off by default because
+          it uses your upstreams even when nobody is asking.
+        </p>
+        <div className="form-grid">
+          {toggle('Enable cache warmer', 'warmer.enabled')}
+          {text('Interval', 'warmer.interval', 'how often a warming pass runs', '15m')}
+          {text('Lookback', 'warmer.lookback', 'how far back into the query log to find active domains', '24h')}
+          {number('Max domains per pass', 'warmer.max_domains', 'cap on upstream traffic per pass; 0 = all in the window')}
+          {number('Parallel resolutions', 'warmer.concurrency', '0 = default (8)')}
         </div>
       </div>
 

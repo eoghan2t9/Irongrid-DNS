@@ -241,6 +241,43 @@ func TestLookupStale(t *testing.T) {
 	}
 }
 
+// TestFresh verifies the cache warmer's quiet probe: fresh positive and
+// negative entries report fresh (L1 hits without touching the hit/miss
+// counters), a miss and an expired entry report not-fresh, and the counters
+// stay untouched by probes.
+func TestFresh(t *testing.T) {
+	c := l1onlyCache(300*time.Millisecond, 50*time.Millisecond)
+	ctx := context.Background()
+
+	// Empty cache: not fresh, and the probe must not count as a miss.
+	if c.Fresh(aQuestion()) {
+		t.Fatal("empty cache reported fresh")
+	}
+	if h, m := c.L1Counters(); h != 0 || m != 0 {
+		t.Fatalf("Fresh probe counted: hits=%d misses=%d, want 0/0", h, m)
+	}
+
+	// A positive entry is fresh.
+	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
+	if !c.Fresh(aQuestion()) {
+		t.Fatal("fresh positive entry not reported fresh")
+	}
+	// A negative entry is fresh too.
+	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
+	if !c.Fresh(aQuestion()) {
+		t.Fatal("fresh negative entry not reported fresh")
+	}
+	if h, m := c.L1Counters(); h != 0 || m != 0 {
+		t.Fatalf("Fresh probe counted: hits=%d misses=%d, want 0/0", h, m)
+	}
+
+	// After expiry the entry is no longer fresh.
+	time.Sleep(400 * time.Millisecond)
+	if c.Fresh(aQuestion()) {
+		t.Fatal("expired entry reported fresh")
+	}
+}
+
 // TestPrefetchNearExpiry verifies a background refresh is scheduled when a
 // positive entry is served close to its cache-lifetime end, and that a fresh
 // entry with plenty of life left does not trigger one.

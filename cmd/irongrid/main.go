@@ -207,6 +207,15 @@ func main() {
 	}
 	// Cache-read budget on the hot path (cache.lookup_timeout; 0 = default).
 	dfly.SetLookupTimeout(cfg.Cache.LookupTimeout)
+	// Proactive cache warmer: scans the query log for the domains queried
+	// within the lookback window and pre-resolves them (A + AAAA) through
+	// the current upstreams into the cache, so a restart or cache flush
+	// doesn't leave the first query for each domain cold. A pass runs
+	// immediately at boot and then every interval. Gated on warmer.enabled
+	// (off by default — warming uses upstreams even when nobody is asking).
+	warmer := dnsserver.NewWarmer(handler, ql)
+	warmer.SetConfig(cfg.Warmer)
+	warmer.Start(ctx)
 	handler.SetRewriter(dnsserver.BuildRewriter(cfg.Rewrites))
 	handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
 	handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
@@ -285,6 +294,7 @@ func main() {
 		Catalog:    catalog.Default(),
 		StartedAt:  time.Now(),
 		Version:    version.Version,
+		Warmer:     warmer,
 	}
 	apiApp.Handler = apiHandler
 	// authorize/validSession/issueSession snapshot the auth fields under the

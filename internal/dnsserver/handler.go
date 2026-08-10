@@ -634,19 +634,21 @@ func raceUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*
 	return nil, "", lastErr
 }
 
-// Refresh re-resolves q via the current upstreams and re-caches the result.
-// It is the cache's prefetch callback: invoked in the background for hot
-// entries near the end of their lifetime so the next query finds a fresh
-// answer instead of paying an upstream round trip. Best-effort — failures
-// are dropped (the entry is expiring anyway and the normal resolution path
-// handles the next query).
-func (h *Handler) Refresh(ctx context.Context, q dns.Question) {
+// resolveAndCache re-resolves q through the current upstreams and re-caches
+// the result (positive or negative). It is shared by the cache's prefetch
+// callback (Refresh) and the proactive cache warmer, so both mechanisms
+// resolve through the exact same path — snapshotting the hot-swappable
+// upstreams and cache at call time.
+func (h *Handler) resolveAndCache(ctx context.Context, q dns.Question) error {
 	h.mu.RLock()
 	ups := h.Upstreams
 	cache := h.Cache
 	h.mu.RUnlock()
-	if len(ups) == 0 || cache == nil {
-		return
+	if len(ups) == 0 {
+		return fmt.Errorf("no upstreams configured")
+	}
+	if cache == nil {
+		return fmt.Errorf("no cache configured")
 	}
 	m := new(dns.Msg)
 	m.SetQuestion(q.Name, q.Qtype)
@@ -660,14 +662,34 @@ func (h *Handler) Refresh(ctx context.Context, q dns.Question) {
 	} else {
 		resp, _, err = raceUpstreams(ctx, ups, m)
 	}
-	if err != nil || resp == nil {
-		return
+	if err != nil {
+		return err
 	}
+	if resp == nil {
+		return fmt.Errorf("upstream returned no response")
+	}
+	// The cache write is bounded like the handler's hot path (3s): the
+	// caller's context may be the warmer's whole pass, and a stuck
+	// Dragonfly must not be able to block a worker (or a prefetch) behind
+	// it — the entry is disposable either way.
+	wctx, wcancel := context.WithTimeout(ctx, 3*time.Second)
+	defer wcancel()
 	if len(resp.Answer) > 0 {
-		cache.Set(ctx, q, resp, 0)
+		cache.Set(wctx, q, resp, 0)
 	} else {
-		cache.SetNegative(ctx, q, resp, 0)
+		cache.SetNegative(wctx, q, resp, 0)
 	}
+	return nil
+}
+
+// Refresh re-resolves q via the current upstreams and re-caches the result.
+// It is the cache's prefetch callback: invoked in the background for hot
+// entries near the end of their lifetime so the next query finds a fresh
+// answer instead of paying an upstream round trip. Best-effort — failures
+// are dropped (the entry is expiring anyway and the normal resolution path
+// handles the next query).
+func (h *Handler) Refresh(ctx context.Context, q dns.Question) {
+	_ = h.resolveAndCache(ctx, q)
 }
 
 // staleServeTTL caps the TTLs of a serve-stale answer (RFC 8767 section 5:

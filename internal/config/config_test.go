@@ -264,6 +264,61 @@ func TestGeoAutoUpdateDefault(t *testing.T) {
 	}
 }
 
+// TestWarmerDefaults verifies the cache warmer ships off with sane tunables:
+// off by default (warming generates upstream traffic), a 15m interval over a
+// 24h lookback, capped at 5000 domains per pass with 8-way concurrency.
+func TestWarmerDefaults(t *testing.T) {
+	c := Default()
+	if c.Warmer.Enabled {
+		t.Error("warmer.enabled should default to false (off = no upstream traffic)")
+	}
+	if c.Warmer.Interval != 15*time.Minute {
+		t.Errorf("warmer.interval = %v, want default 15m", c.Warmer.Interval)
+	}
+	if c.Warmer.Lookback != 24*time.Hour {
+		t.Errorf("warmer.lookback = %v, want default 24h", c.Warmer.Lookback)
+	}
+	if c.Warmer.MaxDomains != 5000 {
+		t.Errorf("warmer.max_domains = %d, want default 5000", c.Warmer.MaxDomains)
+	}
+	if c.Warmer.Concurrency != 8 {
+		t.Errorf("warmer.concurrency = %d, want default 8", c.Warmer.Concurrency)
+	}
+}
+
+// TestWarmerValidation verifies negative warmer values are rejected.
+func TestWarmerValidation(t *testing.T) {
+	c := validBase()
+	c.Warmer = WarmerConfig{Interval: -time.Minute}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "warmer.interval") {
+		t.Errorf("err = %v, want negative warmer.interval rejected", err)
+	}
+	c = validBase()
+	c.Warmer = WarmerConfig{Lookback: -time.Hour}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "warmer.lookback") {
+		t.Errorf("err = %v, want negative warmer.lookback rejected", err)
+	}
+	c = validBase()
+	c.Warmer = WarmerConfig{MaxDomains: -1}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "warmer.max_domains") {
+		t.Errorf("err = %v, want negative warmer.max_domains rejected", err)
+	}
+	c = validBase()
+	c.Warmer = WarmerConfig{Concurrency: -1}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "warmer.concurrency") {
+		t.Errorf("err = %v, want negative warmer.concurrency rejected", err)
+	}
+}
+
+// TestWarmerValid verifies a fully-configured warmer is accepted.
+func TestWarmerValid(t *testing.T) {
+	c := validBase()
+	c.Warmer = WarmerConfig{Enabled: true, Interval: 5 * time.Minute, Lookback: time.Hour, MaxDomains: 100, Concurrency: 4}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid warmer config rejected: %v", err)
+	}
+}
+
 func TestValidateDNS01SupportedProviders(t *testing.T) {
 	cases := []struct {
 		provider string

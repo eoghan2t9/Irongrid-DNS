@@ -91,6 +91,9 @@ type Handler struct {
 	Firewall   *firewall.Manager
 	RebuildGeo func(cfg config.GeoBlockConfig) error
 
+	// Warmer is the proactive cache warmer; nil when not wired (tests).
+	Warmer *dnsserver.Warmer
+
 	// lastInstalledVersion is set after a successful in-place update and
 	// cleared on restart (process exit). It guards against installing twice
 	// before the restart, which would clobber the .prev rollback copy.
@@ -166,6 +169,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.toolsSubdomains(ctx, w, r)
 	case len(parts) == 2 && parts[0] == "cache" && parts[1] == "flush" && r.Method == http.MethodPost:
 		h.flushCache(ctx, w)
+	case len(parts) == 2 && parts[0] == "cache" && parts[1] == "warm" && r.Method == http.MethodPost:
+		h.warmCache(w)
 	case len(parts) == 2 && parts[0] == "tunnel" && parts[1] == "status" && r.Method == http.MethodGet:
 		h.tunnelStatus(w)
 	case len(parts) == 2 && parts[0] == "tunnel" && parts[1] == "start" && r.Method == http.MethodPost:
@@ -336,6 +341,7 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 		"upstreams":    h.DNS.UpstreamHealth(),
 		"query_today":  bundle.Today,
 		"query_hourly": bundle.Hourly,
+		"warmer":       warmerSnapshot(h.Warmer),
 	})
 }
 
@@ -614,6 +620,31 @@ func (h *Handler) flushCache(ctx context.Context, w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, map[string]any{"ok": "flushed", "deleted": n})
 }
 
+// warmerSnapshot returns the warmer's stats (or an empty snapshot when no
+// warmer is wired) so the dashboard's card always gets the same JSON shape.
+func warmerSnapshot(w *dnsserver.Warmer) dnsserver.WarmerStats {
+	if w == nil {
+		return dnsserver.WarmerStats{}
+	}
+	return w.Snapshot()
+}
+
+// warmCache requests an immediate cache-warming pass (the dashboard's "Warm
+// now" action, e.g. right after flushing the cache). It only kicks the
+// background loop; the pass itself runs asynchronously.
+func (h *Handler) warmCache(w http.ResponseWriter) {
+	if h.Warmer == nil {
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "cache warmer not configured"})
+		return
+	}
+	if !h.Warmer.Enabled() {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cache warmer is disabled — enable it under Settings → Cache warmer first"})
+		return
+	}
+	h.Warmer.WarmNow()
+	writeJSON(w, http.StatusOK, map[string]any{"ok": "warming"})
+}
+
 // ---- tunnel ----
 
 type tunnelStartPayload struct {
@@ -674,6 +705,17 @@ type configPayload struct {
 	GeoBlock     geoBlockPayload      `json:"geo_block"`
 	Abuse        abusePayload         `json:"abuse"`
 	DNSSEC       dnssecPayload        `json:"dnssec"`
+	Warmer       warmerPayload        `json:"warmer"`
+}
+
+// warmerPayload is the JSON shape for the proactive cache warmer settings.
+// Durations are human strings ("15m"); empty means the built-in default.
+type warmerPayload struct {
+	Enabled     bool   `json:"enabled"`
+	Interval    string `json:"interval"`
+	Lookback    string `json:"lookback"`
+	MaxDomains  int    `json:"max_domains"`
+	Concurrency int    `json:"concurrency"`
 }
 
 type rewritePayload struct {
@@ -870,6 +912,13 @@ func payloadFromConfig(c *config.Config) configPayload {
 			Prefetch:      c.Cache.Prefetch,
 			LookupTimeout: durationOrEmpty(c.Cache.LookupTimeout),
 		},
+		Warmer: warmerPayload{
+			Enabled:     c.Warmer.Enabled,
+			Interval:    durationOrEmpty(c.Warmer.Interval),
+			Lookback:    durationOrEmpty(c.Warmer.Lookback),
+			MaxDomains:  c.Warmer.MaxDomains,
+			Concurrency: c.Warmer.Concurrency,
+		},
 		TLS: tlsPayload{
 			CertFile:           c.TLS.CertFile,
 			KeyFile:            c.TLS.KeyFile,
@@ -1001,6 +1050,14 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("geo_block.auto_update: %w", err)
 	}
+	warmerInterval, err := parseDur(p.Warmer.Interval)
+	if err != nil {
+		return nil, fmt.Errorf("warmer.interval: %w", err)
+	}
+	warmerLookback, err := parseDur(p.Warmer.Lookback)
+	if err != nil {
+		return nil, fmt.Errorf("warmer.lookback: %w", err)
+	}
 	// Friendly defaults when auto-block is switched on without explicit
 	// values: 3 violations then a 10-minute cooldown.
 	if p.RateLimit.AutoBlock {
@@ -1115,6 +1172,13 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			Enabled:   p.DNSSEC.Enabled,
 			RequireAD: p.DNSSEC.RequireAD,
 		},
+		Warmer: config.WarmerConfig{
+			Enabled:     p.Warmer.Enabled,
+			Interval:    warmerInterval,
+			Lookback:    warmerLookback,
+			MaxDomains:  p.Warmer.MaxDomains,
+			Concurrency: p.Warmer.Concurrency,
+		},
 	}
 	for _, rw := range p.Rewrites {
 		cfg.Rewrites = append(cfg.Rewrites, config.RewriteSpec{Domain: rw.Domain, Type: rw.Type, Value: rw.Value, TTL: rw.TTL})
@@ -1202,6 +1266,11 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	h.DNS.SetClientRouter(dnsserver.BuildClientRouter(cfg, h.Lists))
 	h.DNS.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
 	h.DNS.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
+	// The cache warmer is hot-swappable (a plain settings change, no
+	// listener rebind), so it is live-applied without marking a restart.
+	if h.Warmer != nil {
+		h.Warmer.SetConfig(cfg.Warmer)
+	}
 
 	oldSecret := h.Cfg.Web.SessionSecret
 	*h.Cfg = *cfg

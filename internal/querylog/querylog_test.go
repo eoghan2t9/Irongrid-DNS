@@ -319,6 +319,70 @@ func TestStats(t *testing.T) {
 	}
 }
 
+// TestActiveDomains verifies the cache warmer's domain source: unique
+// domains ordered by query count (ties alphabetical), only allowed/cached
+// actions counting (blocked/error entries are excluded), a result cap, and
+// an empty window.
+func TestActiveDomains(t *testing.T) {
+	l, _ := newTestLog(t, 30)
+	// a.com: 2 warmable hits (allowed + cached). b.com: blocked (excluded).
+	// c.com: 1 allowed + 1 error (the error must not count).
+	l.Record(entry("a.com.", "allowed"))
+	l.Record(entry("b.com.", "blocked"))
+	l.Record(entry("a.com.", "cached"))
+	l.Record(entry("c.com.", "allowed"))
+	l.Record(entry("c.com.", "error"))
+	waitFor(t, l, 5)
+
+	domains, err := l.ActiveDomains(context.Background(), time.Now().Add(-24*time.Hour), 0)
+	if err != nil {
+		t.Fatalf("ActiveDomains: %v", err)
+	}
+	want := []TopDomain{
+		{Domain: "a.com.", Count: 2},
+		{Domain: "c.com.", Count: 1},
+	}
+	if len(domains) != len(want) {
+		t.Fatalf("ActiveDomains returned %v, want %v", domains, want)
+	}
+	for i := range want {
+		if domains[i] != want[i] {
+			t.Fatalf("ActiveDomains[%d] = %+v, want %+v", i, domains[i], want[i])
+		}
+	}
+
+	// The cap keeps only the top-n by count (a.com is the busiest).
+	top1, err := l.ActiveDomains(context.Background(), time.Now().Add(-24*time.Hour), 1)
+	if err != nil {
+		t.Fatalf("ActiveDomains capped: %v", err)
+	}
+	if len(top1) != 1 || top1[0].Domain != "a.com." {
+		t.Fatalf("capped ActiveDomains = %v, want [a.com.]", top1)
+	}
+
+	// A window entirely in the future matches nothing.
+	none, err := l.ActiveDomains(context.Background(), time.Now().Add(time.Hour), 0)
+	if err != nil {
+		t.Fatalf("ActiveDomains future: %v", err)
+	}
+	if none == nil || len(none) != 0 {
+		t.Fatalf("future window ActiveDomains = %v, want empty slice", none)
+	}
+}
+
+// TestActiveDomainsDisabled verifies the no-store path returns an empty slice.
+func TestActiveDomainsDisabled(t *testing.T) {
+	l := NewDisabled(30)
+	defer l.Close()
+	domains, err := l.ActiveDomains(context.Background(), time.Now().Add(-time.Hour), 0)
+	if err != nil {
+		t.Fatalf("ActiveDomains: %v", err)
+	}
+	if len(domains) != 0 {
+		t.Fatalf("disabled log returned %d domains, want 0", len(domains))
+	}
+}
+
 // TestStatsCache verifies the aggregate TTL cache: a second call with the
 // same (quantized) window is served from the cache — an entry recorded
 // between the two calls is not reflected — while a different window
