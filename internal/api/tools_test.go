@@ -12,6 +12,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
@@ -75,6 +76,8 @@ func postTools(t *testing.T, h *Handler, path, body string) (int, []byte) {
 		h.toolsAXFR(context.Background(), rr, req)
 	case "/api/tools/subdomains":
 		h.toolsSubdomains(context.Background(), rr, req)
+	case "/api/tools/fastest":
+		h.toolsFastest(context.Background(), rr, req)
 	}
 	return rr.Code, rr.Body.Bytes()
 }
@@ -359,6 +362,93 @@ func TestToolsAXFRRefused(t *testing.T) {
 	}
 	if len(res.Nameservers) == 0 || res.Nameservers[0].AXFR {
 		t.Errorf("expected refused transfer, got %+v", res.Nameservers)
+	}
+}
+
+// startDelayedUDPDNS runs a UDP DNS server that sleeps before answering — a
+// controllable-latency probe target for the fastest-upstream benchmark.
+func startDelayedUDPDNS(t *testing.T, delay time.Duration) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+		time.Sleep(delay)
+		m := new(dns.Msg)
+		m.SetReply(req)
+		m.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("1.2.3.4")}}
+		_ = w.WriteMsg(m)
+	})}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = pc.Close() })
+	return pc.LocalAddr().String()
+}
+
+// TestToolsFastest verifies the benchmark ranks reachable resolvers by
+// measured latency, flags already-configured specs as in_use, and reports
+// unreachable candidates with an error instead of dropping them.
+func TestToolsFastest(t *testing.T) {
+	fastAddr := startUDPDNS(t, map[string][]dns.RR{
+		"example.com.|A": {&dns.A{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("1.2.3.4")}},
+	})
+	slowAddr := startDelayedUDPDNS(t, 120*time.Millisecond)
+	// A dead address: bind a port then release it, so dialing fails fast.
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadAddr := pc.LocalAddr().String()
+	pc.Close()
+
+	oldList, oldRounds := fastestResolvers, fastestProbeRounds
+	fastestResolvers = []fastestResolver{
+		{"Slow", "udp://" + slowAddr},
+		{"Fast", "udp://" + fastAddr},
+		{"Dead", "udp://" + deadAddr},
+	}
+	fastestProbeRounds = 1
+	defer func() { fastestResolvers, fastestProbeRounds = oldList, oldRounds }()
+
+	h := handlerFor(t, fastAddr)
+	h.Cfg = &config.Config{Upstreams: []string{"udp://" + fastAddr}}
+
+	code, body := postTools(t, h, "/api/tools/fastest", `{}`)
+	if code != http.StatusOK {
+		t.Fatalf("status %d: %s", code, body)
+	}
+	var res struct {
+		Query   string          `json:"query"`
+		Results []fastestResult `json:"results"`
+	}
+	if err := json.Unmarshal(body, &res); err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Results) != 3 {
+		t.Fatalf("results = %d, want 3", len(res.Results))
+	}
+	// Fast (0ms) must rank above Slow (120ms); the dead one last with error.
+	if res.Results[0].Label != "Fast" || res.Results[0].Error != "" {
+		t.Errorf("first = %+v, want Fast with no error", res.Results[0])
+	}
+	if res.Results[0].LatencyMS >= res.Results[1].LatencyMS {
+		t.Errorf("fast latency %dms not below slow %dms", res.Results[0].LatencyMS, res.Results[1].LatencyMS)
+	}
+	if res.Results[1].Label != "Slow" {
+		t.Errorf("second = %+v, want Slow", res.Results[1])
+	}
+	if res.Results[2].Label != "Dead" || res.Results[2].Error == "" {
+		t.Errorf("third = %+v, want Dead with error", res.Results[2])
+	}
+	// The configured spec must be flagged in_use.
+	inUse := false
+	for _, r := range res.Results {
+		if r.Spec == "udp://"+fastAddr && r.InUse {
+			inUse = true
+		}
+	}
+	if !inUse {
+		t.Errorf("configured upstream not flagged in_use: %+v", res.Results)
 	}
 }
 

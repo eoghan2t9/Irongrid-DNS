@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/miekg/dns"
@@ -24,6 +26,50 @@ var publicResolvers = []struct{ label, spec string }{
 	{"google", "udp://8.8.8.8:53"},
 	{"quad9", "udp://9.9.9.9:53"},
 }
+
+// fastestResolver is one candidate the "find fastest upstreams" tool
+// benchmarks from this server.
+type fastestResolver struct{ label, spec string }
+
+// fastestResolvers is the curated pool the Settings → Upstreams benchmark
+// probes. It covers the major public resolver networks in their plain (UDP),
+// encrypted (DoT) and DoH forms — including the encrypted variants, since a
+// DoT/DoH handshake is a real per-connection cost the server pays. A
+// variable so tests can point it at local test servers.
+var fastestResolvers = []fastestResolver{
+	{"Cloudflare (UDP)", "udp://1.1.1.1:53"},
+	{"Cloudflare (DoT)", "tls://1.1.1.1:853"},
+	{"Cloudflare (DoH)", "https://cloudflare-dns.com/dns-query"},
+	{"Google (UDP)", "udp://8.8.8.8:53"},
+	{"Google (DoT)", "tls://8.8.8.8:853"},
+	{"Google (DoH)", "https://dns.google/dns-query"},
+	{"Quad9 (UDP)", "udp://9.9.9.9:53"},
+	{"Quad9 (DoT)", "tls://dns.quad9.net:853"},
+	{"Quad9 (DoH)", "https://dns.quad9.net/dns-query"},
+	{"OpenDNS (UDP)", "udp://208.67.222.222:53"},
+	{"AdGuard (UDP)", "udp://94.140.14.14:53"},
+	{"AdGuard (DoT)", "tls://dns.adguard-dns.com:853"},
+	{"NextDNS (UDP)", "udp://45.90.28.167:53"},
+	{"NextDNS (DoT)", "tls://dns.nextdns.io:853"},
+	{"UncensoredDNS (UDP)", "udp://91.239.100.100:53"},
+	{"Verisign (UDP)", "udp://64.6.64.6:53"},
+	{"Comodo (UDP)", "udp://8.26.56.26:53"},
+	{"Yandex (UDP)", "udp://77.88.8.8:53"},
+}
+
+// fastestProbeRounds is how many latency samples each candidate gets; the
+// best (lowest) wins. The first DoT/DoH round includes the TLS handshake, so
+// several rounds approximate steady-state latency. A variable so tests can
+// run a single round.
+var fastestProbeRounds = 3
+
+// fastestProbeTimeout bounds one probe round; fastestMaxConcurrent caps how
+// many resolvers are probed in parallel (each probe is a goroutine + socket,
+// and a firewalled candidate can sit out its full timeout).
+const (
+	fastestProbeTimeout    = 2 * time.Second
+	fastestMaxConcurrent   = 6
+)
 
 // rblZones are the DNS-based reputation blocklists the RBL tool queries. A
 // listing shows up as an A record in the reversed-IP form of these zones.
@@ -88,6 +134,132 @@ func (h *Handler) resolveAny(ctx context.Context, name string, qtype uint16) (*d
 		lastErr = err
 	}
 	return nil, lastErr
+}
+
+// ---- fastest upstream benchmark ----
+
+type fastestResult struct {
+	Label     string `json:"label"`
+	Transport string `json:"transport"`
+	Spec      string `json:"spec"`
+	LatencyMS int64  `json:"latency_ms"`
+	InUse     bool   `json:"in_use"`
+	Error     string `json:"error"`
+}
+
+// toolsFastest benchmarks the curated public resolver list from this server
+// and returns them sorted by measured latency, so the Settings page can offer
+// one-click addition of the fastest upstreams for the server's location. Each
+// candidate is probed with a real DNS query (example.com A); the best of
+// fastestProbeRounds wins. Results already in the configured upstreams are
+// flagged in_use, and unreachable candidates are reported (last) with their
+// error rather than silently dropped.
+func (h *Handler) toolsFastest(ctx context.Context, w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(ctx, toolsTimeout)
+	defer cancel()
+
+	inUse := map[string]bool{}
+	h.cfgMu.Lock()
+	if h.Cfg != nil {
+		for _, s := range h.Cfg.Upstreams {
+			s = strings.ToLower(strings.TrimSpace(s))
+			inUse[s] = true
+			// Also index the canonical form (Parse fills default ports/schemes),
+			// so a configured "1.1.1.1" or "tls://1.1.1.1" still matches the
+			// canonical "udp://1.1.1.1:53" / "tls://1.1.1.1:853" candidates.
+			if up, err := upstream.Parse(s); err == nil {
+				inUse[strings.ToLower(up.Name())] = true
+			}
+		}
+	}
+	h.cfgMu.Unlock()
+
+	out := make([]fastestResult, len(fastestResolvers))
+	sem := make(chan struct{}, fastestMaxConcurrent)
+	var wg sync.WaitGroup
+	for i, cand := range fastestResolvers {
+		wg.Add(1)
+		go func(i int, cand fastestResolver) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			res := fastestResult{
+				Label:     cand.label,
+				Transport: strings.SplitN(cand.spec, "://", 2)[0],
+				Spec:      cand.spec,
+				InUse:     inUse[strings.ToLower(cand.spec)],
+			}
+			up, err := upstream.Parse(cand.spec)
+			if err != nil {
+				res.Error = err.Error()
+				out[i] = res
+				return
+			}
+			// DoT/TCP probes pool warm connections; close them so a benchmark
+			// run doesn't leave idle sockets behind for the process lifetime.
+			defer up.Close()
+
+			var best time.Duration
+			var lastErr error
+			for round := 0; round < fastestProbeRounds; round++ {
+				if ctx.Err() != nil {
+					break
+				}
+				m := new(dns.Msg)
+				m.SetQuestion("example.com.", dns.TypeA)
+				m.RecursionDesired = true
+				pctx, pcancel := context.WithTimeout(ctx, fastestProbeTimeout)
+				start := time.Now()
+				resp, qerr := up.Query(pctx, m)
+				pcancel()
+				if qerr != nil {
+					lastErr = qerr
+					// A timeout is transient (retry); a hard error like a dial
+					// refusal or no-route won't fix itself next round, and
+					// burning the remaining rounds keeps the whole benchmark
+					// near its 25s budget when several hosts are firewalled.
+					var ne net.Error
+					if errors.As(qerr, &ne) && ne.Timeout() {
+						continue
+					}
+					break
+				}
+				if resp == nil || resp.Rcode == dns.RcodeServerFailure {
+					lastErr = fmt.Errorf("rcode %s", dns.RcodeToString[dns.RcodeServerFailure])
+					continue
+				}
+				d := time.Since(start)
+				if best == 0 || d < best {
+					best = d
+				}
+			}
+			if best > 0 {
+				res.LatencyMS = best.Milliseconds()
+			} else {
+				if lastErr == nil {
+					lastErr = fmt.Errorf("no usable response")
+				}
+				res.Error = lastErr.Error()
+			}
+			out[i] = res
+		}(i, cand)
+	}
+	wg.Wait()
+
+	// Reachable candidates first, sorted by latency; failures last.
+	sort.Slice(out, func(i, j int) bool {
+		ei, ej := out[i].Error != "", out[j].Error != ""
+		if ei != ej {
+			return !ei
+		}
+		if ei {
+			return out[i].Label < out[j].Label
+		}
+		return out[i].LatencyMS < out[j].LatencyMS
+	})
+
+	writeJSON(w, http.StatusOK, map[string]any{"query": "example.com", "type": "A", "results": out})
 }
 
 // ---- resolve (lookup + propagation) ----

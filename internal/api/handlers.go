@@ -167,6 +167,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.toolsAXFR(ctx, w, r)
 	case len(parts) == 2 && parts[0] == "tools" && parts[1] == "subdomains" && r.Method == http.MethodPost:
 		h.toolsSubdomains(ctx, w, r)
+	case len(parts) == 2 && parts[0] == "tools" && parts[1] == "fastest" && r.Method == http.MethodPost:
+		h.toolsFastest(ctx, w, r)
 	case len(parts) == 2 && parts[0] == "cache" && parts[1] == "flush" && r.Method == http.MethodPost:
 		h.flushCache(ctx, w)
 	case len(parts) == 2 && parts[0] == "cache" && parts[1] == "warm" && r.Method == http.MethodPost:

@@ -35,6 +35,9 @@ export default function Settings({ onSessionInvalidated }) {
   const [diagName, setDiagName] = useState('example.com')
   const [diagType, setDiagType] = useState('A')
   const [diagResult, setDiagResult] = useState(null)
+  const [fastest, setFastest] = useState(null)
+  const [fastestBusy, setFastestBusy] = useState(false)
+  const [fastestErr, setFastestErr] = useState('')
   const [blocked, setBlocked] = useState([])
   const [geoInfo, setGeoInfo] = useState({ enabled: false, countries: [] })
   const [honeyBlocked, setHoneyBlocked] = useState([])
@@ -227,6 +230,46 @@ export default function Settings({ onSessionInvalidated }) {
     }
   }
 
+  // findFastest benchmarks the major public resolvers from this server and
+  // ranks them by real lookup latency, so the fastest upstreams for the
+  // server's location can be added with one click.
+  const findFastest = async () => {
+    setFastestBusy(true)
+    setFastestErr('')
+    try {
+      setFastest(await api.toolsFastest())
+    } catch (e) {
+      setFastestErr(e.message)
+    } finally {
+      setFastestBusy(false)
+    }
+  }
+
+  const addUpstream = (spec) => {
+    if ((cfg.upstreams || []).includes(spec)) return
+    set('upstreams', [...(cfg.upstreams || []), spec])
+    toast(`Added ${spec} — save to apply`)
+    // Flip the row to "in use" locally so the table reflects the add without
+    // a re-benchmark (authoritative state follows on save).
+    setFastest((f) => f && { ...f, results: f.results.map((r) => (r.spec === spec ? { ...r, in_use: true } : r)) })
+  }
+
+  const addFastestTop = (n) => {
+    const picks = (fastest?.results || []).filter((r) => !r.error && !r.in_use).slice(0, n).map((r) => r.spec)
+    const fresh = picks.filter((s) => !(cfg.upstreams || []).includes(s))
+    if (!fresh.length) {
+      toast('Fastest resolvers are already in your upstreams', 'error')
+      return
+    }
+    set('upstreams', [...(cfg.upstreams || []), ...fresh])
+    toast(`Added ${fresh.length} fast upstream${fresh.length > 1 ? 's' : ''} — save to apply`)
+    // Mark the picks in_use locally so the table reflects them without a
+    // re-benchmark (the authoritative state follows on save).
+    setFastest((f) => f && { ...f, results: f.results.map((r) => (picks.includes(r.spec) ? { ...r, in_use: true } : r)) })
+  }
+
+  const transportLabel = (t) => ({ udp: 'plain UDP', tls: 'DNS-over-TLS', https: 'DNS-over-HTTPS' }[t] || t)
+
   if (!cfg) return <div className="loading">Loading configuration…</div>
 
   const field = (label, hint, input) => (
@@ -354,6 +397,66 @@ export default function Settings({ onSessionInvalidated }) {
         <div className="form-grid">
           {text('Recursive per-server timeout', 'recursive.server_timeout', 'how long a recursive:// walk waits on one nameserver before moving on; empty = 3s built-in default', '3s')}
         </div>
+        <div className="row-between" style={{ marginTop: 16 }}>
+          <h4 style={{ margin: 0, fontSize: 13 }}>Find the fastest upstreams for this server</h4>
+          <button className="btn small" type="button" onClick={findFastest} disabled={fastestBusy}>
+            {fastestBusy ? 'Benchmarking…' : 'Benchmark public resolvers'}
+          </button>
+        </div>
+        <p className="dim small" style={{ marginTop: 4 }}>
+          Measures real lookup latency from this server to the major public resolvers (plain UDP, DoT and DoH) and ranks
+          them — the fastest for your location win. One click adds them to the list above; save to apply.
+        </p>
+        {fastestErr && <div className="error-banner" style={{ marginTop: 8 }}>{fastestErr}</div>}
+        {fastest && (
+          <div style={{ marginTop: 10 }}>
+            <div className="row-between">
+              <span className="dim small">
+                probe <span className="mono">{fastest.query}</span> {fastest.type} · best of 3
+              </span>
+              <button className="btn small" type="button" onClick={() => addFastestTop(3)} disabled={!fastest.results.some((r) => !r.error && !r.in_use)}>
+                Add fastest 3
+              </button>
+            </div>
+            <div style={{ maxHeight: 320, overflowY: 'auto', marginTop: 6 }}>
+              <table className="table">
+                <thead>
+                  <tr><th>#</th><th>Resolver</th><th>Endpoint</th><th>Latency</th><th className="action-col"></th></tr>
+                </thead>
+                <tbody>
+                  {fastest.results.map((res, i) => {
+                    const lat = res.error ? null : res.latency_ms
+                    const latColor = lat == null ? null : lat < 15 ? 'var(--emerald)' : lat < 60 ? 'var(--cyan)' : 'var(--amber)'
+                    return (
+                      <tr key={res.spec}>
+                        <td className="dim mono">{i + 1}</td>
+                        <td>
+                          <div className="strong">{res.label}</div>
+                          <div className="dim small">{transportLabel(res.transport)}</div>
+                        </td>
+                        <td className="mono">{res.spec}</td>
+                        <td>
+                          {lat == null ? (
+                            <span className="badge badge-error" title={res.error}>unreachable</span>
+                          ) : (
+                            <span className="mono" style={{ color: latColor, fontWeight: 650 }}>{lat} ms</span>
+                          )}
+                        </td>
+                        <td className="action-col">
+                          {res.in_use ? (
+                            <span className="badge badge-cached">in use</span>
+                          ) : lat == null ? null : (
+                            <button className="btn small" type="button" onClick={() => addUpstream(res.spec)}>Add</button>
+                          )}
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
       </div>
 
       <div className="card">

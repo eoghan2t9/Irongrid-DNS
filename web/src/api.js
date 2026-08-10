@@ -98,6 +98,7 @@ export const api = {
   toolsRBL: (ip) => request('/api/tools/rbl', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) }),
   toolsAXFR: (domain) => request('/api/tools/axfr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain }) }),
   toolsSubdomains: (domain) => request('/api/tools/subdomains', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain }) }),
+  toolsFastest: () => request('/api/tools/fastest', { method: 'POST' }),
   flushCache: () => request('/api/cache/flush', { method: 'POST' }),
   warmCache: () => request('/api/cache/warm', { method: 'POST' }),
   rateBlocked: () => request('/api/rate/blocked'),
