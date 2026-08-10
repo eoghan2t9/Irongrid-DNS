@@ -38,6 +38,11 @@ export default function Settings({ onSessionInvalidated }) {
   const [fastest, setFastest] = useState(null)
   const [fastestBusy, setFastestBusy] = useState(false)
   const [fastestErr, setFastestErr] = useState('')
+  // benchmarkAdded tracks the specs added from the benchmark that haven't
+  // been saved yet, so an unsaved change can't silently vanish (or be
+  // forgotten). Tracked as a list (not a count) so the banner stays accurate
+  // if the user manually removes one of the added entries again.
+  const [benchmarkAdded, setBenchmarkAdded] = useState([])
   const [blocked, setBlocked] = useState([])
   const [geoInfo, setGeoInfo] = useState({ enabled: false, countries: [] })
   const [honeyBlocked, setHoneyBlocked] = useState([])
@@ -48,6 +53,9 @@ export default function Settings({ onSessionInvalidated }) {
       setCfg(c)
       setInitialUser((c.web && c.web.username) || '')
     } catch { /* ignore */ }
+    // A fresh load reflects the authoritative config, so any unsaved
+    // benchmark adds are gone (or saved) — clear the tracking.
+    setBenchmarkAdded([])
   }, [])
 
   const loadAbuse = useCallback(async () => {
@@ -127,6 +135,7 @@ export default function Settings({ onSessionInvalidated }) {
           : 'Saved and applied live — no restart required.'
       )
       setDirty(false)
+      setBenchmarkAdded([])
       await load()
       await loadAbuse()
     } catch (e) {
@@ -248,6 +257,7 @@ export default function Settings({ onSessionInvalidated }) {
   const addUpstream = (spec) => {
     if ((cfg.upstreams || []).includes(spec)) return
     set('upstreams', [...(cfg.upstreams || []), spec])
+    setBenchmarkAdded((arr) => [...new Set([...arr, spec])])
     toast(`Added ${spec} — save to apply`)
     // Flip the row to "in use" locally so the table reflects the add without
     // a re-benchmark (authoritative state follows on save).
@@ -262,6 +272,7 @@ export default function Settings({ onSessionInvalidated }) {
       return
     }
     set('upstreams', [...(cfg.upstreams || []), ...fresh])
+    setBenchmarkAdded((arr) => [...new Set([...arr, ...fresh])])
     toast(`Added ${fresh.length} fast upstream${fresh.length > 1 ? 's' : ''} — save to apply`)
     // Mark the picks in_use locally so the table reflects them without a
     // re-benchmark (the authoritative state follows on save).
@@ -269,6 +280,10 @@ export default function Settings({ onSessionInvalidated }) {
   }
 
   const transportLabel = (t) => ({ udp: 'plain UDP', tls: 'DNS-over-TLS', https: 'DNS-over-HTTPS' }[t] || t)
+
+  // Specs added from the benchmark that are still in the (unsaved) upstream
+  // list — manual removals drop out of the count automatically.
+  const pendingBenchmarkAdds = (benchmarkAdded || []).filter((s) => (cfg.upstreams || []).includes(s)).length
 
   if (!cfg) return <div className="loading">Loading configuration…</div>
 
@@ -407,6 +422,12 @@ export default function Settings({ onSessionInvalidated }) {
           Measures real lookup latency from this server to the major public resolvers (plain UDP, DoT and DoH) and ranks
           them — the fastest for your location win. One click adds them to the list above; save to apply.
         </p>
+        {pendingBenchmarkAdds > 0 && (
+          <div className="info-banner" style={{ marginTop: 8 }}>
+            ⚠ {pendingBenchmarkAdds} upstream{pendingBenchmarkAdds === 1 ? ' was' : 's were'} added from the benchmark but
+            not saved yet — click <strong>Save &amp; apply</strong> at the top of this page to make it live.
+          </div>
+        )}
         {fastestErr && <div className="error-banner" style={{ marginTop: 8 }}>{fastestErr}</div>}
         {fastest && (
           <div style={{ marginTop: 10 }}>
