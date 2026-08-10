@@ -695,6 +695,7 @@ func (h *Handler) tunnelLog(w http.ResponseWriter) {
 type configPayload struct {
 	Server       serverPayload        `json:"server"`
 	Upstreams    []string             `json:"upstreams"`
+	UpstreamMode string               `json:"upstream_mode"` // "race" | "sequential"
 	Cache        cachePayload         `json:"cache"`
 	TLS          tlsPayload           `json:"tls"`
 	Filter       filterPayload        `json:"filter"`
@@ -913,7 +914,8 @@ func payloadFromConfig(c *config.Config) configPayload {
 			WebRedirectPort: c.Server.WebRedirectPort,
 			TimeoutSec:      c.Server.TimeoutSec,
 		},
-		Upstreams: c.Upstreams,
+		Upstreams:    c.Upstreams,
+		UpstreamMode: c.UpstreamMode,
 		Cache: cachePayload{
 			Addr:          c.Cache.Addr,
 			Password:      c.Cache.Password,
@@ -1106,7 +1108,8 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			WebRedirectPort: p.Server.WebRedirectPort,
 			TimeoutSec:      p.Server.TimeoutSec,
 		},
-		Upstreams: p.Upstreams,
+		Upstreams:    p.Upstreams,
+		UpstreamMode: p.UpstreamMode,
 		Cache: config.CacheConfig{
 			Addr:          p.Cache.Addr,
 			Password:      p.Cache.Password,
@@ -1281,6 +1284,9 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 		h.DNS.SetUpstreams(ups)
 		h.Upstreams = ups
 	}
+	// The resolution strategy is a cheap, side-effect-free hot-swap, applied
+	// unconditionally like the other live policy knobs.
+	h.DNS.SetUpstreamMode(cfg.UpstreamMode)
 	h.DNS.SetBlockPolicy(cfg.Filter.BlockResponse, cfg.Filter.BlockTTL)
 	h.DNS.SetTimeout(time.Duration(cfg.Server.TimeoutSec) * time.Second)
 	h.DNS.SetFailureTTL(cfg.Cache.FailureTTL)

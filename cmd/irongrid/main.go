@@ -228,6 +228,9 @@ func main() {
 	handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
 	handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
 	handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
+	// Multi-upstream resolution strategy (config upstream_mode: race or
+	// sequential). NewHandler defaults to race; apply the configured value.
+	handler.SetUpstreamMode(cfg.UpstreamMode)
 	// Rebuild per-client-group engines whenever blocklist content changes
 	// (auto-refresh ticker, manual "refresh all lists") — they're built from
 	// the same cached content the global engine uses.
@@ -761,6 +764,7 @@ func main() {
 		//    the new TLS config, so this only changes cache/upstreams/policy.
 		handler.SetCache(newCache)
 		handler.SetUpstreams(newUps)
+		handler.SetUpstreamMode(cfg.UpstreamMode)
 		handler.SetBlockPolicy(cfg.Filter.BlockResponse, cfg.Filter.BlockTTL)
 		handler.SetTimeout(time.Duration(cfg.Server.TimeoutSec) * time.Second)
 		handler.SetFailureTTL(cfg.Cache.FailureTTL)

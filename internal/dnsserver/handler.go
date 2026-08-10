@@ -23,6 +23,16 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
 
+// Upstream resolution strategies for multiple upstreams (config
+// upstream_mode). Race (default) queries every available upstream
+// concurrently and uses the fastest successful answer; sequential tries them
+// in list order, failing over to the next only when the previous errors or
+// answers SERVFAIL.
+const (
+	UpstreamModeRace       = "race"
+	UpstreamModeSequential = "sequential"
+)
+
 // Stats aggregates runtime counters exposed via the API.
 type Stats struct {
 	Total   atomic.Int64
@@ -54,6 +64,7 @@ type Handler struct {
 	// config changes without a restart.
 	mu            sync.RWMutex
 	Upstreams     []*upstream.Upstream
+	UpstreamMode  string // "race" or "sequential" (see UpstreamModeRace/Sequential)
 	BlockResponse string
 	BlockTTL      uint32
 	Timeout       time.Duration
@@ -88,6 +99,7 @@ func NewHandler(engine *filter.Engine, c *cache.Cache, ups []*upstream.Upstream,
 		Engine:        engine,
 		Cache:         c,
 		Upstreams:     ups,
+		UpstreamMode:  UpstreamModeRace,
 		Log:           ql,
 		BlockResponse: blockResp,
 		BlockTTL:      blockTTL,
@@ -151,6 +163,15 @@ func (h *Handler) SetTimeout(d time.Duration) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.Timeout = d
+}
+
+// SetUpstreamMode hot-swaps the multi-upstream resolution strategy
+// (UpstreamModeRace queries every upstream at once and uses the fastest
+// answer; UpstreamModeSequential tries them in list order, failing over).
+func (h *Handler) SetUpstreamMode(mode string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.UpstreamMode = mode
 }
 
 // SetFailureTTL hot-swaps how long a resolution failure is negatively
@@ -255,6 +276,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	// Snapshot hot-swappable settings once so the pipeline below is race-free.
 	h.mu.RLock()
 	upstreams := h.Upstreams
+	upstreamMode := h.UpstreamMode
 	blockResp := h.BlockResponse
 	blockTTL := h.BlockTTL
 	timeout := h.Timeout
@@ -436,16 +458,18 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		}
 	}
 
-	// 5. Forward to upstreams. Multiple upstreams are raced concurrently so
-	// the fastest healthy one answers; a single upstream is queried
-	// directly to avoid goroutine overhead. The outgoing query always
-	// advertises EDNS0 (4096 bytes; the DO bit only when DNSSEC is
-	// enabled) — without it the upstream caps its UDP answer at 512 bytes
-	// and large records fall back to a TCP round trip. The query is copied
-	// so the client's message is never mutated. Upstreams whose circuit is
-	// open (consecutive failures inside the cooldown window) are skipped so
-	// a dead server can't burn its full timeout on every query; a single
-	// upstream in cooldown fails fast into serve-stale/SERVFAIL below.
+	// 5. Forward to upstreams according to the configured strategy: race
+	// (default) queries every available upstream concurrently and uses the
+	// fastest healthy answer; sequential tries them in list order and fails
+	// over. A single upstream is queried directly to avoid goroutine
+	// overhead. The outgoing query always advertises EDNS0 (4096 bytes; the
+	// DO bit only when DNSSEC is enabled) — without it the upstream caps its
+	// UDP answer at 512 bytes and large records fall back to a TCP round
+	// trip. The query is copied so the client's message is never mutated.
+	// Upstreams whose circuit is open (consecutive failures inside the
+	// cooldown window) are skipped so a dead server can't burn its full
+	// timeout on every query; a single upstream in cooldown fails fast into
+	// serve-stale/SERVFAIL below.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	upstreamQuery := r.Copy()
@@ -470,31 +494,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		usedUp string
 		err    error
 	)
-	if len(upstreams) == 1 {
-		if upstreams[0].Available() {
-			resp, err = upstreams[0].Query(ctx, upstreamQuery)
-			if err == nil && resp != nil {
-				usedUp = upstreams[0].Name()
-			} else if err != nil {
-				log.Printf("[dns] upstream %s failed: %v", upstreams[0].Name(), err)
-			}
-		} else {
-			usedUp = upstreams[0].Name()
-			err = fmt.Errorf("upstream %s in failure cooldown", upstreams[0].Name())
-		}
-	} else {
-		avail := make([]*upstream.Upstream, 0, len(upstreams))
-		for _, u := range upstreams {
-			if u.Available() {
-				avail = append(avail, u)
-			}
-		}
-		if len(avail) == 0 {
-			err = fmt.Errorf("all upstreams in failure cooldown")
-		} else {
-			resp, usedUp, err = raceUpstreams(ctx, avail, upstreamQuery)
-		}
-	}
+	resp, usedUp, err = queryUpstreams(ctx, upstreams, upstreamMode, upstreamQuery)
 	// RFC 8767: an upstream that *answers* SERVFAIL is also a resolution
 	// failure — serve stale rather than propagating the failure.
 	if err == nil && resp != nil && resp.Rcode == dns.RcodeServerFailure && stale != nil {
@@ -644,6 +644,89 @@ func answerIPs(m *dns.Msg) []net.IP {
 	return ips
 }
 
+// queryUpstreams forwards r to the upstream set according to the resolution
+// strategy (mode). A single upstream is queried directly to avoid goroutine
+// overhead. With several, UpstreamModeRace races them all concurrently (first
+// success wins) and UpstreamModeSequential tries them in list order, failing
+// over to the next on error or SERVFAIL. Upstreams whose circuit breaker is
+// open (consecutive failures inside the cooldown window) are skipped in the
+// multi-upstream modes so a dead server can't burn its full timeout on every
+// query; a single upstream in cooldown fails fast into serve-stale/SERVFAIL
+// below.
+func queryUpstreams(ctx context.Context, upstreams []*upstream.Upstream, mode string, r *dns.Msg) (*dns.Msg, string, error) {
+	if mode == "" {
+		mode = UpstreamModeRace
+	}
+	if len(upstreams) == 1 {
+		u := upstreams[0]
+		if !u.Available() {
+			return nil, u.Name(), fmt.Errorf("upstream %s in failure cooldown", u.Name())
+		}
+		resp, err := u.Query(ctx, r)
+		if err != nil {
+			log.Printf("[dns] upstream %s failed: %v", u.Name(), err)
+			return nil, "", err
+		}
+		return resp, u.Name(), nil
+	}
+	avail := make([]*upstream.Upstream, 0, len(upstreams))
+	for _, u := range upstreams {
+		if u.Available() {
+			avail = append(avail, u)
+		}
+	}
+	if len(avail) == 0 {
+		return nil, "", fmt.Errorf("all upstreams in failure cooldown")
+	}
+	if mode == UpstreamModeSequential {
+		return sequentialUpstreams(ctx, avail, r)
+	}
+	return raceUpstreams(ctx, avail, r)
+}
+
+// sequentialUpstreams tries each upstream in list order and returns the first
+// real answer — classic failover. A SERVFAIL answer counts as a failure and
+// moves on to the next upstream (that's the point: a primary that is
+// SERVFAILing must not mask a working backup); if every upstream fails or
+// SERVFAILs, the last SERVFAIL response is returned so the caller can serve
+// stale / cache the failure exactly as it would for a single upstream that
+// answered SERVFAIL.
+func sequentialUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*dns.Msg, string, error) {
+	var (
+		lastErr    error
+		lastFail   *dns.Msg
+		lastFailUp string
+	)
+	for _, up := range ups {
+		if ctx.Err() != nil {
+			break
+		}
+		resp, err := up.Query(ctx, r.Copy())
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if resp == nil {
+			lastErr = fmt.Errorf("upstream %s returned no response", up.Name())
+			continue
+		}
+		if resp.Rcode == dns.RcodeServerFailure {
+			lastFail, lastFailUp = resp, up.Name()
+			lastErr = fmt.Errorf("upstream %s answered SERVFAIL", up.Name())
+			continue
+		}
+		return resp, up.Name(), nil
+	}
+	if lastFail != nil {
+		return lastFail, lastFailUp, nil
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no upstream returned a response")
+	}
+	log.Printf("[dns] all upstreams failed: %v", lastErr)
+	return nil, "", lastErr
+}
+
 // raceUpstreams queries every upstream concurrently and returns the first
 // successful response, hiding slow or down upstreams behind the fastest one.
 // On success the shared context is cancelled so the losing queries abort
@@ -699,6 +782,7 @@ func (h *Handler) resolveAndCache(ctx context.Context, q dns.Question) error {
 	h.mu.RLock()
 	ups := h.Upstreams
 	cache := h.Cache
+	mode := h.UpstreamMode
 	h.mu.RUnlock()
 	if len(ups) == 0 {
 		return fmt.Errorf("no upstreams configured")
@@ -709,15 +793,10 @@ func (h *Handler) resolveAndCache(ctx context.Context, q dns.Question) error {
 	m := new(dns.Msg)
 	m.SetQuestion(q.Name, q.Qtype)
 	m.RecursionDesired = true
-	var (
-		resp *dns.Msg
-		err  error
-	)
-	if len(ups) == 1 {
-		resp, err = ups[0].Query(ctx, m)
-	} else {
-		resp, _, err = raceUpstreams(ctx, ups, m)
-	}
+	// The same strategy the query path uses (race by default) applies to
+	// prefetch and warmer resolutions, so a sequential-mode deployment
+	// always talks to the primary first, never fanning out.
+	resp, _, err := queryUpstreams(ctx, ups, mode, m)
 	if err != nil {
 		return err
 	}

@@ -6,6 +6,30 @@ import (
 	"time"
 )
 
+// TestValidateUpstreamMode verifies the resolution strategy accepts race and
+// sequential, defaults an empty value to race, and rejects anything else.
+func TestValidateUpstreamMode(t *testing.T) {
+	c := validBase()
+	c.UpstreamMode = ""
+	if err := c.Validate(); err != nil {
+		t.Fatalf("empty upstream_mode: %v", err)
+	}
+	if c.UpstreamMode != "race" {
+		t.Fatalf("empty upstream_mode defaulted to %q, want race", c.UpstreamMode)
+	}
+	c.UpstreamMode = "sequential"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("sequential upstream_mode: %v", err)
+	}
+	if c.UpstreamMode != "sequential" {
+		t.Fatalf("sequential upstream_mode was rewritten to %q", c.UpstreamMode)
+	}
+	c.UpstreamMode = "parallel"
+	if err := c.Validate(); err == nil {
+		t.Fatal("unsupported upstream_mode accepted")
+	}
+}
+
 // TestPerfTunablesDefaults verifies the performance tunables ship with sane
 // defaults: the L1 cache on (512 entries/shard) and a 256-entry log batch.
 func TestPerfTunablesDefaults(t *testing.T) {

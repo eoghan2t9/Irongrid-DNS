@@ -8,6 +8,7 @@ const empty = () => ({
     doh_path: '/dns-query', web_listen: '', web_tls: false, web_redirect: false, web_redirect_port: 80, timeout_sec: 5,
   },
   upstreams: [],
+  upstream_mode: 'race',
   cache: { addr: '', password: '', db: 0, ttl: '6h', negative_ttl: '1m', l1_entries: 4096, serve_stale: '5m', prefetch: true, lookup_timeout: '150ms', failure_ttl: '' },
   recursive: { server_timeout: '' },
   tls: { cert_file: '', key_file: '', generate_self_signed: true, self_signed_hosts: [], cert_dir: '', acme: { enabled: false, email: '', domains: [], staging: false, http01_port: 80, renew_before_days: 30, dns01: { provider: '', propagation_wait_sec: 60, cloudflare_token: '', digitalocean_token: '', hetzner_token: '', godaddy_key: '', godaddy_secret: '', aws_access_key_id: '', aws_secret_access_key: '' } } },
@@ -403,14 +404,23 @@ export default function Settings({ onSessionInvalidated }) {
 
       <div className="card">
         <h3>Upstreams</h3>
-        {listEditor('upstreams', 'upstreams', 'udp://, tcp://, tls://, https://, quic://, recursive:// — tried in order')}
-        <p className="dim small" style={{ marginTop: -6 }}>
+        {listEditor('upstreams', 'upstreams', 'udp://, tcp://, tls://, https://, quic://, recursive://')}
+        {/* This paragraph follows the list editor's format hint (not a heading), so it needs real
+            spacing instead of the -6px tightening used under card headings — otherwise the two text
+            blocks sit flush against each other. */}
+        <p className="dim small" style={{ marginTop: 10 }}>
           <code>recursive://</code> resolves from the root servers itself instead of forwarding — no third-party
           resolver sees your query stream, at the cost of slower cold lookups and no upstream DNSSEC validation to
-          rely on. Mix it with forwarders (tried in order) or list it alone.
+          rely on. Mix it with forwarders (the Resolution strategy below governs the order) or list it alone.
         </p>
         <div className="form-grid">
           {text('Recursive per-server timeout', 'recursive.server_timeout', 'how long a recursive:// walk waits on one nameserver before moving on; empty = 3s built-in default', '3s')}
+          {field('Resolution strategy', 'how multiple upstreams are queried — race queries them all at once and uses the fastest answer; sequential tries them in list order, failing over to the next when one errors or answers SERVFAIL', (
+            <select className="input" value={cfg.upstream_mode || 'race'} onChange={(e) => set('upstream_mode', e.target.value)}>
+              <option value="race">Race — all at once, fastest wins</option>
+              <option value="sequential">Sequential — one at a time, in order</option>
+            </select>
+          ))}
         </div>
         <div className="row-between" style={{ marginTop: 16 }}>
           <h4 style={{ margin: 0, fontSize: 13 }}>Find the fastest upstreams for this server</h4>

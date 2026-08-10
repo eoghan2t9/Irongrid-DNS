@@ -19,9 +19,18 @@ import (
 
 // Config is the root configuration document.
 type Config struct {
-	Server       ServerConfig    `yaml:"server"`
-	Upstreams    []string        `yaml:"upstreams"`
-	Cache        CacheConfig     `yaml:"cache"`
+	Server ServerConfig `yaml:"server"`
+	// Upstreams is the forwarder list. When more than one is configured,
+	// UpstreamMode decides how they are queried for each resolution:
+	// "race" (default) queries them all concurrently and returns the fastest
+	// successful answer; "sequential" tries them in list order, failing over
+	// to the next only when the previous errors or answers SERVFAIL.
+	Upstreams []string `yaml:"upstreams"`
+	// UpstreamMode is the multi-upstream resolution strategy ("race" or
+	// "sequential"); empty defaults to "race". It is global — client groups
+	// that override the upstream list use the same strategy.
+	UpstreamMode string      `yaml:"upstream_mode"`
+	Cache        CacheConfig `yaml:"cache"`
 	TLS          TLSConfig       `yaml:"tls"`
 	Filter       FilterConfig    `yaml:"filter"`
 	Log          LogConfig       `yaml:"log"`
@@ -354,6 +363,7 @@ func Default() *Config {
 			"udp://1.1.1.1:53",
 			"udp://8.8.8.8:53",
 		},
+		UpstreamMode: "race",
 		Cache: CacheConfig{
 			Addr:          "localhost:6379",
 			DB:            0,
@@ -477,6 +487,17 @@ func (c *Config) Validate() error {
 func (c *Config) validate() error {
 	if len(c.Upstreams) == 0 {
 		return fmt.Errorf("at least one upstream DNS server is required")
+	}
+	// Empty upstream_mode defaults to race; anything else must be one of the
+	// two supported strategies. Keep the accepted values in sync with the
+	// dnsserver package's UpstreamModeRace / UpstreamModeSequential
+	// constants — config cannot import dnsserver (dnsserver imports config).
+	switch c.UpstreamMode {
+	case "":
+		c.UpstreamMode = "race"
+	case "race", "sequential":
+	default:
+		return fmt.Errorf("upstream_mode: unsupported mode %q (supported: race, sequential)", c.UpstreamMode)
 	}
 	if c.Cache.Addr == "" {
 		return fmt.Errorf("cache.addr is required (Dragonfly endpoint)")

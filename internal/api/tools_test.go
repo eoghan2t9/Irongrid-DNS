@@ -365,6 +365,25 @@ func TestToolsAXFRRefused(t *testing.T) {
 	}
 }
 
+// TestConfigPayloadUpstreamMode verifies the multi-upstream resolution
+// strategy survives the API payload mapping in both directions — a silently
+// dropped field here would make the Settings select a no-op.
+func TestConfigPayloadUpstreamMode(t *testing.T) {
+	c := config.Default()
+	if c.UpstreamMode != "race" {
+		t.Fatalf("default upstream_mode = %q, want race", c.UpstreamMode)
+	}
+	p := payloadFromConfig(c)
+	if p.UpstreamMode != "race" {
+		t.Fatalf("payload upstream_mode = %q, want race", p.UpstreamMode)
+	}
+	c.UpstreamMode = "sequential"
+	p = payloadFromConfig(c)
+	if p.UpstreamMode != "sequential" {
+		t.Fatalf("payload upstream_mode = %q, want sequential", p.UpstreamMode)
+	}
+}
+
 // startDelayedUDPDNS runs a UDP DNS server that sleeps before answering — a
 // controllable-latency probe target for the fastest-upstream benchmark.
 func startDelayedUDPDNS(t *testing.T, delay time.Duration) string {

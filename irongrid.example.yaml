@@ -40,6 +40,14 @@ upstreams:
   #   Root hints card shows the source (live / cached / bundled) and
   #   signature state.
 
+# How multiple upstreams are queried for each resolution (global; also covers
+# client-group upstream overrides):
+#   race        (default) query them all at once — the fastest successful
+#               answer wins, hiding slow or down resolvers
+#   sequential  try them in list order, failing over to the next only when
+#               the previous errors or answers SERVFAIL
+# upstream_mode: race
+
 # Proactive cache warmer: pre-caches the answers for every domain your
 # network queried within `lookback` (from the query log), so a restart or
 # cache flush doesn't leave the first query for each domain cold. A pass runs

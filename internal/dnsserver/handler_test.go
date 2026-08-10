@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -121,6 +122,109 @@ func TestHandlerUpstreamQuerySingleOPT(t *testing.T) {
 		if n != 1 {
 			t.Fatalf("upstream query %d carried %d OPT records, want exactly 1 (two OPTs is a FORMERR for strict resolvers)", i, n)
 		}
+	}
+}
+
+// startUDPCountingServer runs a UDP DNS server that answers with an A record
+// of ip and increments count per query received — lets a test assert an
+// upstream was never consulted.
+func startUDPCountingServer(t *testing.T, ip string, count *atomic.Int32) string {
+	t.Helper()
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		count.Add(1)
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP(ip),
+		})
+		_ = w.WriteMsg(m)
+	})
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: mux}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	return pc.LocalAddr().String()
+}
+
+// startSERVFAILServer runs a UDP DNS server that answers every query with
+// SERVFAIL — a "working but failing" upstream for failover tests.
+func startSERVFAILServer(t *testing.T) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeServerFailure
+		_ = w.WriteMsg(m)
+	})}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	return pc.LocalAddr().String()
+}
+
+// TestHandlerSequentialUpstreamFailover verifies the sequential strategy
+// fails over: a primary that answers SERVFAIL is skipped and the backup's
+// real answer is returned (under the default race strategy the first SERVFAIL
+// response would win instead).
+func TestHandlerSequentialUpstreamFailover(t *testing.T) {
+	servfailAddr := startSERVFAILServer(t)
+	okAddr := startUDPTestServer(t, "1.1.1.1", 0)
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: servfailAddr},
+		{Transport: upstream.UDP, Addr: okAddr},
+	}, nil, "nxdomain", 600, 5*time.Second)
+	h.SetUpstreamMode(UpstreamModeSequential)
+
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, m)
+
+	if fw.msg == nil || len(fw.msg.Answer) == 0 {
+		t.Fatalf("rcode=%v, no answers — failover did not reach the backup", fw.msg)
+	}
+	a, ok := fw.msg.Answer[0].(*dns.A)
+	if !ok || !a.A.Equal(net.ParseIP("1.1.1.1")) {
+		t.Fatalf("answer = %v, want 1.1.1.1 (backup after primary SERVFAIL)", fw.msg.Answer)
+	}
+}
+
+// TestHandlerSequentialUpstreamStopsAtFirstSuccess verifies the sequential
+// strategy prefers the first healthy upstream in list order: when the primary
+// answers, the backup must never be consulted (failover does not
+// load-balance).
+func TestHandlerSequentialUpstreamStopsAtFirstSuccess(t *testing.T) {
+	var backupHits atomic.Int32
+	primaryAddr := startUDPTestServer(t, "2.2.2.2", 0)
+	backupAddr := startUDPCountingServer(t, "1.1.1.1", &backupHits)
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: primaryAddr},
+		{Transport: upstream.UDP, Addr: backupAddr},
+	}, nil, "nxdomain", 600, 5*time.Second)
+	h.SetUpstreamMode(UpstreamModeSequential)
+
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, m)
+
+	if fw.msg == nil || len(fw.msg.Answer) == 0 {
+		t.Fatalf("no answer: %v", fw.msg)
+	}
+	a, ok := fw.msg.Answer[0].(*dns.A)
+	if !ok || !a.A.Equal(net.ParseIP("2.2.2.2")) {
+		t.Fatalf("answer = %v, want 2.2.2.2 (the listed primary)", fw.msg.Answer)
+	}
+	if hits := backupHits.Load(); hits != 0 {
+		t.Fatalf("backup upstream was consulted %d times, want 0 (failover must stop at the first success)", hits)
 	}
 }
 
