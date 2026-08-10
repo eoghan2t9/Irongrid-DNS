@@ -3,6 +3,7 @@ package dnsserver
 import (
 	"context"
 	"net"
+	"sync"
 	"testing"
 	"time"
 
@@ -68,6 +69,60 @@ func (f *fakeWriter) Close() error                { return nil }
 func (f *fakeWriter) TsigStatus() error           { return nil }
 func (f *fakeWriter) TsigTimersOnly(b bool)       {}
 func (f *fakeWriter) Hijack()                     {}
+
+// TestHandlerUpstreamQuerySingleOPT verifies the query forwarded to an
+// upstream carries exactly one EDNS OPT record even when the client sent its
+// own — the handler must replace (not append to) the client's OPT. A query
+// with two OPTs is malformed (RFC 6891 §6.1.1) and strict resolvers like
+// Quad9 reject it with FORMERR, surfacing to the client as a resolution
+// failure.
+func TestHandlerUpstreamQuerySingleOPT(t *testing.T) {
+	var mu sync.Mutex
+	optCounts := []int{}
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		n := 0
+		for _, rr := range r.Extra {
+			if rr.Header().Rrtype == dns.TypeOPT {
+				n++
+			}
+		}
+		mu.Lock()
+		optCounts = append(optCounts, n)
+		mu.Unlock()
+		m := new(dns.Msg)
+		m.SetReply(r)
+		_ = w.WriteMsg(m)
+	})
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: mux}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: pc.LocalAddr().String()},
+	}, nil, "nxdomain", 600, 5*time.Second)
+
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	m.SetEdns0(1232, false) // client advertises its own EDNS, like dig/browsers
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, m)
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(optCounts) == 0 {
+		t.Fatal("upstream never received the query")
+	}
+	for i, n := range optCounts {
+		if n != 1 {
+			t.Fatalf("upstream query %d carried %d OPT records, want exactly 1 (two OPTs is a FORMERR for strict resolvers)", i, n)
+		}
+	}
+}
 
 // TestRaceUpstreamsFastestWins verifies the concurrent forward path returns
 // the fastest upstream's answer even when it is listed after a slow one

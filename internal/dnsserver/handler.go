@@ -449,6 +449,21 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	upstreamQuery := r.Copy()
+	// Replace the client's EDNS OPT rather than layering a second one on:
+	// miekg/dns's SetEdns0 appends, and a query carrying two OPT records is
+	// malformed (RFC 6891 §6.1.1: "it MUST be the only OPT RR in that
+	// message"). Strict resolvers (Quad9 in particular) reject it with
+	// FORMERR, which the client sees as a resolution failure. The client's
+	// own advertisement is superseded by the 4096-byte one below anyway, so
+	// drop every OPT (always last in practice, but filtered regardless) and
+	// preserve any other additional records (e.g. TSIG).
+	extra := upstreamQuery.Extra[:0]
+	for _, rr := range upstreamQuery.Extra {
+		if rr.Header().Rrtype != dns.TypeOPT {
+			extra = append(extra, rr)
+		}
+	}
+	upstreamQuery.Extra = extra
 	upstreamQuery.SetEdns0(4096, dnssecEnabled)
 	var (
 		resp   *dns.Msg
