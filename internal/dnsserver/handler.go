@@ -675,12 +675,18 @@ func raceUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*
 		}
 		if res.err != nil {
 			lastErr = res.err
-			log.Printf("[dns] upstream %s failed: %v", res.up, res.err)
 		}
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no upstream returned a response")
 	}
+	// Log only when the whole query failed. In a healthy race the losing
+	// upstreams routinely report transport hiccups (a stale pooled
+	// connection, a momentary timeout) while another wins — logging each of
+	// those per query turns a single degraded upstream into log spam. Each
+	// upstream's health stays visible through the circuit breaker on the
+	// dashboard's Upstreams card.
+	log.Printf("[dns] all upstreams failed: %v", lastErr)
 	return nil, "", lastErr
 }
 

@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -15,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/miekg/dns"
@@ -30,6 +32,24 @@ import (
 // concurrency limit — a query that finds the pool empty just dials fresh,
 // same as before pooling existed.
 const upstreamPoolSize = 8
+
+// poolMaxIdle bounds how long a pooled connection may sit idle before it is
+// presumed stale and evicted. Resolvers close idle TCP/DoT connections after
+// a timeout of their own (measured ~45s for Quad9 DoT), and reusing a
+// connection past that point guarantees an EOF on the first query — which
+// pooledExchange would recover from with a fresh dial, but only after paying
+// the failed exchange, counting a circuit-breaker failure, and logging a
+// scary "upstream failed" line. Evicting pre-emptively turns that
+// guaranteed failure into an ordinary fresh dial. A variable so tests can
+// shrink it.
+var poolMaxIdle = 20 * time.Second
+
+// pooledConn is a warm connection tagged with the moment it was returned to
+// the pool, so getConn can evict connections that sat idle too long.
+type pooledConn struct {
+	conn     *dns.Conn
+	pooledAt time.Time
+}
 
 // tunedDialer returns a net.Dialer whose sockets get the same SocketBufferSize
 // boost as the listeners, so outbound upstream traffic (UDP, TCP and DoT) has
@@ -86,8 +106,9 @@ type Upstream struct {
 	// connPool holds warm TCP/DoT connections (nil for other transports).
 	// TCP and — worse — DoT pay for a full connection setup (a TLS
 	// handshake, for DoT) on every query without this; miekg/dns's
-	// Client.Exchange has no pooling of its own.
-	connPool chan *dns.Conn
+	// Client.Exchange has no pooling of its own. Each entry carries the
+	// time it was pooled so stale connections can be evicted before reuse.
+	connPool chan *pooledConn
 
 	// DoQ keeps a single persistent QUIC connection and opens a new stream
 	// per query instead of a new connection — that's the entire point of
@@ -163,7 +184,7 @@ func Parse(spec string) (*Upstream, error) {
 	}
 	switch u.Transport {
 	case TCP, TLS:
-		u.connPool = make(chan *dns.Conn, upstreamPoolSize)
+		u.connPool = make(chan *pooledConn, upstreamPoolSize)
 	}
 	switch u.Transport {
 	case UDP:
@@ -182,7 +203,12 @@ func Parse(spec string) (*Upstream, error) {
 		transport := &http.Transport{
 			TLSClientConfig: u.tlsConf,
 			MaxIdleConns:    32,
-			IdleConnTimeout: 90 * time.Second,
+			// Keep idle connections only briefly: DoH servers close them
+			// on their own schedule (often ~30-60s), and a conn the server
+			// already closed would fail the next POST with "unexpected
+			// EOF" — queryDoH retries that, but dropping stale conns here
+			// first keeps the retry path rare.
+			IdleConnTimeout: 30 * time.Second,
 			DialContext: (&net.Dialer{
 				Timeout:   5 * time.Second,
 				KeepAlive: 30 * time.Second,
@@ -208,10 +234,10 @@ func NewWithTLS(transport Transport, addr, host string, tlsConf *tls.Config) *Up
 	u := &Upstream{Transport: transport, Addr: addr, Host: host, tlsConf: tlsConf}
 	switch u.Transport {
 	case TCP:
-		u.connPool = make(chan *dns.Conn, upstreamPoolSize)
+		u.connPool = make(chan *pooledConn, upstreamPoolSize)
 		u.tcpClient = &dns.Client{Net: "tcp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
 	case TLS:
-		u.connPool = make(chan *dns.Conn, upstreamPoolSize)
+		u.connPool = make(chan *pooledConn, upstreamPoolSize)
 		u.dotClient = &dns.Client{Net: "tcp-tls", TLSConfig: tlsConf, Timeout: 8 * time.Second, Dialer: tunedDialer()}
 	case HTTPS:
 		u.client = &http.Client{Timeout: 10 * time.Second}
@@ -355,13 +381,22 @@ func (u *Upstream) Available() bool {
 
 // getConn pops a warm connection from the pool, or returns nil if none are
 // available (including when connPool is nil, so this degrades cleanly for
-// transports/constructors that don't set one up).
+// transports/constructors that don't set one up). A connection that sat
+// idle in the pool longer than poolMaxIdle is presumed stale — the upstream
+// almost certainly closed it server-side — and is closed instead of
+// returned, so reuse never wastes a query on a guaranteed EOF.
 func (u *Upstream) getConn() *dns.Conn {
-	select {
-	case c := <-u.connPool:
-		return c
-	default:
-		return nil
+	for {
+		select {
+		case pc := <-u.connPool:
+			if time.Since(pc.pooledAt) > poolMaxIdle {
+				pc.conn.Close()
+				continue
+			}
+			return pc.conn
+		default:
+			return nil
+		}
 	}
 }
 
@@ -369,7 +404,7 @@ func (u *Upstream) getConn() *dns.Conn {
 // is full (or nil).
 func (u *Upstream) putConn(c *dns.Conn) {
 	select {
-	case u.connPool <- c:
+	case u.connPool <- &pooledConn{conn: c, pooledAt: time.Now()}:
 	default:
 		c.Close()
 	}
@@ -384,8 +419,8 @@ func (u *Upstream) Close() {
 	drain:
 		for {
 			select {
-			case c := <-u.connPool:
-				c.Close()
+			case pc := <-u.connPool:
+				pc.conn.Close()
 			default:
 				break drain
 			}
@@ -414,33 +449,67 @@ func (u *Upstream) queryDoH(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.URL.String(), bytes.NewReader(packed))
-	if err != nil {
-		return nil, err
+	// Go's http.Transport never retries POST requests, so a query that lands
+	// on a keep-alive connection the server closed while idle dies with a
+	// transport error even though a fresh connection would answer fine (this
+	// showed up in production as a stream of "unexpected EOF" failures on
+	// an idle-period first query). The body is a replayable in-memory
+	// buffer, so retry exactly once on a stale-connection failure. Not
+	// counted as an upstream failure: the retry proves the server itself is
+	// fine, and counting it would let idle traffic trip the circuit breaker
+	// on a healthy upstream.
+	for attempt := 0; ; attempt++ {
+		req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.URL.String(), bytes.NewReader(packed))
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Content-Type", "application/dns-message")
+		req.Header.Set("Accept", "application/dns-message")
+		resp, err := u.client.Do(req)
+		if err != nil {
+			if attempt == 0 && isStaleConnError(err) {
+				continue
+			}
+			u.markResult(err)
+			return nil, err
+		}
+		if resp.StatusCode != http.StatusOK {
+			resp.Body.Close()
+			return nil, fmt.Errorf("DoH upstream returned HTTP %d", resp.StatusCode)
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
+		resp.Body.Close()
+		if err != nil {
+			// The same stale-connection death, one step later: headers
+			// arrived but the body never did.
+			if attempt == 0 && isStaleConnError(err) {
+				continue
+			}
+			u.markResult(err)
+			return nil, err
+		}
+		r := new(dns.Msg)
+		if err := r.Unpack(body); err != nil {
+			u.markResult(err)
+			return nil, err
+		}
+		u.markResult(nil)
+		return r, nil
 	}
-	req.Header.Set("Content-Type", "application/dns-message")
-	req.Header.Set("Accept", "application/dns-message")
-	resp, err := u.client.Do(req)
-	if err != nil {
-		u.markResult(err)
-		return nil, err
+}
+
+// isStaleConnError reports whether err looks like a request that died on a
+// reused keep-alive connection — the server closed it while idle — rather
+// than a genuine upstream problem. These are exactly the errors one retry on
+// a fresh connection fixes: an unexpected/plain EOF mid-response, or a
+// connection reset / broken pipe on write. Dial failures (refused, no
+// route) and timeouts are deliberately not included — retrying those would
+// just double the failure latency.
+func isStaleConnError(err error) bool {
+	if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+		return true
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("DoH upstream returned HTTP %d", resp.StatusCode)
-	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
-	if err != nil {
-		u.markResult(err)
-		return nil, err
-	}
-	r := new(dns.Msg)
-	if err := r.Unpack(body); err != nil {
-		u.markResult(err)
-		return nil, err
-	}
-	u.markResult(nil)
-	return r, nil
+	return errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.EPIPE)
 }
 
 func (u *Upstream) queryDoQ(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {

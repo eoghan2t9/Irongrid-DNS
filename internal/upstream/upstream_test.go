@@ -7,8 +7,13 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -316,6 +321,115 @@ func TestIsRecursiveSpec(t *testing.T) {
 		if got := IsRecursiveSpec(spec); got != want {
 			t.Fatalf("IsRecursiveSpec(%q) = %v, want %v", spec, got, want)
 		}
+	}
+}
+
+// TestPoolEvictsStaleConnection verifies that a connection which sat idle in
+// the pool past poolMaxIdle is closed and replaced with a fresh dial instead
+// of being reused — resolvers close idle DoT/TCP connections on their own
+// schedule, and reusing one would waste a query on a guaranteed EOF.
+func TestPoolEvictsStaleConnection(t *testing.T) {
+	addr, accepted := startTCPTestServer(t)
+	u := NewWithTLS(TCP, addr, "", nil)
+	t.Cleanup(u.Close)
+	if _, err := u.Query(context.Background(), aQuery()); err != nil {
+		t.Fatalf("first query: %v", err)
+	}
+	if got := accepted.Load(); got != 1 {
+		t.Fatalf("server accepted %d connections, want 1", got)
+	}
+	// Age the pooled connection past the eviction threshold, then return it
+	// to the pool — as if it had sat idle there the whole time.
+	pc := <-u.connPool
+	pc.pooledAt = time.Now().Add(-2 * poolMaxIdle)
+	u.connPool <- pc
+
+	if _, err := u.Query(context.Background(), aQuery()); err != nil {
+		t.Fatalf("second query: %v", err)
+	}
+	if got := accepted.Load(); got != 2 {
+		t.Fatalf("server accepted %d connections after eviction, want 2 (stale conn must not be reused)", got)
+	}
+}
+
+// TestDoHRetriesStaleConnection verifies a query whose request lands on a
+// keep-alive connection the server closed while idle is retried once on a
+// fresh connection instead of failing: Go's http.Transport never retries
+// POSTs, so without this every post-idle query against a DoH upstream would
+// fail with "unexpected EOF" — and that the blip is not counted as an
+// upstream failure (the retry succeeded, so the server was never down).
+func TestDoHRetriesStaleConnection(t *testing.T) {
+	var mu sync.Mutex
+	answered := 0
+	closing := true // first request closes its connection after answering
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		req := new(dns.Msg)
+		_ = req.Unpack(body)
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		resp.Answer = append(resp.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP("1.2.3.4"),
+		})
+		packed, _ := resp.Pack()
+		mu.Lock()
+		answered++
+		closeThis := closing
+		closing = false
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/dns-message")
+		w.Header().Set("Content-Length", strconv.Itoa(len(packed)))
+		_, _ = w.Write(packed)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		if closeThis {
+			// Abruptly close the connection after the response so the client
+			// pools a dead connection; the retried request must land on a
+			// fresh one.
+			if hj, ok := w.(http.Hijacker); ok {
+				conn, _, _ := hj.Hijack()
+				conn.Close()
+			}
+		}
+	}))
+	defer srv.Close()
+
+	u := &Upstream{Transport: HTTPS}
+	u.URL, _ = url.Parse(srv.URL + "/dns-query")
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	u.client = &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig:   &tls.Config{RootCAs: pool},
+			ForceAttemptHTTP2: false, // exercise the HTTP/1.1 stale-conn path deterministically
+		},
+		Timeout: 5 * time.Second,
+	}
+	q := aQuery()
+	q.SetEdns0(4096, false)
+	// Query 1 dials fresh and pools the connection; the server answers then
+	// closes it. Query 2 lands on that dead pooled connection — without the
+	// retry it would fail with "unexpected EOF" — and must recover on a
+	// fresh dial. The server should therefore have answered exactly twice.
+	for i := 1; i <= 2; i++ {
+		r, err := u.Query(context.Background(), q)
+		if err != nil {
+			t.Fatalf("query %d: %v", i, err)
+		}
+		if len(r.Answer) != 1 {
+			t.Fatalf("query %d: answers = %d, want 1", i, len(r.Answer))
+		}
+	}
+	mu.Lock()
+	got := answered
+	mu.Unlock()
+	if got != 2 {
+		t.Fatalf("server handled %d requests, want 2 (original + retry)", got)
+	}
+	if u.Fails() != 0 {
+		t.Fatalf("Fails() = %d, want 0 (a stale-connection blip must not count as a failure)", u.Fails())
 	}
 }
 
