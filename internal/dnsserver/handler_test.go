@@ -640,6 +640,63 @@ func TestHandlerServeStale(t *testing.T) {
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
 		t.Fatalf("stale answer took %s — the dead upstream's timeout was waited out", elapsed)
 	}
+	// The failed re-resolution must NOT have negatively cached the SERVFAIL:
+	// a fresh negative would shadow the serve-stale entry on the next query,
+	// and the whole point of serve-stale is that the last known good answer
+	// keeps winning while re-resolution fails.
+	if res := c.Lookup(q().Question[0]); res.Msg != nil && res.Negative {
+		t.Fatalf("failure was negatively cached despite a serve-stale entry: %v", res.Msg)
+	}
+}
+
+// TestHandlerFailureNegativelyCached verifies that a resolution failure with
+// no cached data (upstream unreachable, no serve-stale entry) is negatively
+// cached: the retry within the negative TTL answers instantly from cache
+// instead of re-paying the full per-query timeout — the property that turns
+// a dead-zone outage (e.g. the NTP-pool incident) from 5s per retry into a
+// one-time cost per negative-TTL window.
+func TestHandlerFailureNegativelyCached(t *testing.T) {
+	// Bind a port then release it: dialing it now fails immediately.
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	deadAddr := pc.LocalAddr().String()
+	pc.Close()
+
+	c := cache.NewLocalOnly(time.Hour, time.Minute, 512, 0)
+	h := NewHandler(filter.NewEngine(), c, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: deadAddr},
+	}, nil, "nxdomain", 600, 5*time.Second)
+
+	q := func() *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("example.com.", dns.TypeA)
+		return m
+	}
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, q())
+	if fw.msg == nil || fw.msg.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("expected SERVFAIL, got %v", fw.msg)
+	}
+
+	// The failure is written asynchronously, like a positive answer; poll
+	// briefly for the negative entry to land.
+	question := fw.msg.Question[0]
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if res := c.Lookup(question); res.Msg != nil {
+			if !res.Negative {
+				t.Fatalf("expected a negative cache entry, got positive %v", res.Msg)
+			}
+			if res.Msg.Rcode != dns.RcodeServerFailure {
+				t.Fatalf("cached rcode = %d, want SERVFAIL", res.Msg.Rcode)
+			}
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatal("negative entry never appeared after the failure")
 }
 
 // TestHandlerSingleUpstreamCooldownFastFail verifies the circuit breaker end

@@ -186,9 +186,17 @@ func (r *Resolver) chaseCNAME(ctx context.Context, q dns.Question, resp *dns.Msg
 	return merged, nil
 }
 
-// queryServers tries each candidate server in order (each a plain address a
-// dns.Client can dial), falling back to TCP on a truncated UDP reply, and
-// returns the first successful response.
+// queryServers asks every candidate server (each a plain address a
+// dns.Client can dial) concurrently and returns the first usable response,
+// falling back to TCP on a truncated UDP reply for the same server. Racing
+// mirrors the handler's raceUpstreams: a single dead or slow server in a
+// zone used to cost a full per-server timeout (attempts ran sequentially, so
+// a second unresponsive server could blow the whole per-query budget before
+// a healthy one was ever tried) — now the fastest healthy server answers in
+// roughly one round trip. Each goroutine performs exactly one send into a
+// channel buffered for every server, so nothing leaks; the losers' exchanges
+// run on a deadline (perServerTimeout) rather than being interrupted the
+// instant the winner returns, exactly like raceUpstreams.
 func (r *Resolver) queryServers(ctx context.Context, servers []string, q dns.Question) (*dns.Msg, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(q.Name, q.Qtype)
@@ -196,21 +204,42 @@ func (r *Resolver) queryServers(ctx context.Context, servers []string, q dns.Que
 	m.RecursionDesired = false
 	m.SetEdns0(4096, false)
 
-	var lastErr error
+	qctx, qcancel := context.WithCancel(ctx)
+	defer qcancel()
+	type result struct {
+		resp *dns.Msg
+		err  error
+	}
+	ch := make(chan result, len(servers))
 	for _, addr := range servers {
-		resp, err := exchange(ctx, addr, m, "udp")
-		if err != nil {
-			lastErr = err
-			continue
-		}
-		if resp.Truncated {
-			resp, err = exchange(ctx, addr, m, "tcp")
-			if err != nil {
-				lastErr = err
-				continue
+		go func(addr string) {
+			// Copy the query per server: miekg/dns's transport overwrites
+			// msg.Id while sending, so the same message cannot be handed to
+			// several servers concurrently (the rule raceUpstreams follows).
+			qm := m.Copy()
+			resp, err := exchange(qctx, addr, qm, "udp")
+			if err == nil && resp.Truncated {
+				// A truncated UDP reply falls back to TCP on the same
+				// server, like a client would; the TCP attempt's error (if
+				// any) supersedes the UDP one.
+				if tcpResp, tcpErr := exchange(qctx, addr, qm, "tcp"); tcpErr == nil {
+					resp = tcpResp
+				} else {
+					err = tcpErr
+				}
 			}
+			ch <- result{resp: resp, err: err}
+		}(addr)
+	}
+	var lastErr error
+	for range len(servers) {
+		res := <-ch
+		if res.err == nil && res.resp != nil {
+			return res.resp, nil
 		}
-		return resp, nil
+		if res.err != nil {
+			lastErr = res.err
+		}
 	}
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no servers to query")

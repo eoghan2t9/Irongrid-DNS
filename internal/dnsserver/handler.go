@@ -499,6 +499,25 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		if err != nil {
 			errStr = err.Error()
 		}
+		// Cache the failure briefly (negative_ttl) so a dead upstream or
+		// zone doesn't burn the full timeout on every retry — a failing
+		// domain's retries used to re-pay the whole per-query timeout each
+		// time. SERVFAIL is cacheable (RFC 2308 section 5.2) and the short
+		// negative TTL bounds how long a transient failure can shadow a
+		// recovery. Only when nothing is stale: if a previous answer is in
+		// its serve-stale window, retries must keep probing upstream so the
+		// stale data wins on success — a cached SERVFAIL must never shadow
+		// it. (An upstream that *answers* SERVFAIL is already negatively
+		// cached by the success path below; this fills the gap where the
+		// upstream never answered at all.)
+		if cache != nil && stale == nil && !isMetaQuery(q) {
+			cacheResp := m.Copy()
+			go func() {
+				cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer ccancel()
+				cache.SetNegative(cctx, q, cacheResp, 0)
+			}()
+		}
 		h.record(client, qname, q, "error", errStr, usedUp, start, m)
 		_ = w.WriteMsg(m)
 		return

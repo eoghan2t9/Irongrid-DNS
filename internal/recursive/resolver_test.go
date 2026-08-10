@@ -86,17 +86,29 @@ func startFakeServer(t *testing.T, listenAddr string, z *fakeZone) (string, func
 			_ = w.WriteMsg(m)
 			return
 		}
+		var ns []dns.RR
+		var extra []dns.RR
+		matched := false
 		for _, d := range z.allDelegates() {
 			if !strings.HasSuffix(name, d.suffix) {
 				continue
 			}
-			ns, _ := dns.NewRR(d.childName + " 300 IN NS " + d.ns)
-			m.Ns = []dns.RR{ns}
+			// Every matching delegate contributes an NS record (and glue
+			// unless noGlue), so a zone can be delegated to several
+			// nameservers in one referral — the real-world shape the
+			// nameserver-racing path depends on.
+			matched = true
+			rr, _ := dns.NewRR(d.childName + " 300 IN NS " + d.ns)
+			ns = append(ns, rr)
 			if !d.noGlue {
 				host, _, _ := net.SplitHostPort(d.addr)
 				a, _ := dns.NewRR(d.ns + " 300 IN A " + host)
-				m.Extra = []dns.RR{a}
+				extra = append(extra, a)
 			}
+		}
+		if matched {
+			m.Ns = ns
+			m.Extra = extra
 			_ = w.WriteMsg(m)
 			return
 		}
@@ -247,6 +259,78 @@ func TestResolveNXDOMAIN(t *testing.T) {
 	}
 	if resp.Rcode != dns.RcodeNameError {
 		t.Fatalf("rcode = %d, want NXDOMAIN", resp.Rcode)
+	}
+}
+
+// TestResolveRacesNameservers verifies a dead nameserver in a zone doesn't
+// stall resolution: the com. TLD delegates example.com. to two nameservers,
+// one unreachable and one live. Sequentially, the dead one would cost a full
+// per-server timeout before the live one was tried (blowing the whole query
+// budget); racing must answer in a small fraction of that.
+func TestResolveRacesNameservers(t *testing.T) {
+	nsPort := freePort(t)
+
+	// Reserve a dead address (bound then released) for the dead delegate. It
+	// sits on 127.0.0.9 — off the 127.0.0.1/2/3 loopback addresses the fake
+	// chain binds — so freePort() (127.0.0.1:0, reused by every fake level)
+	// can never hand the dead address's port back to a live server, which
+	// would turn the "dead" delegate into an accidental live zone and turn
+	// this test into a referral-loop.
+	pc, err := net.ListenPacket("udp", "127.0.0.9:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	deadAddr := pc.LocalAddr().String()
+	pc.Close()
+
+	authAnswers := map[string][]dns.RR{}
+	authRR, _ := dns.NewRR("example.com. 300 IN A 93.184.216.34")
+	authAnswers["example.com."] = []dns.RR{authRR}
+	authZone := &fakeZone{name: "example.com.", answers: authAnswers}
+	liveAddr, _ := startFakeServer(t, "127.0.0.3:"+nsPort, authZone)
+
+	tldZone := &fakeZone{
+		name:    "com.",
+		answers: map[string][]dns.RR{},
+		delegates: []delegateEntry{
+			{suffix: "example.com.", ns: "ns1.dead.invalid.", addr: deadAddr, childName: "example.com."},
+			{suffix: "example.com.", ns: "ns2.live.invalid.", addr: liveAddr, childName: "example.com."},
+		},
+	}
+	tldAddr, _ := startFakeServer(t, "127.0.0.2:"+nsPort, tldZone)
+
+	root := &fakeZone{
+		name:           ".",
+		answers:        map[string][]dns.RR{},
+		delegateSuffix: "com.",
+		delegateNS:     "a.gtld-servers.invalid.",
+		delegateAddr:   tldAddr,
+		childName:      "com.",
+	}
+	rootAddr, _ := startFakeServer(t, "127.0.0.1:"+nsPort, root)
+
+	r := newTestResolver(rootAddr, nsPort)
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+
+	start := time.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	resp, err := r.Resolve(ctx, m)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("answers = %d, want 1: %v", len(resp.Answer), resp.Answer)
+	}
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok || a.A.String() != "93.184.216.34" {
+		t.Fatalf("unexpected answer: %v", resp.Answer[0])
+	}
+	// The dead server would cost perServerTimeout (3s) if it were tried
+	// sequentially first; racing must answer well under that.
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("resolution with a dead nameserver took %s, want < 1s (nameservers not raced)", elapsed)
 	}
 }
 
