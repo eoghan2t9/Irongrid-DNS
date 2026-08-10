@@ -147,6 +147,18 @@ type fastestResult struct {
 	Error     string `json:"error"`
 }
 
+// canonicalUpstreamKey normalizes a parsed upstream to the key the benchmark's
+// candidate specs are indexed under, so "in use" matching survives config
+// entries that omit the scheme or the port ("1.1.1.1", "tls://9.9.9.9" —
+// Parse fills those in). The dial address already carries the default port;
+// DoH keys on the full URL because the path is part of the endpoint.
+func canonicalUpstreamKey(u *upstream.Upstream) string {
+	if u.Transport == upstream.HTTPS {
+		return strings.ToLower(u.Name())
+	}
+	return strings.ToLower(string(u.Transport) + "://" + u.Addr)
+}
+
 // toolsFastest benchmarks the curated public resolver list from this server
 // and returns them sorted by measured latency, so the Settings page can offer
 // one-click addition of the fastest upstreams for the server's location. Each
@@ -164,11 +176,13 @@ func (h *Handler) toolsFastest(ctx context.Context, w http.ResponseWriter, r *ht
 		for _, s := range h.Cfg.Upstreams {
 			s = strings.ToLower(strings.TrimSpace(s))
 			inUse[s] = true
-			// Also index the canonical form (Parse fills default ports/schemes),
-			// so a configured "1.1.1.1" or "tls://1.1.1.1" still matches the
-			// canonical "udp://1.1.1.1:53" / "tls://1.1.1.1:853" candidates.
+			// Also index the canonical form so a configured "1.1.1.1" or
+			// "tls://9.9.9.9" (Parse fills in default schemes/ports) still
+			// matches the canonical "udp://1.1.1.1:53" / "tls://9.9.9.9:853"
+			// candidates. DoH keys on the full URL because the path is part of
+			// the endpoint.
 			if up, err := upstream.Parse(s); err == nil {
-				inUse[strings.ToLower(up.Name())] = true
+				inUse[canonicalUpstreamKey(up)] = true
 			}
 		}
 	}
@@ -188,7 +202,6 @@ func (h *Handler) toolsFastest(ctx context.Context, w http.ResponseWriter, r *ht
 				Label:     cand.label,
 				Transport: strings.SplitN(cand.spec, "://", 2)[0],
 				Spec:      cand.spec,
-				InUse:     inUse[strings.ToLower(cand.spec)],
 			}
 			up, err := upstream.Parse(cand.spec)
 			if err != nil {
@@ -196,6 +209,7 @@ func (h *Handler) toolsFastest(ctx context.Context, w http.ResponseWriter, r *ht
 				out[i] = res
 				return
 			}
+			res.InUse = inUse[canonicalUpstreamKey(up)]
 			// DoT/TCP probes pool warm connections; close them so a benchmark
 			// run doesn't leave idle sockets behind for the process lifetime.
 			defer up.Close()

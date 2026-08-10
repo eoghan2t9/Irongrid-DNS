@@ -401,6 +401,12 @@ func (u *Upstream) Close() {
 		u.quicPc = nil
 	}
 	u.quicMu.Unlock()
+	// DoH's http.Client keeps its own pool of idle keep-alive connections;
+	// release them so a replaced upstream (config reload) or a finished
+	// benchmark run doesn't leave sockets lingering until IdleConnTimeout.
+	if u.client != nil {
+		u.client.CloseIdleConnections()
+	}
 }
 
 func (u *Upstream) queryDoH(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {

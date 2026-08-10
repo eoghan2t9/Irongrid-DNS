@@ -385,6 +385,29 @@ func startDelayedUDPDNS(t *testing.T, delay time.Duration) string {
 	return pc.LocalAddr().String()
 }
 
+// TestCanonicalUpstreamKey verifies the "in use" normalization: a
+// configured upstream that omits the scheme or the default port still keys
+// to the same canonical form as the benchmark's candidate spec, so the UI
+// flags already-configured resolvers and never offers a duplicate.
+func TestCanonicalUpstreamKey(t *testing.T) {
+	cases := []struct{ spec, want string }{
+		{"1.1.1.1", "udp://1.1.1.1:53"},
+		{"udp://1.1.1.1:53", "udp://1.1.1.1:53"},
+		{"tls://9.9.9.9", "tls://9.9.9.9:853"},
+		{"tls://9.9.9.9:853", "tls://9.9.9.9:853"},
+		{"https://dns.quad9.net/dns-query", "https://dns.quad9.net/dns-query"},
+	}
+	for _, c := range cases {
+		u, err := upstream.Parse(c.spec)
+		if err != nil {
+			t.Fatalf("%s: %v", c.spec, err)
+		}
+		if got := canonicalUpstreamKey(u); got != c.want {
+			t.Errorf("%s => %q, want %q", c.spec, got, c.want)
+		}
+	}
+}
+
 // TestToolsFastest verifies the benchmark ranks reachable resolvers by
 // measured latency, flags already-configured specs as in_use, and reports
 // unreachable candidates with an error instead of dropping them.
