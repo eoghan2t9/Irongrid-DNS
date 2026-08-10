@@ -34,6 +34,19 @@ type Config struct {
 	Abuse        AbuseConfig     `yaml:"abuse"`
 	DNSSEC       DNSSECConfig    `yaml:"dnssec"`
 	Warmer       WarmerConfig    `yaml:"warmer"`
+	// Recursive tunes the recursive:// upstream transport (the iterative
+	// resolver that walks referrals from the root servers itself).
+	Recursive RecursiveConfig `yaml:"recursive"`
+}
+
+// RecursiveConfig tunes the recursive:// upstream transport.
+type RecursiveConfig struct {
+	// ServerTimeout bounds one exchange with one nameserver during a
+	// referral walk (each hop of root -> TLD -> authoritative). A dead or
+	// unresponsive server is given up on after this so the walk can move on;
+	// 0 uses the built-in default (3s). server.timeout_sec still bounds the
+	// whole query — this only caps the per-server share of it.
+	ServerTimeout time.Duration `yaml:"server_timeout"`
 }
 
 // WarmerConfig is the proactive cache warmer: a background loop that scans
@@ -219,6 +232,13 @@ type CacheConfig struct {
 	// straight to the upstream instead of stalling behind a slow cache tier.
 	// 0 uses the built-in default (150ms).
 	LookupTimeout time.Duration `yaml:"lookup_timeout"`
+	// FailureTTL is how long a resolution failure — an upstream that never
+	// answered (timeout, dial error, circuit-breaker cooldown) with no
+	// serve-stale entry to fall back on — is negatively cached as SERVFAIL,
+	// so retries during an outage don't re-pay the full per-query timeout
+	// every time. 0 uses NegativeTTL; the short window bounds how long a
+	// transient failure can shadow a recovery.
+	FailureTTL time.Duration `yaml:"failure_ttl"`
 }
 
 // TLSConfig controls certificates used by DoT, DoH and DoQ (and the web UI
@@ -469,6 +489,12 @@ func (c *Config) validate() error {
 	}
 	if c.Cache.LookupTimeout < 0 {
 		return fmt.Errorf("cache.lookup_timeout must be >= 0 (0 uses the built-in default)")
+	}
+	if c.Cache.FailureTTL < 0 {
+		return fmt.Errorf("cache.failure_ttl must be >= 0 (0 uses cache.negative_ttl)")
+	}
+	if c.Recursive.ServerTimeout < 0 {
+		return fmt.Errorf("recursive.server_timeout must be >= 0 (0 uses the built-in default)")
 	}
 	if c.Log.BatchSize < 0 {
 		return fmt.Errorf("log.batch_size must be >= 0 (0 uses the default)")

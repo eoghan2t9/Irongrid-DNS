@@ -8,7 +8,8 @@ const empty = () => ({
     doh_path: '/dns-query', web_listen: '', web_tls: false, web_redirect: false, web_redirect_port: 80, timeout_sec: 5,
   },
   upstreams: [],
-  cache: { addr: '', password: '', db: 0, ttl: '6h', negative_ttl: '1m', l1_entries: 4096, serve_stale: '5m', prefetch: true, lookup_timeout: '150ms' },
+  cache: { addr: '', password: '', db: 0, ttl: '6h', negative_ttl: '1m', l1_entries: 4096, serve_stale: '5m', prefetch: true, lookup_timeout: '150ms', failure_ttl: '' },
+  recursive: { server_timeout: '' },
   tls: { cert_file: '', key_file: '', generate_self_signed: true, self_signed_hosts: [], cert_dir: '', acme: { enabled: false, email: '', domains: [], staging: false, http01_port: 80, renew_before_days: 30, dns01: { provider: '', propagation_wait_sec: 60, cloudflare_token: '', digitalocean_token: '', hetzner_token: '', godaddy_key: '', godaddy_secret: '', aws_access_key_id: '', aws_secret_access_key: '' } } },
   filter: { block_response: 'nxdomain', block_ttl: 600, blocklists: [], whitelist: [], blacklist: [], auto_update: '24h' },
   log: { query_log_file: '', retention_days: 30, verbose: true },
@@ -350,6 +351,9 @@ export default function Settings({ onSessionInvalidated }) {
           resolver sees your query stream, at the cost of slower cold lookups and no upstream DNSSEC validation to
           rely on. Mix it with forwarders (tried in order) or list it alone.
         </p>
+        <div className="form-grid">
+          {text('Recursive per-server timeout', 'recursive.server_timeout', 'how long a recursive:// walk waits on one nameserver before moving on; empty = 3s built-in default', '3s')}
+        </div>
       </div>
 
       <div className="card">
@@ -541,6 +545,7 @@ export default function Settings({ onSessionInvalidated }) {
           {text('Serve stale', 'cache.serve_stale', 'keep entries answerable this long past expiry (RFC 8767) — used when the upstream is unreachable; 0 disables', '5m')}
           {toggle('Prefetch hot entries', 'cache.prefetch')}
           {text('Cache lookup timeout', 'cache.lookup_timeout', 'how long a Dragonfly read may take on the hot path before the query goes straight upstream; empty = 150ms default', '150ms')}
+          {text('Failure cache TTL', 'cache.failure_ttl', 'how long a resolution failure (unreachable upstream, no stale data) is cached as SERVFAIL so retries don\'t re-pay the full timeout; empty = use negative_ttl', '1m')}
         </div>
       </div>
 

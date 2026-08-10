@@ -6,6 +6,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -24,10 +25,38 @@ const (
 	// or hostile chain of glueless delegations could recurse indefinitely.
 	maxNSResolveDepth = 3
 
+	// perServerTimeout is the default budget for one exchange with one
+	// nameserver during a referral walk; SetDefaultServerTimeout can
+	// override it for every resolver (see serverTimeout).
 	perServerTimeout = 3 * time.Second
 	minDelegationTTL = 60 * time.Second
 	maxDelegationTTL = 24 * time.Hour
 )
+
+// defaultServerTimeout is the package-wide per-server exchange timeout used
+// by resolvers that haven't been individually configured — overridable via
+// SetDefaultServerTimeout so the config layer can tune recursive://
+// upstreams without plumbing the value through every construction site
+// (boot, config reload, per-client-group upstreams). Mirrors
+// SetDefaultRootHints. Read at query time, so a live reload takes effect
+// for resolvers that already exist.
+var defaultServerTimeout atomic.Int64 // nanoseconds; 0 = perServerTimeout
+
+// SetDefaultServerTimeout overrides the per-server exchange timeout for
+// every Resolver (0 restores the built-in perServerTimeout default).
+func SetDefaultServerTimeout(d time.Duration) {
+	defaultServerTimeout.Store(int64(d))
+}
+
+// serverTimeout returns the effective budget for one exchange with one
+// nameserver during a referral walk: the package-wide default when set,
+// otherwise perServerTimeout.
+func serverTimeout() time.Duration {
+	if d := time.Duration(defaultServerTimeout.Load()); d > 0 {
+		return d
+	}
+	return perServerTimeout
+}
 
 // Resolver performs iterative resolution starting from the DNS root,
 // following referrals itself instead of forwarding to a recursive resolver.
@@ -206,6 +235,7 @@ func (r *Resolver) queryServers(ctx context.Context, servers []string, q dns.Que
 
 	qctx, qcancel := context.WithCancel(ctx)
 	defer qcancel()
+	timeout := serverTimeout()
 	type result struct {
 		resp *dns.Msg
 		err  error
@@ -217,12 +247,12 @@ func (r *Resolver) queryServers(ctx context.Context, servers []string, q dns.Que
 			// msg.Id while sending, so the same message cannot be handed to
 			// several servers concurrently (the rule raceUpstreams follows).
 			qm := m.Copy()
-			resp, err := exchange(qctx, addr, qm, "udp")
+			resp, err := exchange(qctx, addr, qm, "udp", timeout)
 			if err == nil && resp.Truncated {
 				// A truncated UDP reply falls back to TCP on the same
 				// server, like a client would; the TCP attempt's error (if
 				// any) supersedes the UDP one.
-				if tcpResp, tcpErr := exchange(qctx, addr, qm, "tcp"); tcpErr == nil {
+				if tcpResp, tcpErr := exchange(qctx, addr, qm, "tcp", timeout); tcpErr == nil {
 					resp = tcpResp
 				} else {
 					err = tcpErr
@@ -247,10 +277,13 @@ func (r *Resolver) queryServers(ctx context.Context, servers []string, q dns.Que
 	return nil, fmt.Errorf("recursive: resolving %s: %w", q.Name, lastErr)
 }
 
-func exchange(ctx context.Context, addr string, m *dns.Msg, network string) (*dns.Msg, error) {
-	cctx, cancel := context.WithTimeout(ctx, perServerTimeout)
+// exchange sends one query to one nameserver over network ("udp" or "tcp")
+// bounded by timeout — the resolver's effective per-server budget, itself
+// capped by the caller's overall context.
+func exchange(ctx context.Context, addr string, m *dns.Msg, network string, timeout time.Duration) (*dns.Msg, error) {
+	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	c := &dns.Client{Net: network, Timeout: perServerTimeout}
+	c := &dns.Client{Net: network, Timeout: timeout}
 	resp, _, err := c.ExchangeContext(cctx, m, addr)
 	return resp, err
 }

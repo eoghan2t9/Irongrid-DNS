@@ -334,6 +334,27 @@ func TestResolveRacesNameservers(t *testing.T) {
 	}
 }
 
+// TestSetDefaultServerTimeout verifies the config-layer knob: it overrides
+// the per-server exchange timeout for every Resolver and resets to the
+// built-in default when cleared.
+func TestSetDefaultServerTimeout(t *testing.T) {
+	defer SetDefaultServerTimeout(0) // leave the default for other tests
+
+	if got := serverTimeout(); got != perServerTimeout {
+		t.Fatalf("default serverTimeout = %v, want %v", got, perServerTimeout)
+	}
+
+	SetDefaultServerTimeout(123 * time.Millisecond)
+	if got := serverTimeout(); got != 123*time.Millisecond {
+		t.Fatalf("configured serverTimeout = %v, want 123ms", got)
+	}
+
+	SetDefaultServerTimeout(0)
+	if got := serverTimeout(); got != perServerTimeout {
+		t.Fatalf("cleared serverTimeout = %v, want %v", got, perServerTimeout)
+	}
+}
+
 // TestResolveAllRootsUnreachable verifies a prompt error instead of a hang
 // when every root hint is dead.
 func TestResolveAllRootsUnreachable(t *testing.T) {

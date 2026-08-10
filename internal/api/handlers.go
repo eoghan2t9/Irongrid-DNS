@@ -706,6 +706,14 @@ type configPayload struct {
 	Abuse        abusePayload         `json:"abuse"`
 	DNSSEC       dnssecPayload        `json:"dnssec"`
 	Warmer       warmerPayload        `json:"warmer"`
+	Recursive    recursivePayload     `json:"recursive"`
+}
+
+// recursivePayload is the JSON shape for the recursive:// upstream tuning
+// (see config.RecursiveConfig). Durations are human strings; empty means the
+// built-in default.
+type recursivePayload struct {
+	ServerTimeout string `json:"server_timeout"`
 }
 
 // warmerPayload is the JSON shape for the proactive cache warmer settings.
@@ -794,6 +802,9 @@ type cachePayload struct {
 	ServeStale    string `json:"serve_stale"`
 	Prefetch      bool   `json:"prefetch"`
 	LookupTimeout string `json:"lookup_timeout"` // cache-read budget on the hot path; "" = default 150ms
+	// FailureTTL is how long a resolution failure is negatively cached as
+	// SERVFAIL; "" = use negative_ttl.
+	FailureTTL string `json:"failure_ttl"`
 }
 
 type tlsPayload struct {
@@ -911,6 +922,7 @@ func payloadFromConfig(c *config.Config) configPayload {
 			ServeStale:    durationOrEmpty(c.Cache.ServeStale),
 			Prefetch:      c.Cache.Prefetch,
 			LookupTimeout: durationOrEmpty(c.Cache.LookupTimeout),
+			FailureTTL:    durationOrEmpty(c.Cache.FailureTTL),
 		},
 		Warmer: warmerPayload{
 			Enabled:     c.Warmer.Enabled,
@@ -1005,6 +1017,7 @@ func payloadFromConfig(c *config.Config) configPayload {
 	}
 	p.Abuse = abusePayload{AbuseIPDBKey: c.Abuse.AbuseIPDBKey}
 	p.DNSSEC = dnssecPayload{Enabled: c.DNSSEC.Enabled, RequireAD: c.DNSSEC.RequireAD}
+	p.Recursive = recursivePayload{ServerTimeout: durationOrEmpty(c.Recursive.ServerTimeout)}
 	return p
 }
 
@@ -1037,6 +1050,14 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	lookupTimeout, err := parseDur(p.Cache.LookupTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("cache.lookup_timeout: %w", err)
+	}
+	failureTTL, err := parseDur(p.Cache.FailureTTL)
+	if err != nil {
+		return nil, fmt.Errorf("cache.failure_ttl: %w", err)
+	}
+	recursiveTimeout, err := parseDur(p.Recursive.ServerTimeout)
+	if err != nil {
+		return nil, fmt.Errorf("recursive.server_timeout: %w", err)
 	}
 	blocklistAutoUpdate, err := parseDur(p.Filter.AutoUpdate)
 	if err != nil {
@@ -1094,6 +1115,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			ServeStale:    serveStale,
 			Prefetch:      p.Cache.Prefetch,
 			LookupTimeout: lookupTimeout,
+			FailureTTL:    failureTTL,
 		},
 		TLS: config.TLSConfig{
 			CertFile:           p.TLS.CertFile,
@@ -1179,6 +1201,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			MaxDomains:  p.Warmer.MaxDomains,
 			Concurrency: p.Warmer.Concurrency,
 		},
+		Recursive: config.RecursiveConfig{ServerTimeout: recursiveTimeout},
 	}
 	for _, rw := range p.Rewrites {
 		cfg.Rewrites = append(cfg.Rewrites, config.RewriteSpec{Domain: rw.Domain, Type: rw.Type, Value: rw.Value, TTL: rw.TTL})
@@ -1223,7 +1246,14 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	if !reflect.DeepEqual(h.Cfg.Server, cfg.Server) {
 		restart = append(restart, "server (listeners)")
 	}
-	if !reflect.DeepEqual(h.Cfg.Cache, cfg.Cache) {
+	// cache.failure_ttl is live-applied below (SetFailureTTL), so exclude it
+	// from the restart comparison — changing just it shouldn't prompt a full
+	// cache reload.
+	cacheNoFailure := func(c config.CacheConfig) config.CacheConfig {
+		c.FailureTTL = 0
+		return c
+	}
+	if !reflect.DeepEqual(cacheNoFailure(h.Cfg.Cache), cacheNoFailure(cfg.Cache)) {
 		restart = append(restart, "cache")
 	}
 	if !reflect.DeepEqual(h.Cfg.TLS, cfg.TLS) {
@@ -1251,6 +1281,10 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	}
 	h.DNS.SetBlockPolicy(cfg.Filter.BlockResponse, cfg.Filter.BlockTTL)
 	h.DNS.SetTimeout(time.Duration(cfg.Server.TimeoutSec) * time.Second)
+	h.DNS.SetFailureTTL(cfg.Cache.FailureTTL)
+	// recursive.server_timeout is a package-level default read at query time
+	// by every recursive:// resolver (existing, reloaded and per-client-group).
+	recursive.SetDefaultServerTimeout(cfg.Recursive.ServerTimeout)
 	h.Cache.SetLookupTimeout(cfg.Cache.LookupTimeout)
 	h.Cfg.Filter.Whitelist = cfg.Filter.Whitelist
 	h.Cfg.Filter.Blacklist = cfg.Filter.Blacklist

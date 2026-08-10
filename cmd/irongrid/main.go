@@ -145,6 +145,11 @@ func main() {
 	}
 
 	// ---- upstreams ----
+	// recursive.server_timeout tunes the per-server exchange timeout used by
+	// recursive:// referral walks. Applied as a package-level default (read
+	// at query time) so every resolver — boot, reload and per-client-group —
+	// picks it up.
+	recursive.SetDefaultServerTimeout(cfg.Recursive.ServerTimeout)
 	var upstreams []*upstream.Upstream
 	for _, spec := range cfg.Upstreams {
 		up, err := upstream.Parse(spec)
@@ -207,6 +212,9 @@ func main() {
 	}
 	// Cache-read budget on the hot path (cache.lookup_timeout; 0 = default).
 	dfly.SetLookupTimeout(cfg.Cache.LookupTimeout)
+	// Failure-cache lifetime for unreachable upstreams (cache.failure_ttl;
+	// 0 = use cache.negative_ttl).
+	handler.SetFailureTTL(cfg.Cache.FailureTTL)
 	// Proactive cache warmer: scans the query log for the domains queried
 	// within the lookback window and pre-resolves them (A + AAAA) through
 	// the current upstreams into the cache, so a restart or cache flush
@@ -703,6 +711,7 @@ func main() {
 			return fmt.Errorf("tls: %w", err)
 		}
 		// 3. Upstreams: rebuild from the new specs.
+		recursive.SetDefaultServerTimeout(cfg.Recursive.ServerTimeout)
 		newUps := make([]*upstream.Upstream, 0, len(cfg.Upstreams))
 		for _, spec := range cfg.Upstreams {
 			up, err := upstream.Parse(spec)
@@ -754,6 +763,7 @@ func main() {
 		handler.SetUpstreams(newUps)
 		handler.SetBlockPolicy(cfg.Filter.BlockResponse, cfg.Filter.BlockTTL)
 		handler.SetTimeout(time.Duration(cfg.Server.TimeoutSec) * time.Second)
+		handler.SetFailureTTL(cfg.Cache.FailureTTL)
 		newCache.SetLookupTimeout(cfg.Cache.LookupTimeout)
 		handler.SetRewriter(dnsserver.BuildRewriter(cfg.Rewrites))
 		handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))

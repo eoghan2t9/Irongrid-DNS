@@ -664,10 +664,15 @@ func TestHandlerFailureNegativelyCached(t *testing.T) {
 	deadAddr := pc.LocalAddr().String()
 	pc.Close()
 
-	c := cache.NewLocalOnly(time.Hour, time.Minute, 512, 0)
+	// The cache's own negative TTL is an hour, but the failure-cache knob is
+	// 100ms: if SetFailureTTL were ignored (falling back to negative_ttl) the
+	// entry would outlive the disappearance check below, so that check proves
+	// the custom TTL actually reached the cache.
+	c := cache.NewLocalOnly(time.Hour, time.Hour, 512, 0)
 	h := NewHandler(filter.NewEngine(), c, []*upstream.Upstream{
 		{Transport: upstream.UDP, Addr: deadAddr},
 	}, nil, "nxdomain", 600, 5*time.Second)
+	h.SetFailureTTL(100 * time.Millisecond)
 
 	q := func() *dns.Msg {
 		m := new(dns.Msg)
@@ -680,11 +685,11 @@ func TestHandlerFailureNegativelyCached(t *testing.T) {
 		t.Fatalf("expected SERVFAIL, got %v", fw.msg)
 	}
 
-	// The failure is written asynchronously, like a positive answer; poll
-	// briefly for the negative entry to land.
+	// The failure is written asynchronously, like a positive answer; it must
+	// land promptly (the check interval stays well inside the 100ms TTL).
 	question := fw.msg.Question[0]
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	appeared := false
+	for i := 0; i < 40; i++ {
 		if res := c.Lookup(question); res.Msg != nil {
 			if !res.Negative {
 				t.Fatalf("expected a negative cache entry, got positive %v", res.Msg)
@@ -692,11 +697,25 @@ func TestHandlerFailureNegativelyCached(t *testing.T) {
 			if res.Msg.Rcode != dns.RcodeServerFailure {
 				t.Fatalf("cached rcode = %d, want SERVFAIL", res.Msg.Rcode)
 			}
+			appeared = true
+			break
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	if !appeared {
+		t.Fatal("negative entry never appeared after the failure")
+	}
+
+	// ...and it must expire at the configured 100ms failure TTL rather than
+	// linger for the 1h negative TTL.
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if c.Lookup(question).Msg == nil {
 			return
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatal("negative entry never appeared after the failure")
+	t.Fatal("negative entry outlived the configured failure_ttl — knob ignored?")
 }
 
 // TestHandlerSingleUpstreamCooldownFastFail verifies the circuit breaker end

@@ -71,6 +71,16 @@ cache:
   lookup_timeout: 150ms       # max time a cache read may take on the DNS hot path
                               # before the query proceeds to the upstream
                               # (0 = built-in 150ms default)
+  # failure_ttl: 1m            # how long a resolution failure (upstream
+                              # unreachable, no stale data) is cached as SERVFAIL so
+                              # retries don't re-pay the full per-query timeout
+                              # during an outage (0 = use negative_ttl)
+
+# Tuning for recursive:// upstreams (no effect with forwarders).
+recursive:
+  # server_timeout: 3s        # how long one nameserver exchange may take during a
+                              # referral walk (root -> TLD -> authoritative) before
+                              # the resolver moves on (0 = built-in 3s default)
 
 
 tls:

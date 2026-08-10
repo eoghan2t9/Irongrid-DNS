@@ -57,7 +57,12 @@ type Handler struct {
 	BlockResponse string
 	BlockTTL      uint32
 	Timeout       time.Duration
-	Rewriter      *filter.Rewriter // local DNS records; never nil, may be empty
+	// FailureTTL is how long a resolution failure (upstream never answered,
+	// no serve-stale entry) is negatively cached as SERVFAIL; <= 0 uses the
+	// cache's configured negative TTL. Set via SetFailureTTL; snapshot on
+	// the hot path like the other tunables.
+	FailureTTL time.Duration
+	Rewriter   *filter.Rewriter // local DNS records; never nil, may be empty
 	ClientRouter  *ClientRouter    // per-client policy; never nil, may be empty
 	RateLimiter   *RateLimiter     // nil disables rate limiting
 	Geo           *geoip.Blocker   // nil disables geo-blocking
@@ -146,6 +151,14 @@ func (h *Handler) SetTimeout(d time.Duration) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.Timeout = d
+}
+
+// SetFailureTTL hot-swaps how long a resolution failure is negatively
+// cached as SERVFAIL; <= 0 restores the cache's configured negative TTL.
+func (h *Handler) SetFailureTTL(d time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.FailureTTL = d
 }
 
 // SetRewriter hot-swaps the local DNS records (config live-apply).
@@ -245,6 +258,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	blockResp := h.BlockResponse
 	blockTTL := h.BlockTTL
 	timeout := h.Timeout
+	failureTTL := h.FailureTTL
 	cache := h.Cache
 	rewriter := h.Rewriter
 	clientRouter := h.ClientRouter
@@ -515,7 +529,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			go func() {
 				cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer ccancel()
-				cache.SetNegative(cctx, q, cacheResp, 0)
+				// failureTTL <= 0 falls back to the cache's configured
+				// negative TTL (cache.failure_ttl knob).
+				cache.SetNegative(cctx, q, cacheResp, failureTTL)
 			}()
 		}
 		h.record(client, qname, q, "error", errStr, usedUp, start, m)

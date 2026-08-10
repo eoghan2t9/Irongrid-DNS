@@ -22,6 +22,14 @@ func TestPerfTunablesDefaults(t *testing.T) {
 	if !c.Cache.Prefetch {
 		t.Error("cache.prefetch should default to true")
 	}
+	// Latency-knob defaults: failure caching falls back to the negative TTL
+	// and the recursive resolver uses its built-in per-server timeout.
+	if c.Cache.FailureTTL != 0 {
+		t.Errorf("cache.failure_ttl = %v, want 0 (use negative_ttl)", c.Cache.FailureTTL)
+	}
+	if c.Recursive.ServerTimeout != 0 {
+		t.Errorf("recursive.server_timeout = %v, want 0 (built-in default)", c.Recursive.ServerTimeout)
+	}
 }
 
 // TestPerfTunablesValidation verifies negative values are rejected.
@@ -40,6 +48,16 @@ func TestPerfTunablesValidation(t *testing.T) {
 	c.Log.BatchSize = -1
 	if err := c.Validate(); err == nil {
 		t.Error("negative log.batch_size accepted")
+	}
+	c = validBase()
+	c.Cache.FailureTTL = -time.Minute
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "failure_ttl") {
+		t.Errorf("err = %v, want negative cache.failure_ttl rejected", err)
+	}
+	c = validBase()
+	c.Recursive.ServerTimeout = -time.Second
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "server_timeout") {
+		t.Errorf("err = %v, want negative recursive.server_timeout rejected", err)
 	}
 }
 
