@@ -80,6 +80,12 @@ func main() {
 	stopTuning := tuning.Start()
 	defer stopTuning()
 
+	// ---- system-level tuning: raise the file-descriptor soft limit (Unix)
+	// and, as root on Linux, the kernel socket-buffer ceilings so the large
+	// per-socket buffers the listeners request actually take effect.
+	// Best-effort everywhere; must run before the DNS listeners are created.
+	tuning.ApplySystem()
+
 	// ---- config ----
 	cfg, err := config.Load(*configPath)
 	if err != nil {
@@ -525,7 +531,10 @@ func main() {
 				}
 			}
 			go func() {
-				ln, err := net.Listen("tcp", srv.Addr)
+				// Tuned socket: the dashboard serves DoH when it shares the
+				// HTTPS port, so its buffers get the same boost as the DNS
+				// listeners (accepted connections inherit the settings).
+				ln, err := tuning.ListenConfig().Listen(context.Background(), "tcp", srv.Addr)
 				if err != nil {
 					log.Printf("[web] server error: %v", err)
 					return

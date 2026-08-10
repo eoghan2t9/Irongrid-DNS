@@ -10,9 +10,13 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"net"
 	"os"
 	"runtime"
 	"runtime/debug"
+	"runtime/metrics"
+	"sync"
+	"syscall"
 	"time"
 )
 
@@ -26,7 +30,178 @@ const (
 
 	// recheckInterval controls how often limits are re-read.
 	recheckInterval = 5 * time.Minute
+
+	// SocketBufferSize is the SO_RCVBUF/SO_SNDBUF size requested for every DNS
+	// listener socket (plain UDP/TCP, DoT, DoH, DoQ and the HTTPS web
+	// listener). Under bursts the kernel's default buffer drops datagrams and
+	// the client pays a retransmit round trip — the biggest avoidable latency
+	// cost on a busy LAN. On Linux the request is clamped to net.core.rmem_max
+	// unless that ceiling has been raised (applySysctls does this when running
+	// as root; docker-compose.yml does it for containers).
+	SocketBufferSize = 2 << 20 // 2 MiB
 )
+
+// ApplySystem applies the OS-level tweaks that are separate from the Go
+// runtime: the file-descriptor soft limit is raised to the hard limit (Unix;
+// a no-op on Windows), and on Linux running as root the kernel socket-buffer
+// ceilings are raised so the per-socket buffer sizes actually take effect.
+// Every step is best-effort and never fatal — inside an unprivileged Docker
+// container the sysctl writes are skipped with a log line, and the container
+// can get the same effect from docker-compose's sysctls instead. Call it once
+// at boot, before any DNS listeners are created.
+func ApplySystem() {
+	raiseFileLimit()
+	applySysctls()
+}
+
+// ListenConfig returns a net.ListenConfig whose sockets get SocketBufferSize
+// send/receive buffers, for listeners that are created via the standard net
+// package (TCP, TLS and HTTP servers). Accepted connections inherit the
+// listener's buffer settings on every supported OS.
+func ListenConfig() *net.ListenConfig {
+	return &net.ListenConfig{Control: SocketControl}
+}
+
+// SetPacketBuffers raises the receive/send buffers of a packet socket (the
+// UDP DNS listener and the DoQ QUIC socket) to SocketBufferSize. Best-effort:
+// a kernel that refuses (e.g. a macOS sockbuf ceiling) keeps the OS default
+// and is logged rather than failing the listener.
+func SetPacketBuffers(pc net.PacketConn) {
+	uc, ok := pc.(*net.UDPConn)
+	if !ok {
+		return
+	}
+	if err := uc.SetReadBuffer(SocketBufferSize); err != nil {
+		log.Printf("[tune] SO_RCVBUF: %v", err)
+	}
+	if err := uc.SetWriteBuffer(SocketBufferSize); err != nil {
+		log.Printf("[tune] SO_SNDBUF: %v", err)
+	}
+}
+
+// SocketControl is a net.ListenConfig.Control / net.Dialer.Control hook: it
+// applies the SocketBufferSize receive/send buffers to the raw socket, for
+// listener sockets (via ListenConfig) and outbound sockets (upstream DNS
+// clients and the DoH HTTP transport, via Dialer). A failure only logs — a
+// buffer that couldn't be raised must never take a listener or a dial down.
+func SocketControl(network, address string, c syscall.RawConn) error {
+	var err error
+	if cerr := c.Control(func(fd uintptr) { err = setSocketBufferSizes(fd) }); cerr != nil {
+		log.Printf("[tune] socket buffers for %s %s: %v", network, address, cerr)
+		return nil
+	}
+	if err != nil {
+		log.Printf("[tune] socket buffers for %s %s: %v", network, address, err)
+	}
+	return nil
+}
+
+// ---- status snapshot (dashboard) ----
+
+// SystemTuning is the state ApplySystem set up at boot, reported through
+// Status(). Sysctls carry the live value at query time plus the note recorded
+// when ApplySystem tried each knob.
+type SystemTuning struct {
+	OS           string        `json:"os"`
+	SocketBuffer int           `json:"socket_buffer"`
+	FDSoft       *uint64       `json:"fd_soft"` // nil where there is no fd limit (Windows)
+	FDHard       *uint64       `json:"fd_hard"`
+	FDRaised     bool          `json:"fd_raised"`
+	FDRaisedFrom *uint64       `json:"fd_raised_from,omitempty"`
+	Sysctls      []SysctlState `json:"sysctls"`
+	GOMAXPROCS   int           `json:"gomaxprocs"`
+	GOMEMLIMIT   int64         `json:"gomemlimit"`
+	GOGC         int           `json:"gogc"`
+}
+
+// SysctlState describes one kernel socket knob Irongrid tunes (Linux only).
+type SysctlState struct {
+	Key    string `json:"key"`
+	Value  uint64 `json:"value"` // live value as of Status()
+	Target uint64 `json:"target"`
+	Note   string `json:"note"`   // what ApplySystem recorded at boot
+}
+
+// statusMu guards the package-level tuning state recorded at boot.
+var (
+	statusMu     sync.Mutex
+	fdRaised     bool
+	fdRaisedFrom uint64
+	sysctlNotes  []SysctlState
+)
+
+func recordFDRaised(from uint64) {
+	statusMu.Lock()
+	fdRaised = true
+	fdRaisedFrom = from
+	statusMu.Unlock()
+}
+
+func recordSysctl(s SysctlState) {
+	statusMu.Lock()
+	sysctlNotes = append(sysctlNotes, s)
+	statusMu.Unlock()
+}
+
+// Status returns a snapshot of the current system-tuning state for the
+// dashboard: the file-descriptor limit (live), every Linux socket sysctl
+// (live value + the boot-time note), the per-socket buffer size and the Go
+// runtime settings ApplySystem/Start arrived at.
+func Status() SystemTuning {
+	st := SystemTuning{
+		OS:           runtime.GOOS,
+		SocketBuffer: SocketBufferSize,
+		GOMAXPROCS:   runtime.GOMAXPROCS(0),
+		GOMEMLIMIT:   debug.SetMemoryLimit(-1), // -1 is a documented query for SetMemoryLimit
+		GOGC:         currentGCPercent(),
+	}
+
+	statusMu.Lock()
+	st.FDRaised = fdRaised
+	if fdRaised {
+		from := fdRaisedFrom
+		st.FDRaisedFrom = &from
+	}
+	st.Sysctls = make([]SysctlState, len(sysctlNotes))
+	copy(st.Sysctls, sysctlNotes)
+	statusMu.Unlock()
+
+	if soft, hard, ok := readFileLimit(); ok {
+		st.FDSoft = &soft
+		st.FDHard = &hard
+	}
+	for i := range st.Sysctls {
+		if v, ok := currentSysctlValue(st.Sysctls[i].Key); ok {
+			st.Sysctls[i].Value = v
+		}
+	}
+	return st
+}
+
+// currentGCPercent reads the live GOGC setting via the read-only
+// /gc/gogc:percent runtime metric. debug.SetGCPercent cannot be used to
+// query the current value: unlike SetMemoryLimit it has no negative-input
+// query mode — a negative argument disables the GC-percentage heuristic
+// outright — so calling it with -1 on every status poll would silently switch
+// the runtime to memory-limit-only collection.
+func currentGCPercent() int {
+	samples := []metrics.Sample{{Name: "/gc/gogc:percent"}}
+	metrics.Read(samples)
+	for _, s := range samples {
+		if s.Value.Kind() != metrics.KindUint64 {
+			continue
+		}
+		// The runtime stores GOGC as a signed int32 but reports it as an
+		// uint64, so a negative setting (GOGC=off) surfaces as a huge number;
+		// reinterpret it so "off" is reported truthfully.
+		v := s.Value.Uint64()
+		if v <= math.MaxInt32 {
+			return int(v)
+		}
+		return int(int32(v))
+	}
+	return 0
+}
 
 // Start applies GOMAXPROCS/GOGC/GOMEMLIMIT once immediately, logs what it
 // found, and then re-applies every recheckInterval. Any of the three the

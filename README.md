@@ -65,6 +65,7 @@ commercial ad-blocking DNS with sub-millisecond local responses.
 - [Update in one line](#update-in-one-line)
 - [Features](#features)
 - [Architecture](#architecture)
+- [System tuning](#system-tuning)
 - [Installation options](#installation-options)
   - [1. Interactive TUI wizard (recommended)](#1-interactive-tui-wizard-recommended)
   - [2. Docker Compose (Dragonfly included)](#2-docker-compose-dragonfly-included)
@@ -243,6 +244,46 @@ startup service (systemd / launchd / Windows task).
 
 Every response passes through: **filter → cache → upstream → log**. Blocked
 queries never touch an upstream, so they are answered instantly.
+
+## System tuning
+
+Irongrid applies a small set of OS-level tweaks at boot so a Raspberry Pi, a
+busy LAN server and a Docker container all get the same performance
+headroom — no per-deployment flags to hand-tune. Everything is best-effort
+and never fatal: a knob that can't be changed (no root, a platform without
+the concept) is logged with a `[tune]` prefix and skipped, and the server
+starts normally either way.
+
+| Tweak | Linux | macOS | Windows | Docker |
+|---|---|---|---|---|
+| **Go runtime** — GOMAXPROCS / GOGC / GOMEMLIMIT auto-matched to the detected CPU/memory limits; cgroup-aware, re-checked every 5 min so a live `docker update` resize applies without a restart | ✅ | ✅ (defaults) | ✅ (defaults) | ✅ |
+| **File-descriptor limit** — soft raised to the hard limit at boot (Docker's default soft limit is 1024, which a busy resolver can brush up against) | ✅ | ✅ | n/a | ✅ |
+| **2 MiB socket buffers** (`SO_RCVBUF`/`SO_SNDBUF`) on every socket — all five DNS listeners, the HTTPS web listener, and every outbound upstream connection (UDP/TCP/DoT/DoH/DoQ) | ✅ | ✅ | ✅ | ✅ |
+| **Kernel socket-buffer ceilings** (`net.core.rmem_max`/`wmem_max`/`somaxconn`) raised so the 2 MiB buffers aren't silently clamped to ~208 KiB | ✅ *(needs root / CAP_NET_ADMIN)* | n/a | n/a | ✅ *(via `sysctls:` in docker-compose.yml)* |
+
+Where each one is applied:
+
+- **Bare runs / dev** — Irongrid raises the fd limit itself (Unix) and, when
+  running as root on Linux, writes the sysctls in-process at boot.
+- **systemd service** — `install.sh` writes `/etc/sysctl.d/99-irongrid.conf`
+  (and applies it), and the unit already sets `LimitNOFILE=65536`.
+- **Docker** — `docker-compose.yml` ships `sysctls:` (applied by the daemon
+  at container start, so no `CAP_NET_ADMIN` is needed inside) and `ulimits`
+  for the fd limit. In an unprivileged container the in-process sysctl write
+  is skipped with a log line.
+
+See it in action — boot logs, or the dashboard's **System tuning** card
+(fed by `GET /api/status` → `tuning`):
+
+```bash
+journalctl -u irongrid | grep '\[tune\]'   # what boot applied (systemd install)
+sysctl net.core.rmem_max net.core.wmem_max net.core.somaxconn   # live kernel values
+ulimit -n                                                       # the soft fd limit
+```
+
+If a sysctl is still low (e.g. an unprivileged container), set it at the
+container level instead: `docker run --sysctl net.core.rmem_max=4194304 …` or
+under `sysctls:` in docker-compose.yml.
 
 ## Installation options
 
@@ -535,7 +576,7 @@ The dashboard uses a JSON REST API (HTTP Basic auth):
 <summary><b>📡 Browse all endpoints</b> — click to expand</summary>
 
 ```
-GET  /api/status            server, listeners, cache, tunnel, root-hints status
+GET  /api/status            server, listeners, cache, tunnel, root-hints status + system tuning (fd limit, socket buffers, sysctls, Go runtime)
 GET  /api/stats             counters, protocol split, top blocked, cache (L1 hits/misses + Dragonfly L2 hits/misses/memory/keys), query_today (since-midnight log stats), query_hourly (24 per-hour buckets for the dashboard sparkline)
 GET  /api/log?limit&action&domain&qtype&client   query log (Dragonfly stream, newest first, in-memory filters; client is an exact source-IP match used by the dashboard's click-through top-client rows)
 GET  /api/log/hostnames?ips=a,b,c   reverse-DNS (PTR) names for client IPs, cached (positive 1h / negative 15m), resolved via the configured upstreams

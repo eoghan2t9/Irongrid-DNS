@@ -447,6 +447,32 @@ install_irongrid_service() {
   esac
 }
 
+# ---- host kernel tuning (Linux only) ----
+# The kernel clamps SO_RCVBUF/SO_SNDBUF to net.core.rmem_max/wmem_max
+# (default ~208 KiB), which would silently gut Irongrid's 2 MiB DNS socket
+# buffers. Raising the ceilings is a privileged host change, so this runs
+# only when root is available; without root the in-process best-effort write
+# at boot logs the same hint instead. Docker containers get the effect via
+# docker-compose.yml's sysctls.
+apply_kernel_sysctls() {
+  [ "$OS" = linux ] || return 0
+  has_root || { echo "==> kernel socket tuning skipped (no root — container sysctls apply instead)"; return 0; }
+  local CONF=/etc/sysctl.d/99-irongrid.conf
+  echo "==> tuning kernel socket buffers (net.core.*) ..."
+  run_root tee "$CONF" >/dev/null <<EOF
+# Irongrid DNS — raise the kernel socket-buffer ceilings so the DNS
+# server's 2 MiB socket buffers actually take effect.
+net.core.rmem_max = 4194304
+net.core.wmem_max = 4194304
+net.core.somaxconn = 65535
+EOF
+  if run_root sysctl --system >/dev/null 2>&1 || run_root sysctl -p "$CONF" >/dev/null 2>&1; then
+    echo "==> kernel socket tuning applied ($CONF)"
+  else
+    echo "!! could not apply kernel socket tuning — apply manually: sysctl -p $CONF"
+  fi
+}
+
 install_irongrid_systemd() {
   if ! { has_root && systemd_available; }; then
     echo "!! not installing Irongrid as a service (no root or no systemd)"
@@ -539,6 +565,11 @@ EOF
     echo "   launchd plist written to $plist — load it with: launchctl load $plist"
   fi
 }
+
+# Kernel socket tuning is a host-level change, independent of whether the
+# wizard or the script's own steps install the startup service — run it in
+# both paths (the function self-guards on OS and root availability).
+apply_kernel_sysctls
 
 if [ "$WIZARD_WILL_RUN" -eq 1 ]; then
   echo "==> startup service install deferred to the interactive wizard"

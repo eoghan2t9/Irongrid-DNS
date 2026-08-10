@@ -97,6 +97,8 @@ export default function Dashboard({ onNavigate }) {
 
       <RootHintsCard status={status} />
 
+      <TuningCard status={status} />
+
       <BlockedClientsCard />
 
       <div className="grid-2">
@@ -737,6 +739,84 @@ function RootHintsCard({ status }) {
         <div className="error-text small" style={{ marginTop: 8 }}>
           ⚠ {rh.last_error}
         </div>
+      )}
+    </div>
+  )
+}
+
+// TuningCard summarises the system-level tuning from /api/status: the
+// file-descriptor limit (with what boot raised it from), the per-socket
+// buffer size, the Linux socket sysctls with live values, and the Go runtime
+// settings. A knob below its target shows "low" — raise it with root, a
+// sysctl.d drop-in, or docker --sysctl / compose sysctls.
+function TuningCard({ status }) {
+  const t = status?.tuning
+  if (!t) return null
+  const fmtFd = (n) => {
+    if (n == null) return 'n/a'
+    if (Number(n) > 1e15) return 'unlimited' // RLIM_INFINITY (macOS)
+    return Number(n).toLocaleString()
+  }
+  const bytes = (n) => {
+    if (!n || n <= 0) return '—'
+    if (Number(n) > 1e15) return 'unlimited' // math.MaxInt64: GOMEMLIMIT not set
+    if (n >= 1073741824) return (n / 1073741824).toFixed(1) + ' GiB'
+    return (n / 1048576).toFixed(0) + ' MiB'
+  }
+  const fdState = () => {
+    if (t.fd_soft == null) return { cls: 'badge', label: 'no fd limit on Windows' }
+    if (t.fd_raised) return { cls: 'badge-allowed', label: `raised ${fmtFd(t.fd_raised_from)} → ${fmtFd(t.fd_soft)}` }
+    if (t.fd_soft >= t.fd_hard) return { cls: 'badge-allowed', label: 'at hard limit' }
+    return { cls: 'badge-warn', label: 'not raised' }
+  }
+  const f = fdState()
+  return (
+    <div className="card">
+      <div className="row-between">
+        <h3 style={{ margin: 0 }}>System tuning</h3>
+        <span className="dim small">{t.os}</span>
+      </div>
+      <div className="kv-grid" style={{ marginTop: 8 }}>
+        <div className="kv-row">
+          <span className="kv-label">File descriptors</span>
+          <span className="kv-value">
+            {fmtFd(t.fd_soft)} soft / {fmtFd(t.fd_hard)} hard{' '}
+            <span className={`badge ${f.cls}`}>{f.label}</span>
+          </span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Socket buffers</span>
+          <span className="kv-value">{bytes(t.socket_buffer)} per socket · every listener &amp; upstream</span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">Go runtime</span>
+          <span className="kv-value">GOMAXPROCS {t.gomaxprocs} · GOMEMLIMIT {bytes(t.gomemlimit)} · GOGC {t.gogc < 0 ? 'off' : t.gogc}</span>
+        </div>
+      </div>
+      {t.sysctls && t.sysctls.length > 0 && (
+        <>
+          <h4 style={{ margin: '14px 0 8px' }}>Linux socket sysctls</h4>
+          <div className="kv-grid">
+            {t.sysctls.map((s) => (
+              <div className="kv-row" key={s.key}>
+                <span className="kv-label mono">net.core.{s.key}</span>
+                <span className="kv-value">
+                  {Number(s.value).toLocaleString()}
+                  {' '}<span className={`badge ${s.value >= s.target ? 'badge-allowed' : 'badge-warn'}`}>
+                    {s.value >= s.target ? 'ok' : 'low'}
+                  </span>
+                  <span className="dim small" style={{ marginLeft: 6 }}>{s.note}</span>
+                </span>
+              </div>
+            ))}
+          </div>
+          <div className="card-hint">
+            The kernel clamps SO_RCVBUF to net.core.rmem_max, so a low value caps the
+            socket buffers above. Applied automatically as root at boot; for Docker set
+            the same values under <code>sysctls:</code> in docker-compose.yml, or run
+            as root (or with CAP_NET_ADMIN) for the in-process raise.
+          </div>
+        </>
       )}
     </div>
   )

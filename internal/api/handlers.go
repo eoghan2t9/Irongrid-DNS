@@ -31,6 +31,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/recursive"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tunnel"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/update"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
@@ -225,6 +226,10 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 // ---- status & stats ----
 
 func (h *Handler) getStatus(w http.ResponseWriter) {
+	// System tuning state is independent of the config and involves a couple
+	// of /proc/sys reads plus a getrlimit — cheap, but there's no reason to
+	// hold the config lock while doing it.
+	tuningStatus := tuning.Status()
 	h.cfgMu.Lock()
 	defer h.cfgMu.Unlock()
 	listeners := map[string]bool{}
@@ -267,6 +272,9 @@ func (h *Handler) getStatus(w http.ResponseWriter) {
 		"cache_ok":   cacheOK,
 		"tunnel":     h.Tunnel.Status(),
 		"root_hints": rootHints,
+		// System tuning state: file-descriptor limit, socket buffers, Linux
+		// socket sysctls and the Go runtime settings (dashboard card).
+		"tuning": tuningStatus,
 	})
 }
 

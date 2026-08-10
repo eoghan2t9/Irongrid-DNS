@@ -10,6 +10,8 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
 // startDoQ launches the RFC 9250 DNS-over-QUIC listener.
@@ -23,8 +25,16 @@ func (m *Manager) startDoQ(addr string) error {
 		KeepAlivePeriod:      20 * time.Second,
 		HandshakeIdleTimeout: 8 * time.Second,
 	}
-	ln, err := quic.ListenAddr(addr, tlsConf, quicConf)
+	// Listen on our own UDP socket so the kernel receive/send buffers are
+	// raised (quic.ListenAddr dials its own socket with the OS defaults).
+	pc, err := net.ListenPacket("udp", addr)
 	if err != nil {
+		return err
+	}
+	tuning.SetPacketBuffers(pc)
+	ln, err := quic.Listen(pc, tlsConf, quicConf)
+	if err != nil {
+		_ = pc.Close()
 		return err
 	}
 	m.doqLns = append(m.doqLns, ln)

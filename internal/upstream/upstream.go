@@ -22,6 +22,7 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/recursive"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
 // upstreamPoolSize bounds the number of warm TCP/DoT connections kept per
@@ -29,6 +30,14 @@ import (
 // concurrency limit — a query that finds the pool empty just dials fresh,
 // same as before pooling existed.
 const upstreamPoolSize = 8
+
+// tunedDialer returns a net.Dialer whose sockets get the same SocketBufferSize
+// boost as the listeners, so outbound upstream traffic (UDP, TCP and DoT) has
+// matching receive/send buffers under bursts. miekg/dns copies this Dialer and
+// dials through it, Control hook and all.
+func tunedDialer() *net.Dialer {
+	return &net.Dialer{Timeout: 8 * time.Second, Control: tuning.SocketControl}
+}
 
 // Circuit breaker: after circuitOpenFails consecutive failures an upstream
 // is skipped for circuitCooldown instead of letting every query burn its
@@ -84,9 +93,12 @@ type Upstream struct {
 	// per query instead of a new connection — that's the entire point of
 	// QUIC's multiplexing, which a fresh quic.DialAddr per query (the
 	// previous behavior) completely wasted, on top of paying for a fresh
-	// QUIC+TLS 1.3 handshake every time.
+	// QUIC+TLS 1.3 handshake every time. quicPc is the UDP socket backing
+	// the connection: quic-go's Dial doesn't own a caller-provided packet
+	// conn, so Irongrid closes it alongside the connection.
 	quicMu   sync.Mutex
 	quicConn quic.Connection
+	quicPc   net.PacketConn
 
 	// resolver performs the walk for Transport == Recursive; nil for every
 	// other transport.
@@ -155,11 +167,11 @@ func Parse(spec string) (*Upstream, error) {
 	}
 	switch u.Transport {
 	case UDP:
-		u.udpClient = &dns.Client{Net: "udp", Timeout: 8 * time.Second}
+		u.udpClient = &dns.Client{Net: "udp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
 	case TCP:
-		u.tcpClient = &dns.Client{Net: "tcp", Timeout: 8 * time.Second}
+		u.tcpClient = &dns.Client{Net: "tcp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
 	case TLS:
-		u.dotClient = &dns.Client{Net: "tcp-tls", TLSConfig: u.tlsConf, Timeout: 8 * time.Second}
+		u.dotClient = &dns.Client{Net: "tcp-tls", TLSConfig: u.tlsConf, Timeout: 8 * time.Second, Dialer: tunedDialer()}
 	}
 	if u.Transport == HTTPS {
 		path := parsed.Path
@@ -174,6 +186,8 @@ func Parse(spec string) (*Upstream, error) {
 			DialContext: (&net.Dialer{
 				Timeout:   5 * time.Second,
 				KeepAlive: 30 * time.Second,
+				// The DoH endpoint's sockets get the same buffer boost.
+				Control: tuning.SocketControl,
 			}).DialContext,
 		}
 		// HTTP/2 on the DoH transport is best-effort: ConfigureTransport only
@@ -195,10 +209,10 @@ func NewWithTLS(transport Transport, addr, host string, tlsConf *tls.Config) *Up
 	switch u.Transport {
 	case TCP:
 		u.connPool = make(chan *dns.Conn, upstreamPoolSize)
-		u.tcpClient = &dns.Client{Net: "tcp", Timeout: 8 * time.Second}
+		u.tcpClient = &dns.Client{Net: "tcp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
 	case TLS:
 		u.connPool = make(chan *dns.Conn, upstreamPoolSize)
-		u.dotClient = &dns.Client{Net: "tcp-tls", TLSConfig: tlsConf, Timeout: 8 * time.Second}
+		u.dotClient = &dns.Client{Net: "tcp-tls", TLSConfig: tlsConf, Timeout: 8 * time.Second, Dialer: tunedDialer()}
 	case HTTPS:
 		u.client = &http.Client{Timeout: 10 * time.Second}
 	}
@@ -256,7 +270,7 @@ func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns
 		// pooling buys nothing (a fresh "dial" is just a local socket()).
 		c := u.udpClient
 		if c == nil {
-			c = &dns.Client{Net: "udp", Timeout: 8 * time.Second}
+			c = &dns.Client{Net: "udp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
 		}
 		r, _, err := c.ExchangeContext(ctx, m, u.Addr)
 		u.markResult(err)
@@ -264,7 +278,7 @@ func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns
 	}
 	c := u.tcpClient
 	if c == nil {
-		c = &dns.Client{Net: "tcp", Timeout: 8 * time.Second}
+		c = &dns.Client{Net: "tcp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
 	}
 	return u.pooledExchange(ctx, m, c)
 }
@@ -272,7 +286,7 @@ func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns
 func (u *Upstream) queryDoT(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	c := u.dotClient
 	if c == nil {
-		c = &dns.Client{Net: "tcp-tls", TLSConfig: u.tlsConf, Timeout: 8 * time.Second}
+		c = &dns.Client{Net: "tcp-tls", TLSConfig: u.tlsConf, Timeout: 8 * time.Second, Dialer: tunedDialer()}
 	}
 	return u.pooledExchange(ctx, m, c)
 }
@@ -381,6 +395,10 @@ func (u *Upstream) Close() {
 	if u.quicConn != nil {
 		_ = u.quicConn.CloseWithError(0, "")
 		u.quicConn = nil
+	}
+	if u.quicPc != nil {
+		_ = u.quicPc.Close()
+		u.quicPc = nil
 	}
 	u.quicMu.Unlock()
 }

@@ -11,14 +11,11 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
 const (
-	// udpSocketBuffer is the SO_RCVBUF/SO_SNDBUF size for the DNS UDP
-	// listener. Under bursts the kernel's default buffer drops datagrams
-	// and the client pays a retransmit round trip — the biggest avoidable
-	// latency cost on a busy LAN.
-	udpSocketBuffer = 2 << 20 // 2 MiB
 	// udpMaxPacketSize is the largest datagram the reader accepts (large
 	// EDNS0 queries), vs miekg/dns's 512-byte default which silently
 	// truncates anything bigger.
@@ -93,10 +90,6 @@ func (m *Manager) Start(udpAddr, tcpAddr, dotAddr, dohAddr, doqAddr, dohPath str
 }
 
 func (m *Manager) startClassic(proto, addr string, tcp bool) {
-	netw := map[string]string{"udp": "udp", "tcp": "tcp"}[proto]
-	if tcp {
-		netw = "tcp"
-	}
 	var handler dns.Handler = m.handler
 	if tcp {
 		// Tag TCP queries with the right protocol for stats.
@@ -113,10 +106,7 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 			m.results <- Listener{Proto: proto, Addr: addr, Err: err}
 			return
 		}
-		if uc, ok := pc.(*net.UDPConn); ok {
-			_ = uc.SetReadBuffer(udpSocketBuffer)
-			_ = uc.SetWriteBuffer(udpSocketBuffer)
-		}
+		tuning.SetPacketBuffers(pc)
 		srv := &dns.Server{Net: "udp", PacketConn: pc, UDPSize: udpMaxPacketSize, Handler: handler}
 		m.servers = append(m.servers, srv)
 		go func() {
@@ -128,11 +118,20 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 		}()
 		return
 	}
-	srv := &dns.Server{Addr: addr, Net: netw, Handler: handler}
+	// TCP: create the listener ourselves with a tuned ListenConfig so the
+	// socket buffers are raised here too (accepted connections inherit them).
+	// Handing the pre-built listener to the dns.Server means ActivateAndServe
+	// must serve it (ListenAndServe would replace it with its own socket).
+	ln, err := tuning.ListenConfig().Listen(context.Background(), "tcp", addr)
+	if err != nil {
+		m.results <- Listener{Proto: proto, Addr: addr, Err: err}
+		return
+	}
+	srv := &dns.Server{Net: "tcp", Listener: ln, Handler: handler}
 	m.servers = append(m.servers, srv)
 	go func() {
 		log.Printf("[dns] %s listener on %s", proto, addr)
-		if err := srv.ListenAndServe(); err != nil {
+		if err := srv.ActivateAndServe(); err != nil {
 			log.Printf("[dns] %s listener on %s stopped: %v", proto, addr, err)
 			m.results <- Listener{Proto: proto, Addr: addr, Err: err}
 		}
@@ -140,16 +139,24 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 }
 
 func (m *Manager) startDoT(addr string) {
+	// Same tuned socket as plain TCP; miekg/dns serves a Listener we hand it
+	// as-is, so the TLS wrapping is done here before it is passed along.
+	ln, err := tuning.ListenConfig().Listen(context.Background(), "tcp", addr)
+	if err != nil {
+		m.results <- Listener{Proto: "dot", Addr: addr, Err: err}
+		return
+	}
 	srv := &dns.Server{
 		Addr:      addr,
 		Net:       "tcp-tls",
+		Listener:  tls.NewListener(ln, m.tlsConf),
 		TLSConfig: m.tlsConf,
 		Handler:   protoHandler{m.handler, "dot"},
 	}
 	m.servers = append(m.servers, srv)
 	go func() {
 		log.Printf("[dns] DoT listener on %s", addr)
-		if err := srv.ListenAndServe(); err != nil {
+		if err := srv.ActivateAndServe(); err != nil {
 			log.Printf("[dns] DoT listener on %s stopped: %v", addr, err)
 			m.results <- Listener{Proto: "dot", Addr: addr, Err: err}
 		}

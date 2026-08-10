@@ -5,10 +5,13 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"net"
 	"time"
 
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
 // queryDoQClient implements RFC 9250 (DNS over QUIC): a 2-byte length
@@ -63,23 +66,46 @@ func (u *Upstream) getQUICConn(ctx context.Context) (quic.Connection, error) {
 	// RFC 9250 requires the "doq" ALPN token on both endpoints.
 	qTLS := u.tlsConf.Clone()
 	qTLS.NextProtos = []string{"doq"}
-	conn, err := quic.DialAddr(ctx, u.Addr, qTLS, quicConf)
+	// Dial on our own UDP socket so the receive/send buffers are raised
+	// (quic.DialAddr creates its own socket with the OS defaults). quic-go's
+	// Dial does not take ownership of a caller-provided packet conn, so the
+	// socket is closed alongside the connection (dropQUICConn / Close).
+	pc, err := net.ListenPacket("udp", ":0")
 	if err != nil {
 		return nil, err
 	}
+	tuning.SetPacketBuffers(pc)
+	addr, err := net.ResolveUDPAddr("udp", u.Addr)
+	if err != nil {
+		_ = pc.Close()
+		return nil, err
+	}
+	conn, err := quic.Dial(ctx, pc, addr, qTLS, quicConf)
+	if err != nil {
+		_ = pc.Close()
+		return nil, err
+	}
 	u.quicConn = conn
+	u.quicPc = pc
 	return conn, nil
 }
 
-// dropQUICConn closes conn and clears it if it's still the upstream's
-// current connection (a concurrent call may have already replaced it).
+// dropQUICConn closes conn (and the UDP socket backing it) and clears it if
+// it's still the upstream's current connection (a concurrent call may have
+// already replaced it).
 func (u *Upstream) dropQUICConn(conn quic.Connection) {
 	u.quicMu.Lock()
+	var pc net.PacketConn
 	if u.quicConn == conn {
 		u.quicConn = nil
+		pc = u.quicPc
+		u.quicPc = nil
 	}
 	u.quicMu.Unlock()
 	_ = conn.CloseWithError(0, "")
+	if pc != nil {
+		_ = pc.Close()
+	}
 }
 
 // doQStream runs one query on its own stream over an existing connection.

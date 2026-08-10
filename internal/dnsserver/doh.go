@@ -1,6 +1,7 @@
 package dnsserver
 
 import (
+	"context"
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
@@ -14,6 +15,8 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/miekg/dns"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
 const dnsMessageContentType = "application/dns-message"
@@ -61,10 +64,13 @@ func (m *Manager) startDoH(addr, path string) error {
 
 	m.httpSrv = srv
 
-	ln, err := tls.Listen("tcp", addr, dohTLS)
+	// Create the TCP socket ourselves so the receive/send buffers are raised
+	// (tls.Listen would dial a plain net.Listen with the OS defaults).
+	rawLn, err := tuning.ListenConfig().Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		return err
 	}
+	ln := tls.NewListener(rawLn, dohTLS)
 	log.Printf("[dns] DoH listener on %s (path %s, HTTP/2 enabled)", addr, path)
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
