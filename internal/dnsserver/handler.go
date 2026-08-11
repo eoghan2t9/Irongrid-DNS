@@ -84,12 +84,12 @@ type Handler struct {
 	// no serve-stale entry) is negatively cached as SERVFAIL; <= 0 uses the
 	// cache's configured negative TTL. Set via SetFailureTTL; snapshot on
 	// the hot path like the other tunables.
-	FailureTTL time.Duration
-	Rewriter   *filter.Rewriter // local DNS records; never nil, may be empty
-	ClientRouter  *ClientRouter    // per-client policy; never nil, may be empty
-	RateLimiter   *RateLimiter     // nil disables rate limiting
-	Geo           *geoip.Blocker   // nil disables geo-blocking
-	IPBanner      *geoip.Banner    // nil disables IP/honeypot blocking
+	FailureTTL   time.Duration
+	Rewriter     *filter.Rewriter // local DNS records; never nil, may be empty
+	ClientRouter *ClientRouter    // per-client policy; never nil, may be empty
+	RateLimiter  *RateLimiter     // nil disables rate limiting
+	Geo          *geoip.Blocker   // nil disables geo-blocking
+	IPBanner     *geoip.Banner    // nil disables IP/honeypot blocking
 	// TrustUDP opt-in: when true, a honeypot hit over plain UDP auto-blocks
 	// its source address too. Off by default — a UDP source can be spoofed,
 	// so enabling this lets a spoofing attacker permanently block an
@@ -337,9 +337,6 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		return
 	}
 
-	m := new(dns.Msg)
-	m.SetReply(r)
-	m.RecursionAvailable = true
 	q := r.Question[0]
 	qname := strings.ToLower(strings.TrimSuffix(q.Name, "."))
 
@@ -419,6 +416,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			// correct answer for an authoritatively-local name, not a
 			// blocklist/cache/upstream lookup.
 			h.Stats.Allowed.Add(1)
+			m := newReply(r)
 			h.record(client, qname, q, "rewrite", "local-dns-nodata", "", start, m)
 			_ = w.WriteMsg(m)
 			return
@@ -545,11 +543,14 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			return
 		}
 		h.Stats.Errors.Add(1)
+		m := newReply(r)
 		m.Rcode = dns.RcodeServerFailure
 		errStr := "no upstream available"
 		if err != nil {
 			errStr = err.Error()
 		}
+		h.record(client, qname, q, "error", errStr, usedUp, start, m)
+		_ = w.WriteMsg(m)
 		// Cache the failure briefly (negative_ttl) so a dead upstream or
 		// zone doesn't burn the full timeout on every retry — a failing
 		// domain's retries used to re-pay the whole per-query timeout each
@@ -560,19 +561,20 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		// stale data wins on success — a cached SERVFAIL must never shadow
 		// it. (An upstream that *answers* SERVFAIL is already negatively
 		// cached by the success path below; this fills the gap where the
-		// upstream never answered at all.)
+		// upstream never answered at all.) The write runs after WriteMsg
+		// deliberately: the SERVFAIL has then been packed and sent, so m is
+		// exclusively this goroutine's and the cache writer can take it
+		// directly — no copy (SetNegative mutates the message: SetReply,
+		// Compress, Pack).
 		if cache != nil && stale == nil && !isMetaQuery(q) {
-			cacheResp := m.Copy()
 			go func() {
 				cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer ccancel()
 				// failureTTL <= 0 falls back to the cache's configured
 				// negative TTL (cache.failure_ttl knob).
-				cache.SetNegative(cctx, q, cacheResp, failureTTL)
+				cache.SetNegative(cctx, q, m, failureTTL)
 			}()
 		}
-		h.record(client, qname, q, "error", errStr, usedUp, start, m)
-		_ = w.WriteMsg(m)
 		return
 	}
 
@@ -582,6 +584,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	//    where the AD bit can't be stripped or forged in flight.
 	if dnssecEnabled && dnssecRequireAD && !resp.AuthenticatedData {
 		h.Stats.Errors.Add(1)
+		m := newReply(r)
 		m.Rcode = dns.RcodeServerFailure
 		h.record(client, qname, q, "error", "dnssec: upstream did not authenticate the answer", usedUp, start, m)
 		_ = w.WriteMsg(m)
@@ -598,31 +601,35 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		return
 	}
 
-	// 8. Cache the result (positive or negative) in the background. Caching
-	//    only ever helps *future* queries, so there's no reason to make this
-	//    client wait on a Redis round trip before getting the answer it
-	//    already has. Cache.Set/SetNegative mutate the message they're given
-	//    (SetReply, Compress, Pack) while writing it, so a copy is handed to
-	//    the goroutine — resp itself is about to be packed concurrently by
-	//    w.WriteMsg below, and sharing the same *dns.Msg between the two
-	//    would race. Zero TTLs fall back to the configured Dragonfly cache
-	//    lifetimes.
-	if cache != nil && !isMetaQuery(q) {
-		cacheResp := resp.Copy()
-		go func() {
-			cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer ccancel()
-			if len(cacheResp.Answer) > 0 {
-				cache.Set(cctx, q, cacheResp, 0)
-			} else {
-				cache.SetNegative(cctx, q, cacheResp, 0)
-			}
-		}()
-	}
-
 	h.Stats.Allowed.Add(1)
 	h.record(client, qname, q, "allowed", "", usedUp, start, resp)
 	_ = w.WriteMsg(resp)
+
+	// 8. Cache the result (positive or negative) in the background. Caching
+	//    only ever helps *future* queries, so there's no reason to make this
+	//    client wait on a cache round trip before getting the answer it
+	//    already has. The write runs after WriteMsg deliberately: the
+	//    response has then been packed and sent, so resp is exclusively this
+	//    goroutine's and can be handed to the cache writer directly.
+	//    Cache.Set/SetNegative mutate the message they're given (SetReply,
+	//    Compress, Pack) while writing it — the old code copied resp here
+	//    because the background write raced w.WriteMsg's concurrent pack;
+	//    ordering eliminates the race and the per-query copy with it. The
+	//    trade-off: on a stream transport the cache write now waits for the
+	//    client write to finish, but DNS responses are small and that write
+	//    virtually never blocks. Zero TTLs fall back to the configured
+	//    Dragonfly cache lifetimes.
+	if cache != nil && !isMetaQuery(q) {
+		go func() {
+			cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer ccancel()
+			if len(resp.Answer) > 0 {
+				cache.Set(cctx, q, resp, 0)
+			} else {
+				cache.SetNegative(cctx, q, resp, 0)
+			}
+		}()
+	}
 }
 
 func (h *Handler) record(client, qname string, q dns.Question, action, reason, upstreamName string, start time.Time, m *dns.Msg) {
@@ -648,6 +655,18 @@ func (h *Handler) record(client, qname string, q dns.Question, action, reason, u
 		Rcode:          rcode,
 		Answers:        answers,
 	})
+}
+
+// newReply allocates the empty response skeleton used by the error, NODATA
+// and DNSSEC-failure paths: the client's ID, RD/CD flags and first question
+// copied, Response and RA set. It is allocated lazily — the fast paths (cache
+// hit, blocklist, rewrite answer, successful upstream resolution) never pay
+// for it, and most queries are served from one of those.
+func newReply(r *dns.Msg) *dns.Msg {
+	m := new(dns.Msg)
+	m.SetReply(r)
+	m.RecursionAvailable = true
+	return m
 }
 
 func answerIPs(m *dns.Msg) []net.IP {
@@ -718,13 +737,21 @@ func (h *Handler) resolveUpstreams(ctx context.Context, r *dns.Msg, q dns.Questi
 		// beyond the one flight.
 		if res.Shared {
 			h.Stats.Merged.Add(1)
+			// Copy per caller: WriteMsg packs the message, and the shared
+			// result is one *dns.Msg that several callers would pack
+			// concurrently — a race. The shared result's ID also belongs to
+			// the leader, so rebase it to this request's ID so a UDP client
+			// doesn't silently drop a mismatched-ID response.
+			out := fr.resp.Copy()
+			out.Id = r.Id
+			return out, fr.up, nil
 		}
-		// Copy per caller: WriteMsg packs the message, and the shared
-		// result's ID belongs to the leader — rebase it to this request's
-		// ID so a UDP client doesn't silently drop a mismatched-ID response.
-		out := fr.resp.Copy()
-		out.Id = r.Id
-		return out, fr.up, nil
+		// No other caller shared this flight: the result is exclusively
+		// ours, so take ownership directly — rebase the ID to this request
+		// and return it without a copy, skipping the allocation the shared
+		// path must pay.
+		fr.resp.Id = r.Id
+		return fr.resp, fr.up, nil
 	case <-ctx.Done():
 		// Deadline expired while waiting on the leader: return the timeout
 		// without re-querying. A dead-context query would fail instantly and
@@ -823,7 +850,13 @@ func sequentialUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.M
 		if ctx.Err() != nil {
 			break
 		}
-		resp, err := up.Query(ctx, r.Copy())
+		// One query message is reused across attempts: miekg/dns's
+		// ExchangeContext writes it as-is and matches the reply by the
+		// unchanged ID — it never rewrites msg.Id — and Pack is safe to call
+		// repeatedly on a single message. The per-attempt Copy() the
+		// previous code made only mattered for race mode's concurrent
+		// sends; here the message belongs to this loop for its whole run.
+		resp, err := up.Query(ctx, r)
 		if err != nil {
 			lastErr = err
 			continue
@@ -865,9 +898,12 @@ func raceUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*
 	ch := make(chan result, len(ups))
 	for _, up := range ups {
 		go func(u *upstream.Upstream) {
-			// Copy the query: miekg/dns's transport layer overwrites msg.Id
-			// while sending, so the same message cannot be handed to several
-			// upstreams concurrently.
+			// Copy the query per upstream: each concurrent send must own the
+			// message it hands the transport — sending can mutate the message
+			// (TSIG signing does, and a library bump could change what the
+			// transport rewrites), so a shared *dns.Msg would race, and each
+			// reply must match the query its own conn sent. Sequential mode
+			// reuses one message instead (see sequentialUpstreams).
 			resp, err := u.Query(qctx, r.Copy())
 			ch <- result{resp: resp, up: u.Name(), err: err}
 		}(up)
