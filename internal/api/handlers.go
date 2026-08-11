@@ -700,15 +700,81 @@ func (h *Handler) tunnelStart(w http.ResponseWriter, r *http.Request) {
 	if mode == "" {
 		mode = tunnel.ModeQuick
 	}
+	// Validate mode-specific inputs here so we never persist a broken
+	// configuration (empty token, missing config file) as auto-start-enabled.
+	switch mode {
+	case tunnel.ModeToken:
+		if strings.TrimSpace(p.Token) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "tunnel token required"})
+			return
+		}
+	case tunnel.ModeConfig:
+		if strings.TrimSpace(p.ConfigFile) == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "cloudflared config file required"})
+			return
+		}
+		if _, err := os.Stat(p.ConfigFile); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "config file not readable: " + p.ConfigFile})
+			return
+		}
+	case tunnel.ModeQuick:
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "unknown tunnel mode"})
+		return
+	}
+
 	if err := h.Tunnel.Start(mode, p.Token, p.ConfigFile, p.Origin, p.Hostname); err != nil {
+		// The settings are still saved so the form is pre-filled on the next
+		// visit, but a tunnel that failed to start must NOT be marked
+		// auto-start-enabled — otherwise a bad token would retry on every boot.
+		// Enabled mirrors the manager's actual state: a failure while another
+		// start already succeeded ("tunnel already running") must not clobber
+		// that tunnel's enabled flag.
+		if perr := h.persistTunnelSettings(mode, p, h.Tunnel.Status().Running); perr != nil {
+			log.Printf("[tunnel] settings not saved after failed start: %v", perr)
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	// Started: persist the settings (token/config path/origin) to the config
+	// file so the tunnel comes back automatically after a restart or reboot.
+	// main's auto-start block reads these fields at boot.
+	if err := h.persistTunnelSettings(mode, p, true); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tunnel started but settings not saved: " + err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, h.Tunnel.Status())
 }
 
+// persistTunnelSettings writes the tunnel settings into the in-memory config
+// and saves it to disk so they survive a restart. enabled controls whether
+// the tunnel auto-starts at boot (true once a start succeeds, false when a
+// start failed or the tunnel was stopped).
+func (h *Handler) persistTunnelSettings(mode tunnel.Mode, p tunnelStartPayload, enabled bool) error {
+	h.cfgMu.Lock()
+	defer h.cfgMu.Unlock()
+	h.Cfg.Tunnel.Enabled = enabled
+	h.Cfg.Tunnel.Token = p.Token
+	h.Cfg.Tunnel.ConfigFile = p.ConfigFile
+	h.Cfg.Tunnel.QuickTunnel = mode == tunnel.ModeQuick
+	h.Cfg.Tunnel.QuickTunnelURL = p.Origin
+	h.Cfg.Tunnel.Hostname = p.Hostname
+	return h.SaveConfig()
+}
+
 func (h *Handler) tunnelStop(w http.ResponseWriter) {
 	h.Tunnel.Stop()
+	// Stopping means "I don't want the tunnel anymore": disable auto-start
+	// on the next boot. The token/config path is kept so the form is still
+	// pre-filled if the user starts it again.
+	h.cfgMu.Lock()
+	h.Cfg.Tunnel.Enabled = false
+	saveErr := h.SaveConfig()
+	h.cfgMu.Unlock()
+	if saveErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "tunnel settings not saved: " + saveErr.Error()})
+		return
+	}
 	writeJSON(w, http.StatusOK, h.Tunnel.Status())
 }
 

@@ -20,6 +20,25 @@ export default function Tunnel() {
 
   useEffect(() => {
     load()
+    // Pre-fill the form from the persisted config: once a token / config
+    // path has been saved (tunnelStart persists it), it survives restarts
+    // and shows up here without re-typing.
+    api.config()
+      .then((cfg) => {
+        const t = cfg?.tunnel
+        if (!t) return
+        if (t.token) {
+          setToken(t.token)
+          setMode('token')
+        } else if (t.config_file) {
+          setConfigFile(t.config_file)
+          setMode('config')
+        } else if (t.quick_tunnel) {
+          setMode('quick')
+        }
+        if (t.quick_tunnel_url) setOrigin(t.quick_tunnel_url)
+      })
+      .catch(() => {})
     const t = setInterval(() => {
       load()
       api.tunnelLog().then((r) => setLogLines(r.lines || [])).catch(() => {})
@@ -100,6 +119,10 @@ export default function Tunnel() {
             <button className="btn danger" type="button" onClick={stop} disabled={!status?.running}>Stop</button>
           </div>
         </form>
+        <p className="dim small">
+          Starting saves these settings to the config file, so the tunnel auto-starts on boot.
+          Stopping disables auto-start (the token stays saved for next time).
+        </p>
       </div>
 
       <div className="card">

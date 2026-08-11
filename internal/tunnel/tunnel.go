@@ -58,9 +58,23 @@ func NewManager(dataDir string) *Manager {
 	return &Manager{logFile: filepath.Join(dataDir, "cloudflared.log")}
 }
 
+// registerBuildInfoOnce registers cloudflared's Prometheus build-info metric
+// exactly once per process. RegisterBuildInfo calls prometheus.MustRegister,
+// which panics on a second registration — so calling it from every Start
+// (to support stop-then-start) crashed the API handler with "duplicate
+// metrics collector registration attempted" and left the Manager wedged with
+// running=true but no tunnel.
+var registerBuildInfoOnce sync.Once
+
+func registerBuildInfo() {
+	registerBuildInfoOnce.Do(func() {
+		metrics.RegisterBuildInfo("IrongridDNS", time.Now().Format(time.RFC3339), "v0.1.0")
+	})
+}
+
 // Start launches the tunnel in the given mode. origin is used for quick
 // tunnels (the local URL to expose, e.g. http://localhost:8080).
-func (m *Manager) Start(mode Mode, token, configFile, origin, hostname string) error {
+func (m *Manager) Start(mode Mode, token, configFile, origin, hostname string) (err error) {
 	m.mu.Lock()
 	if m.running {
 		m.mu.Unlock()
@@ -74,8 +88,20 @@ func (m *Manager) Start(mode Mode, token, configFile, origin, hostname string) e
 	m.lastErr = ""
 	m.mu.Unlock()
 
+	// Never leave the manager marked running if cloudflared's package-level
+	// init panics (e.g. the duplicate-metrics registration above, before the
+	// sync.Once guard existed). Reset state and surface the error instead.
+	// Installed after the first lock is released: failStart takes m.mu, so
+	// this must never run while that lock is still held.
+	defer func() {
+		if r := recover(); r != nil {
+			m.failStart(fmt.Sprintf("tunnel init panic: %v", r))
+			err = fmt.Errorf("tunnel init panic: %v", r)
+		}
+	}()
+
 	os.Setenv("QUIC_GO_DISABLE_ECN", "1")
-	metrics.RegisterBuildInfo("IrongridDNS", time.Now().Format(time.RFC3339), "v0.1.0")
+	registerBuildInfo()
 
 	// cloudflared's command packages keep package-level state; re-init on
 	// every start so restarting works.

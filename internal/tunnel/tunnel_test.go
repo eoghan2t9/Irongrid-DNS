@@ -5,11 +5,9 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
 	cftunnel "github.com/cloudflare/cloudflared/cmd/cloudflared/tunnel"
-	"github.com/cloudflare/cloudflared/metrics"
 )
 
 // TestStartFlagOrdering guards against a regression where --no-autoupdate and
@@ -29,7 +27,7 @@ func index(args []string, want string) int {
 
 func TestStartFlagOrdering(t *testing.T) {
 	os.Setenv("QUIC_GO_DISABLE_ECN", "1")
-	metrics.RegisterBuildInfo("IrongridDNS", time.Now().Format(time.RFC3339), "v0.1.0")
+	registerBuildInfo()
 	shutdownC := make(chan struct{})
 	cftunnel.Init(cliutil.GetBuildInfo("IrongridDNS", ""), shutdownC)
 
@@ -59,3 +57,59 @@ func TestStartFlagOrdering(t *testing.T) {
 		t.Fatalf("expected a token-validation error, got: %v", err)
 	}
 }
+
+// TestStartTwiceNoPanic reproduces the production crash where the second
+// Start call panicked with "duplicate metrics collector registration
+// attempted" (cloudflared's RegisterBuildInfo calls prometheus.MustRegister,
+// which cannot be called twice). The sync.Once guard plus panic recovery in
+// Start must turn that into a clean error and leave the manager not-running.
+func TestStartTwiceNoPanic(t *testing.T) {
+	os.Setenv("QUIC_GO_DISABLE_ECN", "1")
+	registerBuildInfo()
+
+	m := NewManager(t.TempDir())
+
+	// First start with a garbage token: cloudflared fails fast and offline.
+	// The panic that previously happened here would crash the whole test
+	// binary, so reaching this line at all is the regression check.
+	if err := m.Start(ModeToken, "definitely-not-a-valid-tunnel-token", "", "", ""); err == nil {
+		t.Fatal("expected first start to fail on the bogus token")
+	}
+
+	// Second start must not panic; it must return a clean error too.
+	if err := m.Start(ModeToken, "definitely-not-a-valid-tunnel-token", "", "", ""); err == nil {
+		t.Fatal("expected second start to fail on the bogus token")
+	}
+
+	st := m.Status()
+	if st.Running {
+		t.Fatal("manager must not report running after failed starts")
+	}
+	if !strings.Contains(st.Error, "token") {
+		t.Fatalf("expected a token error in status, got: %q", st.Error)
+	}
+}
+
+// TestStartRejectedLeavesUsable ensures a rejected start (unknown mode)
+// resets the manager to not-running and that a normal token-mode start is
+// still possible afterwards.
+func TestStartRejectedLeavesUsable(t *testing.T) {
+	os.Setenv("QUIC_GO_DISABLE_ECN", "1")
+	registerBuildInfo()
+
+	m := NewManager(t.TempDir())
+
+	// Unknown mode hits the validation path before launching cloudflared.
+	if err := m.Start("bogus-mode", "", "", "", ""); err == nil {
+		t.Fatal("expected unknown-mode start to fail")
+	}
+	if st := m.Status(); st.Running {
+		t.Fatal("manager must not report running after a rejected start")
+	}
+
+	// And a normal token-mode start is still possible afterwards.
+	if err := m.Start(ModeToken, "definitely-not-a-valid-tunnel-token", "", "", ""); err == nil {
+		t.Fatal("expected token-mode start to fail on the bogus token")
+	}
+}
+
