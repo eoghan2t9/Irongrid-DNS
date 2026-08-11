@@ -1,4 +1,4 @@
-.PHONY: all web build run install test lint vuln docker docker-up release clean bench bench-tcp bench-doh bench-reuseport
+.PHONY: all web build run install test lint vuln docker docker-up release clean bench bench-tcp bench-doh bench-reuseport bench-udp-sockets
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.1.0)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
@@ -76,6 +76,10 @@ bench-doh:
 bench-reuseport:
 	go run ./bench/reuseport -sockets 1 -dur 5s
 	go run ./bench/reuseport -sockets 8 -dur 5s
+
+## bench-udp-sockets: DNS qps with 1 vs 8 UDP sockets (in-process, real listen path)
+bench-udp-sockets:
+	go run ./bench/udpsockets -dur 5s
 
 ## docker: build the container image
 docker:

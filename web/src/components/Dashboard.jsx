@@ -852,6 +852,16 @@ function TuningCard({ status }) {
     if (n >= 1073741824) return (n / 1073741824).toFixed(1) + ' GiB'
     return (n / 1048576).toFixed(0) + ' MiB'
   }
+  // socketPips renders one pip per bound SO_REUSEPORT socket (capped at 8
+  // for the display; the exact count is still printed next to it).
+  const socketPips = (n) => (
+    <span className="socket-pips" aria-hidden="true">
+      {Array.from({ length: Math.min(Number(n) || 0, 8) }, (_, i) => (
+        <span key={i} className="socket-pip" />
+      ))}
+      {Number(n) > 8 && <span className="socket-pip-more">+{Number(n) - 8}</span>}
+    </span>
+  )
   const fdState = () => {
     if (t.fd_soft == null) return { cls: 'badge', label: 'no fd limit on Windows' }
     if (t.fd_raised) return { cls: 'badge-allowed', label: `raised ${fmtFd(t.fd_raised_from)} → ${fmtFd(t.fd_soft)}` }
@@ -880,7 +890,8 @@ function TuningCard({ status }) {
         <div className="kv-row">
           <span className="kv-label">UDP listener sockets</span>
           <span className="kv-value">
-            {status?.udp_sockets ?? 0} plain UDP · {status?.doq_sockets ?? 0} DoQ
+            {socketPips(status?.udp_sockets)} {status?.udp_sockets ?? 0} plain UDP
+            {' · '}{socketPips(status?.doq_sockets)} {status?.doq_sockets ?? 0} DoQ
             {' '}<span className="badge badge-allowed">SO_REUSEPORT</span>
           </span>
         </div>

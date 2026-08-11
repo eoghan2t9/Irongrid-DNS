@@ -1,0 +1,62 @@
+name: bench
+
+# Informational performance benchmarks — never a merge gate. CI runners are
+# shared and noisy, so the numbers are a rough regression signal (watch the
+# relative 1-vs-8 socket delta and the delivered%) rather than absolute
+# measurements. Results land in the workflow's job summary and as an
+# artifact for diffing across runs.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Datagram throughput — 1 vs 8 reuseport sockets
+        run: make bench-reuseport 2>&1 | tee /tmp/reuseport.txt
+
+      - name: DNS qps — 1 vs 8 UDP sockets (real listen path)
+        run: go run ./bench/udpsockets -dur 5s 2>&1 | tee /tmp/udpsockets.txt
+
+      - name: Publish results to job summary
+        run: |
+          {
+            echo "## Bench results"
+            echo ""
+            echo "> Informational only — shared CI runners are noisy; watch relative"
+            echo "> deltas and the socket-count comparisons, not absolute numbers."
+            echo ""
+            echo "### Reuseport datagram throughput"
+            echo '```'
+            cat /tmp/reuseport.txt
+            echo '```'
+            echo ""
+            echo "### UDP socket-count DNS throughput"
+            echo '```'
+            cat /tmp/udpsockets.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload raw results
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: |
+            /tmp/reuseport.txt
+            /tmp/udpsockets.txt
+          retention-days: 14
