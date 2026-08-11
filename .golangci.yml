@@ -32,6 +32,14 @@ linters:
       - linters:
           - gosec
         text: "integer overflow conversion"
+      # G404 (math/rand) in bench tools is deliberate: dnsload and
+      # udpsockets only use it to jitter the query-name mix so load looks
+      # realistic. crypto/rand would add a blocking entropy pull to the hot
+      # path for zero security benefit.
+      - path: bench/
+        linters:
+          - gosec
+        text: "weak random number generator"
       # Test helpers intentionally exercise odd patterns (fuzzing payloads,
       # miniredis, fake servers) — don't flag them.
       - path: (.+)_test\.go

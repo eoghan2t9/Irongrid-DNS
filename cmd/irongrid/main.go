@@ -240,7 +240,7 @@ func main() {
 	// SO_REUSEPORT socket count for the plain UDP and DoQ listeners
 	// (server.udp_sockets: 0 = auto, 1 = exclusive single socket, N =
 	// explicit). Re-applied before every listener restart below.
-	dnsMgr.SetUdpSockets(cfg.Server.UdpSockets)
+	dnsMgr.SetUDPSockets(cfg.Server.UDPSockets)
 	// webSharesDoH reports whether the dashboard and DoH share one HTTPS port
 	// (server.web_listen == server.listen_doh with web_tls on). In that case
 	// the web server also serves /dns-query and no standalone DoH listener is
@@ -757,7 +757,7 @@ func main() {
 		//    the only step that can fail with hard bind errors, so it runs
 		//    before anything is swapped. Note: UDP/TCP/DoT bind failures are
 		//    reported asynchronously via the results channel, not as errors.
-		dnsMgr.SetUdpSockets(cfg.Server.UdpSockets)
+		dnsMgr.SetUDPSockets(cfg.Server.UDPSockets)
 		if err := dnsMgr.Restart(
 			cfg.Server.ListenUDP, cfg.Server.ListenTCP,
 			cfg.Server.ListenDoT, dohAddr(), cfg.Server.ListenDoQ,

@@ -822,10 +822,10 @@ type serverPayload struct {
 	WebRedirect     bool   `json:"web_redirect"`
 	WebRedirectPort int    `json:"web_redirect_port"`
 	TimeoutSec      int    `json:"timeout_sec"`
-	// UdpSockets is how many SO_REUSEPORT sockets the plain UDP listener
+	// UDPSockets is how many SO_REUSEPORT sockets the plain UDP listener
 	// binds: 0 = auto (one per CPU, capped), 1 = a single exclusive socket,
 	// N = exactly N.
-	UdpSockets int `json:"udp_sockets"`
+	UDPSockets int `json:"udp_sockets"`
 }
 
 type cachePayload struct {
@@ -946,7 +946,7 @@ func payloadFromConfig(c *config.Config) configPayload {
 			WebRedirect:     c.Server.WebRedirect,
 			WebRedirectPort: c.Server.WebRedirectPort,
 			TimeoutSec:      c.Server.TimeoutSec,
-			UdpSockets:      c.Server.UdpSockets,
+			UDPSockets:      c.Server.UDPSockets,
 		},
 		Upstreams:    c.Upstreams,
 		UpstreamMode: c.UpstreamMode,
@@ -1141,7 +1141,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			WebRedirect:     p.Server.WebRedirect,
 			WebRedirectPort: p.Server.WebRedirectPort,
 			TimeoutSec:      p.Server.TimeoutSec,
-			UdpSockets:      p.Server.UdpSockets,
+			UDPSockets:      p.Server.UDPSockets,
 		},
 		Upstreams:    p.Upstreams,
 		UpstreamMode: p.UpstreamMode,

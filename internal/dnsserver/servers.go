@@ -65,11 +65,11 @@ type Manager struct {
 	results chan Listener
 }
 
-// SetUdpSockets sets how many SO_REUSEPORT sockets the UDP-family listeners
+// SetUDPSockets sets how many SO_REUSEPORT sockets the UDP-family listeners
 // bind (server.udp_sockets): 0 = auto (one per CPU, capped), 1 = a single
 // exclusive socket, N = exactly N. Applied before Start/Restart; the running
 // listeners are not touched by a call after they are up.
-func (m *Manager) SetUdpSockets(n int) {
+func (m *Manager) SetUDPSockets(n int) {
 	m.mu.Lock()
 	m.udpSockets = n
 	m.mu.Unlock()
