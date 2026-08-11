@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"runtime"
 	"sync"
 	"time"
 
@@ -96,26 +97,39 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 		handler = protoHandler{m.handler, "tcp"}
 	}
 	if !tcp {
-		// UDP: create the socket ourselves so the kernel receive/send
+		// UDP: create the sockets ourselves so the kernel receive/send
 		// buffers can be raised (miekg/dns dials its own listener with the
 		// OS defaults otherwise). ActivateAndServe is used because
 		// ListenAndServe would replace the injected PacketConn with its
 		// own socket.
-		pc, err := net.ListenPacket("udp", addr)
+		//
+		// Where the platform supports it, the address is bound from several
+		// SO_REUSEPORT sockets (one per CPU, capped — see udpSocketCount):
+		// the kernel then hashes incoming datagrams across per-socket
+		// receive queues, each drained by its own read goroutine, so a burst
+		// can't queue up behind a single recvfrom loop. Platforms without
+		// SO_REUSEPORT (Windows) and any bind failure fall back to one plain
+		// socket, so the listener always comes up.
+		pcs, err := newUDPListeners(addr, udpSocketCount())
 		if err != nil {
 			m.results <- Listener{Proto: proto, Addr: addr, Err: err}
 			return
 		}
-		tuning.SetPacketBuffers(pc)
-		srv := &dns.Server{Net: "udp", PacketConn: pc, UDPSize: udpMaxPacketSize, Handler: handler}
-		m.servers = append(m.servers, srv)
-		go func() {
-			log.Printf("[dns] %s listener on %s", proto, addr)
-			if err := srv.ActivateAndServe(); err != nil {
-				log.Printf("[dns] %s listener on %s stopped: %v", proto, addr, err)
-				m.results <- Listener{Proto: proto, Addr: addr, Err: err}
-			}
-		}()
+		noun := "sockets"
+		if len(pcs) == 1 {
+			noun = "socket"
+		}
+		log.Printf("[dns] %s listener on %s (%d %s)", proto, addr, len(pcs), noun)
+		for _, pc := range pcs {
+			srv := &dns.Server{Net: "udp", PacketConn: pc, UDPSize: udpMaxPacketSize, Handler: handler}
+			m.servers = append(m.servers, srv)
+			go func() {
+				if err := srv.ActivateAndServe(); err != nil {
+					log.Printf("[dns] %s listener on %s stopped: %v", proto, addr, err)
+					m.results <- Listener{Proto: proto, Addr: addr, Err: err}
+				}
+			}()
+		}
 		return
 	}
 	// TCP: create the listener ourselves with a tuned ListenConfig so the
@@ -202,6 +216,70 @@ func (m *Manager) Restart(udpAddr, tcpAddr, dotAddr, dohAddr, doqAddr, dohPath s
 	m.mu.Unlock()
 	_, err := m.Start(udpAddr, tcpAddr, dotAddr, dohAddr, doqAddr, dohPath)
 	return err
+}
+
+// maxUDPSockets caps how many SO_REUSEPORT sockets one UDP address opens:
+// each carries its own SocketBufferSize kernel receive/send buffers, so past
+// a handful the extra kernel memory buys nothing measurable on any box this
+// runs on.
+const maxUDPSockets = 8
+
+// udpSocketCount is how many sockets a UDP listen address is bound from: one
+// per available CPU (the runtime's tuned GOMAXPROCS, which the tuning package
+// makes cgroup-aware), capped at maxUDPSockets. The kernel hashes incoming
+// datagrams across the sockets, each with its own receive queue and read
+// goroutine.
+func udpSocketCount() int {
+	n := runtime.GOMAXPROCS(0)
+	if n < 1 {
+		n = 1
+	}
+	if n > maxUDPSockets {
+		n = maxUDPSockets
+	}
+	return n
+}
+
+// newUDPListeners binds addr from n sockets and raises the receive/send
+// buffers on each. With n > 1 it first tries SO_REUSEPORT so the kernel
+// spreads incoming datagrams across the sockets; when the platform lacks
+// reuseport or a bind fails, it closes what it opened and falls back to a
+// single plain socket so the listener always comes up.
+func newUDPListeners(addr string, n int) ([]net.PacketConn, error) {
+	if n > 1 {
+		pcs, err := reuseportUDPListeners(addr, n)
+		if err == nil {
+			return pcs, nil
+		}
+		log.Printf("[dns] reuseport UDP unavailable on %s (%v) — using a single socket", addr, err)
+	}
+	pc, err := net.ListenPacket("udp", addr)
+	if err != nil {
+		return nil, err
+	}
+	tuning.SetPacketBuffers(pc)
+	return []net.PacketConn{pc}, nil
+}
+
+// reuseportUDPListeners binds addr from n SO_REUSEPORT sockets with the
+// receive/send buffers raised on each. On any bind failure it closes every
+// socket it opened and returns the error so the caller can fall back to a
+// single socket.
+func reuseportUDPListeners(addr string, n int) ([]net.PacketConn, error) {
+	lc := &net.ListenConfig{Control: tuning.ReuseportControl}
+	pcs := make([]net.PacketConn, 0, n)
+	for i := 0; i < n; i++ {
+		pc, err := lc.ListenPacket(context.Background(), "udp", addr)
+		if err != nil {
+			for _, p := range pcs {
+				_ = p.Close()
+			}
+			return nil, err
+		}
+		tuning.SetPacketBuffers(pc)
+		pcs = append(pcs, pc)
+	}
+	return pcs, nil
 }
 
 // ensureTLSListener helper for DoT uses the shared TLS config.
