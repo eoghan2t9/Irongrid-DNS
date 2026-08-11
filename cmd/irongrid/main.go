@@ -304,6 +304,7 @@ func main() {
 		Cache:      dfly,
 		Log:        ql,
 		DNS:        handler,
+		DNSManager: dnsMgr,
 		Tunnel:     tunnelMgr,
 		Upstreams:  upstreams,
 		Hints:      hintsMgr,

@@ -50,9 +50,15 @@ type Manager struct {
 	// = a single exclusive socket. Applied by main at boot and on reload
 	// before the listeners are (re)started.
 	udpSockets int
-	mu         sync.Mutex
-	servers    []*dns.Server
-	httpSrv    interface {
+	// udpBound / doqBound are the socket counts the plain UDP and DoQ
+	// listeners actually bound (what server.udp_sockets resolved to on this
+	// platform), for the dashboard's status. Reset on Restart, re-set by
+	// startClassic/startDoQ.
+	udpBound int
+	doqBound int
+	mu       sync.Mutex
+	servers  []*dns.Server
+	httpSrv  interface {
 		Shutdown(ctx context.Context) error
 	}
 	doqLns  []*quic.Listener
@@ -75,6 +81,15 @@ func (m *Manager) udpSocketCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return udpSocketCountFor(m.udpSockets)
+}
+
+// UDPListenerSockets reports how many sockets the plain UDP and DoQ
+// listeners are currently bound with (0 when the listener isn't running),
+// for the dashboard's status endpoint.
+func (m *Manager) UDPListenerSockets() (udp, doq int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.udpBound, m.doqBound
 }
 
 // NewManager creates a listener manager.
@@ -138,6 +153,9 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 			m.results <- Listener{Proto: proto, Addr: addr, Err: err}
 			return
 		}
+		m.mu.Lock()
+		m.udpBound = len(pcs)
+		m.mu.Unlock()
 		noun := "sockets"
 		if len(pcs) == 1 {
 			noun = "socket"
@@ -235,6 +253,8 @@ func (m *Manager) Restart(udpAddr, tcpAddr, dotAddr, dohAddr, doqAddr, dohPath s
 	m.servers = nil
 	m.httpSrv = nil
 	m.doqLns = nil
+	m.udpBound = 0
+	m.doqBound = 0
 	m.tlsConf = tlsConf
 	m.mu.Unlock()
 	_, err := m.Start(udpAddr, tcpAddr, dotAddr, dohAddr, doqAddr, dohPath)

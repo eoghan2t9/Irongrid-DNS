@@ -56,7 +56,10 @@ func (m *Manager) startDoQ(addr string) error {
 		}
 		lns = append(lns, ln)
 	}
+	m.mu.Lock()
 	m.doqLns = append(m.doqLns, lns...)
+	m.doqBound = len(lns)
+	m.mu.Unlock()
 	noun := "sockets"
 	if len(lns) == 1 {
 		noun = "socket"

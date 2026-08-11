@@ -1,4 +1,4 @@
-.PHONY: all web build run install test lint vuln docker docker-up release clean
+.PHONY: all web build run install test lint vuln docker docker-up release clean bench bench-tcp bench-doh bench-reuseport
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.1.0)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
@@ -59,6 +59,23 @@ lint:
 ## vuln: scan the Go dependency tree for known CVEs (golang.org/x/vuln)
 vuln:
 	go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
+## bench: load-test a running server over UDP (see bench/dnsload)
+bench:
+	go run ./bench/dnsload -addr 127.0.0.1:53 -proto udp
+
+## bench-tcp: load-test a running server over TCP
+bench-tcp:
+	go run ./bench/dnsload -addr 127.0.0.1:53 -proto tcp
+
+## bench-doh: load-test a running server over DoH
+bench-doh:
+	go run ./bench/dnsload -addr 127.0.0.1:53 -proto doh
+
+## bench-reuseport: compare 1 vs 8 SO_REUSEPORT sockets on loopback
+bench-reuseport:
+	go run ./bench/reuseport -sockets 1 -dur 5s
+	go run ./bench/reuseport -sockets 8 -dur 5s
 
 ## docker: build the container image
 docker:

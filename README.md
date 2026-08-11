@@ -66,6 +66,7 @@ commercial ad-blocking DNS with sub-millisecond local responses.
 - [Features](#features)
 - [Architecture](#architecture)
 - [System tuning](#system-tuning)
+- [Performance](#performance)
 - [Installation options](#installation-options)
   - [1. Interactive TUI wizard (recommended)](#1-interactive-tui-wizard-recommended)
   - [2. Docker Compose (Dragonfly included)](#2-docker-compose-dragonfly-included)
@@ -284,6 +285,63 @@ ulimit -n                                                       # the soft fd li
 If a sysctl is still low (e.g. an unprivileged container), set it at the
 container level instead: `docker run --sysctl net.core.rmem_max=4194304 …` or
 under `sysctls:` in docker-compose.yml.
+
+## Performance
+
+### SO_REUSEPORT listeners (`server.udp_sockets`)
+
+The classic UDP and DoQ listeners bind **one socket per CPU** (cgroup-aware
+`GOMAXPROCS`, capped at 8) with `SO_REUSEPORT`. The kernel hashes each
+incoming datagram or QUIC connection to one per-socket receive queue, so a
+flood is drained by N read goroutines instead of queueing behind a single
+`recvfrom` loop.
+
+| `server.udp_sockets` | Behaviour |
+|---|---|
+| `0` (default) | Auto — one socket per CPU (max 8). On platforms without `SO_REUSEPORT` (Windows, Solaris) it silently falls back to a single socket. |
+| `1` | Single exclusive socket — the pre-reuseport behaviour: a second instance fails to bind loudly instead of sharing the port. |
+| `N` | Exactly N sockets (clamped at 64). |
+
+Available in `irongrid.yaml`, the Settings → **Server listeners** page, and
+`GET /api/status` reports how many sockets actually bound (`udp_sockets` /
+`doq_sockets`), which also shows up in the dashboard's **System tuning** card.
+
+> **Port sharing:** with auto/explicit reuseport sockets, a second irongrid
+> process can bind the same port and split traffic silently. In-process
+> reloads are unaffected (sockets close first); set `udp_sockets: 1` if you
+> need strict exclusivity.
+
+> **Linux < 6.6:** vanilla `SO_REUSEPORT` distributes by 4-tuple hash; under
+> sustained overload one hot socket can fill and drop while siblings idle.
+> Kernel 6.6+ adds `SO_REUSEPORT_LOAD_BALANCE` which fixes this.
+
+### Benchmarks
+
+Two dependency-light tools live in `bench/` — no dnsperf install needed.
+
+- **`bench/dnsload`** — floods a running server with A queries over UDP, TCP
+  or DoH and reports throughput + latency percentiles. Perfect for
+  measuring a change before/after (e.g. bumping `server.udp_sockets`).
+- **`bench/reuseport`** — raw loopback datagram throughput with N reuseport
+  sockets vs one, to check whether splitting receive queues actually buys
+  anything on your box/kernel before raising the socket count.
+
+```bash
+make bench            # UDP, 10s, 127.0.0.1:53
+make bench-tcp
+make bench-doh
+go run ./bench/dnsload -addr 10.0.0.5:53 -dur 30s -qps 20000
+make bench-reuseport  # 1 socket vs 8, 5s each
+```
+
+### Hot-path allocation trims
+
+Each query used to pay for a reply `dns.Msg` (only ~2% of queries use it),
+full response copies for the background cache write, and per-attempt query
+copies on sequential upstream failover. Those are gone — the reply is built
+lazily on the error paths, the cache write takes ownership of the response
+after it's been written to the client, and a single query message is reused
+across failover attempts (all five transports treat the query as read-only).
 
 ## Installation options
 

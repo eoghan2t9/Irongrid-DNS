@@ -878,6 +878,13 @@ function TuningCard({ status }) {
           <span className="kv-value">{bytes(t.socket_buffer)} per socket · every listener &amp; upstream</span>
         </div>
         <div className="kv-row">
+          <span className="kv-label">UDP listener sockets</span>
+          <span className="kv-value">
+            {status?.udp_sockets ?? 0} plain UDP · {status?.doq_sockets ?? 0} DoQ
+            {' '}<span className="badge badge-allowed">SO_REUSEPORT</span>
+          </span>
+        </div>
+        <div className="kv-row">
           <span className="kv-label">Go runtime</span>
           <span className="kv-value">GOMAXPROCS {t.gomaxprocs} · GOMEMLIMIT {bytes(t.gomemlimit)} · GOGC {t.gogc < 0 ? 'off' : t.gogc}</span>
         </div>

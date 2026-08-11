@@ -78,6 +78,7 @@ type Handler struct {
 	hostFlight singleflight.Group
 	asnFlight  singleflight.Group
 	DNS        *dnsserver.Handler
+	DNSManager *dnsserver.Manager // listener manager; reports bound UDP/DoQ socket counts
 	Tunnel     *tunnel.Manager
 	Upstreams  []*upstream.Upstream
 	// Hints is the authoritative root-hints manager for recursive://
@@ -278,13 +279,22 @@ func (h *Handler) getStatus(w http.ResponseWriter) {
 			"key_fingerprint":  st.KeyFingerprint,
 		}
 	}
+	// SO_REUSEPORT socket counts actually bound (0 when the listener is
+	// off): 1 on platforms without reuseport support, >1 when the kernel is
+	// spreading datagrams across per-socket receive queues.
+	udpSocks, doqSocks := 0, 0
+	if h.DNSManager != nil {
+		udpSocks, doqSocks = h.DNSManager.UDPListenerSockets()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":    version.String(),
-		"uptime_sec": int(time.Since(h.StartedAt).Seconds()),
-		"listeners":  listeners,
-		"cache_ok":   cacheOK,
-		"tunnel":     h.Tunnel.Status(),
-		"root_hints": rootHints,
+		"version":     version.String(),
+		"uptime_sec":  int(time.Since(h.StartedAt).Seconds()),
+		"listeners":   listeners,
+		"udp_sockets": udpSocks,
+		"doq_sockets": doqSocks,
+		"cache_ok":    cacheOK,
+		"tunnel":      h.Tunnel.Status(),
+		"root_hints":  rootHints,
 		// System tuning state: file-descriptor limit, socket buffers, Linux
 		// socket sysctls and the Go runtime settings (dashboard card).
 		"tuning": tuningStatus,
