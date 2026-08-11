@@ -9,12 +9,14 @@ import (
 	"log"
 	"math/bits"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
@@ -91,6 +93,14 @@ type Handler struct {
 	latency latencyHist
 
 	Stats *Stats
+
+	// flight coalesces concurrent identical questions (same name/type/class)
+	// into a single upstream resolution: a burst of clients resolving the
+	// same domain — OS connectivity checks, a shared CDN hostname, an app
+	// launched across the LAN at once — pays one round trip, and every
+	// waiter gets the answer the moment the leader's query returns instead
+	// of each paying its own upstream RTT. See resolveUpstreams.
+	flight singleflight.Group
 }
 
 // NewHandler builds a handler with default stats.
@@ -494,7 +504,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		usedUp string
 		err    error
 	)
-	resp, usedUp, err = queryUpstreams(ctx, upstreams, upstreamMode, upstreamQuery)
+	resp, usedUp, err = h.resolveUpstreams(ctx, r, q, upstreams, upstreamMode, upstreamQuery)
 	// RFC 8767: an upstream that *answers* SERVFAIL is also a resolution
 	// failure — serve stale rather than propagating the failure.
 	if err == nil && resp != nil && resp.Rcode == dns.RcodeServerFailure && stale != nil {
@@ -642,6 +652,81 @@ func answerIPs(m *dns.Msg) []net.IP {
 		}
 	}
 	return ips
+}
+
+// flightResult is the shared outcome of one coalesced upstream resolution.
+// The response is deliberately not exposed to waiters directly: serve() packs
+// the message while writing it, and concurrently packing one *dns.Msg from
+// several goroutines would race. resolveUpstreams hands every caller its own
+// copy instead.
+type flightResult struct {
+	resp *dns.Msg
+	up   string
+}
+
+// resolveUpstreams forwards r to the upstream set exactly like
+// queryUpstreams, but coalesces concurrent identical questions into a single
+// in-flight resolution. When several clients ask the same question at once,
+// the first one becomes the leader (running the full queryUpstreams path with
+// its context and timeout) and the rest wait on its result — one upstream
+// round trip serves the whole burst, cutting both upstream load and the
+// waiters' latency. Each caller (leader included) receives its own copy of
+// the response with its own message ID, so nothing is shared on the wire.
+//
+// Queries that can't safely share a resolution bypass the pool entirely (see
+// coalesceEligible). Client-group upstream routing is not a merge blocker:
+// the answer for a question is the same regardless of which upstream group
+// won, and the response cache already serves every client group from the same
+// entries.
+func (h *Handler) resolveUpstreams(ctx context.Context, r *dns.Msg, q dns.Question, upstreams []*upstream.Upstream, mode string, query *dns.Msg) (*dns.Msg, string, error) {
+	if !coalesceEligible(r) {
+		return queryUpstreams(ctx, upstreams, mode, query)
+	}
+	v, err, _ := h.flight.Do(flightKey(q), func() (any, error) {
+		resp, up, qerr := queryUpstreams(ctx, upstreams, mode, query)
+		return flightResult{resp: resp, up: up}, qerr
+	})
+	res := v.(flightResult)
+	if err != nil || res.resp == nil {
+		return nil, res.up, err
+	}
+	// Copy per caller: WriteMsg packs the message, and the shared result's
+	// ID belongs to the leader — rebase it to this request's ID so a UDP
+	// client doesn't silently drop a mismatched-ID response.
+	out := res.resp.Copy()
+	out.Id = r.Id
+	return out, res.up, nil
+}
+
+// coalesceEligible reports whether r's question may be merged with an
+// identical question from another client. Plain recursive lookups are
+// interchangeable; anything whose answer could legitimately differ between
+// senders — RD=0 probes, CD-set queries (DNSSEC client semantics travel in
+// the flags), meta queries (AXFR/ANY...) and messages carrying TSIG or other
+// non-OPT additional records — resolves on its own.
+func coalesceEligible(r *dns.Msg) bool {
+	if !r.RecursionDesired || r.CheckingDisabled {
+		return false
+	}
+	// Exactly one question: a degenerate multi-question message shares only
+	// its first question with an identical-looking query from another client
+	// and must never merge (its additional questions would be lost).
+	if len(r.Question) != 1 || isMetaQuery(r.Question[0]) {
+		return false
+	}
+	for _, rr := range r.Extra {
+		if rr.Header().Rrtype != dns.TypeOPT {
+			return false
+		}
+	}
+	return true
+}
+
+// flightKey is the coalescing key: the canonical lowercased question. DNS
+// names are case-insensitive, so the key must be canonicalised or two
+// clients spelling the same name differently would resolve twice.
+func flightKey(q dns.Question) string {
+	return strings.ToLower(q.Name) + "|" + strconv.Itoa(int(q.Qtype)) + "|" + strconv.Itoa(int(q.Qclass))
 }
 
 // queryUpstreams forwards r to the upstream set according to the resolution

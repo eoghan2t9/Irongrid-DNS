@@ -2,6 +2,7 @@ package dnsserver
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"sync"
 	"sync/atomic"
@@ -261,6 +262,225 @@ func TestRaceUpstreamsFastestWins(t *testing.T) {
 	}
 	if elapsed > 300*time.Millisecond {
 		t.Fatalf("answered in %s — upstreams were not raced (sequential slow-first)", elapsed)
+	}
+}
+
+// TestHandlerCoalescesConcurrentIdenticalQueries verifies the in-flight
+// request pool: N concurrent queries for the same question collapse into a
+// single upstream round trip, every waiter still receives a correct answer,
+// and each response carries its own message ID (a shared ID would be silently
+// dropped by the UDP clients as a spoofed/mismatched reply).
+func TestHandlerCoalescesConcurrentIdenticalQueries(t *testing.T) {
+	var hits atomic.Int32
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		hits.Add(1)
+		// Keep the response in flight long enough for every goroutine below
+		// to join the shared resolution instead of starting its own (500ms
+		// so a slowly-scheduled goroutine under CI load still joins).
+		time.Sleep(500 * time.Millisecond)
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP("1.2.3.4"),
+		})
+		_ = w.WriteMsg(m)
+	})
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: mux}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: pc.LocalAddr().String()},
+	}, nil, "nxdomain", 600, 5*time.Second)
+
+	const n = 8
+	var wg sync.WaitGroup
+	fws := make([]*fakeWriter, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			fw := &fakeWriter{}
+			fws[i] = fw
+			m := new(dns.Msg)
+			m.SetQuestion("example.com.", dns.TypeA)
+			m.Id = uint16(1000 + i)
+			h.ServeDNS(fw, m)
+		}(i)
+	}
+	wg.Wait()
+
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("upstream received %d queries, want 1 (burst coalesced into one round trip)", got)
+	}
+	for i, fw := range fws {
+		if fw.msg == nil || len(fw.msg.Answer) == 0 {
+			t.Fatalf("waiter %d got no answer (rcode=%v)", i, fw.msg)
+		}
+		a, ok := fw.msg.Answer[0].(*dns.A)
+		if !ok || !a.A.Equal(net.ParseIP("1.2.3.4")) {
+			t.Fatalf("waiter %d answer = %v, want 1.2.3.4", i, fw.msg.Answer[0])
+		}
+		if fw.msg.Id != uint16(1000+i) {
+			t.Fatalf("waiter %d response Id = %d, want %d (IDs must not be shared)", i, fw.msg.Id, 1000+i)
+		}
+	}
+}
+
+// TestHandlerCoalescesMergedFailure verifies the failure side of the request
+// pool: when the leader's resolution fails (here an upstream that answers
+// SERVFAIL), every waiter of the burst receives the same failure instead of
+// each re-querying the upstream.
+func TestHandlerCoalescesMergedFailure(t *testing.T) {
+	var hits atomic.Int32
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		hits.Add(1)
+		time.Sleep(300 * time.Millisecond) // keep the burst joined
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeServerFailure
+		_ = w.WriteMsg(m)
+	})
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: mux}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: pc.LocalAddr().String()},
+	}, nil, "nxdomain", 600, 5*time.Second)
+
+	const n = 4
+	var wg sync.WaitGroup
+	fws := make([]*fakeWriter, n)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			fw := &fakeWriter{}
+			fws[i] = fw
+			m := new(dns.Msg)
+			m.SetQuestion("example.com.", dns.TypeA)
+			h.ServeDNS(fw, m)
+		}(i)
+	}
+	wg.Wait()
+
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("upstream received %d queries, want 1 (failure coalesced too)", got)
+	}
+	for i, fw := range fws {
+		if fw.msg == nil || fw.msg.Rcode != dns.RcodeServerFailure {
+			t.Fatalf("waiter %d got rcode=%v, want SERVFAIL (shared failure)", i, fw.msg)
+		}
+	}
+}
+
+// TestHandlerDoesNotCoalesceDistinctQuestions verifies the request pool keys
+// on the full question: concurrent queries for different domains each reach
+// the upstream rather than sharing a resolution.
+func TestHandlerDoesNotCoalesceDistinctQuestions(t *testing.T) {
+	var hits atomic.Int32
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		hits.Add(1)
+		time.Sleep(100 * time.Millisecond) // keep the window open so they'd overlap if merged
+		m := new(dns.Msg)
+		m.SetReply(r)
+		_ = w.WriteMsg(m)
+	})
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: mux}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: pc.LocalAddr().String()},
+	}, nil, "nxdomain", 600, 5*time.Second)
+
+	const n = 4
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			m := new(dns.Msg)
+			m.SetQuestion(fmt.Sprintf("host%d.example.com.", i), dns.TypeA)
+			h.ServeDNS(&fakeWriter{}, m)
+		}(i)
+	}
+	wg.Wait()
+
+	if got := hits.Load(); got != n {
+		t.Fatalf("upstream received %d queries, want %d (distinct questions must not coalesce)", got, n)
+	}
+}
+
+// TestCoalesceEligible verifies which queries may join the in-flight pool:
+// plain recursive lookups only — meta queries (ANY/AXFR...), RD=0 probes,
+// CD-set queries and messages carrying TSIG or other non-OPT additional
+// records resolve on their own because their answers are not interchangeable.
+func TestCoalesceEligible(t *testing.T) {
+	plain := new(dns.Msg)
+	plain.SetQuestion("example.com.", dns.TypeA)
+	plain.RecursionDesired = true
+	if !coalesceEligible(plain) {
+		t.Fatal("plain A query should be eligible for coalescing")
+	}
+
+	noRD := new(dns.Msg)
+	noRD.SetQuestion("example.com.", dns.TypeA)
+	noRD.RecursionDesired = false
+	if coalesceEligible(noRD) {
+		t.Fatal("RD=0 query must not coalesce")
+	}
+
+	cd := new(dns.Msg)
+	cd.SetQuestion("example.com.", dns.TypeA)
+	cd.RecursionDesired = true
+	cd.CheckingDisabled = true
+	if coalesceEligible(cd) {
+		t.Fatal("CD-set query must not coalesce")
+	}
+
+	anyQ := new(dns.Msg)
+	anyQ.SetQuestion("example.com.", dns.TypeANY)
+	anyQ.RecursionDesired = true
+	if coalesceEligible(anyQ) {
+		t.Fatal("meta (ANY) query must not coalesce")
+	}
+
+	multi := new(dns.Msg)
+	multi.SetQuestion("example.com.", dns.TypeA)
+	multi.RecursionDesired = true
+	multi.Question = append(multi.Question, dns.Question{Name: "other.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET})
+	if coalesceEligible(multi) {
+		t.Fatal("multi-question message must not coalesce (only the first question is keyed)")
+	}
+
+	tsig := new(dns.Msg)
+	tsig.SetQuestion("example.com.", dns.TypeA)
+	tsig.RecursionDesired = true
+	tsig.Extra = append(tsig.Extra, &dns.TSIG{
+		Hdr:        dns.RR_Header{Name: "key.example.com.", Rrtype: dns.TypeTSIG, Class: dns.ClassANY, Ttl: 0},
+		Algorithm:  dns.HmacSHA256,
+		TimeSigned: uint64(time.Now().Unix()),
+	})
+	if coalesceEligible(tsig) {
+		t.Fatal("TSIG-carrying query must not coalesce")
 	}
 }
 
