@@ -73,9 +73,11 @@ cache:
   password: ""                 # set if Dragonfly requires auth
   db: 0
   ttl: 6h                      # positive answer cache lifetime
-  negative_ttl: 1m             # cached NXDOMAIN/SERVFAIL lifetime  l1_entries: 4096             # per-shard size of the in-process L1 cache in
-                              # front of Dragonfly (0 disables it; hits then
-                              # always round-trip to Redis)
+  negative_ttl: 1m             # cached NXDOMAIN/SERVFAIL lifetime
+  # In-process L1 cache in front of Dragonfly (an accelerator — hits skip the
+  # Redis round-trip). 0 = auto-sized from the detected memory ceiling (the
+  # default); -1 disables it; N = exact per-shard entry cap.
+  l1_entries: 0
   serve_stale: 5m             # RFC 8767: keep entries answerable this long past
                               # their TTL so an upstream outage serves the last
                               # known good answer instead of SERVFAIL (0 disables)

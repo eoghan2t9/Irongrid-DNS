@@ -316,6 +316,126 @@ func TestPrefetchNearExpiry(t *testing.T) {
 	}
 }
 
+// TestAutoPerShard verifies the L1 auto-sizing policy: unknown memory uses
+// the default, a tiny box hits the floor, a huge one is capped, and sizing
+// grows monotonically with the machine in between.
+func TestAutoPerShard(t *testing.T) {
+	if got := AutoPerShard(0, false); got != l1AutoDefault {
+		t.Fatalf("unknown memory: AutoPerShard = %d, want default %d", got, l1AutoDefault)
+	}
+	if got := AutoPerShard(256<<20, true); got != l1AutoFloor {
+		t.Errorf("256 MiB: AutoPerShard = %d, want floor %d", got, l1AutoFloor)
+	}
+	if got := AutoPerShard(256<<30, true); got != l1AutoCap {
+		t.Errorf("256 GiB: AutoPerShard = %d, want cap %d", got, l1AutoCap)
+	}
+	prev := 0
+	for _, gb := range []uint64{1, 2, 4, 8, 16, 32, 64} {
+		got := AutoPerShard(gb<<30, true)
+		if got < l1AutoFloor || got > l1AutoCap {
+			t.Fatalf("%d GiB: AutoPerShard = %d outside [%d, %d]", gb, got, l1AutoFloor, l1AutoCap)
+		}
+		if got < prev {
+			t.Errorf("%d GiB: AutoPerShard = %d shrank from %d", gb, got, prev)
+		}
+		prev = got
+	}
+}
+
+// TestL1FIFOEviction verifies a full shard evicts the oldest-inserted entry
+// rather than an arbitrary one: three keys hashing to the same shard under a
+// per-shard cap of two evict the first-inserted key while the later two stay.
+func TestL1FIFOEviction(t *testing.T) {
+	c := newL1(2, 0) // cap 2 per shard
+	now := time.Now()
+	// h=0, h=l1Shards and h=2*l1Shards all mask to shard 0.
+	hs := []uint64{0, l1Shards, 2 * l1Shards}
+	for i, h := range hs {
+		c.set(h, false, []byte{byte(i)}, time.Hour, now)
+	}
+	if _, _, _, ok := c.get(hs[0], false, now); ok {
+		t.Fatal("oldest-inserted entry should have been evicted first")
+	}
+	for _, h := range hs[1:] {
+		if _, _, _, ok := c.get(h, false, now); !ok {
+			t.Fatal("newer entry should still be cached")
+		}
+	}
+}
+
+func nxdomainResponse() *dns.Msg {
+	m := emptyResponse()
+	m.Rcode = dns.RcodeNameError
+	return m
+}
+
+func servfailResponse() *dns.Msg {
+	m := emptyResponse()
+	m.Rcode = dns.RcodeServerFailure
+	return m
+}
+
+// TestNegativePrefetch verifies negative entries near the end of their
+// (short) lifetime schedule a background refresh when the cached answer is a
+// stable one — NXDOMAIN or NODATA (NOERROR with no answers, the classic
+// stale-AAAA-probe case) — but never when it's SERVFAIL: those are
+// failure-cache entries written during an upstream outage, and refreshing
+// them would re-probe the failing upstream on every query instead of letting
+// the failure cache absorb the retries.
+func TestNegativePrefetch(t *testing.T) {
+	negTTL := 2 * time.Second // negPrefetchLead = max(2s/5, 1s) = 1s
+	c := l1onlyCache(5*time.Second, negTTL)
+	ctx := context.Background()
+
+	prefetched := make(chan dns.Question, 2)
+	c.EnablePrefetch(func(cctx context.Context, q dns.Question) {
+		prefetched <- q
+	})
+
+	// SERVFAIL negative near expiry: must NOT prefetch.
+	c.SetNegative(ctx, aQuestion(), servfailResponse(), 0)
+	time.Sleep(1200 * time.Millisecond) // remaining ~0.8s < 1s lead
+	if res := c.Lookup(aQuestion()); res.Msg == nil || !res.Negative {
+		t.Fatal("expected a negative hit")
+	}
+	select {
+	case q := <-prefetched:
+		t.Fatalf("SERVFAIL negative prefetched %s — failure entries must absorb retries", q.Name)
+	default:
+	}
+
+	// NXDOMAIN negative near expiry: must prefetch.
+	c.SetNegative(ctx, aQuestion(), nxdomainResponse(), 0)
+	time.Sleep(1200 * time.Millisecond)
+	if res := c.Lookup(aQuestion()); res.Msg == nil || !res.Negative {
+		t.Fatal("expected a negative hit")
+	}
+	select {
+	case q := <-prefetched:
+		if q.Name != aQuestion().Name {
+			t.Fatalf("prefetched %s, want %s", q.Name, aQuestion().Name)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a prefetch for the NXDOMAIN negative")
+	}
+
+	// NODATA negative (NOERROR, empty answer — e.g. an AAAA probe for an
+	// A-only domain) near expiry: must prefetch too.
+	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
+	time.Sleep(1200 * time.Millisecond)
+	if res := c.Lookup(aQuestion()); res.Msg == nil || !res.Negative {
+		t.Fatal("expected a negative hit")
+	}
+	select {
+	case q := <-prefetched:
+		if q.Name != aQuestion().Name {
+			t.Fatalf("prefetched %s, want %s", q.Name, aQuestion().Name)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("expected a prefetch for the NODATA negative")
+	}
+}
+
 // TestDecodeMGetResult exercises the MGET response parsing in isolation
 // (posKey, negKey order, as Lookup calls MGet) without needing a real Redis
 // connection — go-redis returns a present key as a string and a missing key

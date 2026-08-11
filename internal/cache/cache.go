@@ -70,9 +70,11 @@ func NewLocalOnly(ttl, negativeTTL time.Duration, l1Entries int, serveStale time
 
 // New connects to Dragonfly. It returns an error if the instance is
 // unreachable, enforcing the hard dependency. l1Entries is the per-shard
-// capacity of the in-process L1 cache; <= 0 disables the L1 layer. serveStale
-// is how long an L1 entry remains answerable past its expiry (RFC 8767); 0
-// disables serve-stale.
+// capacity of the in-process L1 cache; <= 0 disables the L1 layer. The
+// "auto" sizing (config 0) is resolved at the call site via AutoPerShard,
+// which needs the tuning package's memory detection. serveStale is how long
+// an L1 entry remains answerable past its expiry (RFC 8767); 0 disables
+// serve-stale.
 func New(addr, password string, db int, ttl, negativeTTL, serveStale time.Duration, l1Entries int) (*Cache, error) {
 	client := redis.NewClient(&redis.Options{
 		Addr:         addr,
@@ -320,13 +322,23 @@ func (c *Cache) EnablePrefetch(fn func(ctx context.Context, q dns.Question)) {
 	c.prefetch = fn
 }
 
-// maybePrefetch schedules a background refresh when a served positive entry is
-// within prefetchLead of its expiry. At most one refresh is in flight per
-// question hash (prefetching sync.Map), and the goroutine is fully
-// best-effort — a failure just leaves the now-stale entry to serve-stale or
-// upstream on the next miss.
-func (c *Cache) maybePrefetch(q dns.Question, h uint64, remaining time.Duration) {
-	if c.prefetch == nil || remaining <= 0 || remaining > c.prefetchLead() {
+// maybePrefetch schedules a background refresh when a served entry is within
+// its prefetch lead of expiry. Positive entries use prefetchLead (a fraction
+// of the positive TTL); negative entries use negPrefetchLead (a fraction of
+// the much shorter negative TTL) so short-lived negatives don't spawn a
+// refresh on every single hit. At most one refresh is in flight per question
+// hash (prefetching sync.Map), and the goroutine is fully best-effort — a
+// failure just leaves the now-stale entry to serve-stale or upstream on the
+// next miss.
+func (c *Cache) maybePrefetch(q dns.Question, h uint64, remaining time.Duration, neg bool) {
+	if c.prefetch == nil || remaining <= 0 {
+		return
+	}
+	lead := c.prefetchLead()
+	if neg {
+		lead = c.negPrefetchLead()
+	}
+	if remaining > lead {
 		return
 	}
 	if _, loaded := c.prefetching.LoadOrStore(h, struct{}{}); loaded {
@@ -338,6 +350,18 @@ func (c *Cache) maybePrefetch(q dns.Question, h uint64, remaining time.Duration)
 		defer cancel()
 		c.prefetch(ctx, q)
 	}()
+}
+
+// negPrefetchLead is the negative-entry equivalent of prefetchLead, derived
+// from the negative TTL instead of the positive one: a lead sized against the
+// (typically hours-long) positive TTL would be longer than most negative
+// entries' whole lifetime, firing a refresh on every hit.
+func (c *Cache) negPrefetchLead() time.Duration {
+	lead := c.negativeTTL / 5
+	if lead < time.Second {
+		lead = time.Second
+	}
+	return lead
 }
 
 // Lookup checks both the positive and negative entries for q, hashing the
@@ -370,13 +394,25 @@ func (c *Cache) Lookup(q dns.Question) LookupResult {
 		posRaw, posRemaining, posStale, posOK := c.l1.get(h, false, now)
 		if posOK && !posStale {
 			c.l1Hits.Add(1)
-			c.maybePrefetch(q, h, posRemaining)
+			c.maybePrefetch(q, h, posRemaining, false)
 			return LookupResult{Msg: unpackEntry(posRaw, now)}
 		}
-		negRaw, _, negStale, negOK := c.l1.get(h, true, now)
+		negRaw, negRemaining, negStale, negOK := c.l1.get(h, true, now)
 		if negOK && !negStale {
 			c.l1Hits.Add(1)
-			return LookupResult{Msg: unpackNegative(negRaw), Negative: true}
+			m := unpackNegative(negRaw)
+			// Prefetch NXDOMAIN and NODATA negatives (stable, legitimate
+			// answers — the classic repeat case is a stale AAAA probe for an
+			// A-only domain, which is NODATA: NOERROR with no answers) but
+			// never SERVFAIL ones: those are failure-cache entries written
+			// during an upstream outage, and refreshing them would re-probe
+			// the failing upstream on every query instead of letting the
+			// failure cache absorb the retries. Blocked domains never reach
+			// the cache at all, so this can't leak a blocked lookup upstream.
+			if m != nil && m.Rcode != dns.RcodeServerFailure {
+				c.maybePrefetch(q, h, negRemaining, true)
+			}
+			return LookupResult{Msg: m, Negative: true}
 		}
 		// Nothing fresh: a stale pos or neg entry (already probed above — no
 		// need to re-fetch it) is the RFC 8767 fallback for when L2 and the

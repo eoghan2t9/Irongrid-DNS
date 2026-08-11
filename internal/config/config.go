@@ -231,7 +231,10 @@ type CacheConfig struct {
 	TTL         time.Duration `yaml:"ttl"`          // positive answer cache TTL
 	NegativeTTL time.Duration `yaml:"negative_ttl"` // cached NXDOMAIN/SERVFAIL TTL
 	// L1Entries is the per-shard entry capacity of the in-process L1 cache
-	// layered in front of Dragonfly. 0 disables the L1 entirely.
+	// layered in front of Dragonfly. -1 disables the L1 layer entirely;
+	// 0 (the default) auto-sizes it from the detected memory ceiling (see
+	// cache.AutoPerShard) so a small Pi and a big server get proportionally
+	// sized caches; N is an explicit per-shard entry cap.
 	L1Entries int `yaml:"l1_entries"`
 	// ServeStale (RFC 8767) keeps an L1 entry answerable for this long past
 	// its expiry, so a query whose upstream resolution fails (outage,
@@ -378,7 +381,7 @@ func Default() *Config {
 			DB:            0,
 			TTL:           6 * time.Hour,
 			NegativeTTL:   60 * time.Second,
-			L1Entries:     4096,
+			L1Entries:     0, // 0 = auto-size the L1 cache from available RAM
 			ServeStale:    5 * time.Minute,
 			Prefetch:      true,
 			LookupTimeout: 150 * time.Millisecond,
@@ -516,8 +519,8 @@ func (c *Config) validate() error {
 	if c.Cache.Addr == "" {
 		return fmt.Errorf("cache.addr is required (Dragonfly endpoint)")
 	}
-	if c.Cache.L1Entries < 0 {
-		return fmt.Errorf("cache.l1_entries must be >= 0 (0 disables the in-memory cache)")
+	if c.Cache.L1Entries < -1 {
+		return fmt.Errorf("cache.l1_entries must be >= -1 (-1 disables the in-process cache, 0 auto-sizes it from available RAM, N is an exact per-shard cap)")
 	}
 	if c.Cache.ServeStale < 0 {
 		return fmt.Errorf("cache.serve_stale must be >= 0 (0 disables serve-stale)")

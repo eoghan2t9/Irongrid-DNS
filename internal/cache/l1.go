@@ -40,6 +40,11 @@ type l1Entry struct {
 type l1Shard struct {
 	mu sync.RWMutex
 	m  map[l1Key]l1Entry
+	// queue tracks insertion order so a full shard evicts the oldest-inserted
+	// entry instead of an arbitrary one (map iteration order). Entries that
+	// were deleted/expired linger as dead slots until they reach the head;
+	// compact() bounds that growth. Never appended when cap == 0.
+	queue []l1Key
 }
 
 type l1Cache struct {
@@ -56,6 +61,47 @@ func newL1(capPerShard int, staleTTL time.Duration) *l1Cache {
 		c.shards[i] = &l1Shard{m: make(map[l1Key]l1Entry, 16)}
 	}
 	return c
+}
+
+// L1 auto-sizing: when cache.l1_entries is left at 0 ("auto"), AutoPerShard
+// picks a per-shard entry cap from the process's memory ceiling so a 512 MiB
+// Pi and a 64 GiB server get proportionally sized in-process caches instead
+// of one fixed default.
+const (
+	// l1MemoryFraction is the share of the detected memory ceiling the L1
+	// cache may occupy. The Go heap (GOMEMLIMIT) already reserves most of the
+	// ceiling; L1 stays a modest slice of that so it accelerates without
+	// crowding out the resolver's working set or the query log.
+	l1MemoryFraction = 0.025
+	// l1AvgEntryBytes is a rough all-in cost estimate per cached entry
+	// (packed message + Go map/queue overhead), used to convert the memory
+	// budget into an entry count.
+	l1AvgEntryBytes = 512
+	// l1AutoDefault is the fallback per-shard cap when the memory ceiling
+	// can't be detected (non-Linux, or no cgroup and no /proc/meminfo).
+	l1AutoDefault = 2048
+	// l1AutoFloor/l1AutoCap bound the auto result: a tiny box never gets a
+	// uselessly small cache, and a huge one can't balloon the eviction queue
+	// overhead.
+	l1AutoFloor = 128
+	l1AutoCap   = 16384
+)
+
+// AutoPerShard returns the per-shard L1 entry cap that keeps the whole
+// cache within l1MemoryFraction of memBytes. memKnown=false (memory
+// undetectable) returns l1AutoDefault.
+func AutoPerShard(memBytes uint64, memKnown bool) int {
+	if !memKnown {
+		return l1AutoDefault
+	}
+	perShard := int(uint64(float64(memBytes)*l1MemoryFraction) / l1AvgEntryBytes / l1Shards)
+	if perShard < l1AutoFloor {
+		return l1AutoFloor
+	}
+	if perShard > l1AutoCap {
+		return l1AutoCap
+	}
+	return perShard
 }
 
 // shard picks the shard for a key hash. FNV-1a's low bits are well
@@ -92,9 +138,11 @@ func (c *l1Cache) get(h uint64, neg bool, now time.Time) (raw []byte, remaining 
 	return nil, 0, false, false
 }
 
-// set stores raw under the question hash with a TTL. When a shard is at
-// capacity the oldest-arbitrary entry (map iteration order) is evicted so
-// memory stays bounded under high query cardinality.
+// set stores raw under the question hash with a TTL. Each shard keeps an
+// insertion-order queue, so a full shard evicts the oldest-inserted entry
+// rather than whichever map entry Go happens to iterate first — the old
+// scheme could evict a hot domain while cold entries lingered. Memory stays
+// bounded under high query cardinality.
 func (c *l1Cache) set(h uint64, neg bool, raw []byte, ttl time.Duration, now time.Time) {
 	if ttl <= 0 || len(raw) == 0 {
 		return
@@ -103,13 +151,54 @@ func (c *l1Cache) set(h uint64, neg bool, raw []byte, ttl time.Duration, now tim
 	s := c.shard(h)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if c.cap > 0 && len(s.m) >= c.cap {
-		for k := range s.m {
-			delete(s.m, k)
-			break
+	if c.cap > 0 {
+		if _, exists := s.m[key]; !exists {
+			s.m[key] = l1Entry{raw: raw, expires: now.Add(ttl), staleUntil: now.Add(ttl + c.staleTTL)}
+			s.queue = append(s.queue, key)
+			s.evictToCap(c.cap)
+			// Dead queue slots (deleted/expired keys) accumulate as the map
+			// churns; compact once they double the map so the queue's memory
+			// stays bounded. Amortized O(1) per set.
+			if len(s.queue) > 2*c.cap {
+				s.compact()
+			}
+			return
 		}
+		// Overwrite keeps the key's original queue position (insertion
+		// order). Re-appending on overwrite would be worse, not better: a
+		// hot key refreshed every TTL would accumulate duplicate queue
+		// entries, pushing itself to the head and making itself MORE
+		// evictable — plus every duplicate is a map probe under the shard
+		// lock during compaction. First-seen order is the cheap, stable
+		// approximation; the L2-hit re-warm path re-sets the same key in
+		// place without churning the queue.
 	}
 	s.m[key] = l1Entry{raw: raw, expires: now.Add(ttl), staleUntil: now.Add(ttl + c.staleTTL)}
+}
+
+// evictToCap pops queue entries until the shard map is at or under cap.
+// Dead slots (keys already deleted) are popped without shrinking the map —
+// delete is a no-op for them — so only popping a live entry frees capacity
+// and the loop advances. Called with the shard lock held.
+func (s *l1Shard) evictToCap(cap int) {
+	for len(s.m) > cap && len(s.queue) > 0 {
+		k := s.queue[0]
+		s.queue = s.queue[1:]
+		delete(s.m, k)
+	}
+}
+
+// compact rebuilds the queue with only live entries, preserving insertion
+// order. Called when the queue grows past 2×cap so stale slots from deleted
+// entries can't grow without bound. Called with the shard lock held.
+func (s *l1Shard) compact() {
+	keep := s.queue[:0]
+	for _, k := range s.queue {
+		if _, ok := s.m[k]; ok {
+			keep = append(keep, k)
+		}
+	}
+	s.queue = keep
 }
 
 func (c *l1Cache) del(h uint64, neg bool) {
@@ -125,6 +214,7 @@ func (c *l1Cache) flush() {
 	for _, s := range c.shards {
 		s.mu.Lock()
 		s.m = make(map[l1Key]l1Entry, 16)
+		s.queue = nil
 		s.mu.Unlock()
 	}
 }

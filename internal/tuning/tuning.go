@@ -41,6 +41,17 @@ const (
 	SocketBufferSize = 2 << 20 // 2 MiB
 )
 
+// MemoryLimitBytes returns the effective memory ceiling for this process:
+// the cgroup limit when one is set (and it's tighter than the host's total
+// RAM), otherwise the host's total RAM. On platforms where neither can be
+// read (non-Linux) it returns (0, false). This is the same cgroup-aware
+// detection the runtime auto-tuning uses, exported so other components —
+// e.g. the cache's auto-sized L1 — can size themselves to what the process
+// is actually allowed to use.
+func MemoryLimitBytes() (uint64, bool) {
+	return detectMemoryLimitBytes()
+}
+
 // ApplySystem applies the OS-level tweaks that are separate from the Go
 // runtime: the file-descriptor soft limit is raised to the hard limit (Unix;
 // a no-op on Windows), and on Linux running as root the kernel socket-buffer

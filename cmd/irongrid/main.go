@@ -100,7 +100,7 @@ func main() {
 	defer stop()
 
 	// ---- Dragonfly cache (hard requirement) ----
-	dfly, err := cache.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Cache.TTL, cfg.Cache.NegativeTTL, cfg.Cache.ServeStale, cfg.Cache.L1Entries)
+	dfly, err := cache.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Cache.TTL, cfg.Cache.NegativeTTL, cfg.Cache.ServeStale, resolveL1Entries(cfg.Cache.L1Entries))
 	if err != nil {
 		log.Fatalf("cache: %v\n\nDragonfly is a hard requirement — start it (see docker-compose.yml) and retry.", err)
 	}
@@ -706,7 +706,7 @@ func main() {
 
 		// 1. Cache: connect to the new endpoint first; keep the old one on
 		//    failure so a bad config never takes the server down.
-		newCache, err := cache.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Cache.TTL, cfg.Cache.NegativeTTL, cfg.Cache.ServeStale, cfg.Cache.L1Entries)
+		newCache, err := cache.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Cache.TTL, cfg.Cache.NegativeTTL, cfg.Cache.ServeStale, resolveL1Entries(cfg.Cache.L1Entries))
 		if err != nil {
 			return fmt.Errorf("cache: %w", err)
 		}
@@ -926,6 +926,18 @@ func hostOnly(addr string) string {
 		return addr
 	}
 	return host
+}
+
+// resolveL1Entries turns the cache.l1_entries config value into a concrete
+// per-shard L1 cap: -1 disables the in-process cache, 0 auto-sizes it from
+// the detected memory ceiling (see cache.AutoPerShard — cgroup-aware, so a
+// container limit is respected), and N is an explicit per-shard entry cap.
+func resolveL1Entries(v int) int {
+	if v != 0 {
+		return v
+	}
+	mem, ok := tuning.MemoryLimitBytes()
+	return cache.AutoPerShard(mem, ok)
 }
 
 // buildRewriter, buildRateLimiter and buildClientRouter live in the

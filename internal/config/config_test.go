@@ -34,8 +34,8 @@ func TestValidateUpstreamMode(t *testing.T) {
 // defaults: the L1 cache on (512 entries/shard) and a 256-entry log batch.
 func TestPerfTunablesDefaults(t *testing.T) {
 	c := Default()
-	if c.Cache.L1Entries != 4096 {
-		t.Errorf("cache.l1_entries = %d, want default 4096", c.Cache.L1Entries)
+	if c.Cache.L1Entries != 0 {
+		t.Errorf("cache.l1_entries = %d, want default 0 (auto-size from available RAM)", c.Cache.L1Entries)
 	}
 	if c.Log.BatchSize != 256 {
 		t.Errorf("log.batch_size = %d, want default 256", c.Log.BatchSize)
@@ -61,9 +61,17 @@ func TestPerfTunablesDefaults(t *testing.T) {
 // TestPerfTunablesValidation verifies negative values are rejected.
 func TestPerfTunablesValidation(t *testing.T) {
 	c := validBase()
-	c.Cache.L1Entries = -1
-	if err := c.Validate(); err == nil {
-		t.Error("negative cache.l1_entries accepted")
+	c.Cache.L1Entries = -2
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "l1_entries") {
+		t.Errorf("err = %v, want out-of-range cache.l1_entries rejected", err)
+	}
+	// -1 (disable) and 0 (auto) are both valid.
+	for _, v := range []int{-1, 0} {
+		c = validBase()
+		c.Cache.L1Entries = v
+		if err := c.Validate(); err != nil {
+			t.Errorf("cache.l1_entries = %d rejected: %v", v, err)
+		}
 	}
 	c = validBase()
 	c.Cache.ServeStale = -time.Minute

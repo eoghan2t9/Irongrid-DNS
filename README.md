@@ -523,7 +523,7 @@ written automatically on first launch. Key options:
 | `server.listen_*` | Per-protocol listen addresses; empty string disables |
 | `upstreams` | Forwarders — `udp://`, `tcp://`, `tls://`, `https://`, `quic://`, or `recursive://` (resolves from the root servers itself, no forwarder involved — seeded with IANA's PGP-verified `named.root` hints; see [Recursive resolution](#recursive-resolution-recursive)) |
 | `cache.addr` | Dragonfly endpoint — **server will not start without it** |
-| `cache.l1_entries` | Per-shard depth of the in-process L1 cache in front of Dragonfly (default 4096; `0` disables it, so every lookup round-trips to Dragonfly). The dashboard's **Dragonfly cache** card shows L1/L2 hit rates and memory live |
+| `cache.l1_entries` | Per-shard depth of the in-process L1 cache in front of Dragonfly (default `0` = auto-sized from the detected memory ceiling, cgroup-aware; `-1` disables it; `N` = exact per-shard cap). The dashboard's **Dragonfly cache** card shows L1/L2 hit rates and memory live |
 | `log.retention_days` | Query-log retention; old entries are pruned hourly from the Dragonfly stream. The log itself lives in Dragonfly (stream `irongrid:log`) — `log.query_log_file` is kept only for backward compatibility and ignored. **Upgrading from a SQLite-based build:** the log starts fresh in the stream; the old `data/querylog.db` file is left untouched on disk but no longer read |
 | `filter.blocklists` | Remote URLs or `file://` paths |
 | `filter.auto_update` | How often every enabled blocklist refreshes — one global interval, not per-list |
