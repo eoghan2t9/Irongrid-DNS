@@ -404,6 +404,7 @@ cache:
   db: 0
   ttl: 6h
   negative_ttl: 1m
+  failure_ttl: 5s
   l1_entries: 4096
 
 tls:

@@ -9,7 +9,7 @@ const empty = () => ({
   },
   upstreams: [],
   upstream_mode: 'race',
-  cache: { addr: '', password: '', db: 0, ttl: '6h', negative_ttl: '1m', l1_entries: 4096, serve_stale: '5m', prefetch: true, lookup_timeout: '150ms', failure_ttl: '' },
+  cache: { addr: '', password: '', db: 0, ttl: '6h', negative_ttl: '1m', l1_entries: 4096, serve_stale: '5m', prefetch: true, lookup_timeout: '150ms', failure_ttl: '5s' },
   recursive: { server_timeout: '' },
   tls: { cert_file: '', key_file: '', generate_self_signed: true, self_signed_hosts: [], cert_dir: '', acme: { enabled: false, email: '', domains: [], staging: false, http01_port: 80, renew_before_days: 30, dns01: { provider: '', propagation_wait_sec: 60, cloudflare_token: '', digitalocean_token: '', hetzner_token: '', godaddy_key: '', godaddy_secret: '', aws_access_key_id: '', aws_secret_access_key: '' } } },
   filter: { block_response: 'nxdomain', block_ttl: 600, blocklists: [], whitelist: [], blacklist: [], auto_update: '24h' },
@@ -679,7 +679,7 @@ export default function Settings({ onSessionInvalidated }) {
           {text('Serve stale', 'cache.serve_stale', 'keep entries answerable this long past expiry (RFC 8767) — used when the upstream is unreachable; 0 disables', '5m')}
           {toggle('Prefetch hot entries', 'cache.prefetch')}
           {text('Cache lookup timeout', 'cache.lookup_timeout', 'how long a Dragonfly read may take on the hot path before the query goes straight upstream; empty = 150ms default', '150ms')}
-          {text('Failure cache TTL', 'cache.failure_ttl', 'how long a resolution failure (unreachable upstream, no stale data) is cached as SERVFAIL so retries don\'t re-pay the full timeout; empty = use negative_ttl', '1m')}
+          {text('Failure cache TTL', 'cache.failure_ttl', 'how long a resolution failure (unreachable upstream, no stale data) is cached as SERVFAIL so retries don\'t re-pay the full timeout; short = a recovered upstream shows up quickly; empty = use negative_ttl', '5s')}
         </div>
       </div>
 

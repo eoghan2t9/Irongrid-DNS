@@ -213,7 +213,8 @@ func main() {
 	// Cache-read budget on the hot path (cache.lookup_timeout; 0 = default).
 	dfly.SetLookupTimeout(cfg.Cache.LookupTimeout)
 	// Failure-cache lifetime for unreachable upstreams (cache.failure_ttl;
-	// 0 = use cache.negative_ttl).
+	// 0 = use cache.negative_ttl; default 5s so a recovery is visible
+	// quickly).
 	handler.SetFailureTTL(cfg.Cache.FailureTTL)
 	// Proactive cache warmer: scans the query log for the domains queried
 	// within the lookback window and pre-resolves them (A + AAAA) through

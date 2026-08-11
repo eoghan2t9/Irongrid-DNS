@@ -245,8 +245,10 @@ type CacheConfig struct {
 	// answered (timeout, dial error, circuit-breaker cooldown) with no
 	// serve-stale entry to fall back on — is negatively cached as SERVFAIL,
 	// so retries during an outage don't re-pay the full per-query timeout
-	// every time. 0 uses NegativeTTL; the short window bounds how long a
-	// transient failure can shadow a recovery.
+	// every time. 0 uses NegativeTTL. The default is a short 5s window (not
+	// 0) so a recovered upstream becomes visible within seconds instead of
+	// being shadowed by a minute of cached SERVFAIL; the short window bounds
+	// how long a transient failure can shadow a recovery.
 	FailureTTL time.Duration `yaml:"failure_ttl"`
 }
 
@@ -373,6 +375,11 @@ func Default() *Config {
 			ServeStale:    5 * time.Minute,
 			Prefetch:      true,
 			LookupTimeout: 150 * time.Millisecond,
+			// Failure cache is deliberately much shorter than negative_ttl:
+			// a cached SERVFAIL must not keep a recovered upstream invisible
+			// for a full minute. 5s means retries re-probe upstream about as
+			// often as the circuit breaker's own cooldown cycle.
+			FailureTTL: 5 * time.Second,
 		},
 		TLS: TLSConfig{
 			GenerateSelfSigned: true,

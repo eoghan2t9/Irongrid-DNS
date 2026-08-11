@@ -46,10 +46,12 @@ func TestPerfTunablesDefaults(t *testing.T) {
 	if !c.Cache.Prefetch {
 		t.Error("cache.prefetch should default to true")
 	}
-	// Latency-knob defaults: failure caching falls back to the negative TTL
-	// and the recursive resolver uses its built-in per-server timeout.
-	if c.Cache.FailureTTL != 0 {
-		t.Errorf("cache.failure_ttl = %v, want 0 (use negative_ttl)", c.Cache.FailureTTL)
+	// Latency-knob defaults: failure caching defaults to a short 5s window
+	// (shorter than negative_ttl so a recovery is visible quickly, not
+	// shadowed by a minute of cached SERVFAIL) and the recursive resolver
+	// uses its built-in per-server timeout.
+	if c.Cache.FailureTTL != 5*time.Second {
+		t.Errorf("cache.failure_ttl = %v, want default 5s", c.Cache.FailureTTL)
 	}
 	if c.Recursive.ServerTimeout != 0 {
 		t.Errorf("recursive.server_timeout = %v, want 0 (built-in default)", c.Recursive.ServerTimeout)
