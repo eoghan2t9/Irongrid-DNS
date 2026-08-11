@@ -81,42 +81,27 @@ func (m *Manager) Start(mode Mode, token, configFile, origin, hostname string) e
 	// every start so restarting works.
 	cftunnel.Init(cliutil.GetBuildInfo("IrongridDNS", ""), shutdownC)
 
-	app := &cli.App{
-		Name:     "cloudflared",
-		Usage:    "embedded in Irongrid DNS",
-		Flags:    cftunnel.Flags(),
-		Commands: cftunnel.Commands(),
-		Version:  "2024.12.1 (embedded)",
-	}
+	app := cloudflaredApp()
 
-	args := []string{"cloudflared"}
+	// Validate inputs before touching the running state.
 	switch mode {
-	case ModeQuick:
-		if origin == "" {
-			origin = "http://localhost:8080"
-		}
-		args = append(args, "tunnel", "--url", origin)
 	case ModeToken:
 		if token == "" {
 			m.failStart("tunnel token required for token mode")
 			return fmt.Errorf("tunnel token required")
 		}
-		args = append(args, "tunnel", "run", "--token", token)
 	case ModeConfig:
 		if configFile == "" {
 			m.failStart("cloudflared config file required for config mode")
 			return fmt.Errorf("cloudflared config file required")
 		}
-		args = append(args, "tunnel", "run", "--config", configFile)
+	case ModeQuick:
 	default:
 		m.failStart("unknown tunnel mode")
 		return fmt.Errorf("unknown tunnel mode %q", mode)
 	}
-	// Persist logs to a file we can tail for status; never auto-update.
-	args = append(args, "--no-autoupdate")
-	if m.logFile != "" {
-		args = append(args, "--logfile", m.logFile)
-	}
+
+	args := buildArgs(mode, token, configFile, origin, m.logFile)
 	_ = hostname
 
 	go func() {
@@ -140,6 +125,51 @@ func (m *Manager) Start(mode Mode, token, configFile, origin, hostname string) e
 		return fmt.Errorf("tunnel failed to start: %s", m.lastErr)
 	}
 	return nil
+}
+
+// buildArgs assembles the cloudflared command line for the given mode.
+// Global flags must precede the subcommand: cloudflared's flag parsing only
+// knows --no-autoupdate / --logfile as app-level flags, not as flags of the
+// `tunnel run` subcommand (which defines only credentials and proxy flags).
+// Passing them after `tunnel run ...` fails with
+// "flag provided but not defined: -no-autoupdate".
+func buildArgs(mode Mode, token, configFile, origin, logFile string) []string {
+	args := []string{"cloudflared", "--no-autoupdate"}
+	if logFile != "" {
+		args = append(args, "--logfile", logFile)
+	}
+	switch mode {
+	case ModeQuick:
+		if origin == "" {
+			origin = "http://localhost:8080"
+		}
+		args = append(args, "tunnel", "--url", origin)
+	case ModeToken:
+		args = append(args, "tunnel", "run", "--token", token)
+	case ModeConfig:
+		args = append(args, "tunnel", "run", "--config", configFile)
+	default:
+		args = append(args, "tunnel") // unreachable: Start validates mode first
+	}
+	return args
+}
+
+// cloudflaredApp builds the embedded cloudflared CLI. ExitErrHandler is
+// required: cloudflared wraps action failures (bad token, unreachable edge,
+// etc.) in cli.Exit, and the cli library's default handler calls os.Exit —
+// which, from inside the tunnel goroutine, would terminate the whole
+// Irongrid process. Swallowing the exit here lets app.Run return the error
+// so Start can record it in Status.Error instead.
+func cloudflaredApp() *cli.App {
+	app := &cli.App{
+		Name:     "cloudflared",
+		Usage:    "embedded in Irongrid DNS",
+		Flags:    cftunnel.Flags(),
+		Commands: cftunnel.Commands(),
+		Version:  "2024.12.1 (embedded)",
+	}
+	app.ExitErrHandler = func(_ *cli.Context, _ error) {}
+	return app
 }
 
 func (m *Manager) failStart(msg string) {
