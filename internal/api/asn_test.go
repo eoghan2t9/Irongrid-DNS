@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -88,6 +89,50 @@ func TestASNCache(t *testing.T) {
 	c.put("trigger", asnInfo{ASN: "AS2"}, now) // crosses the cap and resets
 	if _, ok := c.get("8.8.8.8", now); ok {
 		t.Fatal("cache should have reset after exceeding the cap")
+	}
+}
+
+// TestResolveASNCoalescesConcurrentLookups verifies concurrent owner lookups
+// for the same IP collapse into one RIPEstat round trip: two dashboard views
+// polling at once must not double the external API calls.
+func TestResolveASNCoalescesConcurrentLookups(t *testing.T) {
+	var niHits, aoHits atomic.Int64
+	ni := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		niHits.Add(1)
+		time.Sleep(300 * time.Millisecond) // keep the lookups overlapping
+		_, _ = w.Write([]byte(`{"data":{"asn":"AS15169","prefix":"8.8.8.0/24","name":"GOOGLE","country":"US"}}`))
+	}))
+	defer ni.Close()
+	ao := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		aoHits.Add(1)
+		_, _ = w.Write([]byte(`{"data":{"holder":"Google LLC"}}`))
+	}))
+	defer ao.Close()
+	oldNI, oldAO := ripestatNetworkInfo, ripestatASOverview
+	ripestatNetworkInfo = ni.URL
+	ripestatASOverview = ao.URL
+	defer func() { ripestatNetworkInfo, ripestatASOverview = oldNI, oldAO }()
+
+	h := &Handler{}
+	const n = 4
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if info := h.resolveASN(ctx, "8.8.8.8"); info.ASN != "AS15169" || info.Holder != "Google LLC" {
+				t.Errorf("resolveASN = %+v, want AS15169/Google LLC", info)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := niHits.Load(); got != 1 {
+		t.Fatalf("RIPEstat network-info endpoint hit %d times, want 1 (concurrent ASN lookups coalesced)", got)
+	}
+	if got := aoHits.Load(); got != 1 {
+		t.Fatalf("RIPEstat AS-overview endpoint hit %d times, want 1", got)
 	}
 }
 

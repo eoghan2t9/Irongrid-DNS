@@ -1,10 +1,14 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -44,6 +48,50 @@ func TestLogHostnames(t *testing.T) {
 	}
 	if _, ok := out.Hostnames["not-an-ip"]; ok {
 		t.Fatalf("invalid entry must be ignored: %v", out.Hostnames)
+	}
+}
+
+// TestResolveHostnameCoalescesConcurrentLookups verifies concurrent PTR
+// lookups for the same IP collapse into one upstream query: parallel
+// dashboard polls must not double upstream reverse-DNS traffic.
+func TestResolveHostnameCoalescesConcurrentLookups(t *testing.T) {
+	var hits atomic.Int64
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		hits.Add(1)
+		time.Sleep(300 * time.Millisecond) // keep the lookups overlapping
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = append(m.Answer, &dns.PTR{
+			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypePTR, Class: dns.ClassINET, Ttl: 300},
+			Ptr: "host.example.net.",
+		})
+		_ = w.WriteMsg(m)
+	})}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	h := handlerFor(t, pc.LocalAddr().String())
+
+	const n = 4
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if name := h.resolveHostname(ctx, "1.2.3.4"); name != "host.example.net" {
+				t.Errorf("resolveHostname = %q, want host.example.net", name)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("upstream PTR server answered %d times, want 1 (concurrent hostname lookups coalesced)", got)
 	}
 }
 

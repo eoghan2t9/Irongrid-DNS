@@ -10,6 +10,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 )
 
 // ListManager owns the blocklist sources, their cached content, and the
@@ -25,6 +27,11 @@ type ListManager struct {
 	// than per-list — one global cadence instead of tracking a schedule per
 	// list.
 	autoUpdate time.Duration
+	// fetchFlight coalesces concurrent downloads of the same list URL so
+	// overlapping refresh triggers (boot FetchAll, the auto-refresh ticker,
+	// a manual refresh) never fetch the same list twice at once (see
+	// fetchRemote).
+	fetchFlight singleflight.Group
 	// OnChange, if set, is invoked after every successful ReloadAll. Used to
 	// rebuild anything else that derives from the same cached list content
 	// (e.g. per-client-group engines), which ReloadAll itself knows nothing
@@ -166,12 +173,13 @@ func (m *ListManager) FetchOne(ctx context.Context, id string) error {
 	var content []byte
 	var err error
 	if strings.HasPrefix(spec.URL, "file://") {
+		// Local reads are instant; no need to coalesce.
 		content, err = os.ReadFile(strings.TrimPrefix(spec.URL, "file://"))
 	} else if spec.URL == "" {
 		// A list with no URL holds only manual entries; nothing to fetch.
 		return nil
 	} else {
-		content, err = m.download(ctx, spec.URL)
+		content, err = m.fetchRemote(ctx, spec.URL)
 	}
 	if err != nil {
 		m.mu.Lock()
@@ -187,6 +195,21 @@ func (m *ListManager) FetchOne(ctx context.Context, id string) error {
 	stored.LastError = ""
 	m.mu.Unlock()
 	return m.persist(id, content)
+}
+
+// fetchRemote downloads list content, coalescing concurrent downloads of the
+// same URL into one HTTP round trip (a boot FetchAll overlapping the
+// auto-refresh ticker or a manual refresh must not download each list
+// twice). Keyed on the URL, so two lists pointing at the same source also
+// share one fetch.
+func (m *ListManager) fetchRemote(ctx context.Context, url string) ([]byte, error) {
+	v, err, _ := m.fetchFlight.Do("list:"+url, func() (any, error) {
+		return m.download(ctx, url)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.([]byte), nil
 }
 
 func (m *ListManager) download(ctx context.Context, url string) ([]byte, error) {

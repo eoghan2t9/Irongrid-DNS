@@ -132,15 +132,31 @@ func (h *Handler) logHostnames(w http.ResponseWriter, r *http.Request) {
 }
 
 // resolveHostname returns the cached-or-fresh PTR name for ip, or "" when the
-// address has no PTR record (or resolution failed).
+// address has no PTR record (or resolution failed). Concurrent lookups for
+// the same IP (multiple dashboard views polling at once) are coalesced into
+// one upstream PTR query.
 func (h *Handler) resolveHostname(ctx context.Context, ip string) string {
 	now := time.Now()
 	if name, ok := h.hostCache().get(ip, now); ok {
 		return name
 	}
-	name := lookupPTR(ctx, h, ip)
-	h.hostCache().put(ip, name, time.Now())
-	return name
+	ch := h.hostFlight.DoChan("host:"+ip, func() (any, error) {
+		name := lookupPTR(ctx, h, ip)
+		h.hostCache().put(ip, name, time.Now())
+		return name, nil
+	})
+	select {
+	case res := <-ch:
+		name, _ := res.Val.(string)
+		return name
+	case <-ctx.Done():
+		// Our batch deadline expired while waiting on the leader: take a
+		// result the leader may have just cached, else report nothing.
+		if name, ok := h.hostCache().get(ip, time.Now()); ok {
+			return name
+		}
+		return ""
+	}
 }
 
 // lookupPTR queries the reverse-zone name of ip through the configured

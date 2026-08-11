@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -77,6 +79,10 @@ type Resolver struct {
 	mu          sync.RWMutex
 	delegations map[string]delegation
 	nsAddrs     map[string]nsAddr
+
+	// nsFlight coalesces concurrent address lookups for the same glueless
+	// nameserver hostname into one referral walk (see resolveNSAddr).
+	nsFlight singleflight.Group
 }
 
 type delegation struct {
@@ -391,10 +397,49 @@ func (r *Resolver) resolveNameservers(ctx context.Context, ns []nsInfo, nsDepth 
 // Successful lookups are cached per hostname (with the same TTL clamping
 // as delegations) so a second domain hosted by the same DNS provider skips
 // the walk entirely.
+//
+// Concurrent lookups for the same hostname are coalesced into one walk: two
+// domains hosted by the same DNS provider resolved at once would otherwise
+// each chase the provider's nameservers from the root. The winner's walk
+// feeds every waiter. The flight key includes nsDepth so a walk's own nested
+// lookup of the same host (a pathological delegation loop) gets a different
+// key and can never wait on its own goroutine — singleflight would deadlock
+// on same-key re-entry.
 func (r *Resolver) resolveNSAddr(ctx context.Context, host string, nsDepth int) (string, bool) {
 	if addr, ok := r.cachedNSAddr(host); ok {
 		return addr, true
 	}
+	ch := r.nsFlight.DoChan(host+"|"+strconv.Itoa(nsDepth), func() (any, error) {
+		if addr, ok := r.cachedNSAddr(host); ok {
+			return nsAddrResult{addr: addr, ok: true}, nil
+		}
+		addr, ok := r.resolveNSAddrWalk(ctx, host, nsDepth)
+		return nsAddrResult{addr: addr, ok: ok}, nil
+	})
+	select {
+	case res := <-ch:
+		fr, _ := res.Val.(nsAddrResult)
+		return fr.addr, fr.ok
+	case <-ctx.Done():
+		// Our deadline expired while waiting on the leader's walk: the
+		// leader may still have just finished and cached — take that, else
+		// report the lookup as failed under our own budget.
+		if addr, ok := r.cachedNSAddr(host); ok {
+			return addr, true
+		}
+		return "", false
+	}
+}
+
+// nsAddrResult is the outcome of one coalesced nameserver-address lookup.
+type nsAddrResult struct {
+	addr string
+	ok   bool
+}
+
+// resolveNSAddrWalk runs the actual nested walk for a nameserver hostname's
+// address (see resolveNSAddr for the coalescing wrapper).
+func (r *Resolver) resolveNSAddrWalk(ctx context.Context, host string, nsDepth int) (string, bool) {
 	for _, qtype := range [...]uint16{dns.TypeA, dns.TypeAAAA} {
 		resp, err := r.resolve(ctx, dns.Question{Name: host, Qtype: qtype, Qclass: dns.ClassINET}, 0, nsDepth)
 		if err != nil {

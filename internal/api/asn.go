@@ -132,18 +132,37 @@ func (h *Handler) logASN(w http.ResponseWriter, r *http.Request) {
 // definitive "no routing information" outcome is cached (negatively);
 // transient RIPEstat failures are retried on the next poll instead of being
 // remembered.
+//
+// Concurrent lookups for the same IP — two dashboard tabs, or the log page
+// and blocked-clients card polling together — are coalesced into one
+// RIPEstat round trip instead of each firing the two HTTP calls against the
+// rate-limited API.
 func (h *Handler) resolveASN(ctx context.Context, ip string) asnInfo {
 	now := time.Now()
 	if info, ok := h.asnCache().get(ip, now); ok {
 		return info
 	}
-	info, err := lookupASN(ctx, ip)
-	if err != nil {
-		if strings.Contains(err.Error(), "no routing information") {
-			h.asnCache().put(ip, asnInfo{}, time.Now())
+	ch := h.asnFlight.DoChan("asn:"+ip, func() (any, error) {
+		info, err := lookupASN(ctx, ip)
+		if err != nil {
+			if strings.Contains(err.Error(), "no routing information") {
+				h.asnCache().put(ip, asnInfo{}, time.Now())
+			}
+			return asnInfo{}, nil
+		}
+		h.asnCache().put(ip, info, time.Now())
+		return info, nil
+	})
+	select {
+	case res := <-ch:
+		info, _ := res.Val.(asnInfo)
+		return info
+	case <-ctx.Done():
+		// Our batch deadline expired while waiting on the leader: take a
+		// result the leader may have just cached, else report nothing.
+		if info, ok := h.asnCache().get(ip, time.Now()); ok {
+			return info
 		}
 		return asnInfo{}
 	}
-	h.asnCache().put(ip, info, time.Now())
-	return info
 }

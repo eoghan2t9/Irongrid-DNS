@@ -682,20 +682,35 @@ func (h *Handler) resolveUpstreams(ctx context.Context, r *dns.Msg, q dns.Questi
 	if !coalesceEligible(r) {
 		return queryUpstreams(ctx, upstreams, mode, query)
 	}
-	v, err, _ := h.flight.Do(flightKey(q), func() (any, error) {
+	// DoChan (not Do) so a caller whose own deadline expires while waiting
+	// on the leader can bail and resolve under its own budget: the leader
+	// may be a prefetch or warmer resolution running on a longer context
+	// (up to 15s), and a live query must not overrun its own 5s timeout
+	// just because it joined a slower leader's flight.
+	ch := h.flight.DoChan(flightKey(q), func() (any, error) {
 		resp, up, qerr := queryUpstreams(ctx, upstreams, mode, query)
 		return flightResult{resp: resp, up: up}, qerr
 	})
-	res := v.(flightResult)
-	if err != nil || res.resp == nil {
-		return nil, res.up, err
+	select {
+	case res := <-ch:
+		fr, ok := res.Val.(flightResult)
+		if !ok || res.Err != nil || fr.resp == nil {
+			return nil, fr.up, res.Err
+		}
+		// Copy per caller: WriteMsg packs the message, and the shared
+		// result's ID belongs to the leader — rebase it to this request's
+		// ID so a UDP client doesn't silently drop a mismatched-ID response.
+		out := fr.resp.Copy()
+		out.Id = r.Id
+		return out, fr.up, nil
+	case <-ctx.Done():
+		// Deadline expired while waiting on the leader: return the timeout
+		// without re-querying. A dead-context query would fail instantly and
+		// blame the upstream for a caller-side deadline — counting a
+		// circuit-breaker failure per bailed waiter — even though the
+		// upstream may be perfectly healthy (just slower than our budget).
+		return nil, "", ctx.Err()
 	}
-	// Copy per caller: WriteMsg packs the message, and the shared result's
-	// ID belongs to the leader — rebase it to this request's ID so a UDP
-	// client doesn't silently drop a mismatched-ID response.
-	out := res.resp.Copy()
-	out.Id = r.Id
-	return out, res.up, nil
 }
 
 // coalesceEligible reports whether r's question may be merged with an
@@ -880,8 +895,12 @@ func (h *Handler) resolveAndCache(ctx context.Context, q dns.Question) error {
 	m.RecursionDesired = true
 	// The same strategy the query path uses (race by default) applies to
 	// prefetch and warmer resolutions, so a sequential-mode deployment
-	// always talks to the primary first, never fanning out.
-	resp, _, err := queryUpstreams(ctx, ups, mode, m)
+	// always talks to the primary first, never fanning out. These also run
+	// through the same in-flight request pool as live queries, so a
+	// background refresh that overlaps a client's query (or another
+	// background refresh) shares one upstream round trip instead of
+	// doubling it.
+	resp, _, err := h.resolveUpstreams(ctx, m, q, ups, mode, m)
 	if err != nil {
 		return err
 	}

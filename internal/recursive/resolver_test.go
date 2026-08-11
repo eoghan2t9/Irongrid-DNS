@@ -4,6 +4,8 @@ import (
 	"context"
 	"net"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -497,6 +499,76 @@ func TestResolveGluelessOutOfBailiwickNS(t *testing.T) {
 	a, ok := resp.Answer[0].(*dns.A)
 	if !ok || a.A.String() != "93.184.216.34" {
 		t.Fatalf("unexpected answer: %v", resp.Answer[0])
+	}
+}
+
+// TestResolveCoalescesNSAddressLookups verifies concurrent address lookups
+// for the same glueless nameserver hostname share one referral walk: two
+// domains hosted by the same DNS provider resolved at once must not each
+// walk the tree to find that provider's nameservers.
+func TestResolveCoalescesNSAddressLookups(t *testing.T) {
+	nsPort := freePort(t)
+
+	// The DNS host answers ns1.dnshost.invalid's own A record slowly, so
+	// concurrent lookups overlap; its hit count proves how many walks ran.
+	var nsHits atomic.Int64
+	pc, err := net.ListenPacket("udp", "127.0.0.4:"+nsPort)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	nsHostSrv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		nsHits.Add(1)
+		time.Sleep(300 * time.Millisecond)
+		m := new(dns.Msg)
+		m.SetReply(r)
+		a, _ := dns.NewRR("ns1.dnshost.invalid. 300 IN A 127.0.0.4")
+		m.Answer = []dns.RR{a}
+		m.Authoritative = true
+		_ = w.WriteMsg(m)
+	})}
+	go func() { _ = nsHostSrv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = nsHostSrv.Shutdown() })
+
+	// The invalid. TLD glues dnshost.invalid. so a nameserver-address walk
+	// ends at the DNS host above.
+	tldInvalid := &fakeZone{
+		name:           "invalid.",
+		answers:        map[string][]dns.RR{},
+		delegateSuffix: "dnshost.invalid.",
+		delegateNS:     "a.gtld-servers.invalid.",
+		delegateAddr:   "127.0.0.4:" + nsPort,
+		childName:      "dnshost.invalid.",
+	}
+	tldInvalidAddr, _ := startFakeServer(t, "127.0.0.5:"+nsPort, tldInvalid)
+
+	root := &fakeZone{
+		name:    ".",
+		answers: map[string][]dns.RR{},
+		delegates: []delegateEntry{
+			{suffix: "invalid.", ns: "a.iana-servers.invalid.", addr: tldInvalidAddr, childName: "invalid."},
+		},
+	}
+	rootAddr, _ := startFakeServer(t, "127.0.0.1:"+nsPort, root)
+
+	r := newTestResolver(rootAddr, nsPort)
+
+	const n = 4
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			addr, ok := r.resolveNSAddr(ctx, "ns1.dnshost.invalid.", 1)
+			if !ok || addr != "127.0.0.4:"+nsPort {
+				t.Errorf("resolveNSAddr = %q (ok=%v), want 127.0.0.4:%s", addr, ok, nsPort)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := nsHits.Load(); got != 1 {
+		t.Fatalf("nameserver host answered %d times, want 1 (concurrent NS address lookups coalesced into one walk)", got)
 	}
 }
 

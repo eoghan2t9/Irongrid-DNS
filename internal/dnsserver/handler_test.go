@@ -386,6 +386,56 @@ func TestHandlerCoalescesMergedFailure(t *testing.T) {
 	}
 }
 
+// TestHandlerCoalescesBackgroundResolutions verifies the background
+// resolution path (cache prefetch + cache warmer) shares the same in-flight
+// request pool as live queries: concurrent refreshes of the same question
+// hit the upstream once instead of once per refresh.
+func TestHandlerCoalescesBackgroundResolutions(t *testing.T) {
+	var hits atomic.Int32
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		hits.Add(1)
+		time.Sleep(300 * time.Millisecond) // keep the burst joined
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP("5.6.7.8"),
+		})
+		_ = w.WriteMsg(m)
+	})
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: mux}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	c := cache.NewLocalOnly(6*time.Hour, time.Minute, 4096, 5*time.Minute)
+	h := NewHandler(filter.NewEngine(), c, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: pc.LocalAddr().String()},
+	}, nil, "nxdomain", 600, 5*time.Second)
+
+	const n = 4
+	q := dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			h.Refresh(ctx, q)
+		}()
+	}
+	wg.Wait()
+
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("upstream received %d background resolutions, want 1 (coalesced)", got)
+	}
+}
+
 // TestHandlerDoesNotCoalesceDistinctQuestions verifies the request pool keys
 // on the full question: concurrent queries for different domains each reach
 // the upstream rather than sharing a resolution.

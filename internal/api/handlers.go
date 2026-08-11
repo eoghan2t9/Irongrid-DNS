@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"golang.org/x/sync/singleflight"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/acme"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
@@ -71,6 +72,11 @@ type Handler struct {
 	hosts     *hostCache
 	asnOnce   sync.Once
 	asns      *asnCache
+	// hostFlight/asnFlight coalesce concurrent enrichment lookups for the
+	// same IP so parallel dashboard polls share one external round trip
+	// (see resolveHostname and resolveASN).
+	hostFlight singleflight.Group
+	asnFlight  singleflight.Group
 	DNS       *dnsserver.Handler
 	Tunnel    *tunnel.Manager
 	Upstreams []*upstream.Upstream
