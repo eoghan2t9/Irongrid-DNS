@@ -87,6 +87,19 @@ func TestPerfTunablesValidation(t *testing.T) {
 	}
 }
 
+func TestUdpSocketsValidation(t *testing.T) {
+	c := validBase()
+	c.Server.UdpSockets = -1
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "udp_sockets") {
+		t.Errorf("err = %v, want negative server.udp_sockets rejected", err)
+	}
+	c = validBase()
+	c.Server.UdpSockets = 8 // explicit multi-socket binding is fine
+	if err := c.Validate(); err != nil {
+		t.Errorf("valid server.udp_sockets rejected: %v", err)
+	}
+}
+
 func validBase() *Config {
 	return &Config{
 		Server: ServerConfig{

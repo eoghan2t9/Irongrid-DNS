@@ -10,8 +10,6 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
-
-	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
 // startDoQ launches the RFC 9250 DNS-over-QUIC listener.
@@ -25,31 +23,58 @@ func (m *Manager) startDoQ(addr string) error {
 		KeepAlivePeriod:      20 * time.Second,
 		HandshakeIdleTimeout: 8 * time.Second,
 	}
-	// Listen on our own UDP socket so the kernel receive/send buffers are
+	// Listen on our own UDP sockets so the kernel receive/send buffers are
 	// raised (quic.ListenAddr dials its own socket with the OS defaults).
-	pc, err := net.ListenPacket("udp", addr)
+	// Where the platform supports it, the address is bound from several
+	// SO_REUSEPORT sockets (same count as the plain UDP listener): the
+	// kernel hashes each QUIC connection's 4-tuple to one socket, so every
+	// packet of a connection reaches the listener that accepted it while
+	// receive processing spreads across per-socket read goroutines. On
+	// platforms without reuseport it falls back to a single socket (see
+	// newUDPListeners). Caveat: because the listeners are independent, a
+	// connection that migrates (changes its 4-tuple) would be re-hashed to
+	// a different socket and dropped — acceptable for DoQ, whose clients
+	// don't migrate mid-connection.
+	pcs, err := newUDPListeners(addr, m.udpSocketCount())
 	if err != nil {
 		return err
 	}
-	tuning.SetPacketBuffers(pc)
-	ln, err := quic.Listen(pc, tlsConf, quicConf)
-	if err != nil {
-		_ = pc.Close()
-		return err
-	}
-	m.doqLns = append(m.doqLns, ln)
-	log.Printf("[dns] DoQ listener on %s", addr)
-	go func() {
-		for {
-			conn, err := ln.Accept(context.Background())
-			if err != nil {
-				log.Printf("[dns] DoQ listener on %s stopped: %v", addr, err)
-				m.results <- Listener{Proto: "doq", Addr: addr, Err: err}
-				return
+	lns := make([]*quic.Listener, 0, len(pcs))
+	for _, pc := range pcs {
+		ln, err := quic.Listen(pc, tlsConf, quicConf)
+		if err != nil {
+			// Close everything this call opened: successfully-wrapped
+			// listeners (which own their packet conns) plus the unwrapped
+			// tail of sockets. Nothing was registered in m.doqLns yet.
+			for _, l := range lns {
+				_ = l.Close()
 			}
-			go m.handleDoQConn(conn)
+			for _, p := range pcs[len(lns):] {
+				_ = p.Close()
+			}
+			return err
 		}
-	}()
+		lns = append(lns, ln)
+	}
+	m.doqLns = append(m.doqLns, lns...)
+	noun := "sockets"
+	if len(lns) == 1 {
+		noun = "socket"
+	}
+	log.Printf("[dns] DoQ listener on %s (%d %s)", addr, len(lns), noun)
+	for _, ln := range lns {
+		go func(ln *quic.Listener) {
+			for {
+				conn, err := ln.Accept(context.Background())
+				if err != nil {
+					log.Printf("[dns] DoQ listener on %s stopped: %v", addr, err)
+					m.results <- Listener{Proto: "doq", Addr: addr, Err: err}
+					return
+				}
+				go m.handleDoQConn(conn)
+			}
+		}(ln)
+	}
 	return nil
 }
 

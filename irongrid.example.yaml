@@ -17,6 +17,11 @@ server:
   # web_redirect: true         # with web_tls: plain HTTP on web_redirect_port 301s to HTTPS
   # web_redirect_port: 80
   timeout_sec: 5               # per-query upstream timeout
+  # UDP sockets bound for the plain UDP and DoQ listeners (SO_REUSEPORT
+  # spreads incoming datagrams across them). 0 = auto (one per CPU, capped
+  # at 8); 1 = a single exclusive socket (no port sharing with other
+  # processes); N = exactly N sockets (capped at 64).
+  udp_sockets: 0
 
 # Upstream DNS servers to forward to (udp, tcp, tls, https, quic supported).
 upstreams:

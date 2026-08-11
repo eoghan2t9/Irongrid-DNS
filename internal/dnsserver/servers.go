@@ -45,13 +45,36 @@ type Listener struct {
 type Manager struct {
 	handler *Handler
 	tlsConf *tls.Config
-	mu      sync.Mutex
-	servers []*dns.Server
-	httpSrv interface {
+	// udpSockets is the configured UDP socket count for the plain UDP and
+	// DoQ listeners (server.udp_sockets): 0 = auto (one per CPU, capped), 1
+	// = a single exclusive socket. Applied by main at boot and on reload
+	// before the listeners are (re)started.
+	udpSockets int
+	mu         sync.Mutex
+	servers    []*dns.Server
+	httpSrv    interface {
 		Shutdown(ctx context.Context) error
 	}
 	doqLns  []*quic.Listener
 	results chan Listener
+}
+
+// SetUdpSockets sets how many SO_REUSEPORT sockets the UDP-family listeners
+// bind (server.udp_sockets): 0 = auto (one per CPU, capped), 1 = a single
+// exclusive socket, N = exactly N. Applied before Start/Restart; the running
+// listeners are not touched by a call after they are up.
+func (m *Manager) SetUdpSockets(n int) {
+	m.mu.Lock()
+	m.udpSockets = n
+	m.mu.Unlock()
+}
+
+// udpSocketCount returns how many sockets the UDP-family listeners bind,
+// resolving the configured server.udp_sockets value (see udpSocketCountFor).
+func (m *Manager) udpSocketCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return udpSocketCountFor(m.udpSockets)
 }
 
 // NewManager creates a listener manager.
@@ -110,7 +133,7 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 		// can't queue up behind a single recvfrom loop. Platforms without
 		// SO_REUSEPORT (Windows) and any bind failure fall back to one plain
 		// socket, so the listener always comes up.
-		pcs, err := newUDPListeners(addr, udpSocketCount())
+		pcs, err := newUDPListeners(addr, m.udpSocketCount())
 		if err != nil {
 			m.results <- Listener{Proto: proto, Addr: addr, Err: err}
 			return
@@ -218,18 +241,31 @@ func (m *Manager) Restart(udpAddr, tcpAddr, dotAddr, dohAddr, doqAddr, dohPath s
 	return err
 }
 
-// maxUDPSockets caps how many SO_REUSEPORT sockets one UDP address opens:
-// each carries its own SocketBufferSize kernel receive/send buffers, so past
-// a handful the extra kernel memory buys nothing measurable on any box this
+// maxUDPSockets caps the auto socket count for one UDP address: each socket
+// carries its own SocketBufferSize kernel receive/send buffers, so past a
+// handful the extra kernel memory buys nothing measurable on any box this
 // runs on.
 const maxUDPSockets = 8
 
-// udpSocketCount is how many sockets a UDP listen address is bound from: one
-// per available CPU (the runtime's tuned GOMAXPROCS, which the tuning package
-// makes cgroup-aware), capped at maxUDPSockets. The kernel hashes incoming
-// datagrams across the sockets, each with its own receive queue and read
-// goroutine.
-func udpSocketCount() int {
+// maxExplicitUDPSockets bounds an explicit server.udp_sockets value so a
+// typo (say 1000) can't open a thousand 2 MiB-buffered sockets.
+const maxExplicitUDPSockets = 64
+
+// udpSocketCountFor is how many sockets a UDP listen address is bound from.
+// An explicit operator setting (server.udp_sockets > 0) is honored — 1
+// restores the strictly-exclusive single socket — up to maxExplicitUDPSockets
+// (clamped past that). The default (0) is one per available CPU (the
+// runtime's tuned GOMAXPROCS, which the tuning package makes cgroup-aware),
+// capped at maxUDPSockets. The kernel hashes incoming datagrams across the
+// sockets, each with its own receive queue and read goroutine.
+func udpSocketCountFor(cfg int) int {
+	if cfg > 0 {
+		if cfg > maxExplicitUDPSockets {
+			log.Printf("[dns] udp_sockets=%d exceeds the %d maximum — using %d sockets", cfg, maxExplicitUDPSockets, maxExplicitUDPSockets)
+			cfg = maxExplicitUDPSockets
+		}
+		return cfg
+	}
 	n := runtime.GOMAXPROCS(0)
 	if n < 1 {
 		n = 1

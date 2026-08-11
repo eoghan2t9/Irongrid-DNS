@@ -29,8 +29,8 @@ type Config struct {
 	// UpstreamMode is the multi-upstream resolution strategy ("race" or
 	// "sequential"); empty defaults to "race". It is global — client groups
 	// that override the upstream list use the same strategy.
-	UpstreamMode string      `yaml:"upstream_mode"`
-	Cache        CacheConfig `yaml:"cache"`
+	UpstreamMode string          `yaml:"upstream_mode"`
+	Cache        CacheConfig     `yaml:"cache"`
 	TLS          TLSConfig       `yaml:"tls"`
 	Filter       FilterConfig    `yaml:"filter"`
 	Log          LogConfig       `yaml:"log"`
@@ -213,6 +213,13 @@ type ServerConfig struct {
 	WebRedirect     bool `yaml:"web_redirect"`
 	WebRedirectPort int  `yaml:"web_redirect_port"` // default 80
 	TimeoutSec      int  `yaml:"timeout_sec"`       // per-query timeout
+	// UdpSockets is how many SO_REUSEPORT sockets the plain UDP and DoQ
+	// listeners bind so the kernel spreads incoming datagrams across
+	// per-socket receive queues (each drained by its own read goroutine).
+	// 0 = auto (one per CPU, capped); 1 = a single plain socket (strictly
+	// exclusive binding — the pre-reuseport behaviour); N = exactly N
+	// sockets (capped at 64).
+	UdpSockets int `yaml:"udp_sockets"`
 }
 
 // CacheConfig points at the Dragonfly instance that is the authoritative
@@ -545,6 +552,9 @@ func (c *Config) validate() error {
 	}
 	if c.Server.TimeoutSec < 1 {
 		return fmt.Errorf("server.timeout_sec must be >= 1")
+	}
+	if c.Server.UdpSockets < 0 {
+		return fmt.Errorf("server.udp_sockets must be >= 0 (0 = auto, 1 = single exclusive socket)")
 	}
 	if c.Log.RetentionDays < 1 {
 		return fmt.Errorf("log.retention_days must be >= 1")

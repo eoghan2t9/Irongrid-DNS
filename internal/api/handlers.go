@@ -68,18 +68,18 @@ type Handler struct {
 	// hostOnce/hosts and asnOnce/asns back the cached reverse-DNS and
 	// BGP/ISP-owner lookups for the query-log and blocked-clients views
 	// (see hostname.go and asn.go).
-	hostOnce  sync.Once
-	hosts     *hostCache
-	asnOnce   sync.Once
-	asns      *asnCache
+	hostOnce sync.Once
+	hosts    *hostCache
+	asnOnce  sync.Once
+	asns     *asnCache
 	// hostFlight/asnFlight coalesce concurrent enrichment lookups for the
 	// same IP so parallel dashboard polls share one external round trip
 	// (see resolveHostname and resolveASN).
 	hostFlight singleflight.Group
 	asnFlight  singleflight.Group
-	DNS       *dnsserver.Handler
-	Tunnel    *tunnel.Manager
-	Upstreams []*upstream.Upstream
+	DNS        *dnsserver.Handler
+	Tunnel     *tunnel.Manager
+	Upstreams  []*upstream.Upstream
 	// Hints is the authoritative root-hints manager for recursive://
 	// upstreams; nil when no recursive upstream is configured.
 	Hints     *recursive.HintsManager
@@ -812,6 +812,10 @@ type serverPayload struct {
 	WebRedirect     bool   `json:"web_redirect"`
 	WebRedirectPort int    `json:"web_redirect_port"`
 	TimeoutSec      int    `json:"timeout_sec"`
+	// UdpSockets is how many SO_REUSEPORT sockets the plain UDP listener
+	// binds: 0 = auto (one per CPU, capped), 1 = a single exclusive socket,
+	// N = exactly N.
+	UdpSockets int `json:"udp_sockets"`
 }
 
 type cachePayload struct {
@@ -932,6 +936,7 @@ func payloadFromConfig(c *config.Config) configPayload {
 			WebRedirect:     c.Server.WebRedirect,
 			WebRedirectPort: c.Server.WebRedirectPort,
 			TimeoutSec:      c.Server.TimeoutSec,
+			UdpSockets:      c.Server.UdpSockets,
 		},
 		Upstreams:    c.Upstreams,
 		UpstreamMode: c.UpstreamMode,
@@ -1126,6 +1131,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			WebRedirect:     p.Server.WebRedirect,
 			WebRedirectPort: p.Server.WebRedirectPort,
 			TimeoutSec:      p.Server.TimeoutSec,
+			UdpSockets:      p.Server.UdpSockets,
 		},
 		Upstreams:    p.Upstreams,
 		UpstreamMode: p.UpstreamMode,
