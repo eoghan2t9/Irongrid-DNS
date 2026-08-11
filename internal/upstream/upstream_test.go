@@ -499,3 +499,125 @@ func TestCircuitBreaker(t *testing.T) {
 		t.Fatal("expected the circuit to re-arm once the cooldown elapsed")
 	}
 }
+
+// TestUDPTruncatedFallsBackToTCP verifies the classic UDP resilience path: a
+// truncated UDP reply (the answer outgrew the negotiated EDNS buffer) is
+// retried over TCP on the same server address instead of failing the query.
+func TestUDPTruncatedFallsBackToTCP(t *testing.T) {
+	// The TCP and UDP listeners must share one address (the fallback retries
+	// the same server over TCP): the TCP side answers 1.2.3.4, the UDP side
+	// always truncates.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen tcp: %v", err)
+	}
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go serveOneAnswer(conn, "1.2.3.4")
+		}
+	}()
+	t.Cleanup(func() { ln.Close() })
+	_, port, _ := net.SplitHostPort(ln.Addr().String())
+	udpAddr := net.JoinHostPort("127.0.0.1", port)
+	pc, err := net.ListenPacket("udp", udpAddr)
+	if err != nil {
+		t.Fatalf("listen udp: %v", err)
+	}
+	udpSrv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Truncated = true
+		_ = w.WriteMsg(m)
+	})}
+	go func() { _ = udpSrv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = udpSrv.Shutdown() })
+
+	u := NewWithTLS(UDP, udpAddr, "", nil)
+	r, err := u.Query(context.Background(), aQuery())
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(r.Answer) != 1 {
+		t.Fatalf("answers = %d, want 1 (the TCP fallback's answer)", len(r.Answer))
+	}
+	if a, ok := r.Answer[0].(*dns.A); !ok || !a.A.Equal(net.ParseIP("1.2.3.4")) {
+		t.Fatalf("answer = %v, want 1.2.3.4", r.Answer[0])
+	}
+}
+
+// TestUDPQueryAdvertisesEDNS1232 verifies the query the client sends carries
+// the Flag Day 2020 recommended 1232-byte EDNS UDP payload — large enough
+// for realistic answers without risking IP fragmentation (the old 4096
+// could be dropped silently on fragmented paths).
+func TestUDPQueryAdvertisesEDNS1232(t *testing.T) {
+	var gotSize atomic.Int32
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		for _, rr := range r.Extra {
+			if opt, ok := rr.(*dns.OPT); ok {
+				gotSize.Store(int32(opt.UDPSize()))
+			}
+		}
+		m := new(dns.Msg)
+		m.SetReply(r)
+		_ = w.WriteMsg(m)
+	})}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	u := NewWithTLS(UDP, pc.LocalAddr().String(), "", nil)
+	q := aQuery()
+	q.SetEdns0(1232, false)
+	if _, err := u.Query(context.Background(), q); err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if got := gotSize.Load(); got != 1232 {
+		t.Fatalf("server saw EDNS %d bytes, want 1232", got)
+	}
+}
+
+// TestDoHHTTPErrorCountsAsFailure verifies the breaker blind spot is closed:
+// a DoH endpoint answering an HTTP error status trips the circuit-breaker
+// failure counter exactly like every other transport's errors, so a 5xx
+// storm on an up-but-misbehaving endpoint can no longer hide from
+// availability checks and cooldowns.
+func TestDoHHTTPErrorCountsAsFailure(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "upstream unhappy", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	u := &Upstream{Transport: HTTPS}
+	u.URL, _ = url.Parse(srv.URL + "/dns-query")
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	u.client = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
+
+	if _, err := u.Query(context.Background(), aQuery()); err == nil {
+		t.Fatal("expected an error for HTTP 500")
+	}
+	if u.Fails() != 1 {
+		t.Fatalf("Fails() = %d, want 1 (an HTTP error status must count as an upstream failure)", u.Fails())
+	}
+}
+
+// TestRecursiveFailureCountsAsFailure verifies the other breaker blind spot:
+// a recursive:// upstream with no reachable path to the root servers fails
+// on every query, and that must feed the circuit breaker like any other
+// transport — so race mode skips it instead of burning its timeout per
+// query.
+func TestRecursiveFailureCountsAsFailure(t *testing.T) {
+	u := NewRecursive([]string{"127.0.0.1:1"}) // nothing listening there
+	if _, err := u.Query(context.Background(), aQuery()); err == nil {
+		t.Fatal("expected an error for an unreachable root hint")
+	}
+	if u.Fails() == 0 {
+		t.Fatal("Fails() = 0, want >= 1 (a recursive resolution failure must feed the circuit breaker)")
+	}
+}

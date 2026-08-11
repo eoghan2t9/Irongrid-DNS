@@ -660,3 +660,47 @@ func TestResolveCachesNSAddress(t *testing.T) {
 		t.Fatalf("unexpected answer: %v", resp.Answer[0])
 	}
 }
+
+// TestResolverAdvertisesEDNS1232 verifies the iterative walk's queries to
+// nameservers advertise the Flag Day 2020 recommended 1232-byte EDNS UDP
+// payload (the same knob the forward path uses), so a nameserver doesn't
+// cap its answers at 512 bytes while a bigger buffer would risk IP
+// fragmentation.
+func TestResolverAdvertisesEDNS1232(t *testing.T) {
+	var gotSize atomic.Int32
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		for _, rr := range r.Extra {
+			if opt, ok := rr.(*dns.OPT); ok {
+				gotSize.Store(int32(opt.UDPSize()))
+			}
+		}
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Authoritative = true
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP("203.0.113.9"),
+		})
+		_ = w.WriteMsg(m)
+	})}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	r := New([]string{pc.LocalAddr().String()})
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	resp, err := r.Resolve(context.Background(), m)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("answers = %d, want 1", len(resp.Answer))
+	}
+	if got := gotSize.Load(); got != 1232 {
+		t.Fatalf("nameserver saw EDNS %d bytes, want 1232", got)
+	}
+}

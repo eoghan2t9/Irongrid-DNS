@@ -332,6 +332,14 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 			}
 		}
 	}
+	// In-flight request pool: flights are the upstream resolutions it
+	// actually issued (one per unique question); merged are the queries
+	// served by a shared flight (singleflight marks every caller of a
+	// shared flight, leader included); saved is the conservative lower
+	// bound on upstream round trips avoided (merged minus flights — exact
+	// when every flight was shared).
+	coalesceFlights := h.DNS.Stats.Flights.Load()
+	coalesceMerged := h.DNS.Stats.Merged.Load()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"query": bundle.Stats,
 		"counters": map[string]int64{
@@ -350,6 +358,11 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 		"query_today":  bundle.Today,
 		"query_hourly": bundle.Hourly,
 		"warmer":       warmerSnapshot(h.Warmer),
+		"coalesce": map[string]int64{
+			"flights": coalesceFlights,
+			"merged":  coalesceMerged,
+			"saved":   max(0, coalesceMerged-coalesceFlights),
+		},
 	})
 }
 

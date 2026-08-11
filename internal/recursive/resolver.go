@@ -33,6 +33,9 @@ const (
 	perServerTimeout = 3 * time.Second
 	minDelegationTTL = 60 * time.Second
 	maxDelegationTTL = 24 * time.Hour
+	// ednsUDPSize is the UDP payload size advertised on queries to
+	// nameservers (see dnsserver.ednsUDPSize for the reasoning).
+	ednsUDPSize = 1232
 )
 
 // defaultServerTimeout is the package-wide per-server exchange timeout used
@@ -237,7 +240,11 @@ func (r *Resolver) queryServers(ctx context.Context, servers []string, q dns.Que
 	m.SetQuestion(q.Name, q.Qtype)
 	m.Question[0].Qclass = q.Qclass
 	m.RecursionDesired = false
-	m.SetEdns0(4096, false)
+	// Advertise the DNS Flag Day 2020 recommended 1232-byte UDP payload
+	// (see dnsserver.ednsUDPSize): large enough for realistic answers
+	// without risking IP fragmentation, with anything bigger flowing over
+	// the TCP fallback on truncation.
+	m.SetEdns0(ednsUDPSize, false)
 
 	qctx, qcancel := context.WithCancel(ctx)
 	defer qcancel()

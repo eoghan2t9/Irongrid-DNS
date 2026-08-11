@@ -47,6 +47,16 @@ type Stats struct {
 	// the only place an active flood remains observable.
 	Honeypot   atomic.Int64
 	ByProtocol map[string]*atomic.Int64
+	// Flights is how many upstream resolutions actually ran through the
+	// in-flight request pool — one per unique question sent upstream.
+	// Merged is how many queries were served by a flight that multiple
+	// callers shared (singleflight marks every caller of a shared flight,
+	// leader included, so this is the pool's total absorbed traffic, not
+	// just the waiters). Only *successful* shared flights count — a query
+	// that shared a failed flight is invisible here. Saved round trips are
+	// merged - flights; the two are equal whenever every flight was shared.
+	Flights atomic.Int64
+	Merged  atomic.Int64
 }
 
 func newStats() *Stats {
@@ -472,14 +482,16 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	// (default) queries every available upstream concurrently and uses the
 	// fastest healthy answer; sequential tries them in list order and fails
 	// over. A single upstream is queried directly to avoid goroutine
-	// overhead. The outgoing query always advertises EDNS0 (4096 bytes; the
-	// DO bit only when DNSSEC is enabled) — without it the upstream caps its
-	// UDP answer at 512 bytes and large records fall back to a TCP round
-	// trip. The query is copied so the client's message is never mutated.
-	// Upstreams whose circuit is open (consecutive failures inside the
-	// cooldown window) are skipped so a dead server can't burn its full
-	// timeout on every query; a single upstream in cooldown fails fast into
-	// serve-stale/SERVFAIL below.
+	// overhead. The outgoing query always advertises EDNS0 with the DNS
+	// Flag Day 2020 recommended 1232-byte UDP payload (the DO bit only when
+	// DNSSEC is enabled): without EDNS the upstream caps its UDP answer at
+	// 512 bytes, and a larger buffer risks IP fragmentation (which many
+	// paths drop silently) — 1232 fits every common path MTU while keeping
+	// large records on the TCP fallback. The query is copied so the
+	// client's message is never mutated. Upstreams whose circuit is open
+	// (consecutive failures inside the cooldown window) are skipped so a
+	// dead server can't burn its full timeout on every query; a single
+	// upstream in cooldown fails fast into serve-stale/SERVFAIL below.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	upstreamQuery := r.Copy()
@@ -488,7 +500,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	// malformed (RFC 6891 §6.1.1: "it MUST be the only OPT RR in that
 	// message"). Strict resolvers (Quad9 in particular) reject it with
 	// FORMERR, which the client sees as a resolution failure. The client's
-	// own advertisement is superseded by the 4096-byte one below anyway, so
+	// own advertisement is superseded by the EDNS one below anyway, so
 	// drop every OPT (always last in practice, but filtered regardless) and
 	// preserve any other additional records (e.g. TSIG).
 	extra := upstreamQuery.Extra[:0]
@@ -498,7 +510,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		}
 	}
 	upstreamQuery.Extra = extra
-	upstreamQuery.SetEdns0(4096, dnssecEnabled)
+	upstreamQuery.SetEdns0(ednsUDPSize, dnssecEnabled)
 	var (
 		resp   *dns.Msg
 		usedUp string
@@ -688,6 +700,9 @@ func (h *Handler) resolveUpstreams(ctx context.Context, r *dns.Msg, q dns.Questi
 	// (up to 15s), and a live query must not overrun its own 5s timeout
 	// just because it joined a slower leader's flight.
 	ch := h.flight.DoChan(flightKey(q), func() (any, error) {
+		// One flight per question actually sent upstream: this is the
+		// pool's upstream load (the number of real round trips it issued).
+		h.Stats.Flights.Add(1)
 		resp, up, qerr := queryUpstreams(ctx, upstreams, mode, query)
 		return flightResult{resp: resp, up: up}, qerr
 	})
@@ -696,6 +711,13 @@ func (h *Handler) resolveUpstreams(ctx context.Context, r *dns.Msg, q dns.Questi
 		fr, ok := res.Val.(flightResult)
 		if !ok || res.Err != nil || fr.resp == nil {
 			return nil, fr.up, res.Err
+		}
+		// Shared means this query was served by a flight that multiple
+		// callers shared (singleflight marks the leader of a shared flight
+		// too) — the pool absorbed this query without its own round trip
+		// beyond the one flight.
+		if res.Shared {
+			h.Stats.Merged.Add(1)
 		}
 		// Copy per caller: WriteMsg packs the message, and the shared
 		// result's ID belongs to the leader — rebase it to this request's
@@ -934,6 +956,13 @@ func (h *Handler) Refresh(ctx context.Context, q dns.Question) {
 // staleServeTTL caps the TTLs of a serve-stale answer (RFC 8767 section 5:
 // stale answers should carry a small TTL so clients re-resolve quickly).
 const staleServeTTL = 30
+
+// ednsUDPSize is the UDP payload size advertised on outgoing upstream
+// queries: the DNS Flag Day 2020 recommended 1232 bytes, the largest value
+// that fits every common path MTU without IP fragmentation (1280-byte IPv6
+// minimum minus 48 bytes of IP/UDP/DNS headers). Bigger answers flow over
+// the TCP fallback instead of being dropped as fragments.
+const ednsUDPSize = 1232
 
 // capTTL floors every record's TTL at max across Answer, Ns and Extra — a
 // stale negative answer's SOA in the Authority section would otherwise let a

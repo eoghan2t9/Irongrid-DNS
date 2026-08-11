@@ -89,7 +89,7 @@ export default function Dashboard({ onNavigate }) {
         ))}
       </div>
 
-      <PerformanceCard latency={stats.latency} counters={c} avg24={q.avg_rt_ms} />
+      <PerformanceCard latency={stats.latency} counters={c} avg24={q.avg_rt_ms} coalesce={stats.coalesce} />
 
       <UpstreamsCard upstreams={stats.upstreams} />
 
@@ -170,9 +170,11 @@ export default function Dashboard({ onNavigate }) {
 
 // PerformanceCard shows the response-time percentiles the recent latency
 // work targets: p50/p95/p99 estimated from an in-process histogram of every
-// query (since restart), the 24h average from the query log, and the share
-// of queries answered from cache.
-function PerformanceCard({ latency, counters, avg24 }) {
+// query (since restart), the 24h average from the query log, the share of
+// queries answered from cache, and the in-flight request pool's coalescing
+// (how many concurrent identical queries were served by one upstream round
+// trip instead of starting their own).
+function PerformanceCard({ latency, counters, avg24, coalesce }) {
   const total = counters?.total || 0
   const cached = counters?.cached || 0
   const hitRate = total ? Math.round((100 * cached) / total) : null
@@ -208,12 +210,20 @@ function PerformanceCard({ latency, counters, avg24 }) {
             {' '}<span className="dim small">({fmt(cached)} of {fmt(total)} queries served from cache)</span>
           </span>
         </div>
+        <div className="kv-row">
+          <span className="kv-label">Coalesced queries</span>
+          <span className="kv-value">
+            {fmt(coalesce?.merged)}
+            {' '}<span className="dim small">queries shared {fmt(coalesce?.flights)} upstream flight{coalesce?.flights === 1 ? '' : 's'} · {fmt(coalesce?.saved || 0)} round trips saved</span>
+          </span>
+        </div>
       </div>
       <div className="card-hint">
         Percentiles are estimated from an in-process histogram (blocked, cached and
         upstream-served queries all count). A p99 spike usually means an upstream round
         trip or a serve-stale fallback; prefetch and serve-stale keep repeat queries in
-        the low buckets.
+        the low buckets. The coalescing row counts queries that hit the in-flight
+        request pool: bursts of identical questions collapse into one upstream query.
       </div>
     </div>
   )

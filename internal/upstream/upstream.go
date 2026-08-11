@@ -285,13 +285,21 @@ func (u *Upstream) Query(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	case QUIC:
 		return u.queryDoQ(ctx, m)
 	case Recursive:
-		return u.resolver.Resolve(ctx, m)
+		resp, err := u.resolver.Resolve(ctx, m)
+		// The circuit breaker used to be blind to the recursive transport:
+		// a resolver with no reachable path to the root servers failed on
+		// every query without ever opening its circuit, so in race mode it
+		// kept burning its full per-query timeout and in sequential mode it
+		// blocked failover — every other transport's errors trip the
+		// breaker, so a dead recursive:// upstream should be skipped (and
+		// re-probed after its cooldown) exactly like a dead forwarder.
+		u.markResult(err)
+		return resp, err
 	}
 	return nil, fmt.Errorf("unknown transport %s", u.Transport)
 }
 
-func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns.Msg, error) {
-	if !tcp {
+func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns.Msg, error) {		if !tcp {
 		// UDP is connectionless — there's no handshake to amortize, so
 		// pooling buys nothing (a fresh "dial" is just a local socket()).
 		c := u.udpClient
@@ -299,8 +307,30 @@ func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns
 			c = &dns.Client{Net: "udp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
 		}
 		r, _, err := c.ExchangeContext(ctx, m, u.Addr)
-		u.markResult(err)
-		return r, err
+		if err == nil && r != nil && !r.Truncated {
+			u.markResult(nil)
+			return r, nil
+		}
+		// A truncated UDP reply (the answer outgrew the negotiated EDNS
+		// buffer) or a UDP failure (packet loss, an oversized answer
+		// dropped as a fragment) is exactly what a TCP retry fixes —
+		// dnsmasq and unbound both fall back this way. Retry the same
+		// server over TCP instead of failing the query. A UDP timeout is
+		// not counted as a failure on its own: only if the TCP retry also
+		// fails does the query actually fail (pooledExchange marks that
+		// error for the breaker).
+		c = u.tcpClient
+		if c == nil {
+			c = &dns.Client{Net: "tcp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
+		}
+		tr, terr := u.pooledExchange(ctx, m, c)
+		if terr == nil {
+			return tr, nil
+		}
+		if err != nil {
+			terr = fmt.Errorf("udp: %v; tcp retry: %w", err, terr)
+		}
+		return nil, terr
 	}
 	c := u.tcpClient
 	if c == nil {
@@ -475,7 +505,13 @@ func (u *Upstream) queryDoH(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 		}
 		if resp.StatusCode != http.StatusOK {
 			resp.Body.Close()
-			return nil, fmt.Errorf("DoH upstream returned HTTP %d", resp.StatusCode)
+			// An HTTP error status is a real upstream failure and must feed
+			// the circuit breaker: without it a DoH endpoint that's up but
+			// misbehaving (a 5xx storm) never tripped, unlike every other
+			// transport's transport-level errors.
+			err := fmt.Errorf("DoH upstream returned HTTP %d", resp.StatusCode)
+			u.markResult(err)
+			return nil, err
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 65536))
 		resp.Body.Close()

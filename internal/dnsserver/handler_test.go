@@ -272,9 +272,17 @@ func TestRaceUpstreamsFastestWins(t *testing.T) {
 // dropped by the UDP clients as a spoofed/mismatched reply).
 func TestHandlerCoalescesConcurrentIdenticalQueries(t *testing.T) {
 	var hits atomic.Int32
+	var ednsSize atomic.Int32
 	mux := dns.NewServeMux()
 	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
 		hits.Add(1)
+		// Record the EDNS UDP payload the outgoing query advertises (must be
+		// the Flag Day 2020 1232, not the old 4096).
+		for _, rr := range r.Extra {
+			if opt, ok := rr.(*dns.OPT); ok {
+				ednsSize.Store(int32(opt.UDPSize()))
+			}
+		}
 		// Keep the response in flight long enough for every goroutine below
 		// to join the shared resolution instead of starting its own (500ms
 		// so a slowly-scheduled goroutine under CI load still joins).
@@ -330,6 +338,21 @@ func TestHandlerCoalescesConcurrentIdenticalQueries(t *testing.T) {
 		if fw.msg.Id != uint16(1000+i) {
 			t.Fatalf("waiter %d response Id = %d, want %d (IDs must not be shared)", i, fw.msg.Id, 1000+i)
 		}
+	}
+
+	// The pool's counters: exactly one real upstream resolution (the
+	// leader's) for the whole burst, and every caller — leader included,
+	// per singleflight's Shared semantics — counted as served by a shared
+	// flight (saved round trips = merged - flights = 7).
+	if got := h.Stats.Flights.Load(); got != 1 {
+		t.Fatalf("flights = %d, want 1 (the burst resolved upstream exactly once)", got)
+	}
+	if got := h.Stats.Merged.Load(); got != n {
+		t.Fatalf("merged = %d, want %d (every caller of the shared flight is counted)", got, n)
+	}
+	// The outgoing upstream query advertises the 1232-byte EDNS payload.
+	if got := ednsSize.Load(); got != 1232 {
+		t.Fatalf("outgoing upstream query advertises EDNS %d bytes, want 1232", got)
 	}
 }
 
