@@ -13,11 +13,14 @@
 #   -Version "v1.0.1"   install a specific release tag (default: latest)
 #   -Dir "C:\Tools"     install into a custom directory (default: %LOCALAPPDATA%\Irongrid)
 #   -NoWizard           skip the interactive setup wizard (TUI)
+#   -NoV3               always install the baseline build, even if this CPU
+#                        supports the faster GOAMD64=v3 build
 #
 param(
   [string]$Version = "",
   [string]$Dir = "",
-  [switch]$NoWizard
+  [switch]$NoWizard,
+  [switch]$NoV3
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,27 +35,75 @@ if (-not $Version) {
   $Version = $release.tag_name
 }
 
-$arch = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString().ToLower()
+# ProcessArchitecture.ToString() returns "X64"/"Arm64", not the "amd64"/
+# "arm64" release-asset naming convention (Makefile / release.yml) -
+# .ToLower() alone ("x64") does not match any published asset.
+$archRaw = [System.Runtime.InteropServices.RuntimeInformation]::ProcessArchitecture.ToString()
+$arch = switch ($archRaw) {
+  "X64"   { "amd64" }
+  "Arm64" { "arm64" }
+  default { throw "unsupported architecture: $archRaw (Irongrid ships amd64 and arm64 Windows builds)" }
+}
+
+# Test-SupportsGOAMD64V3 detects whether this CPU supports the x86-64-v3
+# microarchitecture level that Irongrid's "-v3" release binaries are
+# compiled for. A wrong "yes" crashes the binary on its very first run, so
+# this only returns $true when genuinely confirmed. System.Runtime.
+# Intrinsics.X86 (Avx2/Bmi1/Bmi2/Fma/Lzcnt - 5 of the 9 required flags,
+# real JIT-verified checks, not a guess) requires .NET Core - i.e.
+# PowerShell 7+. Under the default Windows PowerShell 5.1 (.NET Framework,
+# what most users get from `irm ... | iex`), that type doesn't exist and
+# this falls back to $false rather than guessing via a less reliable
+# source (Win32's IsProcessorFeaturePresent only exposes AVX/AVX2, no
+# BMI/FMA/LZCNT constants at all - not enough on its own either).
+function Test-SupportsGOAMD64V3 {
+  if ($arch -ne "amd64") { return $false }
+  try {
+    return ([System.Runtime.Intrinsics.X86.Avx2]::IsSupported) -and
+           ([System.Runtime.Intrinsics.X86.Bmi1]::IsSupported) -and
+           ([System.Runtime.Intrinsics.X86.Bmi2]::IsSupported) -and
+           ([System.Runtime.Intrinsics.X86.Fma]::IsSupported) -and
+           ([System.Runtime.Intrinsics.X86.Lzcnt]::IsSupported)
+  } catch {
+    return $false
+  }
+}
+
 $Asset = "irongrid-windows-$arch.exe"
+$v3Asset = "irongrid-windows-$arch-v3.exe"
 $base = "https://github.com/$Repo/releases/download/$Version"
 $exe = Join-Path $Dir "irongrid.exe"
 $configFile = Join-Path $Dir "irongrid.yaml"
 $dataDir = Join-Path $Dir "data"
+$sumsFile = Join-Path $Dir "SHA256SUMS.txt"
 $configExists = Test-Path $configFile
 # The interactive wizard handles the whole install: Dragonfly, the config and
 # the startup task. It only runs in a real console with no existing config
 # (an existing config is always left untouched).
 $wizardRuns = (-not $NoWizard) -and (-not [Console]::IsInputRedirected) -and (-not $configExists)
 
-Write-Host "==> installing Irongrid DNS $Version ($arch) to $Dir"
 New-Item -ItemType Directory -Force -Path $Dir | Out-Null
+
+# Fetched before picking the asset name (not just after, as before): it's
+# also how we know whether this release actually has a -v3 asset for this
+# platform, not just whether the CPU could run one (older releases, or a
+# release where the v3 build for this platform was skipped, won't have
+# one - each platform's v3 build is a separate step in release.yml).
+Invoke-WebRequest -Uri "$base/SHA256SUMS.txt" -OutFile $sumsFile
+$sums = Get-Content $sumsFile
+
+if ((-not $NoV3) -and (Test-SupportsGOAMD64V3) -and ($sums -match [regex]::Escape($v3Asset))) {
+  $Asset = $v3Asset
+  Write-Host "==> installing Irongrid DNS $Version ($arch, GOAMD64=v3 build) to $Dir"
+} else {
+  Write-Host "==> installing Irongrid DNS $Version ($arch) to $Dir"
+}
 
 Write-Host "==> downloading $Asset ..."
 Invoke-WebRequest -Uri "$base/$Asset" -OutFile $exe
-Invoke-WebRequest -Uri "$base/SHA256SUMS.txt" -OutFile (Join-Path $Dir "SHA256SUMS.txt")
 
 Write-Host "==> verifying SHA-256 checksum ..."
-$expected = (Get-Content (Join-Path $Dir "SHA256SUMS.txt") |
+$expected = ($sums |
   Where-Object { $_ -match [regex]::Escape($Asset) } |
   ForEach-Object { ($_ -split "\s+")[0] } | Select-Object -First 1)
 if (-not $expected) { throw "no checksum found for $Asset in SHA256SUMS.txt" }

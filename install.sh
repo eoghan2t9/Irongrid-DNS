@@ -23,6 +23,8 @@
 #   --no-wizard         skip the interactive setup wizard (TUI)
 #   --skip-verify       skip checksum verification (not recommended)
 #   --skip-dragonfly    do not install/start Dragonfly
+#   --no-v3             always install the baseline build, even if this CPU
+#                        supports the faster GOAMD64=v3 build
 #   -h, --help          show this help
 #
 # In an interactive terminal the script launches the interactive TUI setup
@@ -45,6 +47,7 @@ SKIP_VERIFY=0
 SKIP_DRAGONFLY=0
 INSTALL_SERVICE=1
 SKIP_WIZARD=0
+NO_V3=0
 
 die() { echo "error: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required tool missing: $1"; }
@@ -72,6 +75,8 @@ Options:
   --no-wizard         skip the interactive setup wizard (TUI)
   --skip-verify       skip checksum verification (not recommended)
   --skip-dragonfly    do not install/start Dragonfly
+  --no-v3             always install the baseline build, even if this CPU
+                       supports the faster GOAMD64=v3 build
   -h, --help          show this help
 EOF
 }
@@ -90,6 +95,7 @@ while [ $# -gt 0 ]; do
     --no-wizard) SKIP_WIZARD=1; shift ;;
     --skip-verify) SKIP_VERIFY=1; shift ;;
     --skip-dragonfly) SKIP_DRAGONFLY=1; shift ;;
+    --no-v3) NO_V3=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (run with --help)" ;;
   esac
@@ -109,6 +115,64 @@ case "$(uname -m)" in
   aarch64|arm64|ARM64) ARCH=arm64 ;;
   *) die "unsupported architecture: $(uname -m)" ;;
 esac
+
+# supports_goamd64_v3 detects whether this CPU supports the x86-64-v3
+# microarchitecture level (AVX, AVX2, BMI1, BMI2, F16C, FMA, LZCNT, MOVBE,
+# OSXSAVE) that Irongrid's "-v3" release binaries are compiled for — the
+# same feature set internal/update's built-in updater checks (via
+# klauspost/cpuid/v2's X64Level), kept consistent across the whole project.
+# A wrong "yes" here crashes the binary on its very first run with an
+# illegal instruction fault, so every branch below fails closed: anything
+# uncertain (unreadable /proc/cpuinfo, missing sysctl, an OS with no
+# reliable source here) is treated as "no", never as "yes".
+supports_goamd64_v3() {
+  [ "$ARCH" = amd64 ] || return 1
+  case "$OS" in
+    linux)
+      [ -r /proc/cpuinfo ] || return 1
+      local flags f
+      flags=" $(awk -F: '/^flags/{print $2; exit}' /proc/cpuinfo) "
+      # osxsave is checked implicitly, not as a literal token: the kernel
+      # only ever reports "avx" once it has verified XSAVE/OSXSAVE are
+      # functional (arch/x86/kernel/cpu/cpuid-deps.c), but some kernel/
+      # hypervisor combinations don't also print "osxsave" as its own flag
+      # even though it's guaranteed present whenever avx is. lzcnt is
+      # checked as either "lzcnt" or "abm": Intel CPUs report LZCNT support
+      # under the (borrowed) AMD "abm" flag name instead of a discrete
+      # "lzcnt" token — verified against this machine's own real CPU flags.
+      for f in avx avx2 bmi1 bmi2 f16c fma movbe; do
+        case "$flags" in
+          *" $f "*) ;;
+          *) return 1 ;;
+        esac
+      done
+      case "$flags" in
+        *" lzcnt "*|*" abm "*) ;;
+        *) return 1 ;;
+      esac
+      ;;
+    darwin)
+      command -v sysctl >/dev/null 2>&1 || return 1
+      local all f
+      # Apple splits these across three separate sysctl namespaces, and
+      # spells the base AVX flag "AVX1.0" rather than "AVX".
+      all=" $(sysctl -n machdep.cpu.features 2>/dev/null) $(sysctl -n machdep.cpu.leaf7_features 2>/dev/null) $(sysctl -n machdep.cpu.extfeatures 2>/dev/null) "
+      for f in AVX1.0 AVX2 BMI1 BMI2 F16C FMA LZCNT MOVBE OSXSAVE; do
+        case "$all" in
+          *" $f "*) ;;
+          *) return 1 ;;
+        esac
+      done
+      ;;
+    *)
+      # windows (Git Bash): no reliable CPU-feature source in a plain POSIX
+      # shell here — stay on baseline. install.ps1 is the documented
+      # Windows install path and has its own (better) detection.
+      return 1
+      ;;
+  esac
+  return 0
+}
 
 # Root access: we are root, or have passwordless sudo, or (interactive
 # terminal only) can prompt for a sudo password. Never hang a piped install
@@ -152,6 +216,7 @@ fi
 EXT=""
 [ "$OS" = windows ] && EXT=".exe"
 ASSET="irongrid-${OS}-${ARCH}${EXT}"
+V3_ASSET="irongrid-${OS}-${ARCH}-v3${EXT}"
 
 # ---- resolve latest release tag for a GitHub repo (greedy .* takes the
 #      last "tag_name" in the JSON, which is the only one) ----
@@ -166,18 +231,29 @@ if [ -z "$VERSION" ]; then
   VERSION="$(latest_tag "$REPO")"
 fi
 [ -n "$VERSION" ] || die "could not determine the latest version (network or rate limit?)"
-echo "==> installing Irongrid DNS $VERSION ($OS/$ARCH)"
 
 BASE="https://github.com/$REPO/releases/download/$VERSION"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+
+# Fetched unconditionally (even with --skip-verify) and before the binary
+# download: it's also how we know whether this release actually has a -v3
+# asset for this platform, not just whether the CPU could run one.
+# --skip-verify only skips the hash *comparison* further down.
+curl -fsSL -o "$TMP/SHA256SUMS.txt" "$BASE/SHA256SUMS.txt"
+
+if [ "$NO_V3" -ne 1 ] && supports_goamd64_v3 && awk -v a="$V3_ASSET" '$2 == a { found=1 } END { exit !found }' "$TMP/SHA256SUMS.txt"; then
+  ASSET="$V3_ASSET"
+  echo "==> installing Irongrid DNS $VERSION ($OS/$ARCH, GOAMD64=v3 build)"
+else
+  echo "==> installing Irongrid DNS $VERSION ($OS/$ARCH)"
+fi
 
 echo "==> downloading $ASSET ..."
 curl -fsSL -o "$TMP/$ASSET" "$BASE/$ASSET"
 
 if [ "$SKIP_VERIFY" -ne 1 ]; then
   echo "==> verifying SHA-256 checksum ..."
-  curl -fsSL -o "$TMP/SHA256SUMS.txt" "$BASE/SHA256SUMS.txt"
   expected="$(awk -v asset="$ASSET" '$2 == asset { print $1 }' "$TMP/SHA256SUMS.txt")"
   [ -n "$expected" ] || die "no checksum found for $ASSET in SHA256SUMS.txt"
   if command -v sha256sum >/dev/null 2>&1; then
