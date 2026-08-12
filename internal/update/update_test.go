@@ -90,6 +90,46 @@ func TestAssetName(t *testing.T) {
 	}
 }
 
+func TestV3AssetName(t *testing.T) {
+	cases := []struct {
+		goos, goarch, want string
+	}{
+		{"linux", "amd64", "irongrid-linux-amd64-v3"},
+		{"darwin", "amd64", "irongrid-darwin-amd64-v3"},
+		{"windows", "amd64", "irongrid-windows-amd64-v3.exe"},
+	}
+	for _, c := range cases {
+		if got := v3AssetName(c.goos, c.goarch); got != c.want {
+			t.Errorf("v3AssetName(%q, %q) = %q, want %q", c.goos, c.goarch, got, c.want)
+		}
+	}
+}
+
+// withSupportsGOAMD64V3 temporarily overrides the package-level CPU-support
+// var and restores it on cleanup, so tests don't depend on the actual CI
+// runner's CPU.
+func withSupportsGOAMD64V3(t *testing.T, v bool) {
+	t.Helper()
+	orig := supportsGOAMD64V3
+	supportsGOAMD64V3 = func() bool { return v }
+	t.Cleanup(func() { supportsGOAMD64V3 = orig })
+}
+
+func TestPreferredAssetNames(t *testing.T) {
+	withSupportsGOAMD64V3(t, true)
+	if got := preferredAssetNames("linux", "amd64"); len(got) != 2 || got[0] != "irongrid-linux-amd64-v3" || got[1] != "irongrid-linux-amd64" {
+		t.Errorf("amd64+supported: got %v", got)
+	}
+	if got := preferredAssetNames("linux", "arm64"); len(got) != 1 || got[0] != "irongrid-linux-arm64" {
+		t.Errorf("arm64 must never prefer v3 regardless of CPU support: got %v", got)
+	}
+
+	withSupportsGOAMD64V3(t, false)
+	if got := preferredAssetNames("linux", "amd64"); len(got) != 1 || got[0] != "irongrid-linux-amd64" {
+		t.Errorf("amd64+unsupported: got %v", got)
+	}
+}
+
 func fakeRelease(t *testing.T, body string, status int) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -130,6 +170,73 @@ func TestCheckFindsUpdate(t *testing.T) {
 	}
 	if info.DownloadURL == "" || info.AssetName == "" {
 		t.Errorf("expected a matching asset for this platform: %+v", info)
+	}
+}
+
+// v3ReleaseServer serves a fake release JSON offering both the baseline and
+// the GOAMD64=v3 asset for the current platform, so it exercises the real
+// preference order Check/Install use — meaningful only on amd64 hosts,
+// since preferredAssetNames never offers a v3 candidate on any other arch.
+func v3ReleaseServer(t *testing.T, includeV3 bool) *httptest.Server {
+	t.Helper()
+	base := assetName(runtime.GOOS, runtime.GOARCH)
+	v3 := v3AssetName(runtime.GOOS, runtime.GOARCH)
+	assets := fmt.Sprintf(`{"name":%q,"browser_download_url":"https://example.com/%s","size":1}`, base, base)
+	if includeV3 {
+		assets += fmt.Sprintf(`,{"name":%q,"browser_download_url":"https://example.com/%s","size":2}`, v3, v3)
+	}
+	body := fmt.Sprintf(`{"tag_name":"v1.0.1","published_at":"2026-08-04T10:00:00Z","html_url":"https://example.com/r","body":"n","assets":[%s]}`, assets)
+	return fakeRelease(t, body, http.StatusOK)
+}
+
+func TestCheckPrefersV3AssetWhenSupported(t *testing.T) {
+	if runtime.GOARCH != "amd64" {
+		t.Skip("v3 preference only applies on amd64")
+	}
+	srv := v3ReleaseServer(t, true)
+	defer srv.Close()
+
+	withSupportsGOAMD64V3(t, true)
+	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL}
+	info := c.Check(context.Background())
+	want := v3AssetName(runtime.GOOS, runtime.GOARCH)
+	if info.AssetName != want {
+		t.Errorf("AssetName = %q, want %q (v3 preferred)", info.AssetName, want)
+	}
+}
+
+func TestCheckUsesBaselineWhenCPUDoesNotSupportV3(t *testing.T) {
+	if runtime.GOARCH != "amd64" {
+		t.Skip("v3 preference only applies on amd64")
+	}
+	srv := v3ReleaseServer(t, true)
+	defer srv.Close()
+
+	withSupportsGOAMD64V3(t, false)
+	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL}
+	info := c.Check(context.Background())
+	want := assetName(runtime.GOOS, runtime.GOARCH)
+	if info.AssetName != want {
+		t.Errorf("AssetName = %q, want %q (baseline — CPU lacks v3)", info.AssetName, want)
+	}
+}
+
+func TestCheckFallsBackWhenReleaseHasNoV3Asset(t *testing.T) {
+	if runtime.GOARCH != "amd64" {
+		t.Skip("v3 preference only applies on amd64")
+	}
+	srv := v3ReleaseServer(t, false) // pre-18958f3-style release: baseline only
+	defer srv.Close()
+
+	withSupportsGOAMD64V3(t, true) // CPU supports v3, but this release has no v3 asset
+	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL}
+	info := c.Check(context.Background())
+	want := assetName(runtime.GOOS, runtime.GOARCH)
+	if info.AssetName != want {
+		t.Errorf("AssetName = %q, want %q (fall back to baseline, no error)", info.AssetName, want)
+	}
+	if info.Error != "" {
+		t.Errorf("expected no error on graceful fallback, got %q", info.Error)
 	}
 }
 
@@ -264,6 +371,78 @@ func TestInstall(t *testing.T) {
 		if strings.HasPrefix(e.Name(), ".irongrid-update-") {
 			t.Errorf("temp file not cleaned up: %s", e.Name())
 		}
+	}
+}
+
+// installV3TestServer serves a fake "v9.9.9" release offering both the
+// baseline and GOAMD64=v3 binaries (each with its own SHA256SUMS.txt line),
+// so Install's preference-order search can be exercised end to end.
+func installV3TestServer(t *testing.T, baseBin, v3Bin []byte) *httptest.Server {
+	t.Helper()
+	baseName := assetName(runtime.GOOS, runtime.GOARCH)
+	v3Name := v3AssetName(runtime.GOOS, runtime.GOARCH)
+	baseSum := sha256.Sum256(baseBin)
+	v3Sum := sha256.Sum256(v3Bin)
+	var srv *httptest.Server
+	mux := http.NewServeMux()
+	mux.HandleFunc("/release", func(w http.ResponseWriter, r *http.Request) {
+		body := fmt.Sprintf(`{
+		  "tag_name":"v9.9.9",
+		  "published_at":"2026-08-06T10:00:00Z",
+		  "html_url":"https://example.com/r/9",
+		  "body":"n",
+		  "assets":[
+		    {"name":%q,"browser_download_url":%q,"size":%d},
+		    {"name":%q,"browser_download_url":%q,"size":%d},
+		    {"name":"SHA256SUMS.txt","browser_download_url":%q,"size":100}
+		  ]}`, baseName, srv.URL+"/binary", len(baseBin),
+			v3Name, srv.URL+"/binary-v3", len(v3Bin), srv.URL+"/sums")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(body))
+	})
+	mux.HandleFunc("/binary", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(baseBin) })
+	mux.HandleFunc("/binary-v3", func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write(v3Bin) })
+	mux.HandleFunc("/sums", func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintf(w, "%s  %s\n%s  %s\n", hex.EncodeToString(baseSum[:]), baseName, hex.EncodeToString(v3Sum[:]), v3Name)
+	})
+	srv = httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+func TestInstallPrefersV3Asset(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Install is unsupported on Windows")
+	}
+	if runtime.GOARCH != "amd64" {
+		t.Skip("v3 preference only applies on amd64")
+	}
+	baseBin := []byte("baseline binary v9.9.9")
+	v3Bin := []byte("v3 binary v9.9.9 (longer, different content)")
+	srv := installV3TestServer(t, baseBin, v3Bin)
+
+	dir := t.TempDir()
+	execPath := filepath.Join(dir, "irongrid")
+	if err := os.WriteFile(execPath, []byte("old binary"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	withSupportsGOAMD64V3(t, true)
+	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL + "/release"}
+	res, err := c.Install(context.Background(), execPath)
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	want := v3AssetName(runtime.GOOS, runtime.GOARCH)
+	if res.AssetName != want {
+		t.Errorf("AssetName = %q, want %q (v3 preferred)", res.AssetName, want)
+	}
+	got, err := os.ReadFile(execPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, v3Bin) {
+		t.Error("installed binary is not the v3 asset's content")
 	}
 }
 

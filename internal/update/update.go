@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/klauspost/cpuid/v2"
+
 	"github.com/eoghan2t9/Irongrid-DNS/internal/version"
 )
 
@@ -114,10 +116,17 @@ func (c *Client) Check(ctx context.Context) Info {
 	if rel.TagName != "" && Newer(rel.TagName, cur) {
 		info.Available = true
 	}
-	for _, a := range rel.Assets {
-		if a.Name == assetName(runtime.GOOS, runtime.GOARCH) {
-			info.DownloadURL = a.URL
-			info.AssetName = a.Name
+	for _, want := range preferredAssetNames(runtime.GOOS, runtime.GOARCH) {
+		found := false
+		for _, a := range rel.Assets {
+			if a.Name == want {
+				info.DownloadURL = a.URL
+				info.AssetName = a.Name
+				found = true
+				break
+			}
+		}
+		if found {
 			break
 		}
 	}
@@ -204,6 +213,44 @@ func assetName(goos, goarch string) string {
 	return name
 }
 
+// v3AssetName is the GOAMD64=v3 opt-in variant of assetName (see Makefile /
+// .github/workflows/release.yml), built for CPUs supporting AVX, AVX2,
+// BMI1, BMI2, F16C, FMA3, LZCNT, MOVBE and OSXSAVE.
+func v3AssetName(goos, goarch string) string {
+	name := fmt.Sprintf("irongrid-%s-%s-v3", goos, goarch)
+	if goos == "windows" {
+		name += ".exe"
+	}
+	return name
+}
+
+// supportsGOAMD64V3 reports whether the running CPU supports the x86-64-v3
+// microarchitecture level that Irongrid's "-v3" release binaries are
+// compiled for. golang.org/x/sys/cpu (already a direct dependency
+// elsewhere) is missing 3 of the 9 required feature bits (F16C, LZCNT,
+// MOVBE), which would misdetect some real CPUs as v3-capable when they
+// aren't — a wrong answer here means an illegal-instruction crash on
+// install. klauspost/cpuid/v2's X64Level checks exactly the official
+// x86-64-v3 feature set and returns 0 safely on any non-x64 CPU rather than
+// panicking. A var, not a func, so tests can override it.
+var supportsGOAMD64V3 = func() bool {
+	return cpuid.CPU.X64Level() >= 3
+}
+
+// preferredAssetNames returns release asset names to search for, in
+// preference order: the GOAMD64=v3 build first when the target is amd64
+// and the running CPU actually supports it, then always the baseline
+// build as a fallback — covering releases published before the v3
+// artifacts existed, or a release where the v3 build for this OS/arch was
+// skipped (each platform's v3 build is a separate step; see release.yml).
+func preferredAssetNames(goos, goarch string) []string {
+	base := assetName(goos, goarch)
+	if goarch == "amd64" && supportsGOAMD64V3() {
+		return []string{v3AssetName(goos, goarch), base}
+	}
+	return []string{base}
+}
+
 // InstallResult describes an in-place update that was applied.
 type InstallResult struct {
 	PreviousVersion string `json:"previous_version"`
@@ -233,16 +280,24 @@ func (c *Client) Install(ctx context.Context, executable string) (*InstallResult
 	if runtime.GOOS == "windows" {
 		return nil, fmt.Errorf("in-place update is not supported on Windows — use the manual download")
 	}
-	want := assetName(runtime.GOOS, runtime.GOARCH)
+	// Install already refuses on Windows above, so a v3 preference here only
+	// ever matters on Linux/macOS in-place updates — Check (above) still
+	// surfaces a v3 download link for Windows users doing a manual install.
+	wants := preferredAssetNames(runtime.GOOS, runtime.GOARCH)
 	var asset *Asset
-	for i := range rel.Assets {
-		if rel.Assets[i].Name == want {
-			asset = &rel.Assets[i]
+	for _, want := range wants {
+		for i := range rel.Assets {
+			if rel.Assets[i].Name == want {
+				asset = &rel.Assets[i]
+				break
+			}
+		}
+		if asset != nil {
 			break
 		}
 	}
 	if asset == nil {
-		return nil, fmt.Errorf("no %s asset in release %s", want, rel.TagName)
+		return nil, fmt.Errorf("no %s asset in release %s", strings.Join(wants, " or "), rel.TagName)
 	}
 
 	execPath := executable

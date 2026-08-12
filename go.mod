@@ -10,6 +10,7 @@ require (
 	github.com/cloudflare/cloudflared v0.0.0-20260807163836-73f535b57bb7
 	github.com/creack/pty v1.1.24
 	github.com/insomniacslk/dhcp v0.0.0-20260728151720-c308df0fdcef
+	github.com/klauspost/cpuid/v2 v2.4.0
 	github.com/miekg/dns v1.1.72
 	github.com/quic-go/quic-go v0.61.0
 	github.com/redis/go-redis/v9 v9.22.0
@@ -66,7 +67,6 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.29.0 // indirect
 	github.com/josharian/native v1.1.0 // indirect
 	github.com/json-iterator/go v1.1.12 // indirect
-	github.com/klauspost/cpuid/v2 v2.4.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.2.0 // indirect
 	github.com/lufia/plan9stats v0.0.0-20260802145828-341c2f0c90b5 // indirect
 	github.com/mattn/go-colorable v0.1.15 // indirect
