@@ -1117,6 +1117,91 @@ func TestHandlerDNSSECRejectsUnauthenticated(t *testing.T) {
 	}
 }
 
+// startCNAMETestServer runs a tiny UDP DNS server that answers every query
+// with a CNAME from owner to target plus an A record for target.
+func startCNAMETestServer(t *testing.T, owner, target, targetIP string) string {
+	t.Helper()
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = append(m.Answer,
+			&dns.CNAME{Hdr: dns.RR_Header{Name: owner, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60}, Target: target},
+			&dns.A{Hdr: dns.RR_Header{Name: target, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP(targetIP)},
+		)
+		_ = w.WriteMsg(m)
+	})
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: mux}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	return pc.LocalAddr().String()
+}
+
+// TestHandlerCNAMECloakingProtection verifies that a query resolving through
+// a CNAME to a blocklisted domain is blocked even though the originally
+// queried name is on no list — and that it's a no-op when the toggle is off
+// or when no hop in the chain is blocklisted.
+func TestHandlerCNAMECloakingProtection(t *testing.T) {
+	const owner = "sub.example.com."
+	const target = "tracker.ads.net."
+
+	t.Run("blocked when enabled and target is blocklisted", func(t *testing.T) {
+		addr := startCNAMETestServer(t, owner, target, "203.0.113.5")
+		e := filter.NewEngine()
+		e.SetUserLists([]string{"tracker.ads.net"}, nil)
+		e.Compile()
+		h := NewHandler(e, nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
+		h.SetCNAMECloakingProtection(true)
+
+		m := new(dns.Msg)
+		m.SetQuestion(owner, dns.TypeA)
+		fw := &fakeWriter{}
+		h.ServeDNS(fw, m)
+
+		if fw.msg == nil || fw.msg.Rcode != dns.RcodeNameError {
+			t.Fatalf("expected NXDOMAIN for a CNAME-cloaked tracker, got %v", fw.msg)
+		}
+	})
+
+	t.Run("passes through when disabled", func(t *testing.T) {
+		addr := startCNAMETestServer(t, owner, target, "203.0.113.5")
+		e := filter.NewEngine()
+		e.SetUserLists([]string{"tracker.ads.net"}, nil)
+		e.Compile()
+		h := NewHandler(e, nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
+		// SetCNAMECloakingProtection not called: off by default.
+
+		m := new(dns.Msg)
+		m.SetQuestion(owner, dns.TypeA)
+		fw := &fakeWriter{}
+		h.ServeDNS(fw, m)
+
+		if fw.msg == nil || len(fw.msg.Answer) == 0 {
+			t.Fatalf("expected the CNAME+A answer to pass through with protection off, got %v", fw.msg)
+		}
+	})
+
+	t.Run("unaffected when no hop is blocklisted", func(t *testing.T) {
+		addr := startCNAMETestServer(t, owner, target, "203.0.113.5")
+		e := filter.NewEngine() // nothing blocklisted
+		h := NewHandler(e, nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
+		h.SetCNAMECloakingProtection(true)
+
+		m := new(dns.Msg)
+		m.SetQuestion(owner, dns.TypeA)
+		fw := &fakeWriter{}
+		h.ServeDNS(fw, m)
+
+		if fw.msg == nil || len(fw.msg.Answer) == 0 {
+			t.Fatalf("expected the CNAME+A answer to pass through when no hop is blocklisted, got %v", fw.msg)
+		}
+	})
+}
+
 // TestRaceUpstreamsAllFail verifies an all-failures case returns promptly
 // instead of stalling until the full timeout.
 func TestRaceUpstreamsAllFail(t *testing.T) {

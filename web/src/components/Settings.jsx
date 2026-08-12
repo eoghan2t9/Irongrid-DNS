@@ -35,7 +35,7 @@ const empty = () => ({
   cache: { addr: '', password: '', db: 0, ttl: '6h', negative_ttl: '1m', l1_entries: 0, serve_stale: '5m', prefetch: true, lookup_timeout: '150ms', failure_ttl: '5s' },
   recursive: { server_timeout: '' },
   tls: { cert_file: '', key_file: '', generate_self_signed: true, self_signed_hosts: [], cert_dir: '', acme: { enabled: false, email: '', domains: [], staging: false, http01_port: 80, renew_before_days: 30, dns01: { provider: '', propagation_wait_sec: 60, cloudflare_token: '', digitalocean_token: '', hetzner_token: '', godaddy_key: '', godaddy_secret: '', aws_access_key_id: '', aws_secret_access_key: '' } } },
-  filter: { block_response: 'nxdomain', block_ttl: 600, blocklists: [], whitelist: [], blacklist: [], auto_update: '24h' },
+  filter: { block_response: 'nxdomain', block_ttl: 600, blocklists: [], whitelist: [], blacklist: [], auto_update: '24h', cname_cloaking_protection: false },
   log: { query_log_file: '', retention_days: 30, verbose: true },
   web: { username: 'admin', password: '' },
   tunnel: { enabled: false, token: '', config_file: '', quick_tunnel: false, quick_tunnel_url: '', hostname: '' },
@@ -961,6 +961,15 @@ export default function Settings({ onSessionInvalidated }) {
           ))}
           {textarea('Whitelist (always allow)', 'filter.whitelist')}
           {textarea('Blacklist (always block)', 'filter.blacklist')}
+        </div>
+        <p className="dim small">
+          <strong>CNAME cloaking protection</strong> checks every CNAME a query resolves through, not just the name
+          you asked for — trackers hide behind first-party-looking subdomains that CNAME to a blocklisted domain,
+          and this catches that. Off by default: a CNAME chain through a shared CDN could in principle collide with
+          an overly broad blocklist entry.
+        </p>
+        <div className="form-grid">
+          {toggle('Block CNAME-cloaked trackers', 'filter.cname_cloaking_protection')}
         </div>
       </div>
 

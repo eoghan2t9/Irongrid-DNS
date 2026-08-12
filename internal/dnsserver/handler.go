@@ -122,6 +122,10 @@ type Handler struct {
 	TrustUDP        bool
 	DNSSECEnabled   bool
 	DNSSECRequireAD bool
+	// CNAMECloakingProtection checks every CNAME hop in an upstream answer
+	// against the filter engine, not just the originally queried name. Set
+	// via SetCNAMECloakingProtection.
+	CNAMECloakingProtection bool
 	// Padding pads responses on the encrypted transports (DoT/DoH/DoH3/DoQ)
 	// to fixed 128-byte blocks (RFC 7830) so message lengths don't leak
 	// which domain was queried. Set via SetPadding. Atomic because write()
@@ -404,6 +408,13 @@ func (h *Handler) SetDNSSEC(enabled, requireAD bool) {
 	h.DNSSECRequireAD = requireAD
 }
 
+// SetCNAMECloakingProtection hot-swaps CNAME cloaking protection.
+func (h *Handler) SetCNAMECloakingProtection(enabled bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.CNAMECloakingProtection = enabled
+}
+
 // SetPadding hot-swaps RFC 7830 response padding on the encrypted transports.
 func (h *Handler) SetPadding(on bool) {
 	h.Padding.Store(on)
@@ -439,6 +450,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	trustUDP := h.TrustUDP
 	dnssecEnabled := h.DNSSECEnabled
 	dnssecRequireAD := h.DNSSECRequireAD
+	cnameCloakingEnabled := h.CNAMECloakingProtection
 	cookiesOn := h.Cookies.Load()
 	h.mu.RUnlock()
 
@@ -822,6 +834,23 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		return
 	}
 
+	// 7.5 CNAME cloaking protection: a tracker can disguise itself behind a
+	//    first-party-looking subdomain that CNAMEs to a blocklisted domain.
+	//    Walk every CNAME hop in the answer (a classic upstream's raw chain,
+	//    or the recursive resolver's own already-merged chaseCNAME result)
+	//    and block if any target matches the blocklist/whitelist rules, not
+	//    just the originally queried name.
+	if cnameCloakingEnabled {
+		if owner, target, decision := cnameCloakCheck(engine, resp); decision.Action == filter.Block {
+			blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
+			h.Stats.Blocked.Add(1)
+			reason := "cname-cloaking:" + owner + "->" + target + ":" + decision.Reason
+			h.record(client, qname, q, "blocked", reason, usedUp, start, blocked)
+			_ = h.write(w, blocked, r, proto)
+			return
+		}
+	}
+
 	h.Stats.Allowed.Add(1)
 	h.record(client, qname, q, "allowed", "", usedUp, start, resp)
 	_ = h.write(w, resp, r, proto)
@@ -1077,6 +1106,26 @@ func answerIPs(m *dns.Msg) []net.IP {
 		}
 	}
 	return ips
+}
+
+// cnameCloakCheck evaluates every CNAME hop in an answer against the filter
+// engine and returns the first one whose target is blocked (owner name,
+// target name, decision). If no hop is blocked, decision.Action is
+// filter.Allow.
+func cnameCloakCheck(engine *filter.Engine, m *dns.Msg) (owner, target string, decision filter.Decision) {
+	if m == nil {
+		return "", "", filter.Decision{Action: filter.Allow}
+	}
+	for _, rr := range m.Answer {
+		cname, ok := rr.(*dns.CNAME)
+		if !ok {
+			continue
+		}
+		if d := engine.DecideDomain(cname.Target); d.Action == filter.Block {
+			return cname.Hdr.Name, cname.Target, d
+		}
+	}
+	return "", "", filter.Decision{Action: filter.Allow}
 }
 
 // flightResult is the shared outcome of one coalesced upstream resolution.

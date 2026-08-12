@@ -404,6 +404,14 @@ type FilterConfig struct {
 	// a per-list setting — one global cadence is simpler to reason about
 	// than tracking a different schedule per list.
 	AutoUpdate time.Duration `yaml:"auto_update"`
+	// CNAMECloakingProtection checks every CNAME hop in an upstream answer
+	// against the blocklist/whitelist rules, not just the originally queried
+	// name — closing the gap trackers exploit by hiding a blocklisted domain
+	// behind a first-party-looking CNAME. Off by default: a CNAME chain that
+	// passes through a shared CDN (Cloudfront, Fastly, Akamai, ...) could in
+	// principle collide with an overly broad blocklist entry, so this is an
+	// explicit opt-in rather than a silent behavior change on upgrade.
+	CNAMECloakingProtection bool `yaml:"cname_cloaking_protection"`
 }
 
 // BlocklistSpec describes a remote or local blocklist source.
@@ -486,11 +494,12 @@ func Default() *Config {
 			CertDir:            "data/certs",
 		},
 		Filter: FilterConfig{
-			BlockResponse: "nxdomain",
-			BlockTTL:      600,
-			Whitelist:     []string{},
-			Blacklist:     []string{},
-			AutoUpdate:    24 * time.Hour,
+			BlockResponse:           "nxdomain",
+			BlockTTL:                600,
+			Whitelist:               []string{},
+			Blacklist:               []string{},
+			AutoUpdate:              24 * time.Hour,
+			CNAMECloakingProtection: false,
 		},
 		Log: LogConfig{
 			QueryLogFile:  "data/querylog.db",

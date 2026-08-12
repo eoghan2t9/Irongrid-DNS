@@ -996,6 +996,9 @@ type filterPayload struct {
 	// blocklist (duration string, "" = never) — replaces what used to be a
 	// per-list setting.
 	AutoUpdate string `json:"auto_update"`
+	// CNAMECloakingProtection checks every CNAME hop in an answer against
+	// the blocklist/whitelist rules, not just the queried name.
+	CNAMECloakingProtection bool `json:"cname_cloaking_protection"`
 }
 
 type blocklistPayload struct {
@@ -1115,12 +1118,13 @@ func payloadFromConfig(c *config.Config) configPayload {
 			},
 		},
 		Filter: filterPayload{
-			BlockResponse: c.Filter.BlockResponse,
-			BlockTTL:      c.Filter.BlockTTL,
-			Blocklists:    make([]blocklistPayload, 0, len(c.Filter.Blocklists)),
-			Whitelist:     c.Filter.Whitelist,
-			Blacklist:     c.Filter.Blacklist,
-			AutoUpdate:    durationOrEmpty(c.Filter.AutoUpdate),
+			BlockResponse:           c.Filter.BlockResponse,
+			BlockTTL:                c.Filter.BlockTTL,
+			Blocklists:              make([]blocklistPayload, 0, len(c.Filter.Blocklists)),
+			Whitelist:               c.Filter.Whitelist,
+			Blacklist:               c.Filter.Blacklist,
+			AutoUpdate:              durationOrEmpty(c.Filter.AutoUpdate),
+			CNAMECloakingProtection: c.Filter.CNAMECloakingProtection,
 		},
 		Log: logPayload{
 			QueryLogFile:  c.Log.QueryLogFile,
@@ -1335,12 +1339,13 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			},
 		},
 		Filter: config.FilterConfig{
-			BlockResponse: p.Filter.BlockResponse,
-			BlockTTL:      p.Filter.BlockTTL,
-			Blocklists:    make([]config.BlocklistSpec, 0, len(p.Filter.Blocklists)),
-			Whitelist:     p.Filter.Whitelist,
-			Blacklist:     p.Filter.Blacklist,
-			AutoUpdate:    blocklistAutoUpdate,
+			BlockResponse:           p.Filter.BlockResponse,
+			BlockTTL:                p.Filter.BlockTTL,
+			Blocklists:              make([]config.BlocklistSpec, 0, len(p.Filter.Blocklists)),
+			Whitelist:               p.Filter.Whitelist,
+			Blacklist:               p.Filter.Blacklist,
+			AutoUpdate:              blocklistAutoUpdate,
+			CNAMECloakingProtection: p.Filter.CNAMECloakingProtection,
 		},
 		Log: config.LogConfig{
 			QueryLogFile:  p.Log.QueryLogFile,
@@ -1537,6 +1542,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	h.DNS.SetClientRouter(dnsserver.BuildClientRouter(cfg, h.Lists))
 	h.DNS.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
 	h.DNS.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
+	h.DNS.SetCNAMECloakingProtection(cfg.Filter.CNAMECloakingProtection)
 	// The cache warmer is hot-swappable (a plain settings change, no
 	// listener rebind), so it is live-applied without marking a restart.
 	if h.Warmer != nil {

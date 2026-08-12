@@ -230,6 +230,7 @@ func main() {
 	handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
 	handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
 	handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
+	handler.SetCNAMECloakingProtection(cfg.Filter.CNAMECloakingProtection)
 	// RFC 7830 response padding and RFC 7873 DNS cookies (server.padding /
 	// server.cookies). Re-applied on every reload below so a dashboard
 	// toggle applies without a restart.
@@ -826,6 +827,7 @@ func main() {
 		handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
 		handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
 		handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
+		handler.SetCNAMECloakingProtection(cfg.Filter.CNAMECloakingProtection)
 		handler.SetPadding(cfg.Server.Padding)
 		handler.SetCookies(cfg.Server.Cookies)
 		// DHCP: pool/option/static changes apply immediately (handlers read

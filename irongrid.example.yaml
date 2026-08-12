@@ -199,6 +199,12 @@ filter:
     #   enabled: true
   whitelist: []                # always allow (overrides every blocklist)
   blacklist: []                # always block (domains, wildcards, IPs)
+  # Check every CNAME hop an answer resolves through, not just the queried
+  # name — catches trackers that hide behind a first-party-looking
+  # subdomain CNAMEd to a blocklisted domain. Off by default: a CNAME chain
+  # through a shared CDN could in principle collide with a broad blocklist
+  # entry.
+  cname_cloaking_protection: false
 
 log:
   # The query log lives in Dragonfly (stream "irongrid:log"), not a file —
