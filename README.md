@@ -45,7 +45,7 @@ commercial ad-blocking DNS with sub-millisecond local responses.
 
 | **Sign in** | **Dashboard** |
 |---|---|
-| ![Irongrid DNS sign-in page](assets/screenshots/01-login.png) | ![Irongrid DNS dashboard: live stats, top clients, blocked domains and 24-hour sparkline](assets/screenshots/02-dashboard.png) |
+| ![Irongrid DNS sign-in page](assets/screenshots/01-login.png) | ![Irongrid DNS dashboard: live stats, top clients, blocked domains, 24-hour sparkline and a first-run getting-started checklist](assets/screenshots/02-dashboard.png) |
 
 **Query log** — every allowed, blocked and cached request with client, reason, upstream and latency.
 
@@ -60,7 +60,7 @@ hostnames that resolve in the local DNS.
 
 ![Irongrid DNS DHCP server](assets/screenshots/05-dhcp.png)
 
-**Settings** — live config editing, including one-click **backup & restore**.
+**Settings** — live config editing with a jump-nav to every section, including one-click **backup & restore**.
 
 ![Irongrid DNS settings and backup/restore](assets/screenshots/06-settings.png)
 
