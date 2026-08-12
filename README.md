@@ -665,6 +665,8 @@ GET  /api/abuse/export      download blocked clients (honeypot + rate-limit) as 
 POST /api/abuse/asn         free RIPEstat lookup: owning ASN / prefix / registrant of an IP, to route reports to the right host
 GET/POST /api/tunnel/*      tunnel lifecycle + logs
 GET/PUT /api/config         read / update the full config (live-apply + restart notes)
+GET  /api/config/backup     download config + TLS certificates as a zip archive (contains private keys — treat like a key file)
+POST /api/config/restore    restore a backup archive: validated (zip-slip guarded, only cert file types), live-applied like a config save, restart notes returned
 POST /api/config/reload     apply listener/cache/TLS/upstream changes in-process (no restart)
 GET  /api/diag/dns?name=…   resolve through your upstreams
 GET  /api/update/check      check GitHub Releases for a newer version + changelog

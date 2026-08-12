@@ -53,6 +53,10 @@ export default function Settings({ onSessionInvalidated }) {
   const [blocked, setBlocked] = useState([])
   const [geoInfo, setGeoInfo] = useState({ enabled: false, countries: [] })
   const [honeyBlocked, setHoneyBlocked] = useState([])
+  const [backupBusy, setBackupBusy] = useState(false)
+  const [backupErr, setBackupErr] = useState('')
+  const [restoring, setRestoring] = useState(false)
+  const [restoreMsg, setRestoreMsg] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -319,6 +323,54 @@ export default function Settings({ onSessionInvalidated }) {
       return next
     })
     setDirty(true)
+  }
+
+  const downloadBackup = async () => {
+    setBackupBusy(true)
+    setBackupErr('')
+    setRestoreMsg('')
+    try {
+      const blob = await api.configBackup()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `irongrid-backup-${new Date().toISOString().slice(0, 10)}.zip`
+      document.body.appendChild(a)
+      a.click()
+      a.remove()
+      URL.revokeObjectURL(url)
+      toast('Backup downloaded')
+    } catch (e) {
+      setBackupErr(e.message)
+    } finally {
+      setBackupBusy(false)
+    }
+  }
+
+  const onRestoreFile = async (e) => {
+    const file = e.target.files && e.target.files[0]
+    e.target.value = '' // allow re-selecting the same file
+    if (!file) return
+    if (!window.confirm('Restore this backup? It replaces the current config, TLS certificates and admin credentials.')) return
+    setRestoring(true)
+    setBackupErr('')
+    setRestoreMsg('')
+    try {
+      const res = await api.configRestore(file)
+      const notes = (res.restart_required && res.restart_required.length)
+        ? ` Restart needed for: ${res.restart_required.join(', ')}.`
+        : ''
+      const authNote = res.auth_restored
+        ? ' The restored admin credentials are now active — you may need to sign in again.'
+        : ''
+      setRestoreMsg(`Backup restored.${notes}${authNote}`)
+      toast('Backup restored')
+      await load() // refresh the form with the restored config
+    } catch (err) {
+      setBackupErr(err.message)
+    } finally {
+      setRestoring(false)
+    }
   }
 
   const addUpstream = (spec) => {
@@ -957,6 +1009,26 @@ export default function Settings({ onSessionInvalidated }) {
           </div>
         ))}
         <button className="btn small" type="button" onClick={addStaticLease}>+ Add reservation</button>
+      </div>
+
+      <div className="card">
+        <h3>Backup &amp; restore</h3>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          Download an archive of the config file and TLS certificates — handy before upgrades or when moving
+          servers. The archive contains the <strong>TLS private key</strong> and the password hash, so keep it as
+          secure as a key file.
+        </p>
+        <div className="quick-actions" style={{ marginTop: 10 }}>
+          <button className="btn small" type="button" onClick={downloadBackup} disabled={backupBusy}>
+            {backupBusy ? 'Packing…' : '⬇ Download backup'}
+          </button>
+          <label className="btn small" style={{ margin: 0 }}>
+            {restoring ? 'Restoring…' : '⬆ Restore backup'}
+            <input type="file" accept=".zip,application/zip" style={{ display: 'none' }} onChange={onRestoreFile} disabled={restoring} />
+          </label>
+        </div>
+        {backupErr && <div className="error-banner" style={{ marginTop: 8 }}>{backupErr}</div>}
+        {restoreMsg && <div className="info-banner" style={{ marginTop: 8 }}>{restoreMsg}</div>}
       </div>
 
       <div className="card">

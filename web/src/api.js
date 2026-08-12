@@ -132,6 +132,36 @@ export const api = {
   config: () => request('/api/config'),
   saveConfig: (cfg) => request('/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) }),
   reloadConfig: () => request('/api/config/reload', { method: 'POST' }),
+  configBackup: async () => {
+    // Raw fetch so we can return a blob for the zip download (auth header is
+    // attached like request(); after a reload the session cookie covers it).
+    const headers = {}
+    const auth = authHeader()
+    if (auth) headers.Authorization = auth
+    let resp
+    try {
+      resp = await fetch('/api/config/backup', { headers })
+    } catch {
+      // Same stale-connection retry as request().
+      resp = await fetch('/api/config/backup', { headers })
+    }
+    if (resp.status === 401) {
+      if (onUnauthorized) onUnauthorized()
+      throw new Error('unauthorized')
+    }
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}))
+      throw new Error(body.error || `HTTP ${resp.status}`)
+    }
+    return resp.blob()
+  },
+  configRestore: (file) => {
+    // Multipart upload; the browser sets the boundary automatically, so no
+    // Content-Type header is sent.
+    const fd = new FormData()
+    fd.append('file', file)
+    return request('/api/config/restore', { method: 'POST', body: fd })
+  },
   diagDNS: (name, type) => request(`/api/diag/dns?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`),
   updateCheck: () => request('/api/update/check'),
   updateChangelog: () => request('/api/update/changelog'),

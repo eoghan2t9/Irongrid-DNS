@@ -199,6 +199,10 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.putConfig(w, r)
 	case len(parts) == 2 && parts[0] == "config" && parts[1] == "reload" && r.Method == http.MethodPost:
 		h.reloadConfig(w)
+	case len(parts) == 2 && parts[0] == "config" && parts[1] == "backup" && r.Method == http.MethodGet:
+		h.backupConfig(w)
+	case len(parts) == 2 && parts[0] == "config" && parts[1] == "restore" && r.Method == http.MethodPost:
+		h.restoreConfig(w, r)
 	case len(parts) == 2 && parts[0] == "diag" && parts[1] == "dns" && r.Method == http.MethodGet:
 		h.diagDNS(ctx, w, r)
 	case len(parts) == 2 && parts[0] == "update" && parts[1] == "check" && r.Method == http.MethodGet:
