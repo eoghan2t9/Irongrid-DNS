@@ -795,24 +795,25 @@ func (h *Handler) tunnelLog(w http.ResponseWriter) {
 // the web UI. Durations are human strings ("6h") and the web password is a
 // plaintext field that is empty unless the user wants to change it.
 type configPayload struct {
-	Server       serverPayload        `json:"server"`
-	Upstreams    []string             `json:"upstreams"`
-	UpstreamMode string               `json:"upstream_mode"` // "race" | "sequential"
-	Cache        cachePayload         `json:"cache"`
-	TLS          tlsPayload           `json:"tls"`
-	Filter       filterPayload        `json:"filter"`
-	Log          logPayload           `json:"log"`
-	Web          webPayload           `json:"web"`
-	Tunnel       tunnelPayload        `json:"tunnel"`
-	Rewrites     []rewritePayload     `json:"rewrites"`
-	ClientGroups []clientGroupPayload `json:"client_groups"`
-	RateLimit    rateLimitPayload     `json:"rate_limit"`
-	GeoBlock     geoBlockPayload      `json:"geo_block"`
-	Abuse        abusePayload         `json:"abuse"`
-	DNSSEC       dnssecPayload        `json:"dnssec"`
-	Warmer       warmerPayload        `json:"warmer"`
-	Recursive    recursivePayload     `json:"recursive"`
-	DHCP         dhcpPayload          `json:"dhcp"`
+	Server         serverPayload          `json:"server"`
+	Upstreams      []string               `json:"upstreams"`
+	UpstreamMode   string                 `json:"upstream_mode"` // "race" | "sequential"
+	UpstreamRoutes []upstreamRoutePayload `json:"upstream_routes"`
+	Cache          cachePayload           `json:"cache"`
+	TLS            tlsPayload             `json:"tls"`
+	Filter         filterPayload          `json:"filter"`
+	Log            logPayload             `json:"log"`
+	Web            webPayload             `json:"web"`
+	Tunnel         tunnelPayload          `json:"tunnel"`
+	Rewrites       []rewritePayload       `json:"rewrites"`
+	ClientGroups   []clientGroupPayload   `json:"client_groups"`
+	RateLimit      rateLimitPayload       `json:"rate_limit"`
+	GeoBlock       geoBlockPayload        `json:"geo_block"`
+	Abuse          abusePayload           `json:"abuse"`
+	DNSSEC         dnssecPayload          `json:"dnssec"`
+	Warmer         warmerPayload          `json:"warmer"`
+	Recursive      recursivePayload       `json:"recursive"`
+	DHCP           dhcpPayload            `json:"dhcp"`
 }
 
 // dhcpPayload is the JSON shape for the built-in DHCP server settings.
@@ -839,6 +840,13 @@ type dhcpStaticPayload struct {
 	DUID     string `json:"duid"`
 	IP       string `json:"ip"`
 	Hostname string `json:"hostname"`
+}
+
+// upstreamRoutePayload is the JSON shape for one conditional (split-horizon)
+// route: a domain subtree and the dedicated upstreams that answer it.
+type upstreamRoutePayload struct {
+	Domain    string   `json:"domain"`
+	Upstreams []string `json:"upstreams"`
 }
 
 // recursivePayload is the JSON shape for the recursive:// upstream tuning
@@ -1050,6 +1058,13 @@ func payloadFromConfig(c *config.Config) configPayload {
 		},
 		Upstreams:    c.Upstreams,
 		UpstreamMode: c.UpstreamMode,
+		UpstreamRoutes: func() []upstreamRoutePayload {
+			routes := make([]upstreamRoutePayload, 0, len(c.UpstreamRoutes))
+			for _, rt := range c.UpstreamRoutes {
+				routes = append(routes, upstreamRoutePayload{Domain: rt.Domain, Upstreams: rt.Upstreams})
+			}
+			return routes
+		}(),
 		Cache: cachePayload{
 			Addr:          c.Cache.Addr,
 			Password:      c.Cache.Password,
@@ -1270,6 +1285,13 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 		},
 		Upstreams:    p.Upstreams,
 		UpstreamMode: p.UpstreamMode,
+		UpstreamRoutes: func() []config.UpstreamRoute {
+			routes := make([]config.UpstreamRoute, 0, len(p.UpstreamRoutes))
+			for _, rt := range p.UpstreamRoutes {
+				routes = append(routes, config.UpstreamRoute{Domain: rt.Domain, Upstreams: rt.Upstreams})
+			}
+			return routes
+		}(),
 		Cache: config.CacheConfig{
 			Addr:          p.Cache.Addr,
 			Password:      p.Cache.Password,
@@ -1423,6 +1445,14 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	// Parse conditional routes before any live-apply: a bad route spec (e.g.
+	// an unsupported upstream scheme, which Validate doesn't catch) fails the
+	// save with nothing touched. SetUpstreamRoutes takes the compiled routes,
+	// so the live-apply below can no longer fail.
+	parsedRoutes, err := dnsserver.ParseRoutes(routeSpecs(cfg.UpstreamRoutes))
+	if err != nil {
+		return nil, err
+	}
 
 	h.cfgMu.Lock()
 	defer h.cfgMu.Unlock()
@@ -1471,6 +1501,13 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 		}
 		h.DNS.SetUpstreams(ups)
 		h.Upstreams = ups
+	}
+	// Conditional routes are a pure hot-swap like the upstreams list itself
+	// (per-query selection, no listener rebind), so a change applies live
+	// without a restart note. The specs were already parsed up front, so
+	// this cannot fail.
+	if !reflect.DeepEqual(h.Cfg.UpstreamRoutes, cfg.UpstreamRoutes) {
+		h.DNS.SetUpstreamRoutes(parsedRoutes)
 	}
 	// The resolution strategy is a cheap, side-effect-free hot-swap, applied
 	// unconditionally like the other live policy knobs.
@@ -1728,6 +1765,17 @@ func dhcpBindConfig(c config.DHCPConfig) config.DHCPConfig {
 		IPv6:       c.IPv6,
 		IPv6Prefix: c.IPv6Prefix,
 	}
+}
+
+// routeSpecs converts config-level conditional routes into the dnsserver
+// package's RouteSpec form (raw upstream strings; parsing happens in
+// SetUpstreamRoutes so a bad spec is rejected before anything swaps).
+func routeSpecs(routes []config.UpstreamRoute) []dnsserver.RouteSpec {
+	specs := make([]dnsserver.RouteSpec, 0, len(routes))
+	for _, rt := range routes {
+		specs = append(specs, dnsserver.RouteSpec{Domain: rt.Domain, Upstreams: rt.Upstreams})
+	}
+	return specs
 }
 
 // dhcpRuntimeConfig maps the config section into the dhcp package's runtime

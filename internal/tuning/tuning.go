@@ -130,7 +130,7 @@ type SysctlState struct {
 	Key    string `json:"key"`
 	Value  uint64 `json:"value"` // live value as of Status()
 	Target uint64 `json:"target"`
-	Note   string `json:"note"`   // what ApplySystem recorded at boot
+	Note   string `json:"note"` // what ApplySystem recorded at boot
 }
 
 // statusMu guards the package-level tuning state recorded at boot.

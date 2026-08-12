@@ -528,3 +528,44 @@ func TestValidateDHCPv6(t *testing.T) {
 		t.Fatal("v6 range outside prefix accepted")
 	}
 }
+
+// ---- upstream routes (conditional / split-horizon forwarding) ----
+
+func TestValidateUpstreamRoutes(t *testing.T) {
+	c := validBase()
+	c.UpstreamRoutes = []UpstreamRoute{
+		{Domain: "lan", Upstreams: []string{"udp://192.168.1.1:53"}},
+		{Domain: "corp.example.com.", Upstreams: []string{"tls://10.0.0.2:853", "https://dns.corp.example.com/dns-query"}},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid routes rejected: %v", err)
+	}
+	// Domains are normalized: the trailing dot is stripped.
+	if c.UpstreamRoutes[1].Domain != "corp.example.com" {
+		t.Fatalf("route domain not normalized: %q", c.UpstreamRoutes[1].Domain)
+	}
+}
+
+func TestValidateUpstreamRoutesRequireUpstreams(t *testing.T) {
+	c := validBase()
+	c.UpstreamRoutes = []UpstreamRoute{{Domain: "lan"}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("route without upstreams accepted")
+	}
+}
+
+func TestValidateUpstreamRoutesRejectEmptyEntry(t *testing.T) {
+	c := validBase()
+	c.UpstreamRoutes = []UpstreamRoute{{Domain: "lan", Upstreams: []string{"udp://192.168.1.1:53", ""}}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("route with an empty upstream accepted")
+	}
+}
+
+func TestValidateUpstreamRoutesRejectBadDomain(t *testing.T) {
+	c := validBase()
+	c.UpstreamRoutes = []UpstreamRoute{{Domain: "bad domain!", Upstreams: []string{"udp://192.168.1.1:53"}}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("route with an invalid domain accepted")
+	}
+}

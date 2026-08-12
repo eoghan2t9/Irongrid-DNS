@@ -30,20 +30,28 @@ type Config struct {
 	// UpstreamMode is the multi-upstream resolution strategy ("race" or
 	// "sequential"); empty defaults to "race". It is global — client groups
 	// that override the upstream list use the same strategy.
-	UpstreamMode string          `yaml:"upstream_mode"`
-	Cache        CacheConfig     `yaml:"cache"`
-	TLS          TLSConfig       `yaml:"tls"`
-	Filter       FilterConfig    `yaml:"filter"`
-	Log          LogConfig       `yaml:"log"`
-	Web          WebConfig       `yaml:"web"`
-	Tunnel       TunnelConfig    `yaml:"tunnel"`
-	Rewrites     []RewriteSpec   `yaml:"rewrites"`      // local DNS records (A/AAAA/CNAME)
-	ClientGroups []ClientGroup   `yaml:"client_groups"` // per-client blocking/upstream policy
-	RateLimit    RateLimitConfig `yaml:"rate_limit"`
-	GeoBlock     GeoBlockConfig  `yaml:"geo_block"`
-	Abuse        AbuseConfig     `yaml:"abuse"`
-	DNSSEC       DNSSECConfig    `yaml:"dnssec"`
-	Warmer       WarmerConfig    `yaml:"warmer"`
+	UpstreamMode string `yaml:"upstream_mode"`
+	// UpstreamRoutes is conditional (split-horizon) forwarding: queries for
+	// a domain subtree are sent to that route's own upstream set instead of
+	// the global forwarders (or a client group's upstream override). A route
+	// matches its domain and every subdomain under it; the longest matching
+	// domain wins when several routes overlap. The cache is shared, which is
+	// safe because routes partition the name space — one question can only
+	// ever match one route.
+	UpstreamRoutes []UpstreamRoute `yaml:"upstream_routes"`
+	Cache          CacheConfig     `yaml:"cache"`
+	TLS            TLSConfig       `yaml:"tls"`
+	Filter         FilterConfig    `yaml:"filter"`
+	Log            LogConfig       `yaml:"log"`
+	Web            WebConfig       `yaml:"web"`
+	Tunnel         TunnelConfig    `yaml:"tunnel"`
+	Rewrites       []RewriteSpec   `yaml:"rewrites"`      // local DNS records (A/AAAA/CNAME)
+	ClientGroups   []ClientGroup   `yaml:"client_groups"` // per-client blocking/upstream policy
+	RateLimit      RateLimitConfig `yaml:"rate_limit"`
+	GeoBlock       GeoBlockConfig  `yaml:"geo_block"`
+	Abuse          AbuseConfig     `yaml:"abuse"`
+	DNSSEC         DNSSECConfig    `yaml:"dnssec"`
+	Warmer         WarmerConfig    `yaml:"warmer"`
 	// Recursive tunes the recursive:// upstream transport (the iterative
 	// resolver that walks referrals from the root servers itself).
 	Recursive RecursiveConfig `yaml:"recursive"`
@@ -132,6 +140,17 @@ type WarmerConfig struct {
 	// Concurrency bounds how many upstream resolutions run in parallel per
 	// pass; 0 uses the default (8).
 	Concurrency int `yaml:"concurrency"`
+}
+
+// UpstreamRoute sends queries for Domain (and every subdomain under it) to
+// a dedicated upstream set — split-horizon routing for networks whose
+// internal names must not leak to public resolvers (e.g. "lan" -> a local
+// AD or Pi-hole server). The upstream entries use the same syntax as the
+// global upstreams list (udp://, tcp://, tls://, https://, quic://,
+// recursive://).
+type UpstreamRoute struct {
+	Domain    string   `yaml:"domain"`    // exact domain, matches every subdomain under it
+	Upstreams []string `yaml:"upstreams"` // dedicated forwarders for this subtree
 }
 
 // RewriteSpec is a local DNS record: a domain answered directly by Irongrid
@@ -589,6 +608,23 @@ func (c *Config) validate() error {
 	case "race", "sequential":
 	default:
 		return fmt.Errorf("upstream_mode: unsupported mode %q (supported: race, sequential)", c.UpstreamMode)
+	}
+	// Conditional routes: normalize the domain (lowercase, no trailing dot)
+	// and require at least one non-empty upstream per route.
+	for i, rt := range c.UpstreamRoutes {
+		dom := normalizeDomain(rt.Domain)
+		if dom == "" {
+			return fmt.Errorf("upstream_routes[%d]: a valid domain is required", i)
+		}
+		c.UpstreamRoutes[i].Domain = dom
+		if len(rt.Upstreams) == 0 {
+			return fmt.Errorf("upstream_routes[%d] (%s): at least one upstream is required", i, dom)
+		}
+		for _, spec := range rt.Upstreams {
+			if spec == "" {
+				return fmt.Errorf("upstream_routes[%d] (%s): empty upstream entry", i, dom)
+			}
+		}
 	}
 	if c.Cache.Addr == "" {
 		return fmt.Errorf("cache.addr is required (Dragonfly endpoint)")

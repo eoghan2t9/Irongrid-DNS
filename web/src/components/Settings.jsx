@@ -9,6 +9,7 @@ const empty = () => ({
   },
   upstreams: [],
   upstream_mode: 'race',
+  upstream_routes: [],
   cache: { addr: '', password: '', db: 0, ttl: '6h', negative_ttl: '1m', l1_entries: 0, serve_stale: '5m', prefetch: true, lookup_timeout: '150ms', failure_ttl: '5s' },
   recursive: { server_timeout: '' },
   tls: { cert_file: '', key_file: '', generate_self_signed: true, self_signed_hosts: [], cert_dir: '', acme: { enabled: false, email: '', domains: [], staging: false, http01_port: 80, renew_before_days: 30, dns01: { provider: '', propagation_wait_sec: 60, cloudflare_token: '', digitalocean_token: '', hetzner_token: '', godaddy_key: '', godaddy_secret: '', aws_access_key_id: '', aws_secret_access_key: '' } } },
@@ -290,6 +291,36 @@ export default function Settings({ onSessionInvalidated }) {
     setDirty(true)
   }
 
+  const setRoute = (index, field, value) => {
+    setCfg((prev) => {
+      const next = JSON.parse(JSON.stringify(prev))
+      const routes = next.upstream_routes || []
+      if (!routes[index]) routes[index] = {}
+      routes[index] = { ...routes[index], [field]: value }
+      next.upstream_routes = routes
+      return next
+    })
+    setDirty(true)
+  }
+
+  const addRoute = () => {
+    setCfg((prev) => {
+      const next = JSON.parse(JSON.stringify(prev))
+      next.upstream_routes = [...(next.upstream_routes || []), { domain: '', upstreams: [] }]
+      return next
+    })
+    setDirty(true)
+  }
+
+  const removeRoute = (index) => {
+    setCfg((prev) => {
+      const next = JSON.parse(JSON.stringify(prev))
+      next.upstream_routes = (next.upstream_routes || []).filter((_, i) => i !== index)
+      return next
+    })
+    setDirty(true)
+  }
+
   const addUpstream = (spec) => {
     if ((cfg.upstreams || []).includes(spec)) return
     set('upstreams', [...(cfg.upstreams || []), spec])
@@ -461,6 +492,29 @@ export default function Settings({ onSessionInvalidated }) {
             </select>
           ))}
         </div>
+        <h4 style={{ margin: '16px 0 10px' }}>Conditional upstreams (split horizon)</h4>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          Send queries for one domain subtree to a dedicated upstream set instead of the global ones
+          above — e.g. <span className="mono">lan</span> → <span className="mono">udp://192.168.1.1:53</span> so
+          internal names never leave the network. A route matches its domain and every subdomain under it;
+          the longest match wins when routes overlap, and a route overrides both the global list and a
+          client group's upstream override.
+        </p>
+        {(deepGet('upstream_routes', []) || []).map((rt, i) => (
+          <div className="list-row" key={i} style={{ alignItems: 'flex-start' }}>
+            <input className="input mono" placeholder="domain (e.g. lan)" value={rt.domain || ''} onChange={(e) => setRoute(i, 'domain', e.target.value)} style={{ maxWidth: 200 }} />
+            <textarea
+              className="input mono"
+              placeholder={'upstreams, one per line (udp://, tls://, …)'}
+              rows={2}
+              value={(rt.upstreams || []).join('\n')}
+              onChange={(e) => setRoute(i, 'upstreams', e.target.value.split('\n').map((s) => s.trim()).filter(Boolean))}
+              style={{ flex: 1, minHeight: 44 }}
+            />
+            <button className="btn small danger" type="button" onClick={() => removeRoute(i)}>✕</button>
+          </div>
+        ))}
+        <button className="btn small" type="button" onClick={addRoute}>+ Add route</button>
         <div className="row-between" style={{ marginTop: 16 }}>
           <h4 style={{ margin: 0, fontSize: 13 }}>Find the fastest upstreams for this server</h4>
           <button className="btn small" type="button" onClick={findFastest} disabled={fastestBusy}>

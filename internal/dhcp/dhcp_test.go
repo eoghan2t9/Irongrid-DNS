@@ -224,6 +224,45 @@ func TestV4DORA(t *testing.T) {
 	}
 }
 
+// ---- reverse (PTR) lookups ----
+
+func TestLookupPTR(t *testing.T) {
+	cfg, dir := testConfig(t)
+	s := newTestServer(t, cfg, dir)
+	mac := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x07}
+
+	// A dynamic lease with a registered hostname.
+	ip, _ := s.allocV4(mac, nil, "fridge")
+	s.commit(&Lease{
+		Key: string(v4Key(mac)), MAC: mac.String(), IP: ip.String(),
+		Hostname: "fridge", Expires: time.Now().Add(time.Hour),
+	})
+	// The address resolves back to hostname.domain.
+	host, ok := s.LookupPTR(ip.String())
+	if !ok || host != "fridge.lan" {
+		t.Fatalf("LookupPTR(%s) = %q, %v; want fridge.lan, true", ip, host, ok)
+	}
+	// Unknown addresses don't resolve.
+	if _, ok := s.LookupPTR("192.168.1.99"); ok {
+		t.Fatal("unleased address resolved")
+	}
+	// Garbage input is refused.
+	if _, ok := s.LookupPTR("not-an-ip"); ok {
+		t.Fatal("non-IP resolved")
+	}
+
+	// A static reservation with a hostname answers too (via rebuildHosts).
+	staticIP := net.ParseIP("192.168.1.77")
+	s.SetConfig(func(cfg Config) Config {
+		cfg.Static = append(cfg.Static, StaticLease{MAC: "aa:bb:cc:dd:ee:08", IP: staticIP, Hostname: "nas"})
+		return cfg
+	}(s.cfg))
+	host, ok = s.LookupPTR(staticIP.String())
+	if !ok || host != "nas.lan" {
+		t.Fatalf("LookupPTR(static) = %q, %v; want nas.lan, true", host, ok)
+	}
+}
+
 func TestV4RequestRejectsTakenAddress(t *testing.T) {
 	cfg, dir := testConfig(t)
 	s := newTestServer(t, cfg, dir)

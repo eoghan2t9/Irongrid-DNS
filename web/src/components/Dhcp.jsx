@@ -99,8 +99,9 @@ export default function Dhcp() {
               <>
                 Leases handed out by the built-in server. Client hostnames registered here are
                 resolvable in the local DNS — <span className="mono">hostname</span> and{' '}
-                <span className="mono">hostname.domain</span> both answer (Pi-hole style). Configure
-                the pool, reservations and options under <strong>Settings → DHCP server</strong>.
+                <span className="mono">hostname.domain</span> both answer, and PTR reverse lookups
+                answer with the client's name so logs show names, not addresses (Pi-hole style).
+                Configure the pool, reservations and options under <strong>Settings → DHCP server</strong>.
               </>
             ) : (
               <>

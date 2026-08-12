@@ -299,7 +299,8 @@ func (u *Upstream) Query(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	return nil, fmt.Errorf("unknown transport %s", u.Transport)
 }
 
-func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns.Msg, error) {		if !tcp {
+func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns.Msg, error) {
+	if !tcp {
 		// UDP is connectionless — there's no handshake to amortize, so
 		// pooling buys nothing (a fresh "dial" is just a local socket()).
 		c := u.udpClient

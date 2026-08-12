@@ -16,6 +16,7 @@ import (
 // fakeDHCPResolver implements DHCPHostResolver with a fixed hostname map.
 type fakeDHCPResolver struct {
 	hosts map[string][]net.IP
+	ptr   map[string]string // optional explicit reverse map (ip -> hostname)
 }
 
 func (f *fakeDHCPResolver) LookupHost(name string) ([]net.IP, bool) {
@@ -25,6 +26,22 @@ func (f *fakeDHCPResolver) LookupHost(name string) ([]net.IP, bool) {
 	name = strings.TrimSuffix(name, ".lan")
 	ips, ok := f.hosts[name]
 	return ips, ok
+}
+
+func (f *fakeDHCPResolver) LookupPTR(ip string) (string, bool) {
+	// Mirror the real server: the returned name carries the .lan suffix.
+	if f.ptr != nil {
+		h, ok := f.ptr[ip]
+		return h, ok
+	}
+	for name, ips := range f.hosts {
+		for _, candidate := range ips {
+			if candidate.String() == ip {
+				return name + ".lan", true
+			}
+		}
+	}
+	return "", false
 }
 
 // TestDHCPHostnameResolution verifies that a DHCP-registered client hostname
@@ -124,5 +141,78 @@ func TestDHCPHostnameDoesNotLeakToAAAAForV4Only(t *testing.T) {
 	}
 	if fw.msg.Rcode != dns.RcodeSuccess {
 		t.Fatalf("AAAA for v4-only hostname rcode = %d, want NOERROR (NODATA)", fw.msg.Rcode)
+	}
+}
+
+// TestDHCPReverseLookup verifies that a PTR query for a leased address
+// answers with the client's registered hostname locally, and that reverse
+// names for unknown addresses (and non-PTR queries) fall through upstream.
+func TestDHCPReverseLookup(t *testing.T) {
+	var upstreamHits atomic.Int32
+	upAddr := startUDPCountingServer(t, "203.0.113.7", &upstreamHits)
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: upAddr},
+	}, nil, "nxdomain", 600, 5*time.Second)
+
+	h.DHCPHosts = &fakeDHCPResolver{
+		hosts: map[string][]net.IP{
+			"printer": {net.ParseIP("192.168.1.50")},
+			"nas":     {net.ParseIP("fd00::50")},
+		},
+	}
+
+	// PTR for the leased v4 address: answers printer.lan, no upstream hit.
+	v4rev, err := dns.ReverseAddr("192.168.1.50")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := new(dns.Msg)
+	m.SetQuestion(v4rev, dns.TypePTR)
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, m)
+	if fw.msg == nil || len(fw.msg.Answer) != 1 {
+		t.Fatalf("PTR lease: got %d answers, want 1 (upstream hits=%d)", len(fw.msg.Answer), upstreamHits.Load())
+	}
+	if p, ok := fw.msg.Answer[0].(*dns.PTR); !ok || p.Ptr != "printer.lan." {
+		t.Fatalf("PTR lease = %v, want printer.lan.", fw.msg.Answer[0])
+	}
+
+	// PTR for the leased v6 address (ip6.arpa nibble format), built with
+	// ReverseAddr so the 32 nibbles are guaranteed correct.
+	v6rev, err := dns.ReverseAddr("fd00::50")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m6 := new(dns.Msg)
+	m6.SetQuestion(v6rev, dns.TypePTR)
+	fw6 := &fakeWriter{}
+	h.ServeDNS(fw6, m6)
+	if fw6.msg == nil || len(fw6.msg.Answer) != 1 {
+		t.Fatalf("PTR v6 lease: got %d answers, want 1", len(fw6.msg.Answer))
+	}
+	if p, ok := fw6.msg.Answer[0].(*dns.PTR); !ok || p.Ptr != "nas.lan." {
+		t.Fatalf("PTR v6 lease = %v, want nas.lan.", fw6.msg.Answer[0])
+	}
+
+	// PTR for an unknown address falls through to the upstream.
+	hitsBefore := upstreamHits.Load()
+	unknownRev, _ := dns.ReverseAddr("192.168.1.51")
+	m2 := new(dns.Msg)
+	m2.SetQuestion(unknownRev, dns.TypePTR)
+	fw2 := &fakeWriter{}
+	h.ServeDNS(fw2, m2)
+	if upstreamHits.Load() == hitsBefore {
+		t.Fatal("unknown PTR address did not reach the upstream")
+	}
+
+	// An A query for the reverse zone name is not a PTR lookup and must not
+	// be intercepted either.
+	hitsBefore = upstreamHits.Load()
+	m3 := new(dns.Msg)
+	m3.SetQuestion(v4rev, dns.TypeA)
+	fw3 := &fakeWriter{}
+	h.ServeDNS(fw3, m3)
+	if upstreamHits.Load() == hitsBefore {
+		t.Fatal("A query for a reverse name was intercepted by the PTR hook")
 	}
 }

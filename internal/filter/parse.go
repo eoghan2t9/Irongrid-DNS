@@ -12,12 +12,15 @@ type ParseResult struct {
 	ExactDomains int
 	IPs          int
 	Exceptions   int
+	Regexes      int
 }
 
 // parseContent applies blocklist content to the target rule sets.
 // targetBlock* receives blocking rules, targetAllow* receives exceptions
-// (both inline "@@" adblock rules and dedicated whitelist entries).
-func parseContent(content string, listID string, targetBlock, targetBlockExact, targetIPs, targetAllow, targetAllowExact map[string]struct{}, allowIPs map[string]struct{}, listOf map[string]string) ParseResult {
+// (both inline "@@" adblock rules and dedicated whitelist entries), and
+// targetBlockRegex/targetAllowRegex receive compiled AdGuard-style
+// /pattern/ rules (and @@/pattern/ exceptions).
+func parseContent(content string, listID string, targetBlock, targetBlockExact, targetIPs, targetAllow, targetAllowExact map[string]struct{}, allowIPs map[string]struct{}, listOf map[string]string, targetBlockRegex, targetAllowRegex *[]RegexRule) ParseResult {
 	var res ParseResult
 	sc := bufio.NewScanner(strings.NewReader(content))
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
@@ -66,6 +69,25 @@ func parseContent(content string, listID string, targetBlock, targetBlockExact, 
 		if ip := net.ParseIP(line); ip != nil {
 			targetIPs[ip.String()] = struct{}{}
 			res.IPs++
+			continue
+		}
+		// AdGuard regex rules: /pattern/flags (and @@/pattern/ exceptions).
+		// Checked before splitRule because the '/' characters make a regex
+		// line invalid as a domain rule. The "@@/" exception check must come
+		// first — its line starts with '@', not '/', so it would miss the
+		// regex branch below.
+		if strings.HasPrefix(line, "@@/") {
+			if rr := parseRegexRule(strings.TrimPrefix(line, "@@"), listID); rr != nil {
+				*targetAllowRegex = append(*targetAllowRegex, *rr)
+				res.Exceptions++
+			}
+			continue
+		}
+		if line[0] == '/' {
+			if rr := parseRegexRule(line, listID); rr != nil {
+				*targetBlockRegex = append(*targetBlockRegex, *rr)
+				res.Regexes++
+			}
 			continue
 		}
 		// Otherwise treat it as a domain rule (plain or adblock syntax).

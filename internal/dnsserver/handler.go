@@ -71,11 +71,15 @@ func newStats() *Stats {
 }
 
 // DHCPHostResolver is implemented by the DHCP server so locally-assigned
-// client hostnames resolve through the DNS handler (Pi-hole style:
-// "printer" and "printer.lan" both answer). LookupHost returns the client's
-// address(es); ok=false for unknown names.
+// client hostnames and addresses resolve through the DNS handler (Pi-hole
+// style: "printer" and "printer.lan" both answer, and PTR queries for a
+// leased address answer with the client's registered hostname). LookupHost
+// returns the client's address(es); ok=false for unknown names.
 type DHCPHostResolver interface {
 	LookupHost(name string) ([]net.IP, bool)
+	// LookupPTR resolves a leased address back to its registered hostname
+	// (with the configured domain suffix); ok=false for unknown addresses.
+	LookupPTR(ip string) (hostname string, ok bool)
 }
 
 // Handler is the shared request pipeline for all listeners.
@@ -89,12 +93,17 @@ type Handler struct {
 
 	// mu guards the hot-swappable settings below so the API can live-apply
 	// config changes without a restart.
-	mu            sync.RWMutex
-	Upstreams     []*upstream.Upstream
-	UpstreamMode  string // "race" or "sequential" (see UpstreamModeRace/Sequential)
-	BlockResponse string
-	BlockTTL      uint32
-	Timeout       time.Duration
+	mu           sync.RWMutex
+	Upstreams    []*upstream.Upstream
+	UpstreamMode string // "race" or "sequential" (see UpstreamModeRace/Sequential)
+	// UpstreamRoutes is conditional (split-horizon) routing: per-domain
+	// upstream sets that win over the global forwarders and client-group
+	// upstream overrides (the most specific intent wins). Set via
+	// SetUpstreamRoutes.
+	UpstreamRoutes []UpstreamRoute
+	BlockResponse  string
+	BlockTTL       uint32
+	Timeout        time.Duration
 	// FailureTTL is how long a resolution failure (upstream never answered,
 	// no serve-stale entry) is negatively cached as SERVFAIL; <= 0 uses the
 	// cache's configured negative TTL. Set via SetFailureTTL; snapshot on
@@ -182,6 +191,79 @@ func (h *Handler) ServeDNSWithProto(w dns.ResponseWriter, r *dns.Msg, proto stri
 // separately (DoH).
 func (h *Handler) ServeDNSFromContext(w dns.ResponseWriter, r *dns.Msg, clientIP, proto string) {
 	h.serve(w, r, clientIP, proto)
+}
+
+// UpstreamRoute sends queries for one domain subtree to a dedicated
+// upstream set (split-horizon / conditional forwarding). Domain matches
+// exactly and every subdomain under it; the longest matching domain wins
+// when routes overlap.
+type UpstreamRoute struct {
+	Domain    string
+	Upstreams []*upstream.Upstream
+}
+
+// RouteSpec is the config form of an UpstreamRoute: the raw upstream
+// strings before parsing.
+type RouteSpec struct {
+	Domain    string
+	Upstreams []string
+}
+
+// ParseRoutes compiles RouteSpecs into UpstreamRoutes (parsing every
+// upstream spec). It is the validation half of SetUpstreamRoutes: callers
+// parse up front — before any live reference is swapped on a reload — so a
+// bad spec fails the reload with nothing touched, then hand the compiled
+// routes to SetUpstreamRoutes, which can no longer fail.
+func ParseRoutes(specs []RouteSpec) ([]UpstreamRoute, error) {
+	compiled := make([]UpstreamRoute, 0, len(specs))
+	for _, s := range specs {
+		ups := make([]*upstream.Upstream, 0, len(s.Upstreams))
+		for _, spec := range s.Upstreams {
+			up, err := upstream.Parse(spec)
+			if err != nil {
+				return nil, fmt.Errorf("upstream route %q: %w", s.Domain, err)
+			}
+			ups = append(ups, up)
+		}
+		compiled = append(compiled, UpstreamRoute{
+			Domain:    strings.ToLower(strings.TrimSuffix(s.Domain, ".")),
+			Upstreams: ups,
+		})
+	}
+	return compiled, nil
+}
+
+// SetUpstreamRoutes hot-swaps the conditional per-domain upstream routing.
+// Routes must come from ParseRoutes (which does the upstream parsing); the
+// previous routes' upstreams are closed after the swap (they hold pooled
+// TCP/DoT connections and persistent QUIC sessions, like SetUpstreams).
+func (h *Handler) SetUpstreamRoutes(routes []UpstreamRoute) {
+	h.mu.Lock()
+	old := h.UpstreamRoutes
+	h.UpstreamRoutes = routes
+	h.mu.Unlock()
+	for _, rt := range old {
+		for _, u := range rt.Upstreams {
+			u.Close()
+		}
+	}
+}
+
+// routeMatch returns the most specific route whose domain matches name
+// (lowercased, no trailing dot) — exactly or as any ancestor — or nil.
+func routeMatch(routes []UpstreamRoute, name string) *UpstreamRoute {
+	var best *UpstreamRoute
+	bestLen := -1
+	for i := range routes {
+		dom := routes[i].Domain
+		if name == dom || strings.HasSuffix(name, "."+dom) {
+			if len(dom) > bestLen {
+				best = &routes[i]
+				bestLen = len(dom)
+			}
+		}
+	}
+	return best
 }
 
 // SetUpstreams hot-swaps the upstream forwarders (config live-apply).
@@ -343,6 +425,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	h.mu.RLock()
 	upstreams := h.Upstreams
 	upstreamMode := h.UpstreamMode
+	routes := h.UpstreamRoutes
 	blockResp := h.BlockResponse
 	blockTTL := h.BlockTTL
 	timeout := h.Timeout
@@ -527,6 +610,29 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			_ = h.write(w, m, r, proto)
 			return
 		}
+		// 1.6 DHCP reverse lookups: a PTR query for a leased address answers
+		//     with the client's registered hostname, so logs and tools that
+		//     reverse-resolve client IPs (e.g. /api/log/hostnames) see names
+		//     instead of numbers. Only addresses the DHCP server actually
+		//     assigned are intercepted — every other reverse name falls
+		//     through to the upstreams unchanged.
+		if q.Qtype == dns.TypePTR {
+			if ip := reverseNameIP(q.Name); ip != nil {
+				if host, ok := h.DHCPHosts.LookupPTR(ip.String()); ok {
+					m := new(dns.Msg)
+					m.SetReply(r)
+					m.Authoritative = true
+					m.Answer = append(m.Answer, &dns.PTR{
+						Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypePTR, Class: dns.ClassINET, Ttl: dhcpHostTTL},
+						Ptr: host + ".",
+					})
+					h.Stats.Allowed.Add(1)
+					h.record(client, qname, q, "rewrite", "dhcp-host-ptr", "", start, m)
+					_ = h.write(w, m, r, proto)
+					return
+				}
+			}
+		}
 	}
 
 	// 2. Per-client policy: a client whose IP falls in a configured group
@@ -540,6 +646,15 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 				upstreams = policy.Upstreams
 			}
 		}
+	}
+	// 2.5 Conditional routing (split horizon): a per-domain route is the
+	//     most specific intent there is — "*.lan queries go to the LAN
+	//     resolver" — so it wins over both the global forwarders and a
+	//     client group's upstream override. Routes partition the name space
+	//     (a question matches at most one route), so the shared response
+	//     cache and in-flight coalescing stay sound.
+	if rt := routeMatch(routes, qname); rt != nil && len(rt.Upstreams) > 0 {
+		upstreams = rt.Upstreams
 	}
 
 	// 3. Filtering: whitelist overrides everything; blocklists stop the query.
@@ -1218,9 +1333,17 @@ func raceUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*
 func (h *Handler) resolveAndCache(ctx context.Context, q dns.Question) error {
 	h.mu.RLock()
 	ups := h.Upstreams
+	routes := h.UpstreamRoutes
 	cache := h.Cache
 	mode := h.UpstreamMode
 	h.mu.RUnlock()
+	// Conditional routes apply to background resolutions too: a prefetched
+	// or warmed question under a routed subtree must resolve through the
+	// same upstreams a live query would use, or the cached entry could
+	// disagree with the route's split-horizon answer.
+	if rt := routeMatch(routes, strings.ToLower(strings.TrimSuffix(q.Name, "."))); rt != nil && len(rt.Upstreams) > 0 {
+		ups = rt.Upstreams
+	}
 	if len(ups) == 0 {
 		return fmt.Errorf("no upstreams configured")
 	}
@@ -1276,6 +1399,49 @@ const staleServeTTL = 30
 // client that re-negotiates a different address is re-resolved quickly, long
 // enough that LAN lookups are cheap.
 const dhcpHostTTL = 120
+
+// reverseNameIP parses an in-addr.arpa or ip6.arpa name back into the IP
+// address it encodes, or nil when the name isn't a well-formed reverse
+// zone (only full 4-octet IPv4 and full 32-nibble IPv6 names are accepted,
+// so a query for a /24 reverse zone or a random name falls through).
+func reverseNameIP(name string) net.IP {
+	n := strings.ToLower(strings.TrimSuffix(name, "."))
+	if strings.HasSuffix(n, ".in-addr.arpa") {
+		octets := strings.Split(strings.TrimSuffix(n, ".in-addr.arpa"), ".")
+		if len(octets) != 4 {
+			return nil
+		}
+		var b [4]byte
+		for i := 0; i < 4; i++ {
+			v, err := strconv.Atoi(octets[3-i]) // labels are least-significant first
+			if err != nil || v < 0 || v > 255 {
+				return nil
+			}
+			b[i] = byte(v)
+		}
+		return net.IPv4(b[0], b[1], b[2], b[3])
+	}
+	if strings.HasSuffix(n, ".ip6.arpa") {
+		nibbles := strings.Split(strings.TrimSuffix(n, ".ip6.arpa"), ".")
+		if len(nibbles) != 32 {
+			return nil
+		}
+		var b [16]byte
+		for i := 0; i < 32; i++ {
+			v, err := strconv.ParseUint(nibbles[31-i], 16, 4) // nibbles are least-significant first
+			if err != nil {
+				return nil
+			}
+			if i%2 == 0 {
+				b[i/2] = byte(v) << 4
+			} else {
+				b[i/2] |= byte(v)
+			}
+		}
+		return net.IP(b[:])
+	}
+	return nil
+}
 
 // ednsUDPSize is the UDP payload size advertised on outgoing upstream
 // queries: the DNS Flag Day 2020 recommended 1232 bytes, the largest value

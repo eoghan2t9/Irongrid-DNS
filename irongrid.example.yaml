@@ -60,6 +60,20 @@ upstreams:
   #   Root hints card shows the source (live / cached / bundled) and
   #   signature state.
 
+# Conditional (split-horizon) routing: queries for a domain subtree go to
+# that route's own upstream set instead of the global list above — e.g. a
+# LAN resolver that answers internal names, so *.lan queries never leak to
+# public resolvers. A route matches its domain and every subdomain under it;
+# the longest match wins when routes overlap, and a route overrides both the
+# global upstreams and a client group's upstream override.
+# upstream_routes:
+#   - domain: "lan"
+#     upstreams:
+#       - "udp://192.168.1.1:53"
+#   - domain: "corp.example.com"
+#     upstreams:
+#       - "tls://10.0.0.2:853"
+
 # How multiple upstreams are queried for each resolution (global; also covers
 # client-group upstream overrides):
 #   race        (default) query them all at once — the fastest successful

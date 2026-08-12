@@ -163,6 +163,7 @@ type Server struct {
 	leases     map[leaseKey]*Lease
 	byIP       map[string]*Lease
 	hosts      map[string]net.IP // lowercased hostname -> address
+	ptr        map[string]string // address.String() -> hostname, for reverse lookups
 	reserved   map[string]reservation
 	cursor4    uint32
 	cursor6    uint32
@@ -181,6 +182,7 @@ func New(dir string) *Server {
 		leases:     map[leaseKey]*Lease{},
 		byIP:       map[string]*Lease{},
 		hosts:      map[string]net.IP{},
+		ptr:        map[string]string{},
 		reserved:   map[string]reservation{},
 		persistDir: dir,
 		stopCh:     make(chan struct{}),
@@ -478,15 +480,20 @@ func (s *Server) domain() string {
 	return s.cfg.Domain
 }
 
-// rebuildHostsLocked regenerates the hostname index from current leases and
-// static reservations (called under mu on config/lease changes).
+// rebuildHostsLocked regenerates the hostname index (hostname -> address)
+// and the reverse index (address -> hostname) from current leases and static
+// reservations (called under mu on config/lease changes). A lease whose
+// hostname changed is re-indexed by its address, so a re-DHCP that registers
+// a new name still resolves both directions.
 func (s *Server) rebuildHostsLocked() {
 	s.hosts = map[string]net.IP{}
+	s.ptr = map[string]string{}
 	for _, st := range s.cfg.Static {
 		if st.Hostname == "" {
 			continue
 		}
 		s.hosts[strings.ToLower(st.Hostname)] = st.IP
+		s.ptr[st.IP.String()] = st.Hostname
 	}
 	for _, l := range s.leases {
 		if l.Hostname == "" {
@@ -494,8 +501,31 @@ func (s *Server) rebuildHostsLocked() {
 		}
 		if ip := net.ParseIP(l.IP); ip != nil {
 			s.hosts[strings.ToLower(l.Hostname)] = ip
+			s.ptr[ip.String()] = l.Hostname
 		}
 	}
+}
+
+// LookupPTR resolves a leased address back to its registered hostname (the
+// reverse of LookupHost), for PTR queries on the in-addr.arpa / ip6.arpa
+// names of DHCP-assigned clients. The returned name includes the configured
+// domain suffix (printer.lan), so the DNS handler can answer with an FQDN;
+// ok=false when the address is not currently assigned to a client.
+func (s *Server) LookupPTR(ip string) (hostname string, ok bool) {
+	parsed := net.ParseIP(strings.TrimSpace(ip))
+	if parsed == nil {
+		return "", false
+	}
+	s.mu.RLock()
+	h, found := s.ptr[parsed.String()]
+	s.mu.RUnlock()
+	if !found {
+		return "", false
+	}
+	if d := strings.TrimSuffix(s.domain(), "."); d != "" {
+		return h + "." + d, true
+	}
+	return h, true
 }
 
 // ---------------------------------------------------------------------------

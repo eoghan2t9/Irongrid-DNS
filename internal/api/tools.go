@@ -67,8 +67,8 @@ var fastestProbeRounds = 3
 // many resolvers are probed in parallel (each probe is a goroutine + socket,
 // and a firewalled candidate can sit out its full timeout).
 const (
-	fastestProbeTimeout    = 2 * time.Second
-	fastestMaxConcurrent   = 6
+	fastestProbeTimeout  = 2 * time.Second
+	fastestMaxConcurrent = 6
 )
 
 // rblZones are the DNS-based reputation blocklists the RBL tool queries. A

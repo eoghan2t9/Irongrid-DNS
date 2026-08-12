@@ -256,6 +256,17 @@ func main() {
 	// Multi-upstream resolution strategy (config upstream_mode: race or
 	// sequential). NewHandler defaults to race; apply the configured value.
 	handler.SetUpstreamMode(cfg.UpstreamMode)
+	// Conditional (split-horizon) routing: per-domain upstream sets that win
+	// over the global forwarders and client-group overrides (e.g. "lan" ->
+	// a local resolver so internal names never reach public resolvers).
+	// Parsed up front (SetUpstreamRoutes itself cannot fail) so a bad route
+	// spec aborts boot exactly like a bad upstream spec; re-applied on every
+	// reload below, so a config change never needs a restart.
+	routeUps, err := dnsserver.ParseRoutes(routeSpecs(cfg.UpstreamRoutes))
+	if err != nil {
+		log.Fatalf("upstream routes: %v", err)
+	}
+	handler.SetUpstreamRoutes(routeUps)
 	// Rebuild per-client-group engines whenever blocklist content changes
 	// (auto-refresh ticker, manual "refresh all lists") — they're built from
 	// the same cached content the global engine uses.
@@ -755,6 +766,15 @@ func main() {
 			}
 			newUps = append(newUps, up)
 		}
+		// Conditional route specs are parsed here too, before any live
+		// reference is swapped: a bad route spec must fail the reload with
+		// the running server untouched, not after SetCache/SetUpstreams have
+		// already swapped (the parse is the only failing step left).
+		newRoutes, err := dnsserver.ParseRoutes(routeSpecs(cfg.UpstreamRoutes))
+		if err != nil {
+			_ = newCache.Close()
+			return fmt.Errorf("upstream routes: %w", err)
+		}
 		// A reload can introduce recursive:// upstreams when none were
 		// configured at boot (hintsMgr was never created). Start the manager
 		// so they get the authoritative root hints too, not just the bundled
@@ -797,6 +817,7 @@ func main() {
 		handler.SetCache(newCache)
 		handler.SetUpstreams(newUps)
 		handler.SetUpstreamMode(cfg.UpstreamMode)
+		handler.SetUpstreamRoutes(newRoutes)
 		handler.SetBlockPolicy(cfg.Filter.BlockResponse, cfg.Filter.BlockTTL)
 		handler.SetTimeout(time.Duration(cfg.Server.TimeoutSec) * time.Second)
 		handler.SetFailureTTL(cfg.Cache.FailureTTL)
@@ -1008,6 +1029,17 @@ func resolveL1Entries(v int) int {
 // mapping itself lives in dhcp.ConfigFrom so the API's live-apply path
 // produces an identical config — a dashboard save can never drop fields
 // (e.g. the server identifier) that boot had set.
+// routeSpecs converts config-level conditional routes into the dnsserver
+// package's RouteSpec form (raw upstream strings; parsing happens inside
+// SetUpstreamRoutes so a bad spec is rejected before anything swaps).
+func routeSpecs(routes []config.UpstreamRoute) []dnsserver.RouteSpec {
+	specs := make([]dnsserver.RouteSpec, 0, len(routes))
+	for _, rt := range routes {
+		specs = append(specs, dnsserver.RouteSpec{Domain: rt.Domain, Upstreams: rt.Upstreams})
+	}
+	return specs
+}
+
 func buildDHCPRuntime(c config.DHCPConfig) dhcp.Config {
 	_, subnet := parseCIDR(c.Subnet)
 	_, ipv6net := parseCIDR(c.IPv6Prefix)

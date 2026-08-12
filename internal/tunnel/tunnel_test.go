@@ -112,4 +112,3 @@ func TestStartRejectedLeavesUsable(t *testing.T) {
 		t.Fatal("expected token-mode start to fail on the bogus token")
 	}
 }
-

@@ -40,6 +40,17 @@ type Engine struct {
 	allowDomains map[string]struct{}
 	allowExact   map[string]struct{}
 	allowIPs     map[string]struct{}
+	// blockRegex / allowRegex are the compiled AdGuard-style /pattern/ rules
+	// DecideDomain scans (order within a source is preserved; matching scans
+	// them linearly). Compile rebuilds them from the two sources below, so
+	// repeated Compile calls are idempotent: listBlockRegex/listAllowRegex
+	// come from LoadList, userBlockRegex/userAllowRegex from SetUserLists.
+	blockRegex     []RegexRule
+	allowRegex     []RegexRule
+	listBlockRegex []RegexRule
+	listAllowRegex []RegexRule
+	userBlockRegex []RegexRule
+	userAllowRegex []RegexRule
 
 	// domainList tracks which list a domain came from, for reporting.
 	domainList map[string]string // domain -> list ID
@@ -78,6 +89,12 @@ func (e *Engine) Reset() {
 	e.allowDomains = map[string]struct{}{}
 	e.allowExact = map[string]struct{}{}
 	e.allowIPs = map[string]struct{}{}
+	e.blockRegex = nil
+	e.allowRegex = nil
+	e.listBlockRegex = nil
+	e.listAllowRegex = nil
+	e.userBlockRegex = nil
+	e.userAllowRegex = nil
 	e.domainList = map[string]string{}
 	e.listNames = map[string]string{}
 	e.totalBlockedDomains = 0
@@ -90,11 +107,35 @@ func (e *Engine) SetUserLists(blacklist, whitelist []string) {
 	defer e.mu.Unlock()
 	e.userBlacklist = normalizeList(blacklist)
 	e.userWhitelist = normalizeList(whitelist)
+	// /pattern/ entries in the manual lists become regex rules; everything
+	// else stays a domain entry. Rebuilt on every call so Compile is
+	// idempotent.
+	e.userBlockRegex = parseUserRegexes(blacklist)
+	e.userAllowRegex = parseUserRegexes(whitelist)
+}
+
+// parseUserRegexes extracts compiled /pattern/ rules from raw user-list
+// entries (the same check normalizeList uses to keep them verbatim).
+func parseUserRegexes(in []string) []RegexRule {
+	var out []RegexRule
+	for _, s := range in {
+		if rr := parseRegexRule(s, ""); rr != nil {
+			out = append(out, *rr)
+		}
+	}
+	return out
 }
 
 func normalizeList(in []string) []string {
 	out := make([]string, 0, len(in))
 	for _, s := range in {
+		// Regex entries are kept verbatim and compiled in Compile; everything
+		// else must survive splitRule (exceptions are dropped — the user
+		// blacklist/whitelist fields are explicitly one-directional).
+		if parseRegexRule(s, "") != nil {
+			out = append(out, s)
+			continue
+		}
 		if d, exact, exc, ok := splitRule(s); ok && !exc {
 			if exact {
 				out = append(out, "="+d)
@@ -121,8 +162,8 @@ func (e *Engine) LoadList(id, name string, content []byte) (ParseResult, error) 
 	res := parseContent(string(content), id,
 		e.blockDomains, e.blockExact, e.blockIPs,
 		e.allowDomains, e.allowExact, e.allowIPs,
-		e.domainList)
-	e.totalBlockedDomains += res.Domains + res.ExactDomains
+		e.domainList, &e.listBlockRegex, &e.listAllowRegex)
+	e.totalBlockedDomains += res.Domains + res.ExactDomains + res.Regexes
 	e.totalIPRules += res.IPs
 	return res, nil
 }
@@ -131,7 +172,15 @@ func (e *Engine) LoadList(id, name string, content []byte) (ParseResult, error) 
 func (e *Engine) Compile() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	// User whitelist wins: remove matching block entries.
+	// Rebuild the merged regex set from its two sources so a repeated
+	// Compile (without an intervening Reset) doesn't duplicate rules — the
+	// domain sets below are maps and dedupe naturally, the regex slices are
+	// not.
+	e.blockRegex = append(append([]RegexRule(nil), e.listBlockRegex...), e.userBlockRegex...)
+	e.allowRegex = append(append([]RegexRule(nil), e.listAllowRegex...), e.userAllowRegex...)
+	// User whitelist wins: remove matching block entries. Regex entries in
+	// the user lists are handled by parseUserRegexes; splitRule rejects the
+	// '/' lines so they fall through here untouched.
 	for _, d := range e.userWhitelist {
 		domain, exact, _, _ := splitRule(d)
 		if exact {
@@ -190,6 +239,14 @@ func (e *Engine) DecideDomain(qname string) Decision {
 			return Decision{Action: Allow, Reason: "whitelist:" + parent}
 		}
 	}
+	// Whitelist regexes (AdGuard @@/pattern/ exceptions) override block
+	// regexes. RE2 matching is linear-time, so even a long regex list can't
+	// be weaponised into a ReDoS.
+	for _, rr := range e.allowRegex {
+		if rr.Re.MatchString(qname) {
+			return Decision{Action: Allow, Reason: "whitelist:regex"}
+		}
+	}
 
 	// Block exact matches.
 	if _, ok := e.blockExact[qname]; ok {
@@ -206,6 +263,14 @@ func (e *Engine) DecideDomain(qname string) Decision {
 		parent := qname[i+1:]
 		if _, ok := e.blockDomains[parent]; ok {
 			return Decision{Action: Block, Reason: "blocklist:" + parent, ListName: e.listNames[e.domainList[parent]]}
+		}
+	}
+	// Block regexes: matched against the full query name, so a pattern can
+	// target any label (^ads\. matches only the first label, \.ads\. any
+	// label).
+	for _, rr := range e.blockRegex {
+		if rr.Re.MatchString(qname) {
+			return Decision{Action: Block, Reason: "blocklist:regex", ListName: e.listNames[rr.List]}
 		}
 	}
 	return Decision{Action: Allow}
@@ -254,6 +319,7 @@ func (e *Engine) Stats() map[string]int {
 		"blocked_domains": e.totalBlockedDomains,
 		"blocked_exact":   len(e.blockExact),
 		"ip_rules":        e.totalIPRules,
+		"regex_rules":     len(e.blockRegex),
 		"whitelist":       len(e.userWhitelist),
 		"blacklist":       len(e.userBlacklist),
 		"lists":           len(e.listNames),

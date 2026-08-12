@@ -1,6 +1,7 @@
 package filter
 
 import (
+	"regexp"
 	"strings"
 
 	"golang.org/x/net/idna"
@@ -85,4 +86,55 @@ func splitRule(raw string) (domain string, exactOnly bool, isException bool, ok 
 		return "", false, false, false
 	}
 	return domain, exactOnly, isException, true
+}
+
+// RegexRule is a compiled AdGuard-style /pattern/flags blocklist rule. The
+// pattern is matched against the normalized query name (lowercased, no
+// trailing dot), like every other rule form. List carries the list ID for
+// the dashboard's "blocked by" reporting; empty for user blacklist entries.
+type RegexRule struct {
+	Re   *regexp.Regexp
+	List string
+}
+
+// parseRegexRule parses an AdGuard-style regex rule: /pattern/flags, where
+// pattern is a Go (RE2) regular expression and flags one or more of
+// i (case-insensitive), s (dot matches newline) and m (multi-line). The
+// pattern may contain / escaped as \/. Returns nil when the line is not a
+// regex rule, uses an unsupported flag, or the pattern does not compile —
+// a bad rule is skipped rather than failing the whole list.
+func parseRegexRule(raw string, listID string) *RegexRule {
+	line := strings.TrimSpace(raw)
+	// A regex rule must start and end with '/'; "/*" is a comment-style
+	// line some lists use, never a pattern.
+	if len(line) < 3 || line[0] != '/' || strings.HasPrefix(line, "/*") {
+		return nil
+	}
+	// The pattern runs to the last '/'; everything after is flags. A bare
+	// "//" or "///" is not a rule.
+	last := strings.LastIndexByte(line, '/')
+	if last <= 1 {
+		return nil
+	}
+	pattern := line[1:last]
+	if pattern == "" {
+		return nil
+	}
+	inline := ""
+	for _, f := range line[last+1:] {
+		switch f {
+		case 'i', 's', 'm':
+			inline += string(f)
+		default:
+			return nil
+		}
+	}
+	if inline != "" {
+		pattern = "(?" + inline + ")" + pattern
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil
+	}
+	return &RegexRule{Re: re, List: listID}
 }
