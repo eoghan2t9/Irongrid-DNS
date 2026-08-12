@@ -78,6 +78,7 @@ commercial ad-blocking DNS with sub-millisecond local responses.
 - [Built-in updater](#built-in-updater)
 - [Building releases](#building-releases)
 - [Configuration](#configuration)
+- [DHCP server](#dhcp-server)
 - [Recursive resolution (`recursive://`)](#recursive-resolution-recursive)
 - [Fix a broken site](#fix-a-broken-site)
 - [Cloudflare Tunnel (baked in)](#cloudflare-tunnel-baked-in)
@@ -206,7 +207,8 @@ startup service (systemd / launchd / Windows task).
 | | |
 |---|---|
 | ⚡ **Performance** | DragonflyDB-backed response cache (hard requirement), typical answers served in < 1 ms |
-| 🌐 **All protocols** | DNS over **UDP**, **TCP**, **TLS (DoT)**, **HTTPS (DoH, RFC 8484)** and **QUIC (DoQ, RFC 9250)** |
+| 🌐 **All protocols** | DNS over **UDP**, **TCP**, **TLS (DoT)**, **HTTPS (DoH, RFC 8484)**, **HTTP/3 (DoH3, RFC 9114)** and **QUIC (DoQ, RFC 9250)** |
+| 🍪 **DNS cookies** | RFC 7873 server cookies on the public UDP/DoQ listeners — an HMAC-signed server cookie bound to the client IP, with forged cookies answered **BADCOOKIE** to blunt off-path spoofing (`server.cookies`, hot-swappable) |
 | 🧭 **Recursive mode** | `recursive://` upstream resolves from the root servers itself, no forwarder involved — seeded from IANA's authoritative `named.root` (PGP-verified, weekly refresh, offline fallback) |
 | 🛡️ **Blocking** | Hosts files, Adblock syntax (`\\|\\|domain^`, `@@` exceptions), plain domains, wildcards (`*.domain`), regex rules (`/pattern/`), and IP rules |
 | ✅ **Allow list** | Whitelist entries override *any* blocklist, including IP addresses |
@@ -221,10 +223,13 @@ startup service (systemd / launchd / Windows task).
 | 📱 **Android Private DNS** | DoT/DoH on your own domain via the tunnel, with auto-generated or custom TLS certificates |
 | 🐳 **Cross-platform** | Linux, macOS, Windows (single static binary) plus Docker + Dragonfly Compose |
 | 🏠 **Local DNS records** | Answer a domain yourself (`nas.home → 192.168.1.10`) — A/AAAA/CNAME, exact or `*.subtree` wildcard, wins over blocklists and the cache |
+| 🖧 **Built-in DHCP** | Run the LAN's DHCP server (v4 + optional v6): dynamic pool, MAC/DUID-pinned static leases, and client hostnames that resolve in the local DNS (`printer.lan`) with reverse (PTR) answers — dashboard page shows live leases |
+| 🔀 **Split-horizon routes** | `upstream_routes` sends a domain subtree to its own upstream set — e.g. `lan →` your local resolver so internal names never leak to public resolvers; longest match wins, overrides client groups |
 | 👪 **Per-client policy** | Groups matched by client CIDR/IP get their own blocklist subset, extra allow/block entries and (optionally) their own upstreams — first match wins, everyone else uses the global policy |
 | 🚦 **Rate limiting** | Per-client-IP token bucket guards against a compromised LAN device or amplification abuse on a public listener, with fail2ban-style **auto-block**: repeat offenders are refused entirely for a cooldown and listed in the dashboard with one-click unblock |
 | 🌍 **Geo blocking** | Refuse queries from whole countries — per-country CIDR data (ipverse/rir-ip) fetched automatically, no account or API key, with an IP/CIDR allowlist. The same country lists are also installed into the **host firewall** (nftables, or iptables+ipset) so all new inbound traffic from blocked countries is dropped at the packet level |
 | 🔒 **DNSSEC** | Sets the DO bit and can require the upstream's AD bit before trusting an answer — a forwarder-model validation (like Pi-hole/AdGuard Home/dnsmasq), not a local root-of-trust chain |
+| 💾 **Backup & restore** | One click downloads the whole config plus TLS certificates as a zip; restore validates it (zip-slip guarded) and live-applies — safe migrations and rollbacks |
 
 ## Architecture
 
@@ -537,11 +542,49 @@ written automatically on first launch. Key options:
 | `server.web_listen == listen_doh` | Same port + `web_tls` → dashboard and DoH share one HTTPS listener (`https://host`, no port) |
 | `tunnel` | Baked-in cloudflared settings |
 | `rewrites` | Local DNS records (A/AAAA/CNAME) — answered directly, ahead of blocklists and the cache |
+| `dhcp` | Built-in DHCP server for the LAN: `enabled`, `interface` (NIC to serve on, empty = all), `subnet`, `range_start`/`range_end` (dynamic pool), `gateway` (defaults to this host), `dns` (defaults to this host — the point), `lease_time`, `domain` (client hostnames resolve as `<hostname>.<domain>` plus bare `<hostname>` with PTR), `static_leases` (MAC keys DHCPv4, DUID keys DHCPv6), and `ipv6`/`ipv6_prefix`/`ipv6_range_start`/`ipv6_range_end` for stateful DHCPv6 + stateless DNS options |
 | `client_groups` | Per-client policy: CIDR/IP-matched groups with their own blocklist subset, allow/block entries and (optional) upstream override |
 | `rate_limit` | Per-client-IP token bucket: `enabled`, `qps` (sustained), `burst` (must be ≥ `qps`), plus `auto_block` (requires `enabled`), `block_after` (violations), `block_for` (cooldown) for the fail2ban-style auto-block |
 | `geo_block` | Country + client-IP blocking: `enabled`, `countries` (ISO 3166-1 alpha-2, e.g. `RU`, `CN`), `ips` (client IPs/CIDRs that are always blocked regardless of country — e.g. known proxy-exit ranges), `honeypots` (trap domains: any client that queries one — or any subdomain under it, since floods randomise the first label — over a connection-oriented transport — TCP/DoT/DoH/DoQ — is auto-blocked, persisted to `data/geo/blocked-ips.txt` and dropped at the firewall; unblockable in the dashboard. UDP honeypot queries are refused but never auto-block, since UDP sources can be spoofed — unless `trust_udp` is set, which opts into trusting UDP sources on a private network; honeypot traffic is never written to the query log but is counted on the dashboard), `allowlist` (client IPs/CIDRs that always pass), optional `base_url` override for the CIDR data source, and `auto_update` (how often the country lists re-fetch; default `168h`, `0` = never). When enabled, the same country/IP CIDRs are installed into the **host firewall** (nftables when available, otherwise iptables + ipset) as a DROP on all new inbound traffic — run Irongrid as root (or with CAP_NET_ADMIN) for the firewall rules. DoH clients are identified by their `X-Forwarded-For` header only when the direct connection comes from a loopback/private address (a local reverse proxy or the baked-in tunnel) — the header is never trusted from public peers, so geo blocking (and rate limiting) can't be bypassed by spoofing it |
 | `dnssec` | `enabled` sets the DO bit upstream; `require_ad` rejects an answer without the upstream's AD bit as SERVFAIL — trusts an *encrypted* validating upstream rather than validating locally |
 | `abuse` | Free threat-intel reporting: `abuseipdb_key` (free AbuseIPDB account) enables one-click reporting of honeypot-confirmed attacker IPs (DDoS category) from the dashboard's Blocked clients card. CSV export and ⓘ ASN lookups (RIPEstat, no key) are always available |
+
+## DHCP server
+
+Irongrid can run your LAN's DHCP server alongside its DNS — a device that
+leases an address gets Irongrid's own address as its DNS server, with zero
+per-device configuration. Enable it under `dhcp` in the config (or Settings →
+DHCP in the dashboard):
+
+```yaml
+dhcp:
+  enabled: true
+  interface: eth0             # NIC to serve on; empty = all interfaces
+  subnet: 192.168.1.0/24      # IPv4 network served (RFC 2131)
+  range_start: 192.168.1.100
+  range_end: 192.168.1.200    # dynamic pool
+  gateway: 192.168.1.1        # router option; empty = this server's own address
+  lease_time: 24h
+  domain: lan                 # clients resolve as printer.lan and bare printer
+  static_leases:              # fixed addresses that never expire
+    - mac: aa:bb:cc:dd:ee:ff  #   MAC keys DHCPv4
+      ip: 192.168.1.50
+      hostname: printer
+    - duid: 000100011234567890abcdef  #   DUID keys DHCPv6
+      ip: fd00::50
+      hostname: nas
+  ipv6: true                  # also run DHCPv6 (IA_NA + stateless DNS options)
+  ipv6_prefix: fd00::/64
+  ipv6_range_start: fd00::100
+  ipv6_range_end: fd00::200
+```
+
+- **Hostnames resolve automatically** — a client that sends its hostname (or
+  has a static lease) is answerable as `printer.lan` **and** bare `printer`,
+  with reverse (PTR) lookups answered from the lease table.
+- **Live leases** are shown on the dashboard's DHCP page (`GET /api/dhcp/leases`).
+- Run on only the NIC your LAN actually uses (`interface`) when the host has
+  several NICs, so the server never answers on the wrong network.
 
 ## Recursive resolution (`recursive://`)
 
@@ -642,9 +685,13 @@ GET  /api/log/hostnames?ips=a,b,c   reverse-DNS (PTR) names for client IPs, cach
 GET  /api/log/asn?ips=a,b,c   BGP/ISP owner (ASN, registrant, prefix) for client IPs, cached 24h, via free RIPEstat — feeds the query log ISP column and the dashboard blocked-clients card
 DELETE /api/log             clear query log
 GET/POST /api/lists         manage blocklists
+DELETE /api/lists/{id}      remove one blocklist
+GET  /api/lists/{id}/content   view a blocklist's parsed entries
+POST /api/lists/{id}/fetch  refresh one blocklist
 GET  /api/lists/catalog     curated blocklist & allow-list presets (used by the wizard and UI)
 POST /api/lists/refresh     update all lists
 GET/POST /api/filter/{whitelist,blacklist}   allow/block entries
+POST /api/filter/delete     remove an allow/block entry
 POST /api/filter/check      test a domain or IP
 POST /api/filter/site       scan a site's HTML and list the domains it loads that are blocked
 POST /api/tools/resolve     dig-style lookup through chosen sources (local upstreams and/or 1.1.1.1/8.8.8.8/9.9.9.9)
@@ -652,7 +699,9 @@ POST /api/tools/mail        MX/SPF/DKIM/DMARC/CAA for a domain, with SPF issue d
 POST /api/tools/rbl         reputation check of an IPv4 against DNS-based blocklists
 POST /api/tools/axfr        zone-transfer (AXFR) check against a domain's nameservers
 POST /api/tools/subdomains  enumerate a domain's subdomains via crt.sh and flag blocked ones
+POST /api/tools/fastest     benchmark the configured + popular public resolvers (1.1.1.1, 8.8.8.8, …) and report latency percentiles
 POST /api/cache/flush       clear Dragonfly cache
+POST /api/cache/warm        run a cache-warmer pass now (needs warmer enabled)
 GET  /api/rate/blocked      clients currently under an auto-block
 POST /api/rate/unblock      lift an auto-blocked client early
 GET  /api/geo/status        per-country geo data status (ranges, last update, errors) + host-firewall state (backend, active)
@@ -668,8 +717,11 @@ GET/PUT /api/config         read / update the full config (live-apply + restart 
 GET  /api/config/backup     download config + TLS certificates as a zip archive (contains private keys — treat like a key file)
 POST /api/config/restore    restore a backup archive: validated (zip-slip guarded, only cert file types), live-applied like a config save, restart notes returned
 POST /api/config/reload     apply listener/cache/TLS/upstream changes in-process (no restart)
+GET  /api/dhcp/leases       live DHCPv4/v6 leases + static reservations (built-in DHCP server)
 GET  /api/diag/dns?name=…   resolve through your upstreams
 GET  /api/update/check      check GitHub Releases for a newer version + changelog
+GET  /api/update/changelog  changelog for the newest release
+POST /api/update/install    download + install the newest release (native installs)
 GET  /api/tls               current certificate details (subject, SANs, expiry, fingerprint)
 POST /api/tls/generate      generate a self-signed cert (hosts, key type/bits, validity) and apply it
 POST /api/tls/upload        upload a CA-signed cert + key pair and apply it
