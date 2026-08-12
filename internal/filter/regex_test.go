@@ -53,12 +53,14 @@ func TestRegexBlocklistRules(t *testing.T) {
 // regex and classic domain rules) — matching AdGuard's exception semantics.
 func TestRegexExceptions(t *testing.T) {
 	e := NewEngine()
-	e.LoadList("re2", "Regex list", []byte(strings.Join([]string{
+	if _, err := e.LoadList("re2", "Regex list", []byte(strings.Join([]string{
 		"/ads\\./",         // blocks any name containing "ads."
 		"@@/^allowed\\./",  // whitelists names starting with "allowed."
 		"@@/^keep\\./",     // whitelist regex that beats a classic block rule
 		"keep.example.com", // classic subtree block
-	}, "\n")))
+	}, "\n"))); err != nil {
+		t.Fatal(err)
+	}
 	e.Compile()
 
 	cases := []struct {
@@ -99,7 +101,9 @@ func TestRegexUserLists(t *testing.T) {
 	}
 	// A whitelist regex overrides a blocklist regex for the same name.
 	e2 := NewEngine()
-	e2.LoadList("l", "L", []byte("/^keep\\./"))
+	if _, err := e2.LoadList("l", "L", []byte("/^keep\\./")); err != nil {
+		t.Fatal(err)
+	}
 	e2.SetUserLists(nil, []string{"/^keep\\./"})
 	e2.Compile()
 	if d := e2.DecideDomain("keep.example.com."); d.Action != Allow {

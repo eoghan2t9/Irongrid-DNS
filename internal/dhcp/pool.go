@@ -6,15 +6,8 @@ import (
 	"time"
 )
 
-// poolOf returns the dynamic pool for a family (nil when not configured).
-// Takes the read lock.
-func (s *Server) poolOf(v6 bool) (start, end net.IP) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.poolOfLocked(v6)
-}
-
-// poolOfLocked is poolOf without locking (callers hold mu).
+// poolOfLocked returns the dynamic pool for a family (nil when not
+// configured). Callers hold mu.
 func (s *Server) poolOfLocked(v6 bool) (start, end net.IP) {
 	if v6 {
 		if !s.cfg.IPv6 {
@@ -305,28 +298,6 @@ func (s *Server) commitLocked(l *Lease) {
 	s.byIP[l.IP] = l
 	s.rebuildHostsLocked()
 	s.markDirtyLocked()
-}
-
-// extendLease refreshes a committed lease's expiry (RENEW/REBIND, REQUEST for
-// an already-leased address).
-func (s *Server) extendLease(key leaseKey, ip net.IP, hostname string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	l := s.leases[key]
-	if l == nil || l.IP != ip.String() {
-		return false
-	}
-	if l.Static {
-		return true
-	}
-	l.Expires = time.Now().Add(s.leaseTimeLocked())
-	if hostname != "" {
-		l.Hostname = hostname
-	}
-	delete(s.reserved, ip.String())
-	s.rebuildHostsLocked()
-	s.markDirtyLocked()
-	return true
 }
 
 // releaseLease frees a client's lease for the given address (DHCPRELEASE /

@@ -33,9 +33,6 @@ const (
 	offeredHold = 90 * time.Second
 	// declinedHold is how long a DECLINEd address is withheld from the pool.
 	declinedHold = 30 * time.Minute
-	// minLeaseTime floors the lease a client can request (RFC 2131 §4.4.5
-	// suggests rejecting sub-minute leases).
-	minLeaseTime = 60 * time.Second
 	// v6Preferred is the preferred lifetime advertised on IA_NA addresses
 	// (0.5 * valid).
 	v6PreferredFraction = 2
@@ -166,7 +163,6 @@ type Server struct {
 	ptr        map[string]string // address.String() -> hostname, for reverse lookups
 	reserved   map[string]reservation
 	cursor4    uint32
-	cursor6    uint32
 	serverDUID dhcpv6.DUID
 	v4srv      *server4.Server
 	v6srv      *server6.Server
@@ -237,7 +233,7 @@ func (s *Server) Start() error {
 	s.mu.Lock()
 	// A disabled server must never bind, even if a subnet is still in the
 	// config — the operator's enable flag is authoritative.
-	if !s.cfg.Enabled || !(s.cfg.Subnet != nil || (s.cfg.IPv6 && s.cfg.IPv6Prefix != nil)) {
+	if !s.cfg.Enabled || (s.cfg.Subnet == nil && (!s.cfg.IPv6 || s.cfg.IPv6Prefix == nil)) {
 		s.mu.Unlock()
 		return nil
 	}
