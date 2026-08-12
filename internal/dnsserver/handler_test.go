@@ -64,7 +64,12 @@ func (f *fakeWriter) RemoteAddr() net.Addr {
 	return &net.UDPAddr{IP: ip, Port: 12345}
 }
 func (f *fakeWriter) WriteMsg(m *dns.Msg) error {
-	f.msg = m
+	// Copy, not alias: a real WriteMsg implementation packs m into its own
+	// []byte synchronously and never touches m again (see msgpool.go) — the
+	// handler is therefore free to recycle m immediately after this call
+	// returns. Aliasing here would make fw.msg vulnerable to exactly that
+	// recycling, which a real consumer never observes.
+	f.msg = m.Copy()
 	return nil
 }
 func (f *fakeWriter) Write(b []byte) (int, error) { return len(b), nil }
@@ -1259,6 +1264,78 @@ func TestHandlerCacheWriteDoesNotBlockResponse(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatal("cached entry never appeared after the response was written")
+}
+
+// TestHandlerCacheHitPoolConcurrency hammers the cache-hit path (the
+// highest-value site pooled via msgPool/getMsg/putMsg) from many goroutines
+// at once. A single-threaded test can't exercise cross-goroutine pool
+// reuse; this gives `go test -race` a real chance to catch a Get/Put
+// correctness bug (a response written from a message another goroutine has
+// already recycled, or a race on the pooled object itself) while also
+// asserting every response is still well-formed.
+func TestHandlerCacheHitPoolConcurrency(t *testing.T) {
+	addr := startUDPTestServer(t, "203.0.113.7", 0)
+	c := cache.NewLocalOnly(time.Hour, time.Minute, 512, 0)
+	h := NewHandler(filter.NewEngine(), c, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: addr},
+	}, nil, "nxdomain", 600, 5*time.Second)
+
+	// Prime the cache with one real resolution, then wait until it's
+	// actually visible in the cache before firing concurrent queries — a
+	// query that instead falls through to live upstream resolution hands
+	// its (deliberately unpooled) resp to a background cache-write
+	// goroutine and keeps no synchronization with the caller, so reading
+	// that response after ServeDNS returns would itself race the
+	// goroutine — a pre-existing characteristic of the write path (see the
+	// "resp is deliberately never put into msgPool" comment in handler.go),
+	// not something this test is meant to exercise. Waiting for the cache
+	// to converge, exactly like TestHandlerCacheWriteDoesNotBlockResponse
+	// does, keeps every concurrent query on the pooled cache-hit path.
+	primeQ := dns.Question{Name: "pool-concurrency.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	prime := new(dns.Msg)
+	prime.SetQuestion(primeQ.Name, primeQ.Qtype)
+	primeFW := &fakeWriter{}
+	h.ServeDNS(primeFW, prime)
+	if primeFW.msg == nil || len(primeFW.msg.Answer) == 0 {
+		t.Fatalf("priming query failed: %v", primeFW.msg)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got := c.Get(context.Background(), primeQ); got != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	const goroutines = 32
+	const perGoroutine = 50
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < perGoroutine; j++ {
+				m := new(dns.Msg)
+				m.SetQuestion("pool-concurrency.example.com.", dns.TypeA)
+				fw := &fakeWriter{}
+				h.ServeDNS(fw, m)
+				if fw.msg == nil || fw.msg.Rcode != dns.RcodeSuccess {
+					t.Errorf("unexpected response: %v", fw.msg)
+					return
+				}
+				if len(fw.msg.Answer) != 1 {
+					t.Errorf("expected exactly 1 answer RR, got %d: %v", len(fw.msg.Answer), fw.msg)
+					return
+				}
+				a, ok := fw.msg.Answer[0].(*dns.A)
+				if !ok || a.A.String() != "203.0.113.7" {
+					t.Errorf("unexpected answer RR: %v", fw.msg.Answer[0])
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // TestHandlerServeStale verifies RFC 8767 serve-stale end to end: an answer

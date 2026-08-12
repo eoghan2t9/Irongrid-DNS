@@ -455,10 +455,11 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	h.mu.RUnlock()
 
 	if r == nil || len(r.Question) == 0 {
-		m := new(dns.Msg)
+		m := getMsg()
 		m.Response = true
 		m.Rcode = dns.RcodeFormatError
 		_ = h.write(w, m, r, proto)
+		putMsg(m)
 		return
 	}
 
@@ -483,8 +484,11 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 				!strings.EqualFold(reqCookie[:2*clientCookieHexLen], expected) {
 				m := newReply(r)
 				m.Rcode = dns.RcodeBadCookie
-				// Attach the correct cookie so the client can retry with it.
-				_ = h.write(w, attachCookie(m, expected), r, proto)
+				// attachCookie returns a fresh Copy(), so m itself is unused
+				// the moment it returns — safe to putMsg right after.
+				out := attachCookie(m, expected)
+				putMsg(m)
+				_ = h.write(w, out, r, proto)
 				return
 			}
 		}
@@ -500,10 +504,11 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		if proto == "udp" {
 			return
 		}
-		refused := new(dns.Msg)
+		refused := getMsg()
 		refused.SetReply(r)
 		refused.Rcode = dns.RcodeRefused
 		_ = h.write(w, refused, r, proto)
+		putMsg(refused)
 		return
 	}
 
@@ -525,11 +530,12 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			if bannerBlocked {
 				action, reason = "ip-blocked", "blocked-client"
 			}
-			refused := new(dns.Msg)
+			refused := getMsg()
 			refused.SetReply(r)
 			refused.Rcode = dns.RcodeRefused
 			h.record(client, qname, q, action, reason, "", start, refused)
 			_ = h.write(w, refused, r, proto)
+			putMsg(refused)
 			return
 		}
 	}
@@ -564,10 +570,11 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		}
 		h.Stats.Blocked.Add(1)
 		h.Stats.Honeypot.Add(1)
-		refused := new(dns.Msg)
+		refused := getMsg()
 		refused.SetReply(r)
 		refused.Rcode = dns.RcodeRefused
 		_ = h.write(w, refused, r, proto)
+		putMsg(refused)
 		return
 	}
 
@@ -589,6 +596,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			m := newReply(r)
 			h.record(client, qname, q, "rewrite", "local-dns-nodata", "", start, m)
 			_ = h.write(w, m, r, proto)
+			putMsg(m)
 			return
 		}
 	}
@@ -602,7 +610,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	//     an AAAA). Short TTL so a hostname change propagates within minutes.
 	if h.DHCPHosts != nil {
 		if ips, ok := h.DHCPHosts.LookupHost(q.Name); ok && len(ips) > 0 {
-			m := new(dns.Msg)
+			m := getMsg()
 			m.SetReply(r)
 			m.Authoritative = true
 			for _, ip := range ips {
@@ -620,6 +628,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 				h.record(client, qname, q, "rewrite", "dhcp-host-nodata", "", start, m)
 			}
 			_ = h.write(w, m, r, proto)
+			putMsg(m)
 			return
 		}
 		// 1.6 DHCP reverse lookups: a PTR query for a leased address answers
@@ -631,7 +640,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		if q.Qtype == dns.TypePTR {
 			if ip := reverseNameIP(q.Name); ip != nil {
 				if host, ok := h.DHCPHosts.LookupPTR(ip.String()); ok {
-					m := new(dns.Msg)
+					m := getMsg()
 					m.SetReply(r)
 					m.Authoritative = true
 					m.Answer = append(m.Answer, &dns.PTR{
@@ -641,6 +650,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 					h.Stats.Allowed.Add(1)
 					h.record(client, qname, q, "rewrite", "dhcp-host-ptr", "", start, m)
 					_ = h.write(w, m, r, proto)
+					putMsg(m)
 					return
 				}
 			}
@@ -702,6 +712,10 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			}
 			h.record(client, qname, q, "cached", reason, "", start, hit.Msg)
 			_ = h.write(w, hit.Msg, r, proto)
+			// cache.Lookup always does a fresh Unpack on read and never
+			// retains what it hands back (unlike resp, below), so it's safe
+			// to recycle once write() returns.
+			putMsg(hit.Msg)
 			return
 		}
 		if hit.Msg != nil {
@@ -756,6 +770,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		h.Stats.Cached.Add(1)
 		h.record(client, qname, q, "cached", "stale", usedUp, start, stale)
 		_ = h.write(w, stale, r, proto)
+		putMsg(stale) // fresh per-read unpack from the cache, safe once written
 		return
 	}
 	if err != nil || resp == nil {
@@ -773,9 +788,14 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			h.Stats.Cached.Add(1)
 			h.record(client, qname, q, "cached", "stale", usedUp, start, stale)
 			_ = h.write(w, stale, r, proto)
+			putMsg(stale) // fresh per-read unpack from the cache, safe once written
 			return
 		}
 		h.Stats.Errors.Add(1)
+		// Not putMsg'd: when cache != nil this is handed unmodified into a
+		// background cache.SetNegative goroutine below, and serve() returns
+		// without waiting for it — recycling m here would race that
+		// goroutine. See msgpool.go's doc comment.
 		m := newReply(r)
 		m.Rcode = dns.RcodeServerFailure
 		errStr := "no upstream available"
@@ -821,6 +841,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		m.Rcode = dns.RcodeServerFailure
 		h.record(client, qname, q, "error", "dnssec: upstream did not authenticate the answer", usedUp, start, m)
 		_ = h.write(w, m, r, proto)
+		putMsg(m)
 		return
 	}
 
@@ -851,6 +872,10 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		}
 	}
 
+	// resp is deliberately never put into msgPool: when caching is on it's
+	// handed unmodified into the background goroutine below, which keeps
+	// reading/mutating/Pack()-ing it after serve() has already returned —
+	// recycling it here would race that goroutine. See msgpool.go.
 	h.Stats.Allowed.Add(1)
 	h.record(client, qname, q, "allowed", "", usedUp, start, resp)
 	_ = h.write(w, resp, r, proto)
@@ -1085,8 +1110,13 @@ func (h *Handler) write(w dns.ResponseWriter, m *dns.Msg, r *dns.Msg, proto stri
 // copied, Response and RA set. It is allocated lazily — the fast paths (cache
 // hit, blocklist, rewrite answer, successful upstream resolution) never pay
 // for it, and most queries are served from one of those.
+//
+// It draws its *dns.Msg from msgPool, which is safe for every caller — Get
+// never has a safety concern, only Put does. Whether a given caller may also
+// putMsg it back afterward depends on that call site's own lifetime; see the
+// safety comment at each one.
 func newReply(r *dns.Msg) *dns.Msg {
-	m := new(dns.Msg)
+	m := getMsg()
 	m.SetReply(r)
 	m.RecursionAvailable = true
 	return m
