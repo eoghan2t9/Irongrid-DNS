@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast'
+import { EmptyState } from './ui'
 import SiteScanner from './SiteScanner'
 
 const PAGE_SIZE = 50
@@ -21,9 +22,7 @@ function ListCard({ k, items, onRemove }) {
   return (
     <div className="card table-card">
       <div className="row-between">
-        <h3 style={{ margin: 0 }}>
-          {isAllow ? 'Allow list — always resolves' : 'Block list — always blocked'}
-        </h3>
+        <h3 style={{ margin: 0 }}>{isAllow ? 'Allow list — always resolves' : 'Block list — always blocked'}</h3>
         <span className="chip">{total.toLocaleString()} entries</span>
       </div>
       <p className="dim small">
@@ -32,7 +31,14 @@ function ListCard({ k, items, onRemove }) {
           : 'Manual deny entries with the same syntax as blocklists (domains, wildcards, IPs).'}
       </p>
       {total === 0 ? (
-        <div className="empty">Nothing here yet.</div>
+        <EmptyState
+          title={isAllow ? 'Allow list is empty' : 'Block list is empty'}
+          body={
+            isAllow
+              ? 'Domains added above override every blocklist — handy for false positives.'
+              : 'Add a domain above to always refuse it, using the same syntax as blocklists.'
+          }
+        />
       ) : (
         <>
           <table className="table">
@@ -47,7 +53,9 @@ function ListCard({ k, items, onRemove }) {
               {slice.map((it, i) => (
                 <tr key={it}>
                   <td className="mono dim num-col">{start + i + 1}</td>
-                  <td className="entry-cell" title={it}>{it}</td>
+                  <td className="entry-cell" title={it}>
+                    {it}
+                  </td>
                   <td className="action-col">
                     <button
                       className="btn danger ghost small"
@@ -67,7 +75,9 @@ function ListCard({ k, items, onRemove }) {
               <button className="btn small" disabled={cur === 0} onClick={() => setPage(cur - 1)}>
                 ← Prev
               </button>
-              <span className="dim small">Page {cur + 1} / {pages}</span>
+              <span className="dim small">
+                Page {cur + 1} / {pages}
+              </span>
               <button className="btn small" disabled={cur >= pages - 1} onClick={() => setPage(cur + 1)}>
                 Next →
               </button>
@@ -96,10 +106,13 @@ export default function Lists() {
     setBlacklist(b.blacklist || [])
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    load()
+  }, [load])
 
   useEffect(() => {
-    api.catalog()
+    api
+      .catalog()
       .then((c) => setWhitelistPresets(c.whitelists || []))
       .catch(() => {})
   }, [])
@@ -107,7 +120,10 @@ export default function Lists() {
   const addPreset = async (p) => {
     const existing = new Set(whitelist)
     const fresh = (p.domains || []).filter((d) => !existing.has(d))
-    if (fresh.length === 0) { toast(`"${p.name}" domains are already on the allow list.`); return }
+    if (fresh.length === 0) {
+      toast(`"${p.name}" domains are already on the allow list.`)
+      return
+    }
     try {
       for (const d of fresh) await api.addFilterEntry('whitelist', d)
       toast(`Added ${fresh.length} domains from "${p.name}" to the allow list.`)
@@ -151,8 +167,6 @@ export default function Lists() {
     }
   }
 
-
-
   return (
     <div className="stack">
       <div className="card">
@@ -168,52 +182,57 @@ export default function Lists() {
             value={entry}
             onChange={(e) => setEntry(e.target.value)}
           />
-          <button className="btn primary" type="submit">Add</button>
+          <button className="btn primary" type="submit">
+            Add
+          </button>
         </form>
       </div>
 
-      {whitelistPresets.length > 0 && (() => {
-        const q = presetSearch.trim().toLowerCase()
-        const filtered = whitelistPresets.filter((p) => {
-          if (!q) return true
-          return p.name.toLowerCase().includes(q) || (p.description || '').toLowerCase().includes(q)
-        })
-        return (
-          <div className="card">
-            <h3>Pre-made allow lists</h3>
-            <p className="dim small">One click adds a curated set of domains to the Allow list (they override every blocklist).</p>
-            <div className="preset-filters">
-              <input
-                className="input"
-                placeholder="Search name or description…"
-                value={presetSearch}
-                onChange={(e) => setPresetSearch(e.target.value)}
-              />
-            </div>
-            <div className="preset-list">
-              {filtered.map((p) => {
-                const domains = p.domains || []
-                const allAdded = domains.length > 0 && domains.every((d) => whitelist.includes(d))
-                return (
-                  <div className={`preset-row ${allAdded ? 'added' : ''}`} key={p.id}>
-                    <div className="preset-info">
-                      <div className="preset-name">
-                        {p.name}
-                        <span className="chip">{domains.length} domains</span>
+      {whitelistPresets.length > 0 &&
+        (() => {
+          const q = presetSearch.trim().toLowerCase()
+          const filtered = whitelistPresets.filter((p) => {
+            if (!q) return true
+            return p.name.toLowerCase().includes(q) || (p.description || '').toLowerCase().includes(q)
+          })
+          return (
+            <div className="card">
+              <h3>Pre-made allow lists</h3>
+              <p className="dim small">
+                One click adds a curated set of domains to the Allow list (they override every blocklist).
+              </p>
+              <div className="preset-filters">
+                <input
+                  className="input"
+                  placeholder="Search name or description…"
+                  value={presetSearch}
+                  onChange={(e) => setPresetSearch(e.target.value)}
+                />
+              </div>
+              <div className="preset-list">
+                {filtered.map((p) => {
+                  const domains = p.domains || []
+                  const allAdded = domains.length > 0 && domains.every((d) => whitelist.includes(d))
+                  return (
+                    <div className={`preset-row ${allAdded ? 'added' : ''}`} key={p.id}>
+                      <div className="preset-info">
+                        <div className="preset-name">
+                          {p.name}
+                          <span className="chip">{domains.length} domains</span>
+                        </div>
+                        {p.description && <div className="preset-desc">{p.description}</div>}
                       </div>
-                      {p.description && <div className="preset-desc">{p.description}</div>}
+                      <button className="btn small" disabled={allAdded} onClick={() => addPreset(p)}>
+                        {allAdded ? '✓ Added' : '+ Add'}
+                      </button>
                     </div>
-                    <button className="btn small" disabled={allAdded} onClick={() => addPreset(p)}>
-                      {allAdded ? '✓ Added' : '+ Add'}
-                    </button>
-                  </div>
-                )
-              })}
-              {filtered.length === 0 && <div className="empty">No presets match "{presetSearch}".</div>}
+                  )
+                })}
+                {filtered.length === 0 && <div className="empty">No presets match "{presetSearch}".</div>}
+              </div>
             </div>
-          </div>
-        )
-      })()}
+          )
+        })()}
 
       <div className="card">
         <h3>Test a domain or IP</h3>
@@ -224,7 +243,9 @@ export default function Lists() {
             value={checkName}
             onChange={(e) => setCheckName(e.target.value)}
           />
-          <button className="btn" type="submit">Check</button>
+          <button className="btn" type="submit">
+            Check
+          </button>
         </form>
         {checkResult && (
           <div className={`check-result ${checkResult.blocked ? 'check-blocked' : 'check-allowed'}`}>

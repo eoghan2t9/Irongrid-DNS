@@ -74,6 +74,8 @@ describe('Lists', () => {
     renderLists()
 
     expect(await screen.findByText('bad.example.com')).toBeInTheDocument()
-    expect(screen.getByText('Nothing here yet.')).toBeInTheDocument()
+    // The empty allow list renders the friendly empty state (title only —
+    // the body copy explains what belongs there).
+    expect(screen.getByText('Allow list is empty')).toBeInTheDocument()
   })
 })

@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
+import { EmptyState } from './ui'
 
 export default function Dhcp() {
   const [data, setData] = useState(null)
@@ -14,7 +15,9 @@ export default function Dhcp() {
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    load()
+  }, [load])
 
   // Poll every 10s so a lease table changes on its own (new device boots,
   // lease expires, hostname registers) without a manual refresh.
@@ -56,11 +59,15 @@ export default function Dhcp() {
 
   const table = (title, rows) => (
     <div className="card" key={title}>
-      <h3>{title} <span className="dim small">({rows.length})</span></h3>
+      <h3>
+        {title} <span className="dim small">({rows.length})</span>
+      </h3>
       {rows.length === 0 ? (
-        <p className="dim small">
-          No {title.toLowerCase()} leases yet — devices that request an address from this server appear here.
-        </p>
+        <EmptyState
+          compact
+          title={`No ${title.toLowerCase()} leases yet`}
+          body="Devices that request an address from this server appear here automatically."
+        />
       ) : (
         <table className="table">
           <thead>
@@ -82,12 +89,7 @@ export default function Dhcp() {
       <div className="card">
         <div className="row-between">
           <h3 style={{ margin: 0 }}>DHCP server</h3>
-          <span
-            className="badge"
-            style={enabled
-              ? { background: 'rgba(46, 204, 113, 0.12)', borderColor: 'rgba(46, 204, 113, 0.35)', color: 'var(--emerald)' }
-              : { background: 'rgba(217, 154, 27, 0.12)', borderColor: 'rgba(217, 154, 27, 0.35)', color: 'var(--amber)' }}
-          >
+          <span className={`badge ${enabled ? 'badge-allowed' : 'badge-warn'}`}>
             {enabled ? 'enabled' : 'disabled'}
           </span>
         </div>
@@ -97,23 +99,24 @@ export default function Dhcp() {
           <p className="dim small" style={{ marginTop: 8 }}>
             {enabled ? (
               <>
-                Leases handed out by the built-in server. Client hostnames registered here are
-                resolvable in the local DNS — <span className="mono">hostname</span> and{' '}
-                <span className="mono">hostname.domain</span> both answer, and PTR reverse lookups
-                answer with the client's name so logs show names, not addresses (Pi-hole style).
-                Configure the pool, reservations and options under <strong>Settings → DHCP server</strong>.
+                Leases handed out by the built-in server. Client hostnames registered here are resolvable in the local
+                DNS — <span className="mono">hostname</span> and <span className="mono">hostname.domain</span> both
+                answer, and PTR reverse lookups answer with the client's name so logs show names, not addresses (Pi-hole
+                style). Configure the pool, reservations and options under <strong>Settings → DHCP server</strong>.
               </>
             ) : (
               <>
                 The built-in DHCP server is <strong>off</strong>. Enable it under{' '}
-                <strong>Settings → DHCP server</strong> to hand out addresses from a pool, keep
-                static reservations, and make client hostnames resolvable in the local DNS.
+                <strong>Settings → DHCP server</strong> to hand out addresses from a pool, keep static reservations, and
+                make client hostnames resolvable in the local DNS.
               </>
             )}
           </p>
         )}
         <div className="quick-actions" style={{ marginTop: 8 }}>
-          <button className="btn small" onClick={load}>Refresh leases</button>
+          <button className="btn small" onClick={load}>
+            Refresh leases
+          </button>
         </div>
       </div>
 

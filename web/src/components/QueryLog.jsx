@@ -1,12 +1,24 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api'
+import { EmptyState } from './ui'
 
 const fmtTime = (iso) => {
   const d = new Date(iso)
-  return d.toLocaleTimeString([], { hour12: false }) + ' ' + d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+  return (
+    d.toLocaleTimeString([], { hour12: false }) + ' ' + d.toLocaleDateString([], { month: 'short', day: 'numeric' })
+  )
 }
 
-const ACTION_LABEL = { allowed: 'Allowed', blocked: 'Blocked', cached: 'Cached', error: 'Error', rewrite: 'Local DNS', 'geo-blocked': 'Geo-blocked', 'ip-blocked': 'IP-blocked', honeypot: 'Honeypot' }
+const ACTION_LABEL = {
+  allowed: 'Allowed',
+  blocked: 'Blocked',
+  cached: 'Cached',
+  error: 'Error',
+  rewrite: 'Local DNS',
+  'geo-blocked': 'Geo-blocked',
+  'ip-blocked': 'IP-blocked',
+  honeypot: 'Honeypot',
+}
 
 export default function QueryLog() {
   const [entries, setEntries] = useState([])
@@ -19,6 +31,9 @@ export default function QueryLog() {
   const [client, setClient] = useState(() => new URLSearchParams(window.location.search).get('client') || '')
   const [autoRefresh, setAutoRefresh] = useState(true)
   const [busy, setBusy] = useState(false)
+  // The domain filter input, so the global / shortcut can jump straight to
+  // it (the App shell dispatches 'irongrid:focus-log-search').
+  const domainRef = useRef(null)
   // Reverse-DNS names and BGP/ISP owner info for the client IPs on this
   // page, resolved lazily via /api/log/hostnames + /api/log/asn (both
   // server-cached) and dropped when a client scrolls out of the loaded
@@ -33,7 +48,8 @@ export default function QueryLog() {
     const ips = [...new Set(entries.map((e) => e.client).filter(Boolean))].slice(0, 40)
     if (!ips.length) return
     let live = true
-    api.hostnames(ips)
+    api
+      .hostnames(ips)
       .then((res) => {
         if (!live) return
         const names = res.hostnames || {}
@@ -44,7 +60,8 @@ export default function QueryLog() {
         })
       })
       .catch(() => {})
-    api.asnInfo(ips)
+    api
+      .asnInfo(ips)
       .then((res) => {
         if (!live) return
         const infos = res.asn || {}
@@ -55,7 +72,9 @@ export default function QueryLog() {
         })
       })
       .catch(() => {})
-    return () => { live = false }
+    return () => {
+      live = false
+    }
   }, [entries])
 
   const load = useCallback(async () => {
@@ -109,6 +128,18 @@ export default function QueryLog() {
     window.history.replaceState(null, '', u)
   }
 
+  // The global / shortcut lands here: focus the domain filter and select its
+  // current text so typing replaces the old filter.
+  useEffect(() => {
+    const onFocus = () => {
+      if (!domainRef.current) return
+      domainRef.current.focus()
+      domainRef.current.select()
+    }
+    window.addEventListener('irongrid:focus-log-search', onFocus)
+    return () => window.removeEventListener('irongrid:focus-log-search', onFocus)
+  }, [])
+
   const clearLog = async () => {
     if (!confirm('Clear the entire query log?')) return
     await api.clearLog()
@@ -130,6 +161,7 @@ export default function QueryLog() {
             <option value="rewrite">Local DNS</option>
           </select>
           <input
+            ref={domainRef}
             className="input"
             placeholder="Filter by domain…"
             value={domain}
@@ -152,14 +184,41 @@ export default function QueryLog() {
             <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
             Live
           </label>
-          <button className="btn ghost" onClick={load} aria-label="Refresh query log">⟳</button>
-          <button className="btn danger ghost" onClick={clearLog}>Clear</button>
+          <button className="btn ghost" onClick={load} aria-label="Refresh query log">
+            ⟳
+          </button>
+          <button className="btn danger ghost" onClick={clearLog}>
+            Clear
+          </button>
         </div>
       </div>
 
       <div className="card table-card">
         {entries.length === 0 ? (
-          <div className="empty">No queries recorded yet. Send a DNS query to your server.</div>
+          <EmptyState
+            icon={
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <line x1="8" y1="6" x2="21" y2="6" />
+                <line x1="8" y1="12" x2="21" y2="12" />
+                <line x1="8" y1="18" x2="21" y2="18" />
+                <line x1="3" y1="6" x2="3.01" y2="6" />
+                <line x1="3" y1="12" x2="3.01" y2="12" />
+                <line x1="3" y1="18" x2="3.01" y2="18" />
+              </svg>
+            }
+            title="No queries yet"
+            body="Queries appear here the moment your server answers one — try a site on your network or run nslookup from a device pointed at this server."
+          />
         ) : (
           <table className="table">
             <thead>
@@ -180,19 +239,30 @@ export default function QueryLog() {
                   <td className="mono dim">{fmtTime(e.time)}</td>
                   <td>
                     <div className="mono">{e.client}</div>
-                    {hosts[e.client] && <div className="dim small client-host" title={hosts[e.client]}>{hosts[e.client]}</div>}
+                    {hosts[e.client] && (
+                      <div className="dim small client-host" title={hosts[e.client]}>
+                        {hosts[e.client]}
+                      </div>
+                    )}
                   </td>
                   <td className="dim small">
                     {asns[e.client]?.asn ? (
-                      <span className="client-host" title={`${asns[e.client].asn} · ${asns[e.client].holder || asns[e.client].name || ''}${asns[e.client].prefix ? ` · ${asns[e.client].prefix}` : ''}`}>
+                      <span
+                        className="client-host"
+                        title={`${asns[e.client].asn} · ${asns[e.client].holder || asns[e.client].name || ''}${asns[e.client].prefix ? ` · ${asns[e.client].prefix}` : ''}`}
+                      >
                         {asns[e.client].asn} · {asns[e.client].holder || asns[e.client].name}
                       </span>
                     ) : (
                       <span className="dim">—</span>
                     )}
                   </td>
-                  <td className="domain-cell" title={e.domain}>{e.domain}</td>
-                  <td><span className="chip">{e.type}</span></td>
+                  <td className="domain-cell" title={e.domain}>
+                    {e.domain}
+                  </td>
+                  <td>
+                    <span className="chip">{e.type}</span>
+                  </td>
                   <td>
                     <span className={`badge badge-${e.action}`}>{ACTION_LABEL[e.action] || e.action}</span>
                   </td>

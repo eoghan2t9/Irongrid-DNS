@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api'
+import { EmptyState } from './ui'
 
 const fmt = (n) => (n ?? 0).toLocaleString()
 
@@ -22,10 +23,14 @@ export default function Dashboard({ onNavigate }) {
     }
     try {
       setTls(await api.tlsStatus())
-    } catch { /* optional */ }
+    } catch {
+      /* optional */
+    }
     try {
       setStatus(await api.status())
-    } catch { /* optional */ }
+    } catch {
+      /* optional */
+    }
   }, [])
 
   useEffect(() => {
@@ -48,10 +53,21 @@ export default function Dashboard({ onNavigate }) {
   // One config fetch on mount drives the setup checklist — the config is
   // tiny and the dashboard is the natural place a first-time operator lands.
   useEffect(() => {
-    api.config().then(setSetupConfig).catch(() => {})
+    api
+      .config()
+      .then(setSetupConfig)
+      .catch(() => {})
   }, [])
 
-  if (!stats) return <div className="card loading">Loading dashboard…</div>
+  // The ⌘K palette's "Refresh everything" action pokes the dashboard to
+  // reload immediately instead of waiting for the next 10s tick.
+  useEffect(() => {
+    const onRefresh = () => load()
+    window.addEventListener('irongrid:refresh-dashboard', onRefresh)
+    return () => window.removeEventListener('irongrid:refresh-dashboard', onRefresh)
+  }, [load])
+
+  if (!stats) return <DashboardSkeleton />
 
   const c = stats.counters || {}
   const q = stats.query || {}
@@ -80,17 +96,31 @@ export default function Dashboard({ onNavigate }) {
   return (
     <div className="stack">
       {error && <div className="error-banner">{error}</div>}
-      {checklist && (
-        <SetupChecklist items={checklist} onNavigate={onNavigate} />
-      )}
+      {checklist && <SetupChecklist items={checklist} onNavigate={onNavigate} />}
       {certExpired && (
-        <div className="error-banner" role="button" tabIndex={0} onClick={() => onNavigate('tls')} onKeyDown={(e) => e.key === 'Enter' && onNavigate('tls')} style={{ cursor: 'pointer' }}>
-          ⚠ The TLS certificate has <strong>expired</strong> — DoT/DoH/DoQ clients will fail. Generate a new one, upload a CA cert, or renew via Let's Encrypt on the <strong>SSL / TLS</strong> page.
+        <div
+          className="error-banner"
+          role="button"
+          tabIndex={0}
+          onClick={() => onNavigate('tls')}
+          onKeyDown={(e) => e.key === 'Enter' && onNavigate('tls')}
+          style={{ cursor: 'pointer' }}
+        >
+          ⚠ The TLS certificate has <strong>expired</strong> — DoT/DoH/DoQ clients will fail. Generate a new one, upload
+          a CA cert, or renew via Let's Encrypt on the <strong>SSL / TLS</strong> page.
         </div>
       )}
       {certExpiring && !certExpired && (
-        <div className="info-banner" role="button" tabIndex={0} onClick={() => onNavigate('tls')} onKeyDown={(e) => e.key === 'Enter' && onNavigate('tls')} style={{ cursor: 'pointer' }}>
-          ⚠ The TLS certificate expires in <strong>{cert.expires_in_days} days</strong> ({new Date(cert.not_after).toLocaleDateString()}). Renew it on the <strong>SSL / TLS</strong> page.
+        <div
+          className="info-banner"
+          role="button"
+          tabIndex={0}
+          onClick={() => onNavigate('tls')}
+          onKeyDown={(e) => e.key === 'Enter' && onNavigate('tls')}
+          style={{ cursor: 'pointer' }}
+        >
+          ⚠ The TLS certificate expires in <strong>{cert.expires_in_days} days</strong> (
+          {new Date(cert.not_after).toLocaleDateString()}). Renew it on the <strong>SSL / TLS</strong> page.
         </div>
       )}
 
@@ -126,30 +156,47 @@ export default function Dashboard({ onNavigate }) {
               <div className="proto-row" key={p}>
                 <span className="proto-name">{p.toUpperCase()}</span>
                 <div className="proto-track">
-                  <div
-                    className="proto-fill"
-                    style={{ width: `${((protocol[p] || 0) / protoTotal) * 100}%` }}
-                  />
+                  <div className="proto-fill" style={{ width: `${((protocol[p] || 0) / protoTotal) * 100}%` }} />
                 </div>
                 <span className="proto-count">{fmt(protocol[p] || 0)}</span>
               </div>
             ))}
           </div>
-          <div className="card-hint">
-            UDP &amp; TCP on :53 · DoT/DoQ on :853 · DoH on :443
-          </div>
+          <div className="card-hint">UDP &amp; TCP on :53 · DoT/DoQ on :853 · DoH on :443</div>
         </div>
 
         <div className="card">
           <h3>Top blocked domains</h3>
           {topBlocked.length === 0 ? (
-            <div className="empty">Nothing blocked yet — add blocklists in the Blocklists view.</div>
+            <EmptyState
+              icon={
+                <svg
+                  width="20"
+                  height="20"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M12 2 20 6v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6z" />
+                </svg>
+              }
+              title="Nothing blocked yet"
+              body="Your network is quiet. Add a curated blocklist to start filtering ads, trackers and malware."
+              action="Add a blocklist"
+              onAction={() => onNavigate('blocklists')}
+            />
           ) : (
             <div className="top-list">
               {topBlocked.map((t, i) => (
                 <div className="top-row" key={t.domain}>
                   <span className="top-rank">{i + 1}</span>
-                  <span className="top-domain" title={t.domain}>{t.domain}</span>
+                  <span className="top-domain" title={t.domain}>
+                    {t.domain}
+                  </span>
                   <span className="top-count">{fmt(t.count)}</span>
                 </div>
               ))}
@@ -241,15 +288,25 @@ function buildChecklist(cfg) {
   return pending.length ? pending : null
 }
 
-// SetupChecklist is the first-run card: a compact to-do list that deep-links
-// into the page where each item lives. Ticking an item (or Dismiss) persists
-// the item key in localStorage so the card stays gone across reloads and
-// navigation — the dashboard unmounts when you switch views, so nothing
-// may live only in component state.
+// SetupChecklist is the first-run card: a compact to-do list with a progress
+// bar that deep-links into the page where each item lives. Ticking an item
+// (or Dismiss) persists the item key in localStorage so the card stays gone
+// across reloads and navigation — the dashboard unmounts when you switch
+// views, so nothing may live only in component state. When every pending
+// item is done it flips to a short "all set" confirmation instead of
+// vanishing without feedback.
 function SetupChecklist({ items, onNavigate }) {
   const [done, setDone] = useState(() => new Set())
+  // hidden closes the card locally (the "Got it" button on the all-set
+  // state, or Dismiss mid-way). The parent re-render would eventually hide
+  // it anyway once every key is persisted, but an explicit close shouldn't
+  // depend on the next 10s stats tick.
+  const [hidden, setHidden] = useState(false)
   const remaining = items.filter((i) => !done.has(i.key))
-  if (remaining.length === 0) return null
+  const finished = remaining.length === 0
+  const total = items.length
+  const doneCount = total - remaining.length
+  const pct = total ? Math.round((100 * doneCount) / total) : 100
   const persist = (keys) => {
     const cur = (localStorage.getItem('irongrid_setup_dismissed') || '').split(',').filter(Boolean)
     localStorage.setItem('irongrid_setup_dismissed', [...new Set([...cur, ...keys])].join(','))
@@ -260,43 +317,97 @@ function SetupChecklist({ items, onNavigate }) {
   }
   const dismiss = () => {
     persist(items.map((i) => i.key))
-    setDone((s) => new Set([...s, ...items.map((i) => i.key)]))
+    setHidden(true)
   }
+  if (hidden) return null
   return (
-    <div className="card setup-card">
+    <div className={`card setup-card ${finished ? 'setup-done' : ''}`}>
       <div className="row-between">
         <div>
           <h3 style={{ margin: 0 }}>Getting started</h3>
           <p className="dim small" style={{ margin: '4px 0 0' }}>
-            {remaining.length} thing{remaining.length === 1 ? '' : 's'} left to set up — tap one to jump straight to it.
+            {finished
+              ? 'Everything on the list is set up — you are ready to go.'
+              : `${remaining.length} thing${remaining.length === 1 ? '' : 's'} left — tap one to jump straight to it.`}
           </p>
-        </div>
-        <button className="btn ghost small" type="button" onClick={dismiss} title="Hide this checklist">
-          Dismiss
+        </div>{' '}
+        <button
+          className="btn ghost small"
+          type="button"
+          onClick={dismiss}
+          title={finished ? 'Hide this card' : 'Hide this checklist'}
+        >
+          {finished ? 'Got it' : 'Dismiss'}
         </button>
       </div>
-      <div className="setup-list">
-        {remaining.map((i) => (
-          <div className="setup-row" key={i.key}>
-            <button
-              className="setup-check"
-              type="button"
-              onClick={() => tick(i.key)}
-              title="Mark as done"
-              aria-label={`Mark "${i.q}" as done`}
-            >
-              ✓
-            </button>
-            <div className="setup-info">
-              <div className="setup-q">{i.q}</div>
-              <div className="setup-a">{i.a}</div>
-            </div>
-            <button className="btn small" type="button" onClick={() => onNavigate(i.to)}>
-              {i.cta} →
-            </button>
+      {!finished && (
+        <>
+          <div
+            className="setup-progress"
+            role="progressbar"
+            aria-valuemin={0}
+            aria-valuemax={total}
+            aria-valuenow={doneCount}
+            aria-label="Setup progress"
+          >
+            <div className="setup-progress-fill" style={{ width: `${pct}%` }} />
           </div>
+          <div className="setup-list">
+            {remaining.map((i) => (
+              <div className="setup-row" key={i.key}>
+                <button
+                  className="setup-check"
+                  type="button"
+                  onClick={() => tick(i.key)}
+                  title="Mark as done"
+                  aria-label={`Mark "${i.q}" as done`}
+                >
+                  ✓
+                </button>
+                <div className="setup-info">
+                  <div className="setup-q">{i.q}</div>
+                  <div className="setup-a">{i.a}</div>
+                </div>
+                <button className="btn small" type="button" onClick={() => onNavigate(i.to)}>
+                  {i.cta} →
+                </button>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+      {finished && (
+        <div className="setup-complete">
+          <span className="setup-check done" aria-hidden="true">
+            ✓
+          </span>
+          <div>
+            <div className="setup-q">All set</div>
+            <div className="setup-a">
+              You have worked through the essentials. Add more lists, rules and servers any time from the sidebar — or
+              search with Ctrl+K.
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// DashboardSkeleton shows shimmering placeholder cards while the first stats
+// fetch is in flight, so the first paint reads as a page taking shape rather
+// than a bare "Loading…" line.
+function DashboardSkeleton() {
+  return (
+    <div className="stack" aria-busy="true" aria-label="Loading dashboard">
+      <div className="cards">
+        {Array.from({ length: 6 }, (_, i) => (
+          <div key={i} className="card stat-card skel" />
         ))}
       </div>
+      <div className="card skel" style={{ height: 168 }} />
+      <div className="card skel" style={{ height: 96 }} />
+      <div className="card skel" style={{ height: 96 }} />
     </div>
   )
 }
@@ -327,7 +438,9 @@ function PerformanceCard({ latency, counters, avg24, coalesce }) {
         {cells.map((cell) => (
           <div className="latency-cell" key={cell.k}>
             <div className="latency-value">{f(cell.v)}</div>
-            <div className="latency-label">{cell.k.toUpperCase()} · <span className="dim">{cell.hint}</span></div>
+            <div className="latency-label">
+              {cell.k.toUpperCase()} · <span className="dim">{cell.hint}</span>
+            </div>
           </div>
         ))}
       </div>
@@ -339,24 +452,28 @@ function PerformanceCard({ latency, counters, avg24, coalesce }) {
         <div className="kv-row">
           <span className="kv-label">Cache hit rate</span>
           <span className="kv-value">
-            {hitRate == null ? '—' : `${hitRate}%`}
-            {' '}<span className="dim small">({fmt(cached)} of {fmt(total)} queries served from cache)</span>
+            {hitRate == null ? '—' : `${hitRate}%`}{' '}
+            <span className="dim small">
+              ({fmt(cached)} of {fmt(total)} queries served from cache)
+            </span>
           </span>
         </div>
         <div className="kv-row">
           <span className="kv-label">Coalesced queries</span>
           <span className="kv-value">
-            {fmt(coalesce?.merged)}
-            {' '}<span className="dim small">queries shared {fmt(coalesce?.flights)} upstream flight{coalesce?.flights === 1 ? '' : 's'} · {fmt(coalesce?.saved || 0)} round trips saved</span>
+            {fmt(coalesce?.merged)}{' '}
+            <span className="dim small">
+              queries shared {fmt(coalesce?.flights)} upstream flight{coalesce?.flights === 1 ? '' : 's'} ·{' '}
+              {fmt(coalesce?.saved || 0)} round trips saved
+            </span>
           </span>
         </div>
       </div>
       <div className="card-hint">
-        Percentiles are estimated from an in-process histogram (blocked, cached and
-        upstream-served queries all count). A p99 spike usually means an upstream round
-        trip or a serve-stale fallback; prefetch and serve-stale keep repeat queries in
-        the low buckets. The coalescing row counts queries that hit the in-flight
-        request pool: bursts of identical questions collapse into one upstream query.
+        Percentiles are estimated from an in-process histogram (blocked, cached and upstream-served queries all count).
+        A p99 spike usually means an upstream round trip or a serve-stale fallback; prefetch and serve-stale keep repeat
+        queries in the low buckets. The coalescing row counts queries that hit the in-flight request pool: bursts of
+        identical questions collapse into one upstream query.
       </div>
     </div>
   )
@@ -397,17 +514,20 @@ function UpstreamsCard({ upstreams }) {
           return (
             <div className="top-row" key={u.name}>
               <span className={`badge ${s.cls}`}>{s.label}</span>
-              <span className="top-domain mono" title={u.name}>{u.name}</span>
-              <span className="dim small" style={{ marginLeft: 'auto' }}>{u.transport}</span>
+              <span className="top-domain mono" title={u.name}>
+                {u.name}
+              </span>
+              <span className="dim small" style={{ marginLeft: 'auto' }}>
+                {u.transport}
+              </span>
               {!u.available && <span className="top-count dim small">re-arms in {secs(u)}s</span>}
             </div>
           )
         })}
       </div>
       <div className="card-hint">
-        After 3 consecutive failures an upstream is skipped for 30s instead of
-        burning its full timeout on every query; any success resets it. While
-        cooling down, queries fail fast to the next upstream or serve-stale.
+        After 3 consecutive failures an upstream is skipped for 30s instead of burning its full timeout on every query;
+        any success resets it. While cooling down, queries fail fast to the next upstream or serve-stale.
       </div>
     </div>
   )
@@ -463,36 +583,47 @@ function CacheCard({ cache }) {
         <div className="kv-row">
           <span className="kv-label">L1 hit rate</span>
           <span className="kv-value">
-            {l1Rate == null ? '—' : `${l1Rate}%`}
-            {' '}<span className="dim small">({fmt(l1?.hits || 0)} of {fmt((l1?.hits || 0) + (l1?.misses || 0))} since restart)</span>
+            {l1Rate == null ? '—' : `${l1Rate}%`}{' '}
+            <span className="dim small">
+              ({fmt(l1?.hits || 0)} of {fmt((l1?.hits || 0) + (l1?.misses || 0))} since restart)
+            </span>
           </span>
         </div>
         <div className="kv-row">
           <span className="kv-label">L2 hit rate</span>
           <span className="kv-value">
-            {l2Rate == null ? '—' : `${l2Rate}%`}
-            {' '}<span className="dim small">({fmt(dH ?? 0)} of {fmt((dH ?? 0) + (dM ?? 0))} since page load)</span>
+            {l2Rate == null ? '—' : `${l2Rate}%`}{' '}
+            <span className="dim small">
+              ({fmt(dH ?? 0)} of {fmt((dH ?? 0) + (dM ?? 0))} since page load)
+            </span>
           </span>
         </div>
         <div className="kv-row">
           <span className="kv-label">Memory</span>
-          <span className="kv-value">{mb(memUsed)} MB of {mb(memMax)} MB</span>
+          <span className="kv-value">
+            {mb(memUsed)} MB of {mb(memMax)} MB
+          </span>
         </div>
         <div className="kv-row">
           <span className="kv-label">Keys · expired · evicted</span>
-          <span className="kv-value">{fmt(l2?.keys)} · {fmt(l2?.expired)} · {fmt(l2?.evicted)}</span>
+          <span className="kv-value">
+            {fmt(l2?.keys)} · {fmt(l2?.expired)} · {fmt(l2?.evicted)}
+          </span>
         </div>
       </div>
       {memPct != null && (
-        <div className="proto-track" style={{ marginTop: 8 }} title={`${memPct}% of the Dragonfly memory budget in use`}>
+        <div
+          className="proto-track"
+          style={{ marginTop: 8 }}
+          title={`${memPct}% of the Dragonfly memory budget in use`}
+        >
           <div className="proto-fill" style={{ width: `${memPct}%` }} />
         </div>
       )}
       <div className="card-hint">
         The L2 rate above is for traffic since this page loaded; all-time it is{' '}
-        {l2AllTime == null ? '—' : `${l2AllTime}%`} (since Dragonfly started). A low
-        all-time rate is normal — the flood wrote millions of one-off queries — and
-        most repeat queries are absorbed by L1 anyway. L2 is the shared,
+        {l2AllTime == null ? '—' : `${l2AllTime}%`} (since Dragonfly started). A low all-time rate is normal — the flood
+        wrote millions of one-off queries — and most repeat queries are absorbed by L1 anyway. L2 is the shared,
         restart-surviving layer, and the query log lives here too.
       </div>
     </div>
@@ -514,9 +645,9 @@ function WarmerCard({ warmer, onWarmed }) {
           <span className="badge badge-warn">off</span>
         </div>
         <p className="dim small" style={{ margin: '8px 0 0' }}>
-          Pre-cache answers for every domain your network queried in the last 24h, so a
-          restart or cache flush doesn&apos;t leave the first query for each domain cold.
-          Enable it under <strong>Settings → Cache warmer</strong>.
+          Pre-cache answers for every domain your network queried in the last 24h, so a restart or cache flush
+          doesn&apos;t leave the first query for each domain cold. Enable it under{' '}
+          <strong>Settings → Cache warmer</strong>.
         </p>
       </div>
     )
@@ -539,7 +670,13 @@ function WarmerCard({ warmer, onWarmed }) {
         <h3 style={{ margin: 0 }}>Cache warmer</h3>
         <div className="row">
           <span className="badge badge-allowed">on</span>
-          <button className="btn small" type="button" onClick={warmNow} disabled={busy} title="Kick a warming pass now (e.g. right after flushing the cache)">
+          <button
+            className="btn small"
+            type="button"
+            onClick={warmNow}
+            disabled={busy}
+            title="Kick a warming pass now (e.g. right after flushing the cache)"
+          >
             {busy ? 'Warming…' : 'Warm now'}
           </button>
         </div>
@@ -559,18 +696,22 @@ function WarmerCard({ warmer, onWarmed }) {
         </div>
         <div className="kv-row">
           <span className="kv-label">Warmed · skipped · failed</span>
-          <span className="kv-value">{fmt(warmer.warmed)} · {fmt(warmer.skipped)} · {fmt(warmer.failed)}</span>
+          <span className="kv-value">
+            {fmt(warmer.warmed)} · {fmt(warmer.skipped)} · {fmt(warmer.failed)}
+          </span>
         </div>
       </div>
       {warmer.last_error && (
-        <div className="error-text small" style={{ marginTop: 8 }}>⚠ {warmer.last_error}</div>
+        <div className="error-text small" style={{ marginTop: 8 }}>
+          ⚠ {warmer.last_error}
+        </div>
       )}
       <div className="card-hint">
-        Each pass takes the domains queried in the lookback window from the query log
-        and re-resolves them (A + AAAA) through your upstreams into Dragonfly.
-        <strong>Skipped</strong> covers blocked / rewritten domains plus questions the
-        cache already answers fresh; <strong>failed</strong> is upstream or cache write
-        errors. Fresh probes don&apos;t count toward the cache hit-rate cards above.
+        Each pass takes the domains queried in the lookback window from the query log and re-resolves them (A + AAAA)
+        through your upstreams into Dragonfly.
+        <strong>Skipped</strong> covers blocked / rewritten domains plus questions the cache already answers fresh;{' '}
+        <strong>failed</strong> is upstream or cache write errors. Fresh probes don&apos;t count toward the cache
+        hit-rate cards above.
       </div>
     </div>
   )
@@ -598,7 +739,9 @@ function QueryLogCard({ today, q24, hourly, onNavigate }) {
         </div>
         <div className="kv-row">
           <span className="kv-label">Allowed · blocked · cached</span>
-          <span className="kv-value">{fmt(t.allowed || 0)} · {fmt(t.blocked || 0)} · {fmt(t.cached || 0)}</span>
+          <span className="kv-value">
+            {fmt(t.allowed || 0)} · {fmt(t.blocked || 0)} · {fmt(t.cached || 0)}
+          </span>
         </div>
         <div className="kv-row">
           <span className="kv-label">Avg latency today</span>
@@ -625,9 +768,13 @@ function QueryLogCard({ today, q24, hourly, onNavigate }) {
                 onKeyDown={(e) => e.key === 'Enter' && openClient(c.domain)}
               >
                 <span className="top-rank">{i + 1}</span>
-                <span className="top-domain" title={c.domain}>{c.domain}</span>
+                <span className="top-domain" title={c.domain}>
+                  {c.domain}
+                </span>
                 <span className="top-count">{fmt(c.count)}</span>
-                <span className="top-go" aria-hidden="true">›</span>
+                <span className="top-go" aria-hidden="true">
+                  ›
+                </span>
               </div>
             ))}
           </div>
@@ -638,16 +785,38 @@ function QueryLogCard({ today, q24, hourly, onNavigate }) {
   )
 }
 
-// Sparkline renders the last 24 hours of query volume as bars (total in the
-// base tone, blocked overlaid in rose), with per-hour tooltips. Hours with
-// no traffic stay empty so quiet gaps are visible.
+// Sparkline renders the last 24 hours of query volume as a smooth area
+// chart: total traffic as a gradient cyan area with a hairline ridge, and
+// blocked volume overlaid as a rose area on the same baseline. Per-hour
+// tooltips hover; quiet hours dip visibly toward zero.
 function Sparkline({ data }) {
   if (!data || data.length === 0) return null
   const max = Math.max(...data.map((d) => d.total), 1)
-  const H = 56
-  const W = 240
-  const bw = W / data.length
-  const bh = (n) => (n ? Math.max(2, Math.round((n / max) * (H - 6))) : 0)
+  const H = 64
+  const W = 300
+  const PAD = 2
+  const inner = H - PAD * 2
+  const pts = data.map((d, i) => {
+    const x = PAD + (i / (data.length - 1)) * (W - PAD * 2)
+    const yTotal = PAD + inner - (d.total / max) * inner
+    const yBlocked = PAD + inner - ((d.blocked || 0) / max) * inner
+    return { ...d, x, yTotal, yBlocked }
+  })
+  // Smooth path through the points (catmull-rom → cubic bézier) so the
+  // chart reads as a curve rather than a zig-zag of straight segments.
+  const line = (pts, yKey) => {
+    if (pts.length === 1) return `M ${pts[0].x} ${pts[0][yKey]} L ${pts[0].x + 1} ${pts[0][yKey]}`
+    return pts.reduce((acc, p, i) => {
+      if (i === 0) return `M ${p.x} ${p[yKey]}`
+      const prev = pts[i - 1]
+      const cx = (prev.x + p.x) / 2
+      return `${acc} C ${cx} ${prev[yKey]}, ${cx} ${p[yKey]}, ${p.x} ${p[yKey]}`
+    }, '')
+  }
+  const totalLine = line(pts, 'yTotal')
+  const blockedLine = line(pts, 'yBlocked')
+  const area = (l) => `${l} L ${pts[pts.length - 1].x} ${H} L ${pts[0].x} ${H} Z`
+  const uid = `spark${(pts[0]?.hour || '').replace(/\D/g, '') || 'g'}`
   return (
     <div>
       <svg
@@ -657,19 +826,35 @@ function Sparkline({ data }) {
         role="img"
         aria-label="Queries per hour over the last 24 hours"
       >
-        {data.map((d, i) => (
+        <defs>
+          <linearGradient id={`${uid}-total`} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--cyan)" stopOpacity="0.4" />
+            <stop offset="100%" stopColor="var(--cyan)" stopOpacity="0.03" />
+          </linearGradient>
+          <linearGradient id={`${uid}-blocked`} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor="var(--rose)" stopOpacity="0.5" />
+            <stop offset="100%" stopColor="var(--rose)" stopOpacity="0.04" />
+          </linearGradient>
+        </defs>
+        {pts.map((d) => (
           <g key={d.hour}>
             <title>{`${new Date(d.hour).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} — ${fmt(d.total)} query${d.total === 1 ? '' : 's'}${d.blocked ? ` (${fmt(d.blocked)} blocked)` : ''}`}</title>
-            <rect className="spark-total" x={i * bw + 0.5} y={H - bh(d.total)} width={bw - 1} height={bh(d.total)} rx={1} />
-            {d.blocked > 0 && (
-              <rect className="spark-blocked" x={i * bw + 0.5} y={H - bh(d.blocked)} width={bw - 1} height={bh(d.blocked)} rx={1} />
-            )}
+            {/* transparent hit-slab so the tooltip covers the whole column */}
+            <rect x={d.x - 5} y={0} width={10} height={H} fill="transparent" />
           </g>
         ))}
+        <path className="spark-blocked" d={area(blockedLine)} style={{ fill: `url(#${uid}-blocked)` }} />
+        <path className="spark-blocked-line" d={blockedLine} />
+        <path className="spark-total" d={area(totalLine)} style={{ fill: `url(#${uid}-total)` }} />
+        <path className="spark-total-line" d={totalLine} />
       </svg>
       <div className="spark-legend">
-        <span><i className="spark-legend-total" /> queries</span>
-        <span><i className="spark-legend-blocked" /> blocked</span>
+        <span>
+          <i className="spark-legend-total" /> queries
+        </span>
+        <span>
+          <i className="spark-legend-blocked" /> blocked
+        </span>
         <span className="dim small">per hour · last 24h</span>
       </div>
     </div>
@@ -697,8 +882,16 @@ function BlockedClientsCard() {
   const [asns, setAsns] = useState({}) // ip -> { asn, name, holder, prefix }
 
   const load = useCallback(async () => {
-    try { setHoney((await api.geoBlocked()).blocked || []) } catch { /* optional */ }
-    try { setRate((await api.rateBlocked()).blocked || []) } catch { /* optional */ }
+    try {
+      setHoney((await api.geoBlocked()).blocked || [])
+    } catch {
+      /* optional */
+    }
+    try {
+      setRate((await api.rateBlocked()).blocked || [])
+    } catch {
+      /* optional */
+    }
   }, [])
 
   // Resolve hostnames + ISP owner for the currently blocked clients so it's
@@ -708,13 +901,21 @@ function BlockedClientsCard() {
     const ips = [...new Set([...honey, ...rate.map((b) => b.ip)].filter(Boolean))].slice(0, 40)
     if (!ips.length) return
     let live = true
-    api.hostnames(ips)
-      .then((res) => { if (live) setHosts((prev) => ({ ...prev, ...(res.hostnames || {}) })) })
+    api
+      .hostnames(ips)
+      .then((res) => {
+        if (live) setHosts((prev) => ({ ...prev, ...(res.hostnames || {}) }))
+      })
       .catch(() => {})
-    api.asnInfo(ips)
-      .then((res) => { if (live) setAsns((prev) => ({ ...prev, ...(res.asn || {}) })) })
+    api
+      .asnInfo(ips)
+      .then((res) => {
+        if (live) setAsns((prev) => ({ ...prev, ...(res.asn || {}) }))
+      })
       .catch(() => {})
-    return () => { live = false }
+    return () => {
+      live = false
+    }
   }, [honey, rate])
 
   useEffect(() => {
@@ -747,7 +948,12 @@ function BlockedClientsCard() {
   // packet level.
   const blockNet = async (ip, prefix) => {
     const label = prefix ? `${ip}/${prefix}` : ip
-    if (!window.confirm(`Permanently block ${label}? It is added to geo_block.ips (config, survives restarts) and dropped at the host firewall. Remove it under Blocked client IPs in Settings to undo.`)) return
+    if (
+      !window.confirm(
+        `Permanently block ${label}? It is added to geo_block.ips (config, survives restarts) and dropped at the host firewall. Remove it under Blocked client IPs in Settings to undo.`,
+      )
+    )
+      return
     setError('')
     try {
       await api.geoBlockIP(ip, prefix)
@@ -761,7 +967,12 @@ function BlockedClientsCard() {
   // DDoS). Only honeypot rows offer this: they were auto-blocked over a real
   // handshake, so the source is genuine.
   const report = async (ip) => {
-    if (!window.confirm(`Report ${ip} to AbuseIPDB (DDoS category)? Requires an API key set under Settings → Abuse reporting.`)) return
+    if (
+      !window.confirm(
+        `Report ${ip} to AbuseIPDB (DDoS category)? Requires an API key set under Settings → Abuse reporting.`,
+      )
+    )
+      return
     setError('')
     setMsg('')
     setReporting((s) => ({ ...s, [ip]: true }))
@@ -780,7 +991,11 @@ function BlockedClientsCard() {
   // to.
   const toggleAsn = async (ip) => {
     if (asn[ip]) {
-      setAsn((s) => { const n = { ...s }; delete n[ip]; return n })
+      setAsn((s) => {
+        const n = { ...s }
+        delete n[ip]
+        return n
+      })
       return
     }
     setAsn((s) => ({ ...s, [ip]: 'loading' }))
@@ -812,10 +1027,15 @@ function BlockedClientsCard() {
     if (!info) return null
     return (
       <div className="dim small mono" style={{ margin: '2px 0 6px' }}>
-        {info === 'loading' ? 'Looking up ASN…' : (
-          info.error ? `ASN lookup failed: ${info.error}` : (
-            <>{info.asn || 'n/a'} · {info.holder || info.name || 'unknown network'} · {info.prefix || ''}{info.country ? ` · ${info.country}` : ''}</>
-          )
+        {info === 'loading' ? (
+          'Looking up ASN…'
+        ) : info.error ? (
+          `ASN lookup failed: ${info.error}`
+        ) : (
+          <>
+            {info.asn || 'n/a'} · {info.holder || info.name || 'unknown network'} · {info.prefix || ''}
+            {info.country ? ` · ${info.country}` : ''}
+          </>
         )}
       </div>
     )
@@ -829,83 +1049,132 @@ function BlockedClientsCard() {
         <h3 style={{ margin: 0 }}>Blocked clients</h3>
         <div className="row">
           <span className="dim small">honeypot hits &amp; rate-limit auto-blocks</span>
-          <button className="btn small" type="button" onClick={exportCsv} title="Download all blocked client IPs as CSV for bulk abuse reporting">Export CSV</button>
+          <button
+            className="btn small"
+            type="button"
+            onClick={exportCsv}
+            title="Download all blocked client IPs as CSV for bulk abuse reporting"
+          >
+            Export CSV
+          </button>
         </div>
       </div>
-      {msg && <div className="text-ok small" style={{ marginTop: 8 }}>{msg}</div>}
-      {error && <div className="error-text small" style={{ marginTop: 8 }}>{error}</div>}
+      {msg && (
+        <div className="text-ok small" style={{ marginTop: 8 }}>
+          {msg}
+        </div>
+      )}
+      {error && (
+        <div className="error-text small" style={{ marginTop: 8 }}>
+          {error}
+        </div>
+      )}
       <div className="stack" style={{ marginTop: 8 }}>
         {!hasHoney && !hasRate ? (
           <p className="dim small" style={{ margin: 0 }}>
-            No clients currently blocked. Honeypot hits over TCP/DoT/DoH/DoQ and
-            rate-limit offenders appear here. Spoofed-UDP sources are refused but
-            never auto-blocked — they can&apos;t be trusted — so a pure UDP flood can
-            show nothing here even while the <strong>Honeypot hits</strong> counter
-            climbs. Export CSV and ⓘ ASN work whenever clients do get blocked.
+            No clients currently blocked. Honeypot hits over TCP/DoT/DoH/DoQ and rate-limit offenders appear here.
+            Spoofed-UDP sources are refused but never auto-blocked — they can&apos;t be trusted — so a pure UDP flood
+            can show nothing here even while the <strong>Honeypot hits</strong> counter climbs. Export CSV and ⓘ ASN
+            work whenever clients do get blocked.
           </p>
         ) : (
           <>
-          {hasHoney && (
-            <div>
-              <div className="dim small" style={{ marginBottom: 6 }}>
-                <span className="badge badge-honeypot">Honeypot</span> — blocked permanently, dropped at the firewall
-              </div>
-              {honey.map((ip) => (
-                <div key={ip}>
-                  <div className="list-row">
-                    <div style={{ minWidth: 0 }}>
-                      <div className="mono">{ip}</div>
-                      {hosts[ip] && <div className="dim small client-host" title={hosts[ip]}>{hosts[ip]}</div>}
-                      {asns[ip]?.asn && (
-                        <div className="dim small client-host" title={`${asns[ip].asn} · ${asns[ip].holder || asns[ip].name || ''}${asns[ip].prefix ? ` · ${asns[ip].prefix}` : ''}`}>
-                          {asns[ip].asn} · {asns[ip].holder || asns[ip].name}
-                        </div>
-                      )}
-                    </div>
-                    <button className="btn small" type="button" onClick={() => report(ip)} disabled={reporting[ip]}>
-                      {reporting[ip] ? 'Reporting…' : 'Report'}
-                    </button>
-                    <button className="btn small" type="button" onClick={() => toggleAsn(ip)}>ⓘ ASN</button>
-                    <button className="btn small" type="button" onClick={() => blockNet(ip, 0)}>Block IP</button>
-                    <button className="btn small" type="button" onClick={() => blockNet(ip, ip.includes(':') ? 64 : 24)}>Block /{ip.includes(':') ? 64 : 24}</button>
-                    <button className="btn small danger" type="button" onClick={() => act(() => api.geoUnblock(ip))}>Unblock</button>
-                  </div>
-                  <AsnRow ip={ip} />
+            {hasHoney && (
+              <div>
+                <div className="dim small" style={{ marginBottom: 6 }}>
+                  <span className="badge badge-honeypot">Honeypot</span> — blocked permanently, dropped at the firewall
                 </div>
-              ))}
-            </div>
-          )}
-          {hasRate && (
-            <div>
-              <div className="dim small" style={{ marginBottom: 6 }}>
-                <span className="badge badge-error">Rate limit</span> — hammering clients refused until cooldown
-              </div>
-              {rate.map((b) => (
-                <div key={b.ip}>
-                  <div className="list-row" style={{ alignItems: 'flex-start' }}>
-                    <div style={{ minWidth: 0 }}>
-                      <div className="mono">{b.ip}</div>
-                      {hosts[b.ip] && <div className="dim small client-host" title={hosts[b.ip]}>{hosts[b.ip]}</div>}
-                      {asns[b.ip]?.asn && (
-                        <div className="dim small client-host" title={`${asns[b.ip].asn} · ${asns[b.ip].holder || asns[b.ip].name || ''}${asns[b.ip].prefix ? ` · ${asns[b.ip].prefix}` : ''}`}>
-                          {asns[b.ip].asn} · {asns[b.ip].holder || asns[b.ip].name}
-                        </div>
-                      )}
-                      {b.blocked_until && (
-                        <span className="dim small">
-                          {' '}· blocked until {new Date(b.blocked_until).toLocaleString()}
-                          {b.blocks ? ` · ${b.blocks}×` : ''}
-                        </span>
-                      )}
+                {honey.map((ip) => (
+                  <div key={ip}>
+                    <div className="list-row">
+                      <div style={{ minWidth: 0 }}>
+                        <div className="mono">{ip}</div>
+                        {hosts[ip] && (
+                          <div className="dim small client-host" title={hosts[ip]}>
+                            {hosts[ip]}
+                          </div>
+                        )}
+                        {asns[ip]?.asn && (
+                          <div
+                            className="dim small client-host"
+                            title={`${asns[ip].asn} · ${asns[ip].holder || asns[ip].name || ''}${asns[ip].prefix ? ` · ${asns[ip].prefix}` : ''}`}
+                          >
+                            {asns[ip].asn} · {asns[ip].holder || asns[ip].name}
+                          </div>
+                        )}
+                      </div>
+                      <button className="btn small" type="button" onClick={() => report(ip)} disabled={reporting[ip]}>
+                        {reporting[ip] ? 'Reporting…' : 'Report'}
+                      </button>
+                      <button className="btn small" type="button" onClick={() => toggleAsn(ip)}>
+                        ⓘ ASN
+                      </button>
+                      <button className="btn small" type="button" onClick={() => blockNet(ip, 0)}>
+                        Block IP
+                      </button>
+                      <button
+                        className="btn small"
+                        type="button"
+                        onClick={() => blockNet(ip, ip.includes(':') ? 64 : 24)}
+                      >
+                        Block /{ip.includes(':') ? 64 : 24}
+                      </button>
+                      <button className="btn small danger" type="button" onClick={() => act(() => api.geoUnblock(ip))}>
+                        Unblock
+                      </button>
                     </div>
-                    <button className="btn small" type="button" onClick={() => toggleAsn(b.ip)}>ⓘ ASN</button>
-                    <button className="btn small danger" type="button" onClick={() => act(() => api.rateUnblock(b.ip))}>Unblock</button>
+                    <AsnRow ip={ip} />
                   </div>
-                  <AsnRow ip={b.ip} />
+                ))}
+              </div>
+            )}
+            {hasRate && (
+              <div>
+                <div className="dim small" style={{ marginBottom: 6 }}>
+                  <span className="badge badge-error">Rate limit</span> — hammering clients refused until cooldown
                 </div>
-              ))}
-            </div>
-          )}
+                {rate.map((b) => (
+                  <div key={b.ip}>
+                    <div className="list-row" style={{ alignItems: 'flex-start' }}>
+                      <div style={{ minWidth: 0 }}>
+                        <div className="mono">{b.ip}</div>
+                        {hosts[b.ip] && (
+                          <div className="dim small client-host" title={hosts[b.ip]}>
+                            {hosts[b.ip]}
+                          </div>
+                        )}
+                        {asns[b.ip]?.asn && (
+                          <div
+                            className="dim small client-host"
+                            title={`${asns[b.ip].asn} · ${asns[b.ip].holder || asns[b.ip].name || ''}${asns[b.ip].prefix ? ` · ${asns[b.ip].prefix}` : ''}`}
+                          >
+                            {asns[b.ip].asn} · {asns[b.ip].holder || asns[b.ip].name}
+                          </div>
+                        )}
+                        {b.blocked_until && (
+                          <span className="dim small">
+                            {' '}
+                            · blocked until {new Date(b.blocked_until).toLocaleString()}
+                            {b.blocks ? ` · ${b.blocks}×` : ''}
+                          </span>
+                        )}
+                      </div>
+                      <button className="btn small" type="button" onClick={() => toggleAsn(b.ip)}>
+                        ⓘ ASN
+                      </button>
+                      <button
+                        className="btn small danger"
+                        type="button"
+                        onClick={() => act(() => api.rateUnblock(b.ip))}
+                      >
+                        Unblock
+                      </button>
+                    </div>
+                    <AsnRow ip={b.ip} />
+                  </div>
+                ))}
+              </div>
+            )}
           </>
         )}
       </div>
@@ -919,14 +1188,9 @@ function BlockedClientsCard() {
 function RootHintsCard({ status }) {
   const rh = status?.root_hints
   if (!rh?.enabled) return null
-  const badge =
-    rh.source === 'live' ? 'badge-allowed'
-      : rh.source === 'cached' ? 'badge-warn'
-        : 'badge-error'
+  const badge = rh.source === 'live' ? 'badge-allowed' : rh.source === 'cached' ? 'badge-warn' : 'badge-error'
   const sourceLabel =
-    rh.source === 'live' ? 'Live (named.root)'
-      : rh.source === 'cached' ? 'Disk cache'
-        : 'Bundled fallback'
+    rh.source === 'live' ? 'Live (named.root)' : rh.source === 'cached' ? 'Disk cache' : 'Bundled fallback'
   return (
     <div className="card">
       <div className="row-between">
@@ -937,9 +1201,7 @@ function RootHintsCard({ status }) {
         <div className="kv-row">
           <span className="kv-label">Signature</span>
           <span className="kv-value">
-            {rh.verified
-              ? '✓ PGP-verified (Verisign)'
-              : 'not verified — using trusted fallback'}
+            {rh.verified ? '✓ PGP-verified (Verisign)' : 'not verified — using trusted fallback'}
           </span>
         </div>
         <div className="kv-row">
@@ -948,9 +1210,7 @@ function RootHintsCard({ status }) {
         </div>
         <div className="kv-row">
           <span className="kv-label">Last fetch</span>
-          <span className="kv-value">
-            {rh.last_fetch ? new Date(rh.last_fetch).toLocaleString() : '—'}
-          </span>
+          <span className="kv-value">{rh.last_fetch ? new Date(rh.last_fetch).toLocaleString() : '—'}</span>
         </div>
         <div className="kv-row">
           <span className="kv-label">Refresh</span>
@@ -1012,8 +1272,7 @@ function TuningCard({ status }) {
         <div className="kv-row">
           <span className="kv-label">File descriptors</span>
           <span className="kv-value">
-            {fmtFd(t.fd_soft)} soft / {fmtFd(t.fd_hard)} hard{' '}
-            <span className={`badge ${f.cls}`}>{f.label}</span>
+            {fmtFd(t.fd_soft)} soft / {fmtFd(t.fd_hard)} hard <span className={`badge ${f.cls}`}>{f.label}</span>
           </span>
         </div>
         <div className="kv-row">
@@ -1024,13 +1283,16 @@ function TuningCard({ status }) {
           <span className="kv-label">UDP listener sockets</span>
           <span className="kv-value">
             {socketPips(status?.udp_sockets)} {status?.udp_sockets ?? 0} plain UDP
-            {' · '}{socketPips(status?.doq_sockets)} {status?.doq_sockets ?? 0} DoQ
-            {' '}<span className="badge badge-allowed">SO_REUSEPORT</span>
+            {' · '}
+            {socketPips(status?.doq_sockets)} {status?.doq_sockets ?? 0} DoQ{' '}
+            <span className="badge badge-allowed">SO_REUSEPORT</span>
           </span>
         </div>
         <div className="kv-row">
           <span className="kv-label">Go runtime</span>
-          <span className="kv-value">GOMAXPROCS {t.gomaxprocs} · GOMEMLIMIT {bytes(t.gomemlimit)} · GOGC {t.gogc < 0 ? 'off' : t.gogc}</span>
+          <span className="kv-value">
+            GOMAXPROCS {t.gomaxprocs} · GOMEMLIMIT {bytes(t.gomemlimit)} · GOGC {t.gogc < 0 ? 'off' : t.gogc}
+          </span>
         </div>
       </div>
       {t.sysctls && t.sysctls.length > 0 && (
@@ -1041,20 +1303,21 @@ function TuningCard({ status }) {
               <div className="kv-row" key={s.key}>
                 <span className="kv-label mono">net.core.{s.key}</span>
                 <span className="kv-value">
-                  {Number(s.value).toLocaleString()}
-                  {' '}<span className={`badge ${s.value >= s.target ? 'badge-allowed' : 'badge-warn'}`}>
+                  {Number(s.value).toLocaleString()}{' '}
+                  <span className={`badge ${s.value >= s.target ? 'badge-allowed' : 'badge-warn'}`}>
                     {s.value >= s.target ? 'ok' : 'low'}
                   </span>
-                  <span className="dim small" style={{ marginLeft: 6 }}>{s.note}</span>
+                  <span className="dim small" style={{ marginLeft: 6 }}>
+                    {s.note}
+                  </span>
                 </span>
               </div>
             ))}
           </div>
           <div className="card-hint">
-            The kernel clamps SO_RCVBUF to net.core.rmem_max, so a low value caps the
-            socket buffers above. Applied automatically as root at boot; for Docker set
-            the same values under <code>sysctls:</code> in docker-compose.yml, or run
-            as root (or with CAP_NET_ADMIN) for the in-process raise.
+            The kernel clamps SO_RCVBUF to net.core.rmem_max, so a low value caps the socket buffers above. Applied
+            automatically as root at boot; for Docker set the same values under <code>sysctls:</code> in
+            docker-compose.yml, or run as root (or with CAP_NET_ADMIN) for the in-process raise.
           </div>
         </>
       )}
@@ -1098,15 +1361,18 @@ function AcmeCard({ acme, onNavigate, onRenewed }) {
   }
 
   return (
-    <div className={`card acme-card ${ok ? '' : 'acme-error'}`} role="button" tabIndex={0}
-      onClick={() => onNavigate('tls')} onKeyDown={(e) => e.key === 'Enter' && onNavigate('tls')}
-      style={{ cursor: 'pointer' }}>
+    <div
+      className={`card acme-card ${ok ? '' : 'acme-error'}`}
+      role="button"
+      tabIndex={0}
+      onClick={() => onNavigate('tls')}
+      onKeyDown={(e) => e.key === 'Enter' && onNavigate('tls')}
+      style={{ cursor: 'pointer' }}
+    >
       <div className="row-between">
         <h3 style={{ margin: 0 }}>
           Let&apos;s Encrypt{' '}
-          <span className={`badge ${ok ? 'badge-allowed' : 'badge-error'}`}>
-            {ok ? 'healthy' : 'needs attention'}
-          </span>
+          <span className={`badge ${ok ? 'badge-allowed' : 'badge-error'}`}>{ok ? 'healthy' : 'needs attention'}</span>
         </h3>
         <span className="dim small">{acme.staging ? 'staging CA' : 'production CA'}</span>
       </div>
