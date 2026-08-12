@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -554,6 +555,140 @@ func TestCoalesceEligible(t *testing.T) {
 	})
 	if coalesceEligible(tsig) {
 		t.Fatal("TSIG-carrying query must not coalesce")
+	}
+}
+
+// TestHandlerTruncatesOversizedUDPResponse verifies client-facing response
+// sizing (RFC 1035 §4.2.1, RFC 6891): a UDP client whose advertised buffer —
+// 512 bytes for a legacy client without EDNS — is smaller than the answer
+// receives a truncated response with the TC bit set, so it retries over TCP,
+// instead of an oversized datagram that many stacks silently drop. A client
+// with a large EDNS buffer keeps the full answer, and stream transports
+// (TCP/DoT/DoH/DoQ) are never truncated.
+func TestHandlerTruncatesOversizedUDPResponse(t *testing.T) {
+	// A realistic recursive upstream: UDP + TCP on the same port, honoring
+	// the query's advertised EDNS payload — an answer bigger than the buffer
+	// goes out truncated (TC) over UDP so the forwarder falls back to TCP
+	// for the full answer, exactly like Cloudflare/Quad9 behave.
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		for i := 0; i < 8; i++ {
+			m.Answer = append(m.Answer, &dns.TXT{
+				Hdr: dns.RR_Header{Name: fmt.Sprintf("txt%d.example.com.", i), Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60},
+				// RFC 1035 caps each TXT character-string at 255 bytes, so real
+				// large TXT records split content across strings: 240 + 160
+				// chars = 400 per record, ~3.4 KB across all eight.
+				Txt: []string{strings.Repeat("0123456789abcdef", 15), strings.Repeat("0123456789abcdef", 10)},
+			})
+		}
+		if _, isUDP := w.RemoteAddr().(*net.UDPAddr); isUDP {
+			if size := clientUDPSize(r); m.Len() > size {
+				m.Truncate(size)
+			}
+		}
+		_ = w.WriteMsg(m)
+	})
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	host, port, err := net.SplitHostPort(pc.LocalAddr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ln, err := net.Listen("tcp", net.JoinHostPort(host, port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvUDP := &dns.Server{PacketConn: pc, Handler: mux}
+	srvTCP := &dns.Server{Listener: ln, Handler: mux}
+	go func() { _ = srvUDP.ActivateAndServe() }()
+	go func() { _ = srvTCP.ActivateAndServe() }()
+	t.Cleanup(func() {
+		_ = srvUDP.Shutdown()
+		_ = srvTCP.Shutdown()
+	})
+
+	// A cache makes the handler's second query take the cache-hit path, so
+	// the test covers write(w, hit.Msg, ...) — a message unpacked from the
+	// stored wire form, not a fresh upstream response — and verifies the
+	// truncated copy never poisons the shared entry.
+	c := cache.NewLocalOnly(time.Hour, time.Minute, 1024, 0)
+	h := NewHandler(filter.NewEngine(), c, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: pc.LocalAddr().String()},
+	}, nil, "nxdomain", 600, 5*time.Second)
+
+	// The 8 x 400-char TXT answer is ~3.4 KB — well over 512 even compressed,
+	// comfortably under a 4096-byte EDNS buffer.
+	legacy := new(dns.Msg)
+	legacy.SetQuestion("example.com.", dns.TypeTXT)
+	q := legacy.Question[0]
+
+	assertTruncated := func(fw *fakeWriter, label string) {
+		t.Helper()
+		if fw.msg == nil || len(fw.msg.Answer) == 0 {
+			t.Fatalf("%s: no answer (rcode=%v)", label, fw.msg)
+		}
+		if !fw.msg.Truncated {
+			t.Fatalf("%s: TC bit not set (wire %d bytes)", label, fw.msg.Len())
+		}
+		if n := fw.msg.Len(); n > dns.MinMsgSize {
+			t.Fatalf("%s: received a %d-byte UDP response, want <= %d", label, n, dns.MinMsgSize)
+		}
+	}
+
+	// Legacy client, cache miss: truncated with TC over UDP.
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, legacy)
+	assertTruncated(fw, "legacy client (upstream path)")
+
+	// The cache must hold the FULL untruncated answer: the truncation runs
+	// on a copy, never on resp, so a small-buffer client can't poison the
+	// shared entry. The cache write is a background goroutine, so poll.
+	var hit *dns.Msg
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		hit = c.Get(context.Background(), q)
+		if hit != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if hit == nil || len(hit.Answer) != 8 {
+		answers := 0
+		if hit != nil {
+			answers = len(hit.Answer)
+		}
+		t.Fatalf("cache lost records to truncation: %d answers, want 8", answers)
+	}
+
+	// Same legacy client again — now a cache hit, still truncated for it.
+	fwHit := &fakeWriter{}
+	h.ServeDNS(fwHit, legacy)
+	assertTruncated(fwHit, "legacy client (cache-hit path)")
+
+	// A client advertising a 4096-byte EDNS buffer keeps the full answer.
+	big := new(dns.Msg)
+	big.SetQuestion("example.com.", dns.TypeTXT)
+	big.SetEdns0(4096, false)
+	fw2 := &fakeWriter{}
+	h.ServeDNS(fw2, big)
+	if fw2.msg == nil || len(fw2.msg.Answer) != 8 {
+		t.Fatalf("4096-buffer client got %d answers, want all 8 (msg=%v)", len(fw2.msg.Answer), fw2.msg)
+	}
+	if fw2.msg.Truncated {
+		t.Fatal("4096-buffer client: TC set unexpectedly")
+	}
+
+	// Stream transports have no datagram limit: the TCP path delivers the
+	// full untruncated answer to the same 512-byte (no-EDNS) client. serve()
+	// copies the request before forwarding, so reusing legacy here is safe.
+	fw3 := &fakeWriter{}
+	h.ServeDNSWithProto(fw3, legacy, "tcp")
+	if fw3.msg == nil || fw3.msg.Truncated || len(fw3.msg.Answer) != 8 {
+		t.Fatalf("TCP client: expected the full untruncated answer, got %v", fw3.msg)
 	}
 }
 

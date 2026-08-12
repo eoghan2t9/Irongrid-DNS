@@ -316,7 +316,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		m := new(dns.Msg)
 		m.Response = true
 		m.Rcode = dns.RcodeFormatError
-		_ = write(w, m)
+		_ = write(w, m, r, proto)
 		return
 	}
 
@@ -333,7 +333,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		refused := new(dns.Msg)
 		refused.SetReply(r)
 		refused.Rcode = dns.RcodeRefused
-		_ = write(w, refused)
+		_ = write(w, refused, r, proto)
 		return
 	}
 
@@ -359,7 +359,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			refused.SetReply(r)
 			refused.Rcode = dns.RcodeRefused
 			h.record(client, qname, q, action, reason, "", start, refused)
-			_ = write(w, refused)
+			_ = write(w, refused, r, proto)
 			return
 		}
 	}
@@ -397,7 +397,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		refused := new(dns.Msg)
 		refused.SetReply(r)
 		refused.Rcode = dns.RcodeRefused
-		_ = write(w, refused)
+		_ = write(w, refused, r, proto)
 		return
 	}
 
@@ -409,7 +409,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			if ans := filter.BuildAnswer(r, rules, q.Name, q.Qtype); ans != nil {
 				h.Stats.Allowed.Add(1)
 				h.record(client, qname, q, "rewrite", "local-dns", "", start, ans)
-				_ = write(w, ans)
+				_ = write(w, ans, r, proto)
 				return
 			}
 			// The name matched but not this record type: NODATA is the
@@ -418,7 +418,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			h.Stats.Allowed.Add(1)
 			m := newReply(r)
 			h.record(client, qname, q, "rewrite", "local-dns-nodata", "", start, m)
-			_ = write(w, m)
+			_ = write(w, m, r, proto)
 			return
 		}
 	}
@@ -442,7 +442,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 		h.Stats.Blocked.Add(1)
 		h.record(client, qname, q, "blocked", decision.Reason, "", start, blocked)
-		_ = write(w, blocked)
+		_ = write(w, blocked, r, proto)
 		return
 	} // 4. Cache lookup (only for standard record types). Cached messages carry
 	//    the ID of the original query, so rebase to this request's ID.
@@ -468,7 +468,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 				reason = "cache-negative"
 			}
 			h.record(client, qname, q, "cached", reason, "", start, hit.Msg)
-			_ = write(w, hit.Msg)
+			_ = write(w, hit.Msg, r, proto)
 			return
 		}
 		if hit.Msg != nil {
@@ -522,7 +522,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		capTTL(stale, staleServeTTL)
 		h.Stats.Cached.Add(1)
 		h.record(client, qname, q, "cached", "stale", usedUp, start, stale)
-		_ = write(w, stale)
+		_ = write(w, stale, r, proto)
 		return
 	}
 	if err != nil || resp == nil {
@@ -539,7 +539,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			capTTL(stale, staleServeTTL)
 			h.Stats.Cached.Add(1)
 			h.record(client, qname, q, "cached", "stale", usedUp, start, stale)
-			_ = write(w, stale)
+			_ = write(w, stale, r, proto)
 			return
 		}
 		h.Stats.Errors.Add(1)
@@ -550,7 +550,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			errStr = err.Error()
 		}
 		h.record(client, qname, q, "error", errStr, usedUp, start, m)
-		_ = write(w, m)
+		_ = write(w, m, r, proto)
 		// Cache the failure briefly (negative_ttl) so a dead upstream or
 		// zone doesn't burn the full timeout on every retry — a failing
 		// domain's retries used to re-pay the whole per-query timeout each
@@ -587,7 +587,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		m := newReply(r)
 		m.Rcode = dns.RcodeServerFailure
 		h.record(client, qname, q, "error", "dnssec: upstream did not authenticate the answer", usedUp, start, m)
-		_ = write(w, m)
+		_ = write(w, m, r, proto)
 		return
 	}
 
@@ -597,13 +597,13 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 		h.Stats.Blocked.Add(1)
 		h.record(client, qname, q, "blocked", reason, usedUp, start, blocked)
-		_ = write(w, blocked)
+		_ = write(w, blocked, r, proto)
 		return
 	}
 
 	h.Stats.Allowed.Add(1)
 	h.record(client, qname, q, "allowed", "", usedUp, start, resp)
-	_ = write(w, resp)
+	_ = write(w, resp, r, proto)
 
 	// 8. Cache the result (positive or negative) in the background. Caching
 	//    only ever helps *future* queries, so there's no reason to make this
@@ -657,6 +657,21 @@ func (h *Handler) record(client, qname string, q dns.Question, action, reason, u
 	})
 }
 
+// clientUDPSize returns the largest UDP payload this client will accept:
+// its advertised EDNS0 buffer (RFC 6891), or the 512-byte RFC 1035 limit
+// for legacy clients that send no OPT record. A nil request (the FORMERR
+// path, where the query was unparseable) is treated as a legacy client.
+func clientUDPSize(r *dns.Msg) int {
+	if r != nil {
+		if opt := r.IsEdns0(); opt != nil {
+			if s := int(opt.UDPSize()); s >= dns.MinMsgSize {
+				return s
+			}
+		}
+	}
+	return dns.MinMsgSize
+}
+
 // write packs m for the client and sends it. DNS message compression
 // (RFC 1035 §4.1.4) replaces repeated owner names with pointers to earlier
 // occurrences in the message, typically cutting the wire form 20-40% — real
@@ -664,8 +679,28 @@ func (h *Handler) record(client, qname string, q dns.Question, action, reason, u
 // UDP datagrams that stay comfortably under the fragmentation threshold.
 // Every reply path (rewritten, blocked, cached, upstream, error) funnels
 // through here so no response goes out uncompressed.
-func write(w dns.ResponseWriter, m *dns.Msg) error {
+//
+// On UDP the response is also sized to the client's advertised buffer
+// (clientUDPSize): an oversized datagram is silently dropped or ignored by
+// many stacks, so a legacy 512-byte client must receive a truncated answer
+// with the TC bit set (RFC 1035 §4.2.1, RFC 6891) to fall back over TCP —
+// the previous code sent the full answer regardless of the client's limit,
+// surfacing as silent resolution failures for exactly the clients most
+// likely to be older devices. Stream transports have no size limit to
+// respect. The truncation runs on a copy, never the caller's message: the
+// success path hands resp to the background cache writer right after this,
+// and a truncated answer must not poison the shared cache for every other
+// client (a small-buffer client would otherwise evict everyone's full
+// answer).
+func write(w dns.ResponseWriter, m *dns.Msg, r *dns.Msg, proto string) error {
 	m.Compress = true
+	if proto == "udp" {
+		if limit := clientUDPSize(r); m.Len() > limit {
+			c := m.Copy()
+			c.Truncate(limit)
+			m = c
+		}
+	}
 	return w.WriteMsg(m)
 }
 
