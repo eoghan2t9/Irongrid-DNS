@@ -31,53 +31,68 @@ function navSvg(children) {
   )
 }
 
+// NAV is grouped into labelled sections so newcomers can find features by
+// what they do, not by name. Each entry carries a plain-English desc used
+// for the topbar subtitle and the sidebar hover tooltip.
 const NAV = [
   {
-    id: 'dashboard', label: 'Dashboard',
+    id: 'dashboard', label: 'Dashboard', section: 'Overview',
+    desc: 'Live overview of your network\u2019s DNS traffic and health',
     icon: navSvg(<><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></>),
   },
   {
-    id: 'log', label: 'Query Log',
+    id: 'log', label: 'Query Log', section: 'Overview',
+    desc: 'Every DNS query your server answered — searchable and filterable',
     icon: navSvg(<><line x1="8" y1="6" x2="21" y2="6" /><line x1="8" y1="12" x2="21" y2="12" /><line x1="8" y1="18" x2="21" y2="18" /><line x1="3" y1="6" x2="3.01" y2="6" /><line x1="3" y1="12" x2="3.01" y2="12" /><line x1="3" y1="18" x2="3.01" y2="18" /></>),
   },
   {
-    id: 'blocklists', label: 'Blocklists',
+    id: 'blocklists', label: 'Blocklists', section: 'Ad blocking',
+    desc: 'Choose curated lists that block ads, trackers and malware',
     icon: navSvg(<path d="M12 2 20 6v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6z" />),
   },
   {
-    id: 'lists', label: 'Allow / Block',
+    id: 'lists', label: 'Allow / Block', section: 'Ad blocking',
+    desc: 'Always-allow or always-block specific domains yourself',
     icon: navSvg(<><circle cx="12" cy="12" r="9" /><path d="M8 12.5l2.5 2.5 5.5-6" /></>),
   },
   {
-    id: 'rewrites', label: 'Local DNS',
+    id: 'rewrites', label: 'Local DNS', section: 'Ad blocking',
+    desc: 'Answer local names yourself, like printer.lan or media-server.local',
     icon: navSvg(<><path d="M12 21s-7-6.5-7-11a7 7 0 1 1 14 0c0 4.5-7 11-7 11z" /><circle cx="12" cy="10" r="2.5" /></>),
   },
   {
-    id: 'tools', label: 'DNS Tools',
+    id: 'tools', label: 'DNS Tools', section: 'Diagnostics',
+    desc: 'Look up records, check mail servers, and audit a domain',
     icon: navSvg(<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />),
   },
   {
-    id: 'client-groups', label: 'Client Groups',
+    id: 'client-groups', label: 'Client Groups', section: 'Network',
+    desc: 'Give different devices different rules — kids, guests, IoT',
     icon: navSvg(<><circle cx="9" cy="8" r="3" /><path d="M2.5 20c0-3.3 3-5.5 6.5-5.5s6.5 2.2 6.5 5.5" /><circle cx="17" cy="8.5" r="2.2" /><path d="M15.7 13.3c2.3.5 4.1 2.2 4.1 4.7" /></>),
   },
   {
-    id: 'tls', label: 'SSL / TLS',
-    icon: navSvg(<><rect x="5" y="11" width="14" height="9" rx="1.5" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></>),
-  },
-  {
-    id: 'tunnel', label: 'Tunnel',
-    icon: navSvg(<><line x1="6" y1="18" x2="18" y2="6" /><polyline points="9 6 18 6 18 15" /></>),
-  },
-  {
-    id: 'dhcp', label: 'DHCP',
+    id: 'dhcp', label: 'DHCP', section: 'Network',
+    desc: 'Hand out addresses and names to devices on your network',
     icon: navSvg(<><path d="M12 21s-7-6.5-7-11a7 7 0 1 1 14 0c0 4.5-7 11-7 11z" /><circle cx="12" cy="10" r="2.5" /><path d="M8 10h8M10.5 12.5l3-3" /></>),
   },
   {
-    id: 'changelog', label: 'Changelog',
+    id: 'tls', label: 'SSL / TLS', section: 'Server',
+    desc: 'Certificates that keep your DNS and dashboard encrypted',
+    icon: navSvg(<><rect x="5" y="11" width="14" height="9" rx="1.5" /><path d="M8 11V8a4 4 0 0 1 8 0v3" /></>),
+  },
+  {
+    id: 'tunnel', label: 'Tunnel', section: 'Server',
+    desc: 'Reach your server from anywhere via a Cloudflare tunnel',
+    icon: navSvg(<><line x1="6" y1="18" x2="18" y2="6" /><polyline points="9 6 18 6 18 15" /></>),
+  },
+  {
+    id: 'changelog', label: 'Changelog', section: 'System',
+    desc: 'What\u2019s new in each Irongrid release',
     icon: navSvg(<><circle cx="12" cy="12" r="9" /><polyline points="12 7 12 12 15.5 14" /></>),
   },
   {
-    id: 'settings', label: 'Settings',
+    id: 'settings', label: 'Settings', section: 'System',
+    desc: 'Every option — listeners, cache, security and more',
     icon: navSvg(<><circle cx="12" cy="12" r="3" /><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82A1.65 1.65 0 0 0 3 13.09H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" /></>),
   },
 ]
@@ -86,6 +101,9 @@ const NAV = [
 // back/forward buttons work and links are shareable. The web server serves
 // index.html as the SPA fallback for these paths.
 const VALID_VIEWS = NAV.map((n) => n.id)
+// Section order for the sidebar grouping, derived from the first appearance
+// of each section label in NAV so the nav stays the single source of truth.
+const NAV_SECTIONS = [...new Set(NAV.map((n) => n.section))]
 const viewFromPath = () => {
   const p = window.location.pathname.replace(/^\/+|\/+$/g, '')
   return VALID_VIEWS.includes(p) ? p : 'dashboard'
@@ -198,18 +216,24 @@ export default function App() {
           </div>
         </div>
         <nav className="nav">
-          {NAV.map((n) => (
-            <button
-              key={n.id}
-              className={`nav-item ${view === n.id ? 'active' : ''}`}
-              onClick={() => {
-                navigate(n.id)
-                setNavOpen(false)
-              }}
-            >
-              <span className="nav-icon">{n.icon}</span>
-              {n.label}
-            </button>
+          {NAV_SECTIONS.map((sec) => (
+            <div className="nav-group" key={sec}>
+              <div className="nav-section">{sec}</div>
+              {NAV.filter((n) => n.section === sec).map((n) => (
+                <button
+                  key={n.id}
+                  className={`nav-item ${view === n.id ? 'active' : ''}`}
+                  title={n.desc}
+                  onClick={() => {
+                    navigate(n.id)
+                    setNavOpen(false)
+                  }}
+                >
+                  <span className="nav-icon">{n.icon}</span>
+                  {n.label}
+                </button>
+              ))}
+            </div>
           ))}
         </nav>
         <div className="sidebar-foot">
@@ -235,7 +259,10 @@ export default function App() {
             <button className="menu-btn" onClick={() => setNavOpen(true)} aria-label="Open navigation">
               ☰
             </button>
-            <div className="topbar-title">{NAV.find((n) => n.id === view)?.label}</div>
+            <div>
+              <div className="topbar-title">{NAV.find((n) => n.id === view)?.label}</div>
+              <div className="topbar-sub">{NAV.find((n) => n.id === view)?.desc}</div>
+            </div>
           </div>
           <div className="topbar-actions">
             <UpdateChecker onNavigate={navigate} />

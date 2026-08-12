@@ -8,6 +8,10 @@ export default function Dashboard({ onNavigate }) {
   const [tls, setTls] = useState(null)
   const [status, setStatus] = useState(null)
   const [error, setError] = useState('')
+  // Beginner checklist state: what the operator has already configured on
+  // this box. Derived from the live config (not defaults) so an already-set
+  // up server hides the card automatically.
+  const [setupConfig, setSetupConfig] = useState(null)
 
   const load = useCallback(async () => {
     try {
@@ -41,6 +45,12 @@ export default function Dashboard({ onNavigate }) {
     }
   }, [load])
 
+  // One config fetch on mount drives the setup checklist — the config is
+  // tiny and the dashboard is the natural place a first-time operator lands.
+  useEffect(() => {
+    api.config().then(setSetupConfig).catch(() => {})
+  }, [])
+
   if (!stats) return <div className="card loading">Loading dashboard…</div>
 
   const c = stats.counters || {}
@@ -65,9 +75,14 @@ export default function Dashboard({ onNavigate }) {
   const certExpiring = cert && cert.expires_in_days >= 0 && cert.expires_in_days < 30
   const certExpired = cert && cert.expires_in_days < 0
 
+  const checklist = buildChecklist(setupConfig)
+
   return (
     <div className="stack">
       {error && <div className="error-banner">{error}</div>}
+      {checklist && (
+        <SetupChecklist items={checklist} onNavigate={onNavigate} />
+      )}
       {certExpired && (
         <div className="error-banner" role="button" tabIndex={0} onClick={() => onNavigate('tls')} onKeyDown={(e) => e.key === 'Enter' && onNavigate('tls')} style={{ cursor: 'pointer' }}>
           ⚠ The TLS certificate has <strong>expired</strong> — DoT/DoH/DoQ clients will fail. Generate a new one, upload a CA cert, or renew via Let's Encrypt on the <strong>SSL / TLS</strong> page.
@@ -164,6 +179,124 @@ export default function Dashboard({ onNavigate }) {
       </div>
 
       <AcmeCard acme={tls?.acme} onNavigate={onNavigate} onRenewed={load} />
+    </div>
+  )
+}
+
+// buildChecklist turns the live config into the beginner setup checklist:
+// one entry per thing worth configuring on a fresh install. Returns null
+// when the config isn't loaded yet or everything is already done (or the
+// operator dismissed it). Each entry carries a plain-English question, the
+// action that fixes it, and the page that hosts that action.
+function buildChecklist(cfg) {
+  if (!cfg) return null
+  const items = []
+
+  const blocklists = (cfg.filter && cfg.filter.blocklists) || []
+  const hasBlocklist = blocklists.some((b) => b.enabled)
+  if (!hasBlocklist) {
+    items.push({
+      key: 'blocklists',
+      q: 'Block ads and trackers',
+      a: 'Add a blocklist — one click on a curated list like OISD or StevenBlack.',
+      to: 'blocklists',
+      cta: 'Add a blocklist',
+    })
+  }
+
+  if (!cfg.server || !cfg.server.web_tls) {
+    items.push({
+      key: 'https',
+      q: 'Encrypt the dashboard',
+      a: 'Serve this dashboard over HTTPS so your sign-in travels encrypted, not in the clear.',
+      to: 'settings',
+      cta: 'Turn on HTTPS',
+    })
+  }
+
+  if (!cfg.rate_limit || !cfg.rate_limit.enabled) {
+    items.push({
+      key: 'ratelimit',
+      q: 'Protect against abuse',
+      a: 'Rate limiting stops one device — or a public attacker — from hammering your server.',
+      to: 'settings',
+      cta: 'Enable rate limiting',
+    })
+  }
+
+  if (!cfg.dhcp || !cfg.dhcp.enabled) {
+    items.push({
+      key: 'dhcp',
+      q: 'Serve your own network',
+      a: 'Optional: hand out addresses and device names to your LAN with the built-in DHCP server.',
+      to: 'dhcp',
+      cta: 'Set up DHCP',
+    })
+  }
+
+  if (items.length === 0) return null
+  // Respect a prior dismiss (stored per key, so a re-added feature resurfaces).
+  const dismissed = (localStorage.getItem('irongrid_setup_dismissed') || '').split(',').filter(Boolean)
+  const pending = items.filter((i) => !dismissed.includes(i.key))
+  return pending.length ? pending : null
+}
+
+// SetupChecklist is the first-run card: a compact to-do list that deep-links
+// into the page where each item lives. Ticking an item (or Dismiss) persists
+// the item key in localStorage so the card stays gone across reloads and
+// navigation — the dashboard unmounts when you switch views, so nothing
+// may live only in component state.
+function SetupChecklist({ items, onNavigate }) {
+  const [done, setDone] = useState(() => new Set())
+  const remaining = items.filter((i) => !done.has(i.key))
+  if (remaining.length === 0) return null
+  const persist = (keys) => {
+    const cur = (localStorage.getItem('irongrid_setup_dismissed') || '').split(',').filter(Boolean)
+    localStorage.setItem('irongrid_setup_dismissed', [...new Set([...cur, ...keys])].join(','))
+  }
+  const tick = (key) => {
+    persist([key])
+    setDone((s) => new Set(s).add(key))
+  }
+  const dismiss = () => {
+    persist(items.map((i) => i.key))
+    setDone((s) => new Set([...s, ...items.map((i) => i.key)]))
+  }
+  return (
+    <div className="card setup-card">
+      <div className="row-between">
+        <div>
+          <h3 style={{ margin: 0 }}>Getting started</h3>
+          <p className="dim small" style={{ margin: '4px 0 0' }}>
+            {remaining.length} thing{remaining.length === 1 ? '' : 's'} left to set up — tap one to jump straight to it.
+          </p>
+        </div>
+        <button className="btn ghost small" type="button" onClick={dismiss} title="Hide this checklist">
+          Dismiss
+        </button>
+      </div>
+      <div className="setup-list">
+        {remaining.map((i) => (
+          <div className="setup-row" key={i.key}>
+            <button
+              className="setup-check"
+              type="button"
+              onClick={() => tick(i.key)}
+              title="Mark as done"
+              aria-label={`Mark "${i.q}" as done`}
+            >
+              ✓
+            </button>
+            <div className="setup-info">
+              <div className="setup-q">{i.q}</div>
+              <div className="setup-a">{i.a}</div>
+            </div>
+            <button className="btn small" type="button" onClick={() => onNavigate(i.to)}>
+              {i.cta} →
+            </button>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

@@ -2,6 +2,28 @@ import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast'
 
+// Sections for the Settings jump-nav — every card above keeps its id in
+// this list so the anchors stay in sync with the page.
+const SETTINGS_SECTIONS = [
+  { id: 'settings-listeners', label: 'Listeners' },
+  { id: 'settings-upstreams', label: 'Upstreams' },
+  { id: 'settings-dnssec', label: 'DNSSEC' },
+  { id: 'settings-ratelimit', label: 'Rate limit' },
+  { id: 'settings-geo', label: 'Geo block' },
+  { id: 'settings-abuse', label: 'Abuse' },
+  { id: 'settings-cache', label: 'Cache' },
+  { id: 'settings-warmer', label: 'Warmer' },
+  { id: 'settings-tls', label: 'TLS' },
+  { id: 'settings-filtering', label: 'Filtering' },
+  { id: 'settings-log', label: 'Query log' },
+  { id: 'settings-credentials', label: 'Login' },
+  { id: 'settings-tunnel', label: 'Tunnel' },
+  { id: 'settings-dhcp', label: 'DHCP' },
+  { id: 'settings-backup', label: 'Backup' },
+  { id: 'settings-diagnostic', label: 'Diagnostic' },
+  { id: 'settings-maintenance', label: 'Maintenance' },
+]
+
 const empty = () => ({
   server: {
     listen_udp: '', listen_tcp: '', listen_dot: '', listen_doh: '', listen_doh3: '', listen_doq: '',
@@ -501,9 +523,17 @@ export default function Settings({ onSessionInvalidated }) {
           listener/cache/TLS changes can be applied in place with <strong>Apply &amp; restart</strong> — no process
           restart needed.
         </p>
+        {/* Jump links for the long page: anchor into each section below. */}
+        <div className="settings-jump">
+          {SETTINGS_SECTIONS.map((s) => (
+            <a className="btn ghost small" href={`#${s.id}`} key={s.id}>
+              {s.label}
+            </a>
+          ))}
+        </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-listeners">
         <h3>Server listeners</h3>
         <div className="form-grid">
           {text('UDP listener', 'server.listen_udp', 'plain DNS over UDP, "" disables', '0.0.0.0:53')}
@@ -524,7 +554,7 @@ export default function Settings({ onSessionInvalidated }) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-upstreams">
         <h3>Upstreams</h3>
         {listEditor('upstreams', 'upstreams', 'udp://, tcp://, tls://, https://, quic://, recursive://')}
         {/* This paragraph follows the list editor's format hint (not a heading), so it needs real
@@ -635,7 +665,7 @@ export default function Settings({ onSessionInvalidated }) {
         )}
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-dnssec">
         <h3>DNSSEC</h3>
         <p className="dim small" style={{ marginTop: -6 }}>
           Irongrid forwards queries rather than validating the signature chain itself — like Pi-hole, AdGuard Home
@@ -648,7 +678,7 @@ export default function Settings({ onSessionInvalidated }) {
           {toggle('Enable DNSSEC (trust upstream validation)', 'dnssec.enabled')}
           {toggle('Reject unauthenticated answers (SERVFAIL)', 'dnssec.require_ad')}
         </div>
-      </div>      <div className="card">
+      </div>      <div className="card" id="settings-ratelimit">
         <h3>Rate limiting &amp; abuse protection</h3>
         <p className="dim small" style={{ marginTop: -6 }}>
           Throttles queries per client IP — a defense against a compromised LAN device or a public listener being
@@ -689,7 +719,7 @@ export default function Settings({ onSessionInvalidated }) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-geo">
         <h3>Geo blocking</h3>
         <p className="dim small" style={{ marginTop: -6 }}>
           Refuses queries (<strong>REFUSED</strong> on every transport) from client IPs that belong to the selected
@@ -785,7 +815,7 @@ export default function Settings({ onSessionInvalidated }) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-abuse">
         <h3>Abuse reporting</h3>
         <p className="dim small" style={{ marginTop: -6 }}>
           One-click reporting of honeypot-confirmed attackers to{' '}
@@ -808,7 +838,7 @@ export default function Settings({ onSessionInvalidated }) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-cache">
         <h3>Cache (Dragonfly)</h3>
         <p className="dim small" style={{ marginTop: -6 }}>
           Dragonfly is the response cache <em>and</em> the query log's home. Watch live utilisation on the
@@ -828,7 +858,7 @@ export default function Settings({ onSessionInvalidated }) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-warmer">
         <h3>Cache warmer</h3>
         <p className="dim small" style={{ marginTop: -6 }}>
           Proactively pre-caches answers for every domain your network queried within
@@ -847,7 +877,7 @@ export default function Settings({ onSessionInvalidated }) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-tls">
         <h3>TLS</h3>
         <p className="dim small" style={{ marginTop: -6 }}>
           Prefer the dedicated <strong>SSL / TLS</strong> page for generating or uploading
@@ -906,7 +936,7 @@ export default function Settings({ onSessionInvalidated }) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-filtering">
         <h3>Filtering</h3>
         <p className="dim small" style={{ marginTop: -6 }}>
           Manage which blocklists are installed on the dedicated <strong>Blocklists</strong> page — this is just
@@ -934,7 +964,7 @@ export default function Settings({ onSessionInvalidated }) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-log">
         <h3>Query log</h3>
         <p className="dim small" style={{ marginTop: -6 }}>
           The query log lives in <strong>Dragonfly</strong> (stream <code>irongrid:log</code>) alongside the DNS
@@ -947,7 +977,7 @@ export default function Settings({ onSessionInvalidated }) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-credentials">
         <h3>Web credentials</h3>
         <div className="form-grid">
           {text('Username', 'web.username')}
@@ -957,7 +987,7 @@ export default function Settings({ onSessionInvalidated }) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-tunnel">
         <h3>Tunnel (cloudflared)</h3>
         <div className="form-grid">
           {toggle('Start on boot', 'tunnel.enabled')}
@@ -969,7 +999,7 @@ export default function Settings({ onSessionInvalidated }) {
         </div>
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-dhcp">
         <h3>DHCP server</h3>
         <p className="dim small" style={{ marginTop: -6 }}>
           A built-in DHCP server for the LAN this box is the DNS for: hands out IPv4 addresses from
@@ -1011,7 +1041,7 @@ export default function Settings({ onSessionInvalidated }) {
         <button className="btn small" type="button" onClick={addStaticLease}>+ Add reservation</button>
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-backup">
         <h3>Backup &amp; restore</h3>
         <p className="dim small" style={{ marginTop: -6 }}>
           Download an archive of the config file and TLS certificates — handy before upgrades or when moving
@@ -1031,7 +1061,7 @@ export default function Settings({ onSessionInvalidated }) {
         {restoreMsg && <div className="info-banner" style={{ marginTop: 8 }}>{restoreMsg}</div>}
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-diagnostic">
         <h3>DNS diagnostic</h3>
         <form onSubmit={runDiag} className="form-grid">
           <input className="input" value={diagName} onChange={(e) => setDiagName(e.target.value)} />
@@ -1059,7 +1089,7 @@ export default function Settings({ onSessionInvalidated }) {
         )}
       </div>
 
-      <div className="card">
+      <div className="card" id="settings-maintenance">
         <h3>Cache &amp; maintenance</h3>
         <div className="quick-actions">
           <button className="btn" onClick={flush}>Flush DNS cache (Dragonfly)</button>
