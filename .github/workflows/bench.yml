@@ -7,8 +7,6 @@ name: bench
 # artifact for diffing across runs.
 on:
   pull_request:
-  push:
-    branches: [main]
   workflow_dispatch:
 
 permissions:
