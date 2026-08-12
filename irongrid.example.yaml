@@ -115,6 +115,37 @@ recursive:
                               # the resolver moves on (0 = built-in 3s default)
 
 
+# dhcp:
+#   enabled: true             # off by default — this host is usually the DNS
+#                             # server, so it doubles as the LAN's DHCP server.
+#                             # Only bind the NIC your LAN actually uses (below).
+#   interface: eth0           # NIC to serve on; empty = all interfaces (careful
+#                             # if the host has several NICs)
+#   subnet: 192.168.1.0/24    # IPv4 network served (RFC 2131)
+#   range_start: 192.168.1.100
+#   range_end: 192.168.1.200  # dynamic pool
+#   gateway: 192.168.1.1      # router option; empty = this server's own address
+#   dns:                      # DNS option; empty = this server (the point!)
+#     - 192.168.1.1
+#   lease_time: 24h
+#   domain: lan               # client hostnames resolve as <hostname>.lan and
+#                             # bare <hostname> in the local DNS (Pi-hole style);
+#                             # empty disables hostname resolution
+#   static_leases:            # fixed addresses that never expire; MAC keys
+#                             # DHCPv4, DUID keys DHCPv6
+#     - mac: aa:bb:cc:dd:ee:ff
+#       ip: 192.168.1.50
+#       hostname: printer
+#     - duid: 000100011234567890abcdef
+#       ip: fd00::50
+#       hostname: nas
+#   ipv6: false               # also run DHCPv6 (RFC 8415 IA_NA + stateless DNS
+#                             # options for SLAAC clients) on the same NIC
+#   ipv6_prefix: fd00::/64
+#   ipv6_range_start: fd00::100
+#   ipv6_range_end: fd00::200
+
+
 tls:
   cert_file: ""                # PEM cert chain for DoT/DoH/DoQ ("" = self-signed)
   key_file: ""

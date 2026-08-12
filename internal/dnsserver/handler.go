@@ -70,11 +70,22 @@ func newStats() *Stats {
 	return s
 }
 
+// DHCPHostResolver is implemented by the DHCP server so locally-assigned
+// client hostnames resolve through the DNS handler (Pi-hole style:
+// "printer" and "printer.lan" both answer). LookupHost returns the client's
+// address(es); ok=false for unknown names.
+type DHCPHostResolver interface {
+	LookupHost(name string) ([]net.IP, bool)
+}
+
 // Handler is the shared request pipeline for all listeners.
 type Handler struct {
 	Engine *filter.Engine
 	Cache  *cache.Cache
 	Log    *querylog.Log
+	// DHCPHosts resolves locally-assigned client hostnames (set at boot;
+	// never swapped — the DHCP server lives for the process).
+	DHCPHosts DHCPHostResolver
 
 	// mu guards the hot-swappable settings below so the API can live-apply
 	// config changes without a restart.
@@ -482,6 +493,37 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			h.Stats.Allowed.Add(1)
 			m := newReply(r)
 			h.record(client, qname, q, "rewrite", "local-dns-nodata", "", start, m)
+			_ = h.write(w, m, r, proto)
+			return
+		}
+	}
+
+	// 1.5 DHCP-assigned hostnames: a client the DHCP server registered (its
+	//     hostname from DHCPREQUEST, optionally under the configured domain)
+	//     resolves locally — the address is authoritative while the lease is
+	//     live, so the answer never goes upstream. Both <hostname>.<domain>
+	//     and the bare <hostname> match; the other address family of a known
+	//     host is answered with authoritative NODATA (it exists, just not as
+	//     an AAAA). Short TTL so a hostname change propagates within minutes.
+	if h.DHCPHosts != nil {
+		if ips, ok := h.DHCPHosts.LookupHost(q.Name); ok && len(ips) > 0 {
+			m := new(dns.Msg)
+			m.SetReply(r)
+			m.Authoritative = true
+			for _, ip := range ips {
+				switch {
+				case q.Qtype == dns.TypeA && ip.To4() != nil:
+					m.Answer = append(m.Answer, &dns.A{Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: dhcpHostTTL}, A: ip.To4()})
+				case q.Qtype == dns.TypeAAAA && ip.To4() == nil && ip.To16() != nil:
+					m.Answer = append(m.Answer, &dns.AAAA{Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: dhcpHostTTL}, AAAA: ip.To16()})
+				}
+			}
+			h.Stats.Allowed.Add(1)
+			if len(m.Answer) > 0 {
+				h.record(client, qname, q, "rewrite", "dhcp-host", "", start, m)
+			} else {
+				h.record(client, qname, q, "rewrite", "dhcp-host-nodata", "", start, m)
+			}
 			_ = h.write(w, m, r, proto)
 			return
 		}
@@ -1229,6 +1271,11 @@ func (h *Handler) Refresh(ctx context.Context, q dns.Question) {
 // staleServeTTL caps the TTLs of a serve-stale answer (RFC 8767 section 5:
 // stale answers should carry a small TTL so clients re-resolve quickly).
 const staleServeTTL = 30
+
+// dhcpHostTTL is the TTL on DHCP-registered hostname answers: short so a
+// client that re-negotiates a different address is re-resolved quickly, long
+// enough that LAN lookups are cheap.
+const dhcpHostTTL = 120
 
 // ednsUDPSize is the UDP payload size advertised on outgoing upstream
 // queries: the DNS Flag Day 2020 recommended 1232 bytes, the largest value

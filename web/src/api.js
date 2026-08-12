@@ -128,6 +128,7 @@ export const api = {
   tunnelStart: (body) => request('/api/tunnel/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
   tunnelStop: () => request('/api/tunnel/stop', { method: 'POST' }),
   tunnelLog: () => request('/api/tunnel/log'),
+  dhcpLeases: () => request('/api/dhcp/leases'),
   config: () => request('/api/config'),
   saveConfig: (cfg) => request('/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) }),
   reloadConfig: () => request('/api/config/reload', { method: 'POST' }),

@@ -25,6 +25,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/catalog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cert"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dhcp"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsserver"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/firewall"
@@ -234,6 +235,24 @@ func main() {
 	// toggle applies without a restart.
 	handler.SetPadding(cfg.Server.Padding)
 	handler.SetCookies(cfg.Server.Cookies)
+	// ---- built-in DHCP server (LAN feature, off by default) ----
+	// Hands out IPv4 (RFC 2131) and optionally IPv6 (RFC 8415) addresses
+	// from the config-driven pool, persists leases under the data dir, and
+	// registers client hostnames so <hostname>.<domain> (and the bare
+	// hostname) resolve locally through the DNS handler — Pi-hole style.
+	// Only wired when the feature is enabled in the config; the DHCP server
+	// lives for the process, so the DNS handler's DHCPHosts hook is set once
+	// here and never swapped.
+	dhcpSrv := dhcp.New(filepath.Join(*dataDir, "dhcp"))
+	dhcpSrv.SetConfig(buildDHCPRuntime(cfg.DHCP))
+	if dhcpSrv.Enabled() {
+		if err := dhcpSrv.Start(); err != nil {
+			log.Printf("[dhcp] failed to start (feature disabled): %v", err)
+		} else {
+			log.Printf("[dhcp] server enabled: %s", dhcpSummary(cfg.DHCP))
+		}
+	}
+	handler.DHCPHosts = dhcpSrv
 	// Multi-upstream resolution strategy (config upstream_mode: race or
 	// sequential). NewHandler defaults to race; apply the configured value.
 	handler.SetUpstreamMode(cfg.UpstreamMode)
@@ -317,6 +336,7 @@ func main() {
 		StartedAt:  time.Now(),
 		Version:    version.Version,
 		Warmer:     warmer,
+		DHCP:       dhcpSrv,
 	}
 	apiApp.Handler = apiHandler
 	// authorize/validSession/issueSession snapshot the auth fields under the
@@ -787,6 +807,35 @@ func main() {
 		handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
 		handler.SetPadding(cfg.Server.Padding)
 		handler.SetCookies(cfg.Server.Cookies)
+		// DHCP: pool/option/static changes apply immediately (handlers read
+		// them per packet); a bind change (interface, enable state, subnet)
+		// restarts the packet listeners without dropping leases. Capture the
+		// old bind state before SetConfig swaps the runtime config.
+		wasRunning := dhcpSrv.Enabled()
+		wasIface := dhcpSrv.Interface()
+		newDHCP := buildDHCPRuntime(cfg.DHCP)
+		dhcpSrv.SetConfig(newDHCP)
+		wantRunning := cfg.DHCP.Enabled && (cfg.DHCP.Subnet != "" || (cfg.DHCP.IPv6 && cfg.DHCP.IPv6Prefix != ""))
+		// Restart when the enable state flipped, or when the NIC the
+		// listeners bind changed (the server itself is always running in
+		// this build, so wasRunning stays true across an interface edit).
+		if wasRunning != wantRunning || (wantRunning && wasIface != cfg.DHCP.Interface) {
+			if wantRunning {
+				var err error
+				if wasRunning {
+					// Already bound: rebind to the new interface without
+					// dropping the lease table.
+					err = dhcpSrv.RestartListeners()
+				} else {
+					err = dhcpSrv.Start()
+				}
+				if err != nil {
+					log.Printf("[dhcp] listener start failed: %v", err)
+				}
+			} else {
+				dhcpSrv.Stop()
+			}
+		}
 		// Geo blocking is hot-swapped asynchronously (see RebuildGeo).
 		if apiHandler.RebuildGeo != nil {
 			_ = apiHandler.RebuildGeo(cfg.GeoBlock)
@@ -950,3 +999,113 @@ func resolveL1Entries(v int) int {
 // buildRewriter, buildRateLimiter and buildClientRouter live in the
 // dnsserver package (as BuildRewriter etc.) so the API's live config-apply
 // path can share the exact same logic instead of duplicating it.
+
+// ---- DHCP runtime config ----
+
+// buildDHCPRuntime maps the config section into the dhcp package's runtime
+// Config, discovering this host's own addresses inside the served networks
+// (the default gateway/DNS options and the anchor for the server DUID). The
+// mapping itself lives in dhcp.ConfigFrom so the API's live-apply path
+// produces an identical config — a dashboard save can never drop fields
+// (e.g. the server identifier) that boot had set.
+func buildDHCPRuntime(c config.DHCPConfig) dhcp.Config {
+	_, subnet := parseCIDR(c.Subnet)
+	_, ipv6net := parseCIDR(c.IPv6Prefix)
+	var addrs dhcp.HostAddresses
+	addrs.IPv4, addrs.IPv6, addrs.MAC = hostLANAddresses(subnet, ipv6net, c.Interface)
+	return dhcp.ConfigFrom(c.Enabled, c.Interface, c.Subnet, c.RangeStart, c.RangeEnd,
+		c.Gateway, c.DNS, c.LeaseTime, c.Domain, dhcpStatics(c.StaticLeases),
+		c.IPv6, c.IPv6Prefix, c.IPv6RangeStart, c.IPv6RangeEnd, addrs)
+}
+
+// dhcpStatics converts the config's static-lease specs into the runtime type.
+func dhcpStatics(leases []config.DHCPStaticLease) []dhcp.StaticLease {
+	out := make([]dhcp.StaticLease, 0, len(leases))
+	for _, sl := range leases {
+		st := dhcp.StaticLease{MAC: sl.MAC, DUID: sl.DUID, Hostname: sl.Hostname}
+		if ip := net.ParseIP(sl.IP); ip != nil {
+			st.IP = ip
+		}
+		out = append(out, st)
+	}
+	return out
+}
+
+// parseCIDR returns the *net.IPNet for a CIDR string (nil when invalid — the
+// config validator has already rejected bad values by the time this runs).
+func parseCIDR(s string) (net.IP, *net.IPNet) {
+	if s == "" {
+		return nil, nil
+	}
+	ip, n, err := net.ParseCIDR(s)
+	if err != nil {
+		return nil, nil
+	}
+	return ip, n
+}
+
+// dhcpSummary renders a one-line description of the DHCP config for the boot
+// log (only called when the server is enabled).
+func dhcpSummary(c config.DHCPConfig) string {
+	s := "DHCPv4 " + c.Subnet
+	if c.RangeStart != "" {
+		s += " (pool " + c.RangeStart + "-" + c.RangeEnd + ")"
+	}
+	if c.IPv6 {
+		s += " + DHCPv6 " + c.IPv6Prefix
+	}
+	return s
+}
+
+// hostLANAddresses finds this host's own IPs (IPv4 and IPv6) inside the
+// served networks and its hardware MAC, so the DHCP options can point at this
+// box by default. Interface, when non-empty, restricts the search to that
+// NIC. Any part can be nil — the DHCP handlers then fall back to the
+// configured gateway/DNS values.
+func hostLANAddresses(subnet, ipv6net *net.IPNet, iface string) (v4, v6 net.IP, mac net.HardwareAddr) {
+	ifaces := []net.Interface{}
+	if iface != "" {
+		i, err := net.InterfaceByName(iface)
+		if err != nil {
+			log.Printf("[dhcp] interface %q not found: %v", iface, err)
+			return nil, nil, nil
+		}
+		ifaces = append(ifaces, *i)
+	} else {
+		all, err := net.Interfaces()
+		if err != nil {
+			return nil, nil, nil
+		}
+		for _, i := range all {
+			if i.Flags&net.FlagUp != 0 && i.Flags&net.FlagLoopback == 0 {
+				ifaces = append(ifaces, i)
+			}
+		}
+	}
+	for _, i := range ifaces {
+		if mac == nil && len(i.HardwareAddr) == 6 {
+			mac = i.HardwareAddr
+		}
+		addrs, err := i.Addrs()
+		if err != nil {
+			continue
+		}
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok {
+				continue
+			}
+			ip := ipnet.IP
+			if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+				continue
+			}
+			if ip.To4() != nil && v4 == nil && subnet != nil && subnet.Contains(ip) {
+				v4 = ip.To4()
+			}
+			if ip.To4() == nil && v6 == nil && ipv6net != nil && ipv6net.Contains(ip) {
+				v6 = ip
+			}
+		}
+	}
+	return v4, v6, mac
+}

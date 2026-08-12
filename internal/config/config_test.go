@@ -407,3 +407,124 @@ func TestValidateDNS01SupportedProviders(t *testing.T) {
 		}
 	}
 }
+
+// dhcpBase returns a valid DHCP-enabled config for validation tests.
+func dhcpBase() *Config {
+	c := validBase()
+	c.DHCP = DHCPConfig{
+		Enabled:    true,
+		Subnet:     "192.168.1.0/24",
+		RangeStart: "192.168.1.100",
+		RangeEnd:   "192.168.1.200",
+		Gateway:    "192.168.1.1",
+		DNS:        []string{"192.168.1.1"},
+		LeaseTime:  24 * time.Hour,
+		Domain:     "lan",
+	}
+	return c
+}
+
+func TestValidateDHCPValid(t *testing.T) {
+	if err := dhcpBase().Validate(); err != nil {
+		t.Fatalf("valid DHCP config rejected: %v", err)
+	}
+}
+
+func TestValidateDHCPRequiresRange(t *testing.T) {
+	c := dhcpBase()
+	c.DHCP.RangeStart = ""
+	if err := c.Validate(); err == nil {
+		t.Fatal("missing range_start accepted")
+	}
+}
+
+func TestValidateDHCPBadSubnet(t *testing.T) {
+	c := dhcpBase()
+	c.DHCP.Subnet = "not-a-cidr"
+	if err := c.Validate(); err == nil {
+		t.Fatal("invalid subnet accepted")
+	}
+}
+
+func TestValidateDHCPRangeOutsideSubnet(t *testing.T) {
+	c := dhcpBase()
+	c.DHCP.RangeEnd = "10.9.9.9"
+	if err := c.Validate(); err == nil {
+		t.Fatal("range outside subnet accepted")
+	}
+}
+
+func TestValidateDHCPReversedRange(t *testing.T) {
+	c := dhcpBase()
+	c.DHCP.RangeStart = "192.168.1.200"
+	c.DHCP.RangeEnd = "192.168.1.100"
+	if err := c.Validate(); err == nil {
+		t.Fatal("reversed range accepted")
+	}
+}
+
+func TestValidateDHCPBadGateway(t *testing.T) {
+	c := dhcpBase()
+	c.DHCP.Gateway = "203.0.113.1" // outside the subnet
+	if err := c.Validate(); err == nil {
+		t.Fatal("gateway outside subnet accepted")
+	}
+}
+
+func TestValidateDHCPBadDNS(t *testing.T) {
+	c := dhcpBase()
+	c.DHCP.DNS = []string{"not-an-ip"}
+	if err := c.Validate(); err == nil {
+		t.Fatal("invalid DNS entry accepted")
+	}
+}
+
+func TestValidateDHCPBadDomain(t *testing.T) {
+	c := dhcpBase()
+	c.DHCP.Domain = "bad domain!"
+	if err := c.Validate(); err == nil {
+		t.Fatal("invalid domain accepted")
+	}
+}
+
+func TestValidateDHCPStaticLease(t *testing.T) {
+	// Valid static reservation passes.
+	c := dhcpBase()
+	c.DHCP.StaticLeases = []DHCPStaticLease{{MAC: "aa:bb:cc:dd:ee:ff", IP: "192.168.1.50", Hostname: "printer"}}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid static lease rejected: %v", err)
+	}
+	// Static lease with no MAC/DUID rejected.
+	c = dhcpBase()
+	c.DHCP.StaticLeases = []DHCPStaticLease{{IP: "192.168.1.50"}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("static lease without mac/duid accepted")
+	}
+	// Static lease IP outside subnet rejected.
+	c = dhcpBase()
+	c.DHCP.StaticLeases = []DHCPStaticLease{{MAC: "aa:bb:cc:dd:ee:ff", IP: "10.9.9.9"}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("static lease IP outside subnet accepted")
+	}
+}
+
+func TestValidateDHCPv6(t *testing.T) {
+	// Valid v6 config passes.
+	c := dhcpBase()
+	c.DHCP.IPv6 = true
+	c.DHCP.IPv6Prefix = "fd00::/64"
+	c.DHCP.IPv6RangeStart = "fd00::100"
+	c.DHCP.IPv6RangeEnd = "fd00::200"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid DHCPv6 config rejected: %v", err)
+	}
+	// v6 range outside prefix rejected.
+	c = dhcpBase()
+	c.DHCP.IPv6 = true
+	c.DHCP.IPv6Prefix = "fd00::/64"
+	c.DHCP.IPv6RangeStart = "2001:db8::1"
+	c.DHCP.IPv6RangeEnd = "2001:db8::2"
+	if err := c.Validate(); err == nil {
+		t.Fatal("v6 range outside prefix accepted")
+	}
+}

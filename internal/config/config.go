@@ -3,6 +3,7 @@
 package config
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
@@ -46,6 +47,58 @@ type Config struct {
 	// Recursive tunes the recursive:// upstream transport (the iterative
 	// resolver that walks referrals from the root servers itself).
 	Recursive RecursiveConfig `yaml:"recursive"`
+	DHCP      DHCPConfig      `yaml:"dhcp"`
+}
+
+// DHCPConfig controls the built-in DHCP server: stateful DHCPv4 (RFC 2131)
+// and DHCPv6 (RFC 8415 IA_NA, plus stateless option serving to SLAAC
+// clients). It is meant for a LAN deployment where this host is the network's
+// DNS server — the addresses handed out and the options advertised are all
+// config-driven, and off by default.
+type DHCPConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Interface binds the server to one NIC (e.g. "eth0", "br0"); empty
+	// listens on all interfaces. Binding a specific interface is
+	// recommended when the host has several NICs so the server only
+	// answers on the LAN.
+	Interface string `yaml:"interface"`
+	// Subnet is the IPv4 network served, e.g. "192.168.1.0/24".
+	Subnet string `yaml:"subnet"`
+	// RangeStart/RangeEnd bound the dynamic IPv4 pool handed to clients.
+	RangeStart string `yaml:"range_start"`
+	RangeEnd   string `yaml:"range_end"`
+	// Gateway is the router option advertised to clients; empty defaults to
+	// this server's own address on the subnet.
+	Gateway string `yaml:"gateway"`
+	// DNS are the DNS server options advertised to clients; empty defaults
+	// to this server's own address (the whole point: Irongrid is the DNS).
+	DNS []string `yaml:"dns"`
+	// LeaseTime is how long a dynamic lease lasts; 0 uses the default (24h).
+	LeaseTime time.Duration `yaml:"lease_time"`
+	// Domain is the suffix appended to client hostnames for local DNS
+	// resolution (e.g. "lan" makes a client "printer" resolvable as
+	// printer.lan). Empty disables hostname resolution.
+	Domain string `yaml:"domain"`
+	// StaticLeases reserve fixed addresses per client (MAC for v4, DUID for
+	// v6) that never expire, and their hostnames are always resolvable.
+	StaticLeases []DHCPStaticLease `yaml:"static_leases"`
+	// IPv6 enables the DHCPv6 server on the same interface: stateful IA_NA
+	// assignment from IPv6Range within IPv6Prefix, plus stateless option
+	// serving (DNS etc.) to SLAAC-only clients.
+	IPv6 bool `yaml:"ipv6"`
+	// IPv6Prefix is the network served, e.g. "fd00::/64" (ULA).
+	IPv6Prefix     string `yaml:"ipv6_prefix"`
+	IPv6RangeStart string `yaml:"ipv6_range_start"`
+	IPv6RangeEnd   string `yaml:"ipv6_range_end"`
+}
+
+// DHCPStaticLease reserves a fixed address for one client and optionally
+// pins its hostname. MAC is used by DHCPv4; DUID by DHCPv6.
+type DHCPStaticLease struct {
+	MAC      string `yaml:"mac"`
+	DUID     string `yaml:"duid"`
+	IP       string `yaml:"ip"`
+	Hostname string `yaml:"hostname"`
 }
 
 // RecursiveConfig tunes the recursive:// upstream transport.
@@ -455,6 +508,10 @@ func Default() *Config {
 			MaxDomains:  5000,
 			Concurrency: 8,
 		},
+		DHCP: DHCPConfig{
+			LeaseTime: 24 * time.Hour,
+			Domain:    "lan",
+		},
 	}
 }
 
@@ -565,6 +622,82 @@ func (c *Config) validate() error {
 	}
 	if c.Warmer.Concurrency < 0 {
 		return fmt.Errorf("warmer.concurrency must be >= 0 (0 uses the default)")
+	}
+	if c.DHCP.Enabled {
+		_, ipnet, err := net.ParseCIDR(c.DHCP.Subnet)
+		if err != nil {
+			return fmt.Errorf("dhcp.subnet %q is not a valid CIDR", c.DHCP.Subnet)
+		}
+		if c.DHCP.RangeStart == "" || c.DHCP.RangeEnd == "" {
+			return fmt.Errorf("dhcp.range_start and dhcp.range_end are required when DHCP is enabled")
+		}
+		start, end := net.ParseIP(c.DHCP.RangeStart), net.ParseIP(c.DHCP.RangeEnd)
+		if start == nil || end == nil || start.To4() == nil || end.To4() == nil {
+			return fmt.Errorf("dhcp.range_start/range_end must be IPv4 addresses")
+		}
+		if !ipnet.Contains(start) || !ipnet.Contains(end) {
+			return fmt.Errorf("dhcp range %s-%s must lie inside dhcp.subnet %s", c.DHCP.RangeStart, c.DHCP.RangeEnd, c.DHCP.Subnet)
+		}
+		if bytes.Compare(start.To4(), end.To4()) > 0 {
+			return fmt.Errorf("dhcp.range_start %s is after dhcp.range_end %s", c.DHCP.RangeStart, c.DHCP.RangeEnd)
+		}
+		if c.DHCP.Gateway != "" {
+			g := net.ParseIP(c.DHCP.Gateway)
+			if g == nil || g.To4() == nil || !ipnet.Contains(g) {
+				return fmt.Errorf("dhcp.gateway %q is not an IPv4 address inside dhcp.subnet", c.DHCP.Gateway)
+			}
+		}
+		for _, d := range c.DHCP.DNS {
+			if net.ParseIP(d) == nil {
+				return fmt.Errorf("dhcp.dns entry %q is not a valid IP", d)
+			}
+		}
+		if c.DHCP.LeaseTime < 0 {
+			return fmt.Errorf("dhcp.lease_time must be >= 0 (0 uses the default)")
+		}
+		if c.DHCP.Domain != "" && !validHostname(c.DHCP.Domain) {
+			return fmt.Errorf("dhcp.domain %q is not a valid hostname", c.DHCP.Domain)
+		}
+		for i, sl := range c.DHCP.StaticLeases {
+			if sl.MAC == "" && sl.DUID == "" {
+				return fmt.Errorf("dhcp.static_leases[%d]: mac or duid is required", i)
+			}
+			if sl.MAC != "" && !validMAC(sl.MAC) {
+				return fmt.Errorf("dhcp.static_leases[%d]: mac %q is not a valid MAC address", i, sl.MAC)
+			}
+			ip := net.ParseIP(sl.IP)
+			if ip == nil {
+				return fmt.Errorf("dhcp.static_leases[%d]: ip %q is not a valid address", i, sl.IP)
+			}
+			if ip.To4() != nil && !ipnet.Contains(ip) {
+				return fmt.Errorf("dhcp.static_leases[%d]: ip %s must lie inside dhcp.subnet %s", i, sl.IP, c.DHCP.Subnet)
+			}
+			if sl.Hostname != "" && !validHostname(sl.Hostname) {
+				return fmt.Errorf("dhcp.static_leases[%d]: hostname %q is not valid", i, sl.Hostname)
+			}
+		}
+		if c.DHCP.IPv6 {
+			_, ipnet6, err := net.ParseCIDR(c.DHCP.IPv6Prefix)
+			if err != nil {
+				return fmt.Errorf("dhcp.ipv6_prefix %q is not a valid CIDR", c.DHCP.IPv6Prefix)
+			}
+			s6, e6 := net.ParseIP(c.DHCP.IPv6RangeStart), net.ParseIP(c.DHCP.IPv6RangeEnd)
+			if s6 == nil || e6 == nil || s6.To4() != nil || e6.To4() != nil {
+				return fmt.Errorf("dhcp.ipv6_range_start/ipv6_range_end must be IPv6 addresses")
+			}
+			if !ipnet6.Contains(s6) || !ipnet6.Contains(e6) {
+				return fmt.Errorf("dhcp ipv6 range %s-%s must lie inside dhcp.ipv6_prefix %s", c.DHCP.IPv6RangeStart, c.DHCP.IPv6RangeEnd, c.DHCP.IPv6Prefix)
+			}
+			if bytes.Compare(s6, e6) > 0 {
+				return fmt.Errorf("dhcp.ipv6_range_start %s is after dhcp.ipv6_range_end %s", c.DHCP.IPv6RangeStart, c.DHCP.IPv6RangeEnd)
+			}
+			for i, sl := range c.DHCP.StaticLeases {
+				ip := net.ParseIP(sl.IP)
+				if ip != nil && ip.To4() == nil && !ipnet6.Contains(ip) {
+					return fmt.Errorf("dhcp.static_leases[%d]: ipv6 address %s must lie inside dhcp.ipv6_prefix %s", i, sl.IP, c.DHCP.IPv6Prefix)
+				}
+			}
+		}
 	}
 	if c.Server.ListenUDP == "" && c.Server.ListenTCP == "" &&
 		c.Server.ListenDoT == "" && c.Server.ListenDoH == "" && c.Server.ListenDoQ == "" {
@@ -749,6 +882,26 @@ func (c *Config) validate() error {
 		return fmt.Errorf("geo_block.auto_update must be >= 0 (0 disables automatic refreshes)")
 	}
 	return nil
+}
+
+// validMAC reports whether s parses as a colon-separated MAC address.
+func validMAC(s string) bool {
+	_, err := net.ParseMAC(strings.ToLower(s))
+	return err == nil
+}
+
+// validHostname reports whether s is a plausible single-label hostname
+// (letters, digits, hyphens — no dots, no spaces).
+func validHostname(s string) bool {
+	if s == "" || len(s) > 63 {
+		return false
+	}
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // normalizeDomain lowercases, trims and strips a trailing dot from a domain

@@ -23,6 +23,11 @@ const empty = () => ({
   abuse: { abuseipdb_key: '' },
   dnssec: { enabled: false, require_ad: true },
   warmer: { enabled: false, interval: '15m', lookback: '24h', max_domains: 5000, concurrency: 8 },
+  dhcp: {
+    enabled: false, interface: '', subnet: '', range_start: '', range_end: '', gateway: '',
+    dns: [], lease_time: '24h', domain: 'lan', static_leases: [],
+    ipv6: false, ipv6_prefix: '', ipv6_range_start: '', ipv6_range_end: '',
+  },
 })
 
 export default function Settings({ onSessionInvalidated }) {
@@ -253,6 +258,36 @@ export default function Settings({ onSessionInvalidated }) {
     } finally {
       setFastestBusy(false)
     }
+  }
+
+  const setStaticLease = (index, field, value) => {
+    setCfg((prev) => {
+      const next = JSON.parse(JSON.stringify(prev))
+      const leases = next.dhcp.static_leases || []
+      if (!leases[index]) leases[index] = {}
+      leases[index] = { ...leases[index], [field]: value }
+      next.dhcp.static_leases = leases
+      return next
+    })
+    setDirty(true)
+  }
+
+  const addStaticLease = () => {
+    setCfg((prev) => {
+      const next = JSON.parse(JSON.stringify(prev))
+      next.dhcp.static_leases = [...(next.dhcp.static_leases || []), {}]
+      return next
+    })
+    setDirty(true)
+  }
+
+  const removeStaticLease = (index) => {
+    setCfg((prev) => {
+      const next = JSON.parse(JSON.stringify(prev))
+      next.dhcp.static_leases = (next.dhcp.static_leases || []).filter((_, i) => i !== index)
+      return next
+    })
+    setDirty(true)
   }
 
   const addUpstream = (spec) => {
@@ -826,6 +861,48 @@ export default function Settings({ onSessionInvalidated }) {
           {text('Origin URL', 'tunnel.quick_tunnel_url')}
           {text('Hostname', 'tunnel.hostname')}
         </div>
+      </div>
+
+      <div className="card">
+        <h3>DHCP server</h3>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          A built-in DHCP server for the LAN this box is the DNS for: hands out IPv4 addresses from
+          a pool (and optionally stateful IPv6 via DHCPv6), honours static reservations, and registers
+          client hostnames so <span className="mono">hostname</span> and{' '}
+          <span className="mono">hostname.{deepGet('dhcp.domain', 'lan')}</span> resolve locally — Pi-hole
+          style. Requires the server to have an address inside the served subnet. Only enable on the
+          NIC your LAN actually uses.
+        </p>
+        <div className="form-grid">
+          {toggle('Enable DHCP server', 'dhcp.enabled')}
+          {text('Interface', 'dhcp.interface', 'NIC to serve on (e.g. eth0, br0); empty = all interfaces', 'eth0')}
+          {text('IPv4 subnet', 'dhcp.subnet', 'the network served, e.g. 192.168.1.0/24')}
+          {text('Pool start', 'dhcp.range_start', 'first dynamic address, e.g. 192.168.1.100')}
+          {text('Pool end', 'dhcp.range_end', 'last dynamic address, e.g. 192.168.1.200')}
+          {text('Gateway', 'dhcp.gateway', 'router option advertised; empty = this server\'s own address on the subnet')}
+          {textarea('DNS servers', 'dhcp.dns', 'advertised DNS option, one per line; empty = this server')}
+          {text('Lease time', 'dhcp.lease_time', 'e.g. 24h, 12h', '24h')}
+          {text('Domain suffix', 'dhcp.domain', 'hostnames resolve as hostname.domain; empty disables hostname resolution', 'lan')}
+          {toggle('Enable DHCPv6', 'dhcp.ipv6')}
+          {deepGet('dhcp.ipv6', false) && text('IPv6 prefix', 'dhcp.ipv6_prefix', 'e.g. fd00::/64 (ULA)')}
+          {deepGet('dhcp.ipv6', false) && text('IPv6 pool start', 'dhcp.ipv6_range_start', 'first stateful address (inside the prefix)')}
+          {deepGet('dhcp.ipv6', false) && text('IPv6 pool end', 'dhcp.ipv6_range_end', 'last stateful address')}
+        </div>
+        <h4 style={{ margin: '16px 0 10px' }}>Static reservations</h4>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          Fixed addresses that never expire. MAC keys a DHCPv4 reservation, DUID a DHCPv6 one — either
+          is fine (v4 clients match on MAC, v6 clients on DUID). A hostname pins the local-DNS name.
+        </p>
+        {(deepGet('dhcp.static_leases', []) || []).map((sl, i) => (
+          <div className="list-row" key={i} style={{ alignItems: 'flex-start' }}>
+            <input className="input mono" placeholder="mac (aa:bb:…)" value={sl.mac || ''} onChange={(e) => setStaticLease(i, 'mac', e.target.value)} />
+            <input className="input mono" placeholder="duid" value={sl.duid || ''} onChange={(e) => setStaticLease(i, 'duid', e.target.value)} />
+            <input className="input mono" placeholder="ip" value={sl.ip || ''} onChange={(e) => setStaticLease(i, 'ip', e.target.value)} />
+            <input className="input" placeholder="hostname" value={sl.hostname || ''} onChange={(e) => setStaticLease(i, 'hostname', e.target.value)} />
+            <button className="btn small danger" type="button" onClick={() => removeStaticLease(i)}>✕</button>
+          </div>
+        ))}
+        <button className="btn small" type="button" onClick={addStaticLease}>+ Add reservation</button>
       </div>
 
       <div className="card">

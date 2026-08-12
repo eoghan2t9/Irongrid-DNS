@@ -13,6 +13,7 @@ const Rewrites = lazy(() => import('./components/Rewrites'))
 const Tools = lazy(() => import('./components/Tools'))
 const ClientGroups = lazy(() => import('./components/ClientGroups'))
 const Tunnel = lazy(() => import('./components/Tunnel'))
+const Dhcp = lazy(() => import('./components/Dhcp'))
 const Settings = lazy(() => import('./components/Settings'))
 const Tls = lazy(() => import('./components/Tls'))
 const Changelog = lazy(() => import('./components/Changelog'))
@@ -66,6 +67,10 @@ const NAV = [
   {
     id: 'tunnel', label: 'Tunnel',
     icon: navSvg(<><line x1="6" y1="18" x2="18" y2="6" /><polyline points="9 6 18 6 18 15" /></>),
+  },
+  {
+    id: 'dhcp', label: 'DHCP',
+    icon: navSvg(<><path d="M12 21s-7-6.5-7-11a7 7 0 1 1 14 0c0 4.5-7 11-7 11z" /><circle cx="12" cy="10" r="2.5" /><path d="M8 10h8M10.5 12.5l3-3" /></>),
   },
   {
     id: 'changelog', label: 'Changelog',
@@ -266,6 +271,7 @@ export default function App() {
               {view === 'client-groups' && <ClientGroups />}
               {view === 'tls' && <Tls />}
               {view === 'tunnel' && <Tunnel />}
+              {view === 'dhcp' && <Dhcp />}
               {view === 'changelog' && <Changelog />}
               {view === 'settings' && <Settings onSessionInvalidated={handleSessionInvalidated} />}
             </Suspense>

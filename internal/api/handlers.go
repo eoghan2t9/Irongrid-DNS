@@ -26,6 +26,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/catalog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cert"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dhcp"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsserver"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/firewall"
@@ -100,6 +101,10 @@ type Handler struct {
 
 	// Warmer is the proactive cache warmer; nil when not wired (tests).
 	Warmer *dnsserver.Warmer
+
+	// DHCP is the built-in DHCP server (DHCPv4 + DHCPv6); nil when not wired
+	// (tests) or the feature is unused on this host.
+	DHCP *dhcp.Server
 
 	// lastInstalledVersion is set after a successful in-place update and
 	// cleared on restart (process exit). It guards against installing twice
@@ -232,6 +237,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.abuseExport(w)
 	case len(parts) == 2 && parts[0] == "abuse" && parts[1] == "asn" && r.Method == http.MethodPost:
 		h.abuseASN(w, r)
+	case len(parts) == 2 && parts[0] == "dhcp" && parts[1] == "leases" && r.Method == http.MethodGet:
+		h.dhcpLeases(w)
 	default:
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "not found"})
 	}
@@ -805,6 +812,33 @@ type configPayload struct {
 	DNSSEC       dnssecPayload        `json:"dnssec"`
 	Warmer       warmerPayload        `json:"warmer"`
 	Recursive    recursivePayload     `json:"recursive"`
+	DHCP         dhcpPayload          `json:"dhcp"`
+}
+
+// dhcpPayload is the JSON shape for the built-in DHCP server settings.
+// LeaseTime is a human duration string; empty means the default (24h).
+type dhcpPayload struct {
+	Enabled        bool                `json:"enabled"`
+	Interface      string              `json:"interface"`
+	Subnet         string              `json:"subnet"`
+	RangeStart     string              `json:"range_start"`
+	RangeEnd       string              `json:"range_end"`
+	Gateway        string              `json:"gateway"`
+	DNS            []string            `json:"dns"`
+	LeaseTime      string              `json:"lease_time"`
+	Domain         string              `json:"domain"`
+	StaticLeases   []dhcpStaticPayload `json:"static_leases"`
+	IPv6           bool                `json:"ipv6"`
+	IPv6Prefix     string              `json:"ipv6_prefix"`
+	IPv6RangeStart string              `json:"ipv6_range_start"`
+	IPv6RangeEnd   string              `json:"ipv6_range_end"`
+}
+
+type dhcpStaticPayload struct {
+	MAC      string `json:"mac"`
+	DUID     string `json:"duid"`
+	IP       string `json:"ip"`
+	Hostname string `json:"hostname"`
 }
 
 // recursivePayload is the JSON shape for the recursive:// upstream tuning
@@ -1122,6 +1156,27 @@ func payloadFromConfig(c *config.Config) configPayload {
 	p.Abuse = abusePayload{AbuseIPDBKey: c.Abuse.AbuseIPDBKey}
 	p.DNSSEC = dnssecPayload{Enabled: c.DNSSEC.Enabled, RequireAD: c.DNSSEC.RequireAD}
 	p.Recursive = recursivePayload{ServerTimeout: durationOrEmpty(c.Recursive.ServerTimeout)}
+	p.DHCP = dhcpPayload{
+		Enabled:        c.DHCP.Enabled,
+		Interface:      c.DHCP.Interface,
+		Subnet:         c.DHCP.Subnet,
+		RangeStart:     c.DHCP.RangeStart,
+		RangeEnd:       c.DHCP.RangeEnd,
+		Gateway:        c.DHCP.Gateway,
+		DNS:            c.DHCP.DNS,
+		LeaseTime:      durationOrEmpty(c.DHCP.LeaseTime),
+		Domain:         c.DHCP.Domain,
+		StaticLeases:   make([]dhcpStaticPayload, 0, len(c.DHCP.StaticLeases)),
+		IPv6:           c.DHCP.IPv6,
+		IPv6Prefix:     c.DHCP.IPv6Prefix,
+		IPv6RangeStart: c.DHCP.IPv6RangeStart,
+		IPv6RangeEnd:   c.DHCP.IPv6RangeEnd,
+	}
+	for _, sl := range c.DHCP.StaticLeases {
+		p.DHCP.StaticLeases = append(p.DHCP.StaticLeases, dhcpStaticPayload{
+			MAC: sl.MAC, DUID: sl.DUID, IP: sl.IP, Hostname: sl.Hostname,
+		})
+	}
 	return p
 }
 
@@ -1174,6 +1229,10 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	geoAutoUpdate, err := parseDur(p.GeoBlock.AutoUpdate)
 	if err != nil {
 		return nil, fmt.Errorf("geo_block.auto_update: %w", err)
+	}
+	leaseTime, err := parseDur(p.DHCP.LeaseTime)
+	if err != nil {
+		return nil, fmt.Errorf("dhcp.lease_time: %w", err)
 	}
 	warmerInterval, err := parseDur(p.Warmer.Interval)
 	if err != nil {
@@ -1308,6 +1367,22 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			Concurrency: p.Warmer.Concurrency,
 		},
 		Recursive: config.RecursiveConfig{ServerTimeout: recursiveTimeout},
+		DHCP: config.DHCPConfig{
+			Enabled:        p.DHCP.Enabled,
+			Interface:      p.DHCP.Interface,
+			Subnet:         p.DHCP.Subnet,
+			RangeStart:     p.DHCP.RangeStart,
+			RangeEnd:       p.DHCP.RangeEnd,
+			Gateway:        p.DHCP.Gateway,
+			DNS:            p.DHCP.DNS,
+			LeaseTime:      leaseTime,
+			Domain:         p.DHCP.Domain,
+			StaticLeases:   make([]config.DHCPStaticLease, 0, len(p.DHCP.StaticLeases)),
+			IPv6:           p.DHCP.IPv6,
+			IPv6Prefix:     p.DHCP.IPv6Prefix,
+			IPv6RangeStart: p.DHCP.IPv6RangeStart,
+			IPv6RangeEnd:   p.DHCP.IPv6RangeEnd,
+		},
 	}
 	for _, rw := range p.Rewrites {
 		cfg.Rewrites = append(cfg.Rewrites, config.RewriteSpec{Domain: rw.Domain, Type: rw.Type, Value: rw.Value, TTL: rw.TTL})
@@ -1321,6 +1396,11 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	for _, bl := range p.Filter.Blocklists {
 		cfg.Filter.Blocklists = append(cfg.Filter.Blocklists, config.BlocklistSpec{
 			ID: bl.ID, Name: bl.Name, URL: bl.URL, Enabled: bl.Enabled,
+		})
+	}
+	for _, sl := range p.DHCP.StaticLeases {
+		cfg.DHCP.StaticLeases = append(cfg.DHCP.StaticLeases, config.DHCPStaticLease{
+			MAC: sl.MAC, DUID: sl.DUID, IP: sl.IP, Hostname: sl.Hostname,
 		})
 	}
 
@@ -1371,6 +1451,13 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	if !reflect.DeepEqual(h.Cfg.Tunnel, cfg.Tunnel) {
 		restart = append(restart, "tunnel")
 	}
+	// DHCP is live-applied below (SetConfig + listener restart when the
+	// interface/enable state changed), so a pure pool-option tweak doesn't
+	// prompt a restart — but a bind change (interface, enabling/disabling)
+	// is reported like the other listener-bound sections.
+	if h.DHCP != nil && !reflect.DeepEqual(dhcpBindConfig(h.Cfg.DHCP), dhcpBindConfig(cfg.DHCP)) {
+		restart = append(restart, "dhcp (listeners)")
+	}
 
 	// Live-apply the hot sections.
 	if !reflect.DeepEqual(h.Cfg.Upstreams, cfg.Upstreams) {
@@ -1413,6 +1500,13 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	// listener rebind), so it is live-applied without marking a restart.
 	if h.Warmer != nil {
 		h.Warmer.SetConfig(cfg.Warmer)
+	}
+	// DHCP options (pool, gateway, DNS, lease time, domain, statics) apply
+	// immediately — the handlers read them per packet under the server's own
+	// lock. Only the bind itself (interface, enable state) needs a listener
+	// restart, which main's Reload performs.
+	if h.DHCP != nil {
+		h.DHCP.SetConfig(h.dhcpRuntimeConfig(cfg.DHCP))
 	}
 
 	oldSecret := h.Cfg.Web.SessionSecret
@@ -1618,6 +1712,63 @@ func (h *Handler) geoUnblock(w http.ResponseWriter, r *http.Request) {
 		_ = h.Firewall.RemoveIP(p.IP)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "unblocked"})
+}
+
+// ---- DHCP ----
+
+// dhcpBindConfig is the subset of DHCP settings whose change requires a
+// listener restart: the interface to bind and whether each protocol runs.
+// Everything else (pool, options, statics) is read per packet by the
+// handlers, so applyPayload live-applies it without a restart.
+func dhcpBindConfig(c config.DHCPConfig) config.DHCPConfig {
+	return config.DHCPConfig{
+		Enabled:    c.Enabled,
+		Interface:  c.Interface,
+		Subnet:     c.Subnet,
+		IPv6:       c.IPv6,
+		IPv6Prefix: c.IPv6Prefix,
+	}
+}
+
+// dhcpRuntimeConfig maps the config section into the dhcp package's runtime
+// Config. It reuses dhcp.ConfigFrom (the same constructor main's boot path
+// uses), so the API's live-apply and a process boot produce identical
+// runtime configs. The host's own addresses are carried over from the
+// currently running config (discovered at boot); they are only stale if the
+// interface/subnet changed, in which case the user applies the restart and
+// main re-discovers them.
+func (h *Handler) dhcpRuntimeConfig(c config.DHCPConfig) dhcp.Config {
+	var addrs dhcp.HostAddresses
+	if h.DHCP != nil {
+		s := h.DHCP.Config()
+		addrs = dhcp.HostAddresses{IPv4: s.ServerIPv4, IPv6: s.ServerIPv6, MAC: s.ServerMAC}
+	}
+	statics := make([]dhcp.StaticLease, 0, len(c.StaticLeases))
+	for _, sl := range c.StaticLeases {
+		st := dhcp.StaticLease{MAC: sl.MAC, DUID: sl.DUID, Hostname: sl.Hostname}
+		if ip := net.ParseIP(sl.IP); ip != nil {
+			st.IP = ip
+		}
+		statics = append(statics, st)
+	}
+	return dhcp.ConfigFrom(c.Enabled, c.Interface, c.Subnet, c.RangeStart, c.RangeEnd,
+		c.Gateway, c.DNS, c.LeaseTime, c.Domain, statics,
+		c.IPv6, c.IPv6Prefix, c.IPv6RangeStart, c.IPv6RangeEnd, addrs)
+}
+
+// dhcpLeases serves the DHCP lease table for the dashboard's DHCP page.
+func (h *Handler) dhcpLeases(w http.ResponseWriter) {
+	if h.DHCP == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"enabled": false, "leases": []any{}})
+		return
+	}
+	h.cfgMu.Lock()
+	enabled := h.Cfg.DHCP.Enabled
+	h.cfgMu.Unlock()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled": enabled,
+		"leases":  h.DHCP.Leases(),
+	})
 }
 
 func (h *Handler) getConfig(w http.ResponseWriter) {
