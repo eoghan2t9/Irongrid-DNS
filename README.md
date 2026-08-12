@@ -55,6 +55,15 @@ commercial ad-blocking DNS with sub-millisecond local responses.
 
 ![Irongrid DNS blocklists](assets/screenshots/04-blocklists.png)
 
+**DHCP** — the built-in DHCP server's leases and static reservations, with client
+hostnames that resolve in the local DNS.
+
+![Irongrid DNS DHCP server](assets/screenshots/05-dhcp.png)
+
+**Settings** — live config editing, including one-click **backup & restore**.
+
+![Irongrid DNS settings and backup/restore](assets/screenshots/06-settings.png)
+
 ## Table of contents
 
 - [Screenshots](#screenshots)
