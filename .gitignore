@@ -10,6 +10,9 @@
 web/node_modules/
 web/dist/assets/
 
+# Agent memory (local-only; never committed — loaded at session start)
+/AGENTS.md
+
 # IDE / OS
 .idea/
 .vscode/
