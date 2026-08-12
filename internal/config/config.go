@@ -204,10 +204,16 @@ type ServerConfig struct {
 	ListenTCP string `yaml:"listen_tcp"` // plain DNS over TCP, "" disables
 	ListenDoT string `yaml:"listen_dot"` // DNS over TLS, "" disables
 	ListenDoH string `yaml:"listen_doh"` // DNS over HTTPS, "" disables
-	ListenDoQ string `yaml:"listen_doq"` // DNS over QUIC, "" disables
-	DoHPath   string `yaml:"doh_path"`   // HTTP path served for DoH (RFC 8484)
-	WebListen string `yaml:"web_listen"` // management web UI + REST API
-	WebTLS    bool   `yaml:"web_tls"`    // serve the web UI + API over HTTPS (uses the TLS cert)
+	// ListenDoH3 is the UDP address for DNS over HTTP/3 (RFC 9114/8484
+	// over QUIC, "h3" ALPN), typically "0.0.0.0:443" next to the TCP DoH
+	// listener. "" disables. DoH3 binds UDP, so it can coexist with the
+	// dashboard/DoH on TCP 443; it must not share an address with the DoQ
+	// listener (different ALPNs on one UDP port cannot be negotiated).
+	ListenDoH3 string `yaml:"listen_doh3"`
+	ListenDoQ  string `yaml:"listen_doq"` // DNS over QUIC, "" disables
+	DoHPath    string `yaml:"doh_path"`   // HTTP path served for DoH (RFC 8484)
+	WebListen  string `yaml:"web_listen"` // management web UI + REST API
+	WebTLS     bool   `yaml:"web_tls"`    // serve the web UI + API over HTTPS (uses the TLS cert)
 	// WebRedirect serves a plain-HTTP listener on WebRedirectPort that 301s
 	// to https://<host>/ — a convenience when web_tls is enabled.
 	WebRedirect     bool `yaml:"web_redirect"`
@@ -220,6 +226,17 @@ type ServerConfig struct {
 	// exclusive binding — the pre-reuseport behaviour); N = exactly N
 	// sockets (capped at 64).
 	UDPSockets int `yaml:"udp_sockets"`
+	// Padding pads responses on the encrypted transports (DoT/DoH/DoH3/DoQ)
+	// to fixed 128-byte block boundaries (RFC 7830), so an observer of the
+	// encrypted stream cannot infer which domain was queried from the
+	// message length. Off by default; plain UDP/TCP are never padded.
+	Padding bool `yaml:"padding"`
+	// Cookies enables server DNS cookies (RFC 7873) on UDP and TCP: a
+	// client that sends a COOKIE option gets its 8-byte client cookie
+	// echoed with an HMAC server cookie bound to its IP, and a query
+	// carrying a stale/forged server cookie is answered BADCOOKIE instead
+	// of being processed — blunting off-path spoofing and cache pollution.
+	Cookies bool `yaml:"cookies"`
 }
 
 // CacheConfig points at the Dragonfly instance that is the authoritative
@@ -559,6 +576,14 @@ func (c *Config) validate() error {
 	if c.Server.UDPSockets < 0 {
 		return fmt.Errorf("server.udp_sockets must be >= 0 (0 = auto, 1 = single exclusive socket)")
 	}
+	// DoH3 and DoQ are both QUIC over UDP on the address they bind. Two
+	// QUIC listeners on one UDP address would each accept the other's
+	// connections and fail the ALPN negotiation — an operator mistake that
+	// must be caught at config time, not as a live bind failure.
+	if c.Server.ListenDoH3 != "" && c.Server.ListenDoQ != "" &&
+		sameUDPAddr(c.Server.ListenDoH3, c.Server.ListenDoQ) {
+		return fmt.Errorf("server.listen_doh3 %s and listen_doq %s share one UDP address — DoH3 (ALPN h3) and DoQ (ALPN doq) cannot negotiate different ALPNs on the same port", c.Server.ListenDoH3, c.Server.ListenDoQ)
+	}
 	if c.Log.RetentionDays < 1 {
 		return fmt.Errorf("log.retention_days must be >= 1")
 	}
@@ -736,6 +761,24 @@ func normalizeDomain(d string) string {
 		return ""
 	}
 	return d
+}
+
+// sameUDPAddr reports whether two listen addresses would bind the same UDP
+// endpoint: the same port, with hosts that are equal or both wildcard
+// ("", "0.0.0.0", "::", "*").
+func sameUDPAddr(a, b string) bool {
+	ah, ap, errA := net.SplitHostPort(a)
+	bh, bp, errB := net.SplitHostPort(b)
+	if errA != nil || errB != nil {
+		return false
+	}
+	if ap != bp {
+		return false
+	}
+	wild := func(h string) bool {
+		return h == "" || h == "0.0.0.0" || h == "::" || h == "*"
+	}
+	return ah == bh || (wild(ah) && wild(bh))
 }
 
 // webPort returns the port of a host:port listen address (0 when absent).

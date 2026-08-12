@@ -4,8 +4,8 @@ import { useToast } from '../toast'
 
 const empty = () => ({
   server: {
-    listen_udp: '', listen_tcp: '', listen_dot: '', listen_doh: '', listen_doq: '',
-    doh_path: '/dns-query', web_listen: '', web_tls: false, web_redirect: false, web_redirect_port: 80, timeout_sec: 5, udp_sockets: 0,
+    listen_udp: '', listen_tcp: '', listen_dot: '', listen_doh: '', listen_doh3: '', listen_doq: '',
+    doh_path: '/dns-query', web_listen: '', web_tls: false, web_redirect: false, web_redirect_port: 80, timeout_sec: 5, udp_sockets: 0, padding: false, cookies: false,
   },
   upstreams: [],
   upstream_mode: 'race',
@@ -392,6 +392,7 @@ export default function Settings({ onSessionInvalidated }) {
           {text('TCP listener', 'server.listen_tcp', null, '0.0.0.0:53')}
           {text('DoT (TLS)', 'server.listen_dot', null, '0.0.0.0:853')}
           {text('DoH (HTTPS)', 'server.listen_doh', null, '0.0.0.0:443')}
+          {text('DoH3 (HTTP/3)', 'server.listen_doh3', 'DNS over HTTP/3 over UDP — same /dns-query path as DoH; typically the DoH port (443) since TCP and UDP ports are independent. Must differ from the DoQ address.', '0.0.0.0:443')}
           {text('DoQ (QUIC)', 'server.listen_doq', null, '0.0.0.0:853')}
           {text('DoH path', 'server.doh_path', null, '/dns-query')}
           {text('Web dashboard', 'server.web_listen', null, '0.0.0.0:8080')}
@@ -399,7 +400,9 @@ export default function Settings({ onSessionInvalidated }) {
           {toggle('Redirect plain HTTP to HTTPS (web_redirect)', 'server.web_redirect')}
           {number('Redirect listener port', 'server.web_redirect_port')}
           {number('Upstream timeout (s)', 'server.timeout_sec')}
-          {number('UDP sockets (0 = auto)', 'server.udp_sockets', 'SO_REUSEPORT sockets for the UDP + DoQ listeners; 0 = one per CPU (auto, capped), 1 = single exclusive socket, N = exactly N')}
+          {number('UDP sockets (0 = auto)', 'server.udp_sockets', 'SO_REUSEPORT sockets for the UDP + DoQ + DoH3 listeners; 0 = one per CPU (auto, capped), 1 = single exclusive socket, N = exactly N')}
+          {toggle('Pad encrypted responses (RFC 7830)', 'server.padding')}
+          {toggle('DNS cookies (RFC 7873)', 'server.cookies')}
         </div>
       </div>
 

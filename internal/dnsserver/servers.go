@@ -12,6 +12,7 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
@@ -36,7 +37,7 @@ func (p protoHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
 
 // Listener describes one running DNS listener.
 type Listener struct {
-	Proto string // udp, tcp, dot, doh, doq
+	Proto string // udp, tcp, dot, doh, doh3, doq
 	Addr  string
 	Err   error
 }
@@ -61,8 +62,14 @@ type Manager struct {
 	httpSrv  interface {
 		Shutdown(ctx context.Context) error
 	}
-	doqLns  []*quic.Listener
-	results chan Listener
+	doqLns []*quic.Listener
+	// http3Srvs and http3Pcs are the DoH3 (HTTP/3) servers and their packet
+	// conns. Unlike a quic.Listener (which owns its socket), http3.Server's
+	// Serve does not close the connection it is given, so the sockets are
+	// tracked separately and closed alongside the servers on shutdown.
+	http3Srvs []*http3.Server
+	http3Pcs  []net.PacketConn
+	results   chan Listener
 }
 
 // SetUDPSockets sets how many SO_REUSEPORT sockets the UDP-family listeners
@@ -100,10 +107,10 @@ func NewManager(h *Handler, tlsConf *tls.Config) *Manager {
 // Start launches listeners for the configured addresses ("" disables a proto).
 // It returns a channel that reports per-listener bind errors (bound ports are
 // a hard failure; other listener types are logged).
-func (m *Manager) Start(udpAddr, tcpAddr, dotAddr, dohAddr, doqAddr, dohPath string) (<-chan Listener, error) {
+func (m *Manager) Start(udpAddr, tcpAddr, dotAddr, dohAddr, doh3Addr, doqAddr, dohPath string) (<-chan Listener, error) {
 	if m.tlsConf == nil {
-		log.Printf("[dns] warning: no TLS config; DoT/DoH/DoQ listeners disabled")
-		dotAddr, dohAddr, doqAddr = "", "", ""
+		log.Printf("[dns] warning: no TLS config; DoT/DoH/DoH3/DoQ listeners disabled")
+		dotAddr, dohAddr, doh3Addr, doqAddr = "", "", "", ""
 	}
 
 	if udpAddr != "" {
@@ -117,6 +124,11 @@ func (m *Manager) Start(udpAddr, tcpAddr, dotAddr, dohAddr, doqAddr, dohPath str
 	}
 	if dohAddr != "" {
 		if err := m.startDoH(dohAddr, dohPath); err != nil {
+			return m.results, err
+		}
+	}
+	if doh3Addr != "" {
+		if err := m.startDoH3(doh3Addr, dohPath); err != nil {
 			return m.results, err
 		}
 	}
@@ -231,6 +243,12 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	for _, ln := range m.doqLns {
 		_ = ln.Close()
 	}
+	for _, srv := range m.http3Srvs {
+		_ = srv.Close()
+	}
+	for _, pc := range m.http3Pcs {
+		_ = pc.Close()
+	}
 }
 
 // SetTLS replaces the TLS config used by the DoT/DoH/DoQ listeners.
@@ -243,8 +261,8 @@ func (m *Manager) SetTLS(conf *tls.Config) {
 // Restart stops every current listener and starts fresh ones with the given
 // addresses and TLS config. It is used by the config-reload flow so listener
 // changes apply without killing the process. Returns a bind error if any hard
-// listener (DoH/DoQ) fails to come back up.
-func (m *Manager) Restart(udpAddr, tcpAddr, dotAddr, dohAddr, doqAddr, dohPath string, tlsConf *tls.Config) error {
+// listener (DoH/DoH3/DoQ) fails to come back up.
+func (m *Manager) Restart(udpAddr, tcpAddr, dotAddr, dohAddr, doh3Addr, doqAddr, dohPath string, tlsConf *tls.Config) error {
 	// Bound the shutdown so a stuck listener can't wedge the reload forever.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	m.Shutdown(shutdownCtx)
@@ -253,11 +271,13 @@ func (m *Manager) Restart(udpAddr, tcpAddr, dotAddr, dohAddr, doqAddr, dohPath s
 	m.servers = nil
 	m.httpSrv = nil
 	m.doqLns = nil
+	m.http3Srvs = nil
+	m.http3Pcs = nil
 	m.udpBound = 0
 	m.doqBound = 0
 	m.tlsConf = tlsConf
 	m.mu.Unlock()
-	_, err := m.Start(udpAddr, tcpAddr, dotAddr, dohAddr, doqAddr, dohPath)
+	_, err := m.Start(udpAddr, tcpAddr, dotAddr, dohAddr, doh3Addr, doqAddr, dohPath)
 	return err
 }
 

@@ -15,6 +15,8 @@ import (
 	"golang.org/x/net/http2"
 
 	"github.com/miekg/dns"
+	"github.com/quic-go/quic-go"
+	"github.com/quic-go/quic-go/http3"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
@@ -27,15 +29,19 @@ const dnsMessageContentType = "application/dns-message"
 // dashboard and /dns-query are served from one port.
 func (m *Manager) DoHHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		m.handleDoH(w, r)
+		m.handleDoH(w, r, "doh")
 	})
 }
 
-// startDoH launches the RFC 8484 DNS-over-HTTPS server.
-func (m *Manager) startDoH(addr, path string) error {
+// dohMux returns the mux serving the RFC 8484 DoH endpoint plus a landing
+// page at "/". It is shared by the DoH (TCP) and DoH3 (QUIC) listeners so
+// both transports serve the same paths and handler. proto tags every query
+// with the transport ("doh" or "doh3") so stats and per-protocol policy see
+// the real listener, not a lumped "doh".
+func (m *Manager) dohMux(path, proto string) *http.ServeMux {
 	mux := http.NewServeMux()
 	mux.HandleFunc(path, func(w http.ResponseWriter, r *http.Request) {
-		m.handleDoH(w, r)
+		m.handleDoH(w, r, proto)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -45,6 +51,12 @@ func (m *Manager) startDoH(addr, path string) error {
 		}
 		http.NotFound(w, r)
 	})
+	return mux
+}
+
+// startDoH launches the RFC 8484 DNS-over-HTTPS server.
+func (m *Manager) startDoH(addr, path string) error {
+	mux := m.dohMux(path, "doh")
 
 	// RFC 8484 recommends HTTP/2; Go only negotiates h2 automatically via
 	// ServeTLS, so configure it explicitly for the DoH listener.
@@ -81,7 +93,71 @@ func (m *Manager) startDoH(addr, path string) error {
 	return nil
 }
 
-func (m *Manager) handleDoH(w http.ResponseWriter, r *http.Request) {
+// startDoH3 launches RFC 8484 DNS-over-HTTP/3: the DoH endpoint served over
+// QUIC (RFC 9114, ALPN "h3") on a UDP address — typically the same port as
+// the TCP DoH listener (443), since TCP and UDP ports are independent. HTTP/3
+// multiplexes many queries over one connection and supports 0-RTT resumption,
+// making it the fastest transport for mobile/roaming clients; AdGuard, NextDNS
+// and Cloudflare all serve it. It shares the DoH mux, so the same /dns-query
+// path and RFC 8484 GET/POST semantics work over both transports.
+func (m *Manager) startDoH3(addr, path string) error {
+	tlsConf := m.tlsConf.Clone()
+	// http3.Server's ConfigureTLSConfig sets the "h3" ALPN token
+	// automatically (RFC 9114 requires it).
+	quicConf := &quic.Config{
+		MaxIdleTimeout:       60 * time.Second,
+		KeepAlivePeriod:      20 * time.Second,
+		HandshakeIdleTimeout: 8 * time.Second,
+	}
+	// Same tuned, SO_REUSEPORT-bound sockets as the DoQ listener: the kernel
+	// hashes each QUIC connection to one socket while receive processing
+	// spreads across per-socket read goroutines. Each socket gets its own
+	// http3.Server (Serve does not own the connection it is given, so both
+	// the server and the socket are tracked for shutdown).
+	pcs, err := newUDPListeners(addr, m.udpSocketCount())
+	if err != nil {
+		return err
+	}
+	noun := "socket"
+	if len(pcs) > 1 {
+		noun = "sockets"
+	}
+	log.Printf("[dns] DoH3 listener on %s (%d %s, path %s)", addr, len(pcs), noun, path)
+	for _, pc := range pcs {
+		srv := &http3.Server{
+			TLSConfig:  tlsConf,
+			QUICConfig: quicConf,
+			Handler:    m.dohMux(path, "doh3"),
+		}
+		m.mu.Lock()
+		m.http3Pcs = append(m.http3Pcs, pc)
+		m.http3Srvs = append(m.http3Srvs, srv)
+		m.mu.Unlock()
+		go func(pc net.PacketConn) {
+			// The close errors from a deliberate shutdown are not listener
+			// failures — reporting them would spam the reload log.
+			if err := srv.Serve(pc); err != nil &&
+				!errors.Is(err, net.ErrClosed) && !errors.Is(err, quic.ErrServerClosed) {
+				log.Printf("[dns] DoH3 listener on %s stopped: %v", addr, err)
+				m.results <- Listener{Proto: "doh3", Addr: addr, Err: err}
+			}
+		}(pc)
+	}
+	return nil
+}
+
+// DoH3Addr returns the bound address of the DoH3 listener (useful when
+// binding to port 0 for tests or dynamic ports).
+func (m *Manager) DoH3Addr() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if len(m.http3Pcs) == 0 {
+		return ""
+	}
+	return m.http3Pcs[len(m.http3Pcs)-1].LocalAddr().String()
+}
+
+func (m *Manager) handleDoH(w http.ResponseWriter, r *http.Request, proto string) {
 	var msg *dns.Msg
 	var err error
 
@@ -124,8 +200,9 @@ func (m *Manager) handleDoH(w http.ResponseWriter, r *http.Request) {
 
 	clientIP := clientIPFromRequest(r)
 	// Replies are written back through this writer as the DNS response bytes.
+	// proto tags the transport ("doh" or "doh3") for stats and policy.
 	httpWriter := &dohResponseWriter{httpW: w, clientIP: clientIP}
-	m.handler.ServeDNSFromContext(httpWriter, msg, clientIP, "doh")
+	m.handler.ServeDNSFromContext(httpWriter, msg, clientIP, proto)
 }
 
 func clientIPFromRequest(r *http.Request) string {

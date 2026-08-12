@@ -5,6 +5,10 @@ package dnsserver
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"math/bits"
@@ -61,7 +65,7 @@ type Stats struct {
 
 func newStats() *Stats {
 	s := &Stats{ByProtocol: map[string]*atomic.Int64{
-		"udp": {}, "tcp": {}, "dot": {}, "doh": {}, "doq": {},
+		"udp": {}, "tcp": {}, "dot": {}, "doh": {}, "doh3": {}, "doq": {},
 	}}
 	return s
 }
@@ -98,6 +102,17 @@ type Handler struct {
 	TrustUDP        bool
 	DNSSECEnabled   bool
 	DNSSECRequireAD bool
+	// Padding pads responses on the encrypted transports (DoT/DoH/DoH3/DoQ)
+	// to fixed 128-byte blocks (RFC 7830) so message lengths don't leak
+	// which domain was queried. Set via SetPadding. Atomic because write()
+	// reads it on every response — an RLock per reply is measurable on the
+	// flat-out path, one load is not.
+	Padding atomic.Bool
+	// Cookies enables server DNS cookies (RFC 7873). Set via SetCookies.
+	Cookies atomic.Bool
+	// cookieSecret is the HMAC key for server cookies, generated once at
+	// construction and never mutated — a reader never races a writer.
+	cookieSecret []byte
 	// latency is the in-process response-time histogram backing the
 	// dashboard's Performance card percentiles (see latencyHist).
 	latency latencyHist
@@ -115,7 +130,7 @@ type Handler struct {
 
 // NewHandler builds a handler with default stats.
 func NewHandler(engine *filter.Engine, c *cache.Cache, ups []*upstream.Upstream, ql *querylog.Log, blockResp string, blockTTL uint32, timeout time.Duration) *Handler {
-	return &Handler{
+	h := &Handler{
 		Engine:        engine,
 		Cache:         c,
 		Upstreams:     ups,
@@ -128,6 +143,16 @@ func NewHandler(engine *filter.Engine, c *cache.Cache, ups []*upstream.Upstream,
 		ClientRouter:  NewClientRouter(),
 		Stats:         newStats(),
 	}
+	// Server-cookie HMAC key. crypto/rand failure is effectively impossible
+	// (kernel entropy); the time-seeded fallback keeps DNS cookies working
+	// on a pathological system rather than silently disabling them.
+	h.cookieSecret = make([]byte, 32)
+	if _, err := rand.Read(h.cookieSecret); err != nil {
+		log.Printf("[dns] warning: crypto/rand failed (%v); DNS cookie key falls back to time-derived", err)
+		sum := sha256.Sum256([]byte(time.Now().UTC().String()))
+		h.cookieSecret = sum[:]
+	}
+	return h
 }
 
 // ServeDNS implements dns.Handler. clientIP may be empty (callers that know
@@ -286,6 +311,16 @@ func (h *Handler) SetDNSSEC(enabled, requireAD bool) {
 	h.DNSSECRequireAD = requireAD
 }
 
+// SetPadding hot-swaps RFC 7830 response padding on the encrypted transports.
+func (h *Handler) SetPadding(on bool) {
+	h.Padding.Store(on)
+}
+
+// SetCookies hot-swaps RFC 7873 server DNS cookies.
+func (h *Handler) SetCookies(on bool) {
+	h.Cookies.Store(on)
+}
+
 func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) {
 	start := time.Now()
 	h.Stats.Total.Add(1)
@@ -310,14 +345,43 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	trustUDP := h.TrustUDP
 	dnssecEnabled := h.DNSSECEnabled
 	dnssecRequireAD := h.DNSSECRequireAD
+	cookiesOn := h.Cookies.Load()
 	h.mu.RUnlock()
 
 	if r == nil || len(r.Question) == 0 {
 		m := new(dns.Msg)
 		m.Response = true
 		m.Rcode = dns.RcodeFormatError
-		_ = write(w, m, r, proto)
+		_ = h.write(w, m, r, proto)
 		return
+	}
+
+	// 0.25 DNS cookies (RFC 7873): a client that sends a COOKIE option gets
+	//    its client cookie echoed with our HMAC server cookie on every
+	//    response (attached in write), and a query carrying a stale or
+	//    forged server cookie is answered BADCOOKIE here instead of being
+	//    processed — an off-path attacker cannot spoof a query with a valid
+	//    server cookie, and cannot push forged answers past a validating
+	//    client. The check runs before the rate limiter so a spoofed flood
+	//    of bad-cookie queries is answered cheaply instead of burning the
+	//    victim's token bucket.
+	if cookiesOn && client != "" {
+		if reqCookie := requestCookieValue(r); len(reqCookie) >= clientCookieHexLen {
+			cc := reqCookie[:clientCookieHexLen]
+			expected := cc + h.serverCookie(client, cc)
+			// Compare only the expected prefix: some clients append extra
+			// bytes to the echoed server cookie. Cookie comparison is not
+			// timing-sensitive — the value travels in cleartext inside the
+			// cookie itself — so EqualFold (hex is case-insensitive) is fine.
+			if len(reqCookie) > clientCookieHexLen &&
+				!strings.EqualFold(reqCookie[:2*clientCookieHexLen], expected) {
+				m := newReply(r)
+				m.Rcode = dns.RcodeBadCookie
+				// Attach the correct cookie so the client can retry with it.
+				_ = h.write(w, attachCookie(m, expected), r, proto)
+				return
+			}
+		}
 	}
 
 	// 0. Rate limit: the cheapest possible check, before any real work. A
@@ -333,7 +397,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		refused := new(dns.Msg)
 		refused.SetReply(r)
 		refused.Rcode = dns.RcodeRefused
-		_ = write(w, refused, r, proto)
+		_ = h.write(w, refused, r, proto)
 		return
 	}
 
@@ -359,7 +423,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			refused.SetReply(r)
 			refused.Rcode = dns.RcodeRefused
 			h.record(client, qname, q, action, reason, "", start, refused)
-			_ = write(w, refused, r, proto)
+			_ = h.write(w, refused, r, proto)
 			return
 		}
 	}
@@ -397,7 +461,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		refused := new(dns.Msg)
 		refused.SetReply(r)
 		refused.Rcode = dns.RcodeRefused
-		_ = write(w, refused, r, proto)
+		_ = h.write(w, refused, r, proto)
 		return
 	}
 
@@ -409,7 +473,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			if ans := filter.BuildAnswer(r, rules, q.Name, q.Qtype); ans != nil {
 				h.Stats.Allowed.Add(1)
 				h.record(client, qname, q, "rewrite", "local-dns", "", start, ans)
-				_ = write(w, ans, r, proto)
+				_ = h.write(w, ans, r, proto)
 				return
 			}
 			// The name matched but not this record type: NODATA is the
@@ -418,7 +482,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			h.Stats.Allowed.Add(1)
 			m := newReply(r)
 			h.record(client, qname, q, "rewrite", "local-dns-nodata", "", start, m)
-			_ = write(w, m, r, proto)
+			_ = h.write(w, m, r, proto)
 			return
 		}
 	}
@@ -442,7 +506,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 		h.Stats.Blocked.Add(1)
 		h.record(client, qname, q, "blocked", decision.Reason, "", start, blocked)
-		_ = write(w, blocked, r, proto)
+		_ = h.write(w, blocked, r, proto)
 		return
 	} // 4. Cache lookup (only for standard record types). Cached messages carry
 	//    the ID of the original query, so rebase to this request's ID.
@@ -468,7 +532,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 				reason = "cache-negative"
 			}
 			h.record(client, qname, q, "cached", reason, "", start, hit.Msg)
-			_ = write(w, hit.Msg, r, proto)
+			_ = h.write(w, hit.Msg, r, proto)
 			return
 		}
 		if hit.Msg != nil {
@@ -522,7 +586,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		capTTL(stale, staleServeTTL)
 		h.Stats.Cached.Add(1)
 		h.record(client, qname, q, "cached", "stale", usedUp, start, stale)
-		_ = write(w, stale, r, proto)
+		_ = h.write(w, stale, r, proto)
 		return
 	}
 	if err != nil || resp == nil {
@@ -539,7 +603,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			capTTL(stale, staleServeTTL)
 			h.Stats.Cached.Add(1)
 			h.record(client, qname, q, "cached", "stale", usedUp, start, stale)
-			_ = write(w, stale, r, proto)
+			_ = h.write(w, stale, r, proto)
 			return
 		}
 		h.Stats.Errors.Add(1)
@@ -550,7 +614,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			errStr = err.Error()
 		}
 		h.record(client, qname, q, "error", errStr, usedUp, start, m)
-		_ = write(w, m, r, proto)
+		_ = h.write(w, m, r, proto)
 		// Cache the failure briefly (negative_ttl) so a dead upstream or
 		// zone doesn't burn the full timeout on every retry — a failing
 		// domain's retries used to re-pay the whole per-query timeout each
@@ -587,7 +651,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		m := newReply(r)
 		m.Rcode = dns.RcodeServerFailure
 		h.record(client, qname, q, "error", "dnssec: upstream did not authenticate the answer", usedUp, start, m)
-		_ = write(w, m, r, proto)
+		_ = h.write(w, m, r, proto)
 		return
 	}
 
@@ -597,13 +661,13 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 		h.Stats.Blocked.Add(1)
 		h.record(client, qname, q, "blocked", reason, usedUp, start, blocked)
-		_ = write(w, blocked, r, proto)
+		_ = h.write(w, blocked, r, proto)
 		return
 	}
 
 	h.Stats.Allowed.Add(1)
 	h.record(client, qname, q, "allowed", "", usedUp, start, resp)
-	_ = write(w, resp, r, proto)
+	_ = h.write(w, resp, r, proto)
 
 	// 8. Cache the result (positive or negative) in the background. Caching
 	//    only ever helps *future* queries, so there's no reason to make this
@@ -672,6 +736,109 @@ func clientUDPSize(r *dns.Msg) int {
 	return dns.MinMsgSize
 }
 
+// clientCookieHexLen is the hex length of an RFC 7873 client cookie (8 bytes
+// = 16 hex chars). The server cookie is generated at the same length, so a
+// full cookie round-trips as 32 hex chars.
+const clientCookieHexLen = 16
+
+// requestCookieValue returns the request's COOKIE option value (a hex
+// string), or "" when the message carries none — RFC 7873 clients may omit
+// the option entirely, and a server must not force cookies on them.
+func requestCookieValue(r *dns.Msg) string {
+	if r == nil {
+		return ""
+	}
+	opt := r.IsEdns0()
+	if opt == nil {
+		return ""
+	}
+	for _, o := range opt.Option {
+		if c, ok := o.(*dns.EDNS0_COOKIE); ok {
+			return c.Cookie
+		}
+	}
+	return ""
+}
+
+// requestClientCookie returns the request's client cookie — the first
+// clientCookieHexLen hex chars of its COOKIE option. An option shorter than
+// 8 bytes is malformed and ignored (RFC 7873 §5.2.3).
+func requestClientCookie(r *dns.Msg) string {
+	if c := requestCookieValue(r); len(c) >= clientCookieHexLen {
+		return c[:clientCookieHexLen]
+	}
+	return ""
+}
+
+// serverCookie is the RFC 7873 server cookie for a client: the first 8 bytes
+// of HMAC-SHA256(secret, clientIP || clientCookie), hex-encoded. It is
+// deterministic — the same client IP and client cookie always produce the
+// same value, so an echoed cookie validates on every later query — and
+// binding it to the client IP means a cookie minted for one client is
+// useless from another source, which is exactly what makes an off-path
+// attacker's spoofed queries fail the BADCOOKIE check.
+func (h *Handler) serverCookie(clientIP, clientCookie string) string {
+	mac := hmac.New(sha256.New, h.cookieSecret)
+	mac.Write([]byte(clientIP))
+	mac.Write([]byte(clientCookie))
+	return hex.EncodeToString(mac.Sum(nil))[:clientCookieHexLen]
+}
+
+// attachCookie returns a copy of m carrying the given COOKIE option (the
+// client cookie echoed with the server cookie appended), replacing any
+// existing COOKIE option. It copies so the caller's message — a cache hit,
+// or resp about to be handed to the background cache writer — is never
+// mutated.
+func attachCookie(m *dns.Msg, cookie string) *dns.Msg {
+	c := m.Copy()
+	opt := c.IsEdns0()
+	if opt == nil {
+		opt = &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
+		opt.SetUDPSize(udpMaxPacketSize)
+		c.Extra = append(c.Extra, opt)
+	}
+	keep := opt.Option[:0]
+	for _, o := range opt.Option {
+		if o.Option() != dns.EDNS0COOKIE {
+			keep = append(keep, o)
+		}
+	}
+	opt.Option = keep
+	opt.Option = append(opt.Option, &dns.EDNS0_COOKIE{Code: dns.EDNS0COOKIE, Cookie: cookie})
+	return c
+}
+
+// padMessage returns a copy of m padded so its packed length is a multiple
+// of block bytes (RFC 7830). Any padding option the message already carries
+// (e.g. one forwarded from an upstream) is replaced by a single option that
+// lands the total exactly on the boundary. The copy is mandatory: the
+// caller's message is often resp about to be cached, and a padded answer
+// must not be stored for every other client.
+func padMessage(m *dns.Msg, block int) *dns.Msg {
+	c := m.Copy()
+	c.Compress = true
+	opt := c.IsEdns0()
+	if opt == nil {
+		opt = &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
+		opt.SetUDPSize(udpMaxPacketSize)
+		c.Extra = append(c.Extra, opt)
+	}
+	keep := opt.Option[:0]
+	for _, o := range opt.Option {
+		if o.Option() != dns.EDNS0PADDING {
+			keep = append(keep, o)
+		}
+	}
+	opt.Option = keep
+	// The padding option costs 4 bytes of framing (code + length fields)
+	// once added; size its data so the total lands on the boundary.
+	base := c.Len() + 4
+	if need := block - (base % block); need != block {
+		opt.Option = append(opt.Option, &dns.EDNS0_PADDING{Padding: make([]byte, need)})
+	}
+	return c
+}
+
 // write packs m for the client and sends it. DNS message compression
 // (RFC 1035 §4.1.4) replaces repeated owner names with pointers to earlier
 // occurrences in the message, typically cutting the wire form 20-40% — real
@@ -692,16 +859,39 @@ func clientUDPSize(r *dns.Msg) int {
 // and a truncated answer must not poison the shared cache for every other
 // client (a small-buffer client would otherwise evict everyone's full
 // answer).
-func write(w dns.ResponseWriter, m *dns.Msg, r *dns.Msg, proto string) error {
+//
+// With RFC 7830 padding enabled, responses on the encrypted transports
+// (DoT/DoH/DoH3/DoQ) are padded to a 128-byte block boundary so message
+// lengths don't reveal the query; plain UDP/TCP are never padded. With RFC
+// 7873 cookies enabled, a request that carried a COOKIE option gets the
+// cookie echoed with our server cookie attached. Padding and cookie
+// attachment both run on a copy — the caller's message (resp, a cache hit)
+// must never be mutated, for the same reason truncation copies: the success
+// path caches resp right after the write, and a padded or cookie-laden
+// answer must not be stored for every other client.
+func (h *Handler) write(w dns.ResponseWriter, m *dns.Msg, r *dns.Msg, proto string) error {
 	m.Compress = true
+	out := m
 	if proto == "udp" {
 		if limit := clientUDPSize(r); m.Len() > limit {
 			c := m.Copy()
 			c.Truncate(limit)
-			m = c
+			out = c
 		}
 	}
-	return w.WriteMsg(m)
+	// Padding only helps where the stream is encrypted anyway — on plain UDP
+	// the padded datagram length leaks just as much as the unpadded one, and
+	// padding must not inflate a datagram toward the client's buffer limit.
+	if h.Padding.Load() && (proto == "dot" || proto == "doh" || proto == "doh3" || proto == "doq") {
+		out = padMessage(out, 128)
+	}
+	if h.Cookies.Load() {
+		if cc := requestClientCookie(r); cc != "" {
+			cookie := cc + h.serverCookie(clientIPOf(w.RemoteAddr()), cc)
+			out = attachCookie(out, cookie)
+		}
+	}
+	return w.WriteMsg(out)
 }
 
 // newReply allocates the empty response skeleton used by the error, NODATA

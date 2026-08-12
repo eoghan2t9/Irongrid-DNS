@@ -32,7 +32,7 @@ func TestDoQRoundTrip(t *testing.T) {
 		t.Fatalf("tls: %v", err)
 	}
 	mgr := NewManager(h, tlsConf)
-	if _, err := mgr.Start("", "", "", "", "127.0.0.1:0", "/dns-query"); err != nil {
+	if _, err := mgr.Start("", "", "", "", "", "127.0.0.1:0", "/dns-query"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
 	defer mgr.Shutdown(context.Background())

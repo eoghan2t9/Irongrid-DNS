@@ -6,9 +6,24 @@ server:
   listen_udp: "0.0.0.0:53"     # plain DNS over UDP ("" disables)
   listen_tcp: "0.0.0.0:53"     # plain DNS over TCP
   listen_dot: "0.0.0.0:853"    # DNS over TLS
-  listen_doh: "0.0.0.0:443"    # DNS over HTTPS
+  listen_doh: "0.0.0.0:443"    # DNS over HTTPS (TCP)
+  # listen_doh3: "0.0.0.0:443"  # DNS over HTTP/3 (RFC 9114) — the same
+                                 # /dns-query endpoint over QUIC (UDP 443,
+                                 # independent of TCP 443). 0-RTT + full
+                                 # multiplexing make it the fastest transport
+                                 # for mobile/roaming clients. Must differ
+                                 # from listen_doq (different ALPNs can't
+                                 # share one UDP port).
   listen_doq: "0.0.0.0:853"    # DNS over QUIC
   doh_path: "/dns-query"       # RFC 8484 path
+  # padding: true               # pad responses on DoT/DoH/DoH3/DoQ to 128-byte
+                                 # blocks (RFC 7830) so message lengths don't
+                                 # reveal the queried domain
+  # cookies: true               # server DNS cookies (RFC 7873): client cookies
+                                 # are echoed with an HMAC server cookie bound
+                                 # to the client IP; forged cookies get
+                                 # BADCOOKIE — blunts off-path spoofing on the
+                                 # public UDP listener
   # Set web_listen to the DoH port (0.0.0.0:443) with web_tls to serve the
   # dashboard and DoH on ONE HTTPS port — open it at https://your-domain
   # with no port suffix (/dns-query keeps serving DoH).
@@ -17,10 +32,10 @@ server:
   # web_redirect: true         # with web_tls: plain HTTP on web_redirect_port 301s to HTTPS
   # web_redirect_port: 80
   timeout_sec: 5               # per-query upstream timeout
-  # UDP sockets bound for the plain UDP and DoQ listeners (SO_REUSEPORT
-  # spreads incoming datagrams across them). 0 = auto (one per CPU, capped
-  # at 8); 1 = a single exclusive socket (no port sharing with other
-  # processes); N = exactly N sockets (capped at 64).
+  # UDP sockets bound for the plain UDP, DoQ and DoH3 listeners
+  # (SO_REUSEPORT spreads incoming datagrams across them). 0 = auto (one per
+  # CPU, capped at 8); 1 = a single exclusive socket (no port sharing with
+  # other processes); N = exactly N sockets (capped at 64).
   udp_sockets: 0
 
 # Upstream DNS servers to forward to (udp, tcp, tls, https, quic supported).

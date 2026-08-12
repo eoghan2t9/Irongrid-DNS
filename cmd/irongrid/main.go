@@ -229,6 +229,11 @@ func main() {
 	handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
 	handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
 	handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
+	// RFC 7830 response padding and RFC 7873 DNS cookies (server.padding /
+	// server.cookies). Re-applied on every reload below so a dashboard
+	// toggle applies without a restart.
+	handler.SetPadding(cfg.Server.Padding)
+	handler.SetCookies(cfg.Server.Cookies)
 	// Multi-upstream resolution strategy (config upstream_mode: race or
 	// sequential). NewHandler defaults to race; apply the configured value.
 	handler.SetUpstreamMode(cfg.UpstreamMode)
@@ -262,7 +267,7 @@ func main() {
 	}
 	results, err := dnsMgr.Start(
 		cfg.Server.ListenUDP, cfg.Server.ListenTCP,
-		cfg.Server.ListenDoT, dohAddr(), cfg.Server.ListenDoQ,
+		cfg.Server.ListenDoT, dohAddr(), cfg.Server.ListenDoH3, cfg.Server.ListenDoQ,
 		cfg.Server.DoHPath,
 	)
 	if err != nil {
@@ -645,7 +650,7 @@ func main() {
 		}
 		if err := dnsMgr.Restart(
 			cfg.Server.ListenUDP, cfg.Server.ListenTCP,
-			cfg.Server.ListenDoT, dohAddr(), cfg.Server.ListenDoQ,
+			cfg.Server.ListenDoT, dohAddr(), cfg.Server.ListenDoH3, cfg.Server.ListenDoQ,
 			cfg.Server.DoHPath, newTLS,
 		); err != nil {
 			return fmt.Errorf("dns listeners: %w", err)
@@ -760,7 +765,7 @@ func main() {
 		dnsMgr.SetUDPSockets(cfg.Server.UDPSockets)
 		if err := dnsMgr.Restart(
 			cfg.Server.ListenUDP, cfg.Server.ListenTCP,
-			cfg.Server.ListenDoT, dohAddr(), cfg.Server.ListenDoQ,
+			cfg.Server.ListenDoT, dohAddr(), cfg.Server.ListenDoH3, cfg.Server.ListenDoQ,
 			cfg.Server.DoHPath, newTLS,
 		); err != nil {
 			_ = newCache.Close()
@@ -780,6 +785,8 @@ func main() {
 		handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
 		handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
 		handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
+		handler.SetPadding(cfg.Server.Padding)
+		handler.SetCookies(cfg.Server.Cookies)
 		// Geo blocking is hot-swapped asynchronously (see RebuildGeo).
 		if apiHandler.RebuildGeo != nil {
 			_ = apiHandler.RebuildGeo(cfg.GeoBlock)
