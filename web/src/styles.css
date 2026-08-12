@@ -110,16 +110,28 @@ body {
 .dot.idle { background: var(--dim2); }
 
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+/* Two-row topbar: the page title/description get the first row to itself
+   and the action cluster (Updates / Refresh / Log out) sits on its own
+   second row, so a long title or subtitle never competes with the buttons
+   for space (and vice versa). */
 .topbar {
-  display: flex; align-items: center; justify-content: space-between;
-  padding: 14px 24px; border-bottom: 1px solid var(--border);
+  display: flex; flex-direction: column;
+  padding: 14px 24px 12px; border-bottom: 1px solid var(--border);
 }
-.topbar-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.topbar-main { display: flex; align-items: center; gap: 12px; min-width: 0; }
 .topbar-title { font-size: 16px; font-weight: 650; font-family: var(--font-mono); }
 /* One-line plain-English description under the page title, so a newcomer
    knows what the current view is for before clicking anything. */
 .topbar-sub { font-size: 12px; color: var(--dim); margin-top: 2px; }
-.topbar-actions { display: flex; align-items: center; gap: 10px; }
+/* The action strip is its own section of the topbar, separated from the
+   title row by a hairline so the two never read as one squashed cluster.
+   flex-wrap lets the buttons flow to a second line on narrow phones. */
+.topbar-actions {
+  display: flex; align-items: center; justify-content: flex-end;
+  flex-wrap: wrap; gap: 10px;
+  margin-top: 12px; padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
 .topbar-actions .btn { display: inline-flex; align-items: center; }
 /* The topbar action cluster (Updates / Refresh / Log out) gets a taller,
    roomier treatment than the generic .btn.small (5px 10px) — which is
@@ -256,8 +268,10 @@ body {
     background: rgba(0, 0, 0, 0.6);
     animation: fade-in 0.15s ease;
   }
-  .topbar { padding: 10px 14px; position: sticky; top: 0; z-index: 50;
+  .topbar { padding: 10px 14px 8px; position: sticky; top: 0; z-index: 50;
     background: rgba(10, 10, 10, 0.94); }
+  /* Tighter row spacing on the compact sticky topbar; the hairline stays. */
+  .topbar-actions { margin-top: 8px; padding-top: 8px; }
   .content { padding: 14px 12px 40px; }
   .card { padding: 14px; }
   .stat-card { padding: 12px; }

@@ -255,7 +255,10 @@ export default function App() {
       {navOpen && <div className="sidebar-backdrop" onClick={() => setNavOpen(false)} />}
       <main className="main">
         <header className="topbar">
-          <div className="topbar-left">
+          {/* Row one: page title + description, with the full width to
+              itself so a long view name or subtitle never competes with
+              the action buttons for space. */}
+          <div className="topbar-main">
             <button className="menu-btn" onClick={() => setNavOpen(true)} aria-label="Open navigation">
               ☰
             </button>
@@ -264,6 +267,9 @@ export default function App() {
               <div className="topbar-sub">{NAV.find((n) => n.id === view)?.desc}</div>
             </div>
           </div>
+          {/* Row two: the action cluster (Updates / Refresh / Log out) on
+              its own strip, right-aligned, so neither row squashes the
+              other. */}
           <div className="topbar-actions">
             <UpdateChecker onNavigate={navigate} />
             <button className="btn ghost small" onClick={refreshStatus}>
