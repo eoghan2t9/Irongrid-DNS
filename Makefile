@@ -41,6 +41,15 @@ release: web
 		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags "$(LDFLAGS)" \
 			-o dist/$$name ./cmd/irongrid; \
 	done
+	@set -e; \
+	for t in linux/amd64 darwin/amd64 windows/amd64; do \
+		os=$${t%%/*}; arch=$${t##*/}; \
+		ext=$$([ "$$os" = windows ] && echo .exe || echo ''); \
+		name=irongrid-$$os-$$arch-v3$$ext; \
+		echo "  -> $$name (GOAMD64=v3 opt-in build for modern x86_64)"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch GOAMD64=v3 go build -trimpath -ldflags "$(LDFLAGS)" \
+			-o dist/$$name ./cmd/irongrid; \
+	done
 	cd dist && $(SHA256) irongrid-* > SHA256SUMS.txt
 	ls -lh dist
 

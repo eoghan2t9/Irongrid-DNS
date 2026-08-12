@@ -524,8 +524,19 @@ git push origin v1.0.0
 Or build them locally with:
 
 ```bash
-make release   # cross-compiles all 6 targets into dist/
+make release   # cross-compiles all 6 baseline targets, plus 3 GOAMD64=v3
+                # opt-in builds for modern x86_64, into dist/
 ```
+
+The release also publishes `-v3` amd64 artifacts (`irongrid-linux-amd64-v3`,
+`irongrid-darwin-amd64-v3`, `irongrid-windows-amd64-v3.exe`) built with
+`GOAMD64=v3`, which lets the compiler use AVX2/BMI2 and other instructions
+available on most x86_64 CPUs from the last decade or so. They're purely
+optional extra downloads alongside the baseline builds above — grab one only
+if you know your CPU supports it; **the baseline builds remain the
+recommended default** for unknown or older hardware (and for every arm64
+target, which has no GOAMD64 concept). The one-line installers and built-in
+updater always select the baseline build.
 
 ## Configuration
 
