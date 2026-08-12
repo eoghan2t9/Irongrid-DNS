@@ -25,6 +25,33 @@ import (
 // behind a slow or down cache tier.
 const defaultLookupTimeout = 150 * time.Millisecond
 
+// l2Write is one queued L2 cache write: a key, its value and TTL. The hot
+// path enqueues these and a single writer goroutine commits them to
+// Dragonfly in pipelined batches, so a cache miss costs one channel send
+// instead of a fresh goroutine plus one Redis round trip per write.
+type l2Write struct {
+	key string
+	val []byte
+	ttl time.Duration
+}
+
+const (
+	// writeQueueCap bounds the pending-write queue. The enqueue path never
+	// blocks on it: when the queue is full the write falls back to a
+	// synchronous SET — batching is a throughput optimization, never a
+	// reason to drop a cache entry.
+	writeQueueCap = 8192
+	// writeBatchSize flushes the writer once this many writes have queued.
+	writeBatchSize = 256
+	// writeFlushInterval is the maximum age of a queued write before the
+	// writer commits it in one pipelined round trip. 20ms keeps writes
+	// visible almost immediately while still coalescing bursts.
+	writeFlushInterval = 20 * time.Millisecond
+	// writeFlushTimeout bounds each pipelined flush so a stuck Dragonfly
+	// can't wedge the writer goroutine.
+	writeFlushTimeout = 2 * time.Second
+)
+
 // Cache is a two-layer response cache: a fast in-process L1 in front of the
 // Dragonfly/Redis L2. The L2 is authoritative for the fleet (and survives
 // restarts); the L1 makes local hits a pure map lookup.
@@ -50,6 +77,20 @@ type Cache struct {
 	// replacement in) — the field is read lock-free on the lookup path.
 	prefetch    func(ctx context.Context, q dns.Question)
 	prefetching sync.Map // msgKey -> struct{}: one in-flight refresh per key
+
+	// L2 write batching: Set/SetNegative enqueue their Dragonfly writes and
+	// a single writer goroutine commits them in pipelined batches (see
+	// runWriter), so the per-write cost on the miss path is one channel
+	// send instead of a Dragonfly round trip. All nil for the LocalOnly
+	// test cache (no L2, no writer).
+	writes  chan l2Write
+	wdone   chan struct{}
+	wwg     sync.WaitGroup
+	wclosed atomic.Bool
+	// lastWriteErr rate-limits the batch-write failure log line so a down
+	// Dragonfly can't spam the journal (the writer flushes on a ticker even
+	// when nothing is queued).
+	lastWriteErr atomic.Int64
 
 	// l1Hits/l1Misses count lookups answered (or missed) by the in-process
 	// L1 layer since process start, for the dashboard's cache card. They are
@@ -102,13 +143,115 @@ func New(addr, password string, db int, ttl, negativeTTL, serveStale time.Durati
 	if l1Entries > 0 {
 		l1 = newL1(l1Entries, serveStale)
 	}
-	return &Cache{
+	c := &Cache{
 		client:      client,
 		l1:          l1,
 		prefix:      "irongrid:dns:",
 		ttl:         ttl,
 		negativeTTL: negativeTTL,
-	}, nil
+	}
+	c.startWriter()
+	return c, nil
+}
+
+// startWriter launches the batched L2 write goroutine. Only called when
+// there is a real L2 (client != nil); the LocalOnly test cache has no
+// writer, and its Set/SetNegative skip the L2 path entirely.
+func (c *Cache) startWriter() {
+	if c.client == nil {
+		return
+	}
+	c.writes = make(chan l2Write, writeQueueCap)
+	c.wdone = make(chan struct{})
+	c.wwg.Add(1)
+	go c.runWriter()
+}
+
+// enqueueL2 queues a write for the batched writer, falling back to a direct
+// synchronous SET when the writer hasn't started, is shutting down, or the
+// queue is full — batching is an optimization and must never lose an entry.
+func (c *Cache) enqueueL2(ctx context.Context, key string, val []byte, ttl time.Duration) {
+	if c.client == nil {
+		return
+	}
+	if c.writes == nil || c.wclosed.Load() {
+		c.client.Set(ctx, key, val, ttl)
+		return
+	}
+	select {
+	case c.writes <- l2Write{key: key, val: val, ttl: ttl}:
+	default:
+		c.client.Set(ctx, key, val, ttl)
+	}
+}
+
+// runWriter drains the write queue, committing batches of writeBatchSize or
+// everything queued every writeFlushInterval, whichever comes first — one
+// pipelined Dragonfly round trip per flush instead of one per write.
+// Close() signals via wdone so the writer commits whatever is still queued
+// before exiting. The writes channel is deliberately never closed: enqueueL2
+// may race Close, and a send on a closed channel would panic.
+func (c *Cache) runWriter() {
+	defer c.wwg.Done()
+	batch := make([]l2Write, 0, writeBatchSize)
+	ticker := time.NewTicker(writeFlushInterval)
+	defer ticker.Stop()
+	flush := func() {
+		if len(batch) == 0 {
+			return
+		}
+		c.writeBatchL2(batch)
+		batch = batch[:0]
+	}
+	for {
+		select {
+		case w := <-c.writes:
+			batch = append(batch, w)
+			if len(batch) >= writeBatchSize {
+				flush()
+			}
+		case <-ticker.C:
+			flush()
+		case <-c.wdone:
+			// Shutdown: commit everything still queued, then exit.
+			for {
+				select {
+				case w := <-c.writes:
+					batch = append(batch, w)
+					if len(batch) >= writeBatchSize {
+						flush()
+					}
+				default:
+					flush()
+					return
+				}
+			}
+		}
+	}
+}
+
+// writeBatchL2 commits queued writes to Dragonfly in a single pipelined
+// round trip. A failed flush drops the batch — the entries just re-warm on
+// the next miss — and logs at most once a minute so a down cache tier can't
+// spam the journal.
+func (c *Cache) writeBatchL2(batch []l2Write) {
+	if c.client == nil || len(batch) == 0 {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), writeFlushTimeout)
+	defer cancel()
+	pipe := c.client.Pipeline()
+	for i := range batch {
+		pipe.Set(ctx, batch[i].key, batch[i].val, batch[i].ttl)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		now := time.Now().UnixNano()
+		last := c.lastWriteErr.Load()
+		if last == 0 || now-last > int64(time.Minute) {
+			c.lastWriteErr.Store(now)
+			log.Printf("[cache] L2 batch write failed (%d entries): %v", len(batch), err)
+		}
+	}
 }
 
 func summarizeServerInfo(info string) string {
@@ -123,8 +266,21 @@ func summarizeServerInfo(info string) string {
 	}
 }
 
-// Close terminates the connection pool.
-func (c *Cache) Close() error { return c.client.Close() }
+// Close stops the batched writer (committing whatever is queued) and then
+// terminates the connection pool. Safe to call more than once: the CAS
+// guarantees only the first caller shuts the writer down, and enqueueL2
+// racing the shutdown sees wclosed and falls back to a direct synchronous
+// SET instead of sending on a channel the writer has stopped draining.
+func (c *Cache) Close() error {
+	if c.writes != nil && c.wclosed.CompareAndSwap(false, true) {
+		close(c.wdone)
+		c.wwg.Wait()
+	}
+	if c.client != nil {
+		return c.client.Close()
+	}
+	return nil
+}
 
 // Ping returns an error if the cache is not reachable right now.
 func (c *Cache) Ping(ctx context.Context) error { return c.client.Ping(ctx).Err() }
@@ -600,9 +756,7 @@ func (c *Cache) Set(ctx context.Context, q dns.Question, m *dns.Msg, capTTL time
 	if c.l1 != nil {
 		c.l1.set(h, false, buf, ttl, now)
 	}
-	if c.client != nil {
-		c.client.Set(ctx, c.msgKey(h), buf, ttl)
-	}
+	c.enqueueL2(ctx, c.msgKey(h), buf, ttl)
 }
 
 // ---- negative answers ----
@@ -629,9 +783,7 @@ func (c *Cache) SetNegative(ctx context.Context, q dns.Question, m *dns.Msg, ttl
 	if c.l1 != nil {
 		c.l1.set(h, true, raw, ttl, now)
 	}
-	if c.client != nil {
-		c.client.Set(ctx, c.negKey(h), raw, ttl)
-	}
+	c.enqueueL2(ctx, c.negKey(h), raw, ttl)
 }
 
 // GetNegative returns a cached empty response, if any (L1 first, then L2).
