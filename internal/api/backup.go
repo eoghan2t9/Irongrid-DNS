@@ -30,12 +30,21 @@ var backupCertExts = map[string]bool{
 	".pem": true, ".crt": true, ".key": true, ".cer": true,
 }
 
+// backupPassphraseHeader carries an optional passphrase that, when set,
+// encrypts the downloaded archive (backupConfig) or decrypts an uploaded one
+// (restoreConfig). A header rather than a query parameter keeps the secret
+// out of default access-log formats, which log the request line/URI but not
+// headers.
+const backupPassphraseHeader = "X-Backup-Passphrase"
+
 // backupConfig serves a downloadable archive of the config file and the
 // TLS certificate directory — everything needed to move the server to a new
 // host or roll back a bad change. The archive contains the TLS private key
 // and the bcrypt password hash, so it must be handled with the same care as
-// a private key.
-func (h *Handler) backupConfig(w http.ResponseWriter) {
+// a private key. If the caller supplies a passphrase (via
+// backupPassphraseHeader), the archive is encrypted before it leaves the
+// server.
+func (h *Handler) backupConfig(w http.ResponseWriter, r *http.Request) {
 	h.cfgMu.Lock()
 	cfgPath := h.ConfigPath
 	certDir := h.Cfg.TLS.CertDir
@@ -46,8 +55,19 @@ func (h *Handler) backupConfig(w http.ResponseWriter) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="irongrid-backup-%s.zip"`, time.Now().Format("20060102-150405")))
+	contentType := "application/zip"
+	ext := "zip"
+	if passphrase := r.Header.Get(backupPassphraseHeader); passphrase != "" {
+		data, err = encryptBackup(data, passphrase)
+		if err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+			return
+		}
+		contentType = "application/octet-stream"
+		ext = "zip.enc"
+	}
+	w.Header().Set("Content-Type", contentType)
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="irongrid-backup-%s.%s"`, time.Now().Format("20060102-150405"), ext))
 	_, _ = w.Write(data)
 }
 
@@ -122,6 +142,19 @@ func (h *Handler) restoreConfig(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
+	}
+
+	if isEncryptedBackup(zipData) {
+		passphrase := r.FormValue("passphrase")
+		if passphrase == "" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "this backup is encrypted — enter the passphrase it was created with"})
+			return
+		}
+		zipData, err = decryptBackup(zipData, passphrase)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 
 	h.cfgMu.Lock()

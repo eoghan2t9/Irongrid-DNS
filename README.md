@@ -238,7 +238,7 @@ startup service (systemd / launchd / Windows task).
 | 🚦 **Rate limiting** | Per-client-IP token bucket guards against a compromised LAN device or amplification abuse on a public listener, with fail2ban-style **auto-block**: repeat offenders are refused entirely for a cooldown and listed in the dashboard with one-click unblock |
 | 🌍 **Geo blocking** | Refuse queries from whole countries — per-country CIDR data (ipverse/rir-ip) fetched automatically, no account or API key, with an IP/CIDR allowlist. The same country lists are also installed into the **host firewall** (nftables, or iptables+ipset) so all new inbound traffic from blocked countries is dropped at the packet level |
 | 🔒 **DNSSEC** | Sets the DO bit and can require the upstream's AD bit before trusting an answer — a forwarder-model validation (like Pi-hole/AdGuard Home/dnsmasq), not a local root-of-trust chain |
-| 💾 **Backup & restore** | One click downloads the whole config plus TLS certificates as a zip; restore validates it (zip-slip guarded) and live-applies — safe migrations and rollbacks |
+| 💾 **Backup & restore** | One click downloads the whole config plus TLS certificates as a zip; restore validates it (zip-slip guarded) and live-applies — safe migrations and rollbacks. An optional passphrase encrypts the archive (AES-256-GCM, Argon2id-derived key) since it contains the TLS private key and password hash |
 
 ## Architecture
 
@@ -735,7 +735,9 @@ POST /api/abuse/asn         free RIPEstat lookup: owning ASN / prefix / registra
 GET/POST /api/tunnel/*      tunnel lifecycle + logs
 GET/PUT /api/config         read / update the full config (live-apply + restart notes)
 GET  /api/config/backup     download config + TLS certificates as a zip archive (contains private keys — treat like a key file)
+                             pass X-Backup-Passphrase to encrypt the archive (AES-256-GCM, Argon2id key)
 POST /api/config/restore    restore a backup archive: validated (zip-slip guarded, only cert file types), live-applied like a config save, restart notes returned
+                             an encrypted archive needs its passphrase in the "passphrase" form field
 POST /api/config/reload     apply listener/cache/TLS/upstream changes in-process (no restart)
 GET  /api/dhcp/leases       live DHCPv4/v6 leases + static reservations (built-in DHCP server)
 GET  /api/diag/dns?name=…   resolve through your upstreams

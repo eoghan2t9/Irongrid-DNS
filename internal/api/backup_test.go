@@ -64,6 +64,60 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	}
 }
 
+// TestBackupRestoreEncryptedRoundTrip verifies an encrypted backup restores
+// exactly like a plain one once decrypted with the right passphrase, and
+// that restoreFromZip never sees anything but the plaintext zip.
+func TestBackupRestoreEncryptedRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	cfg := config.Default()
+	cfg.Upstreams = []string{"udp://1.1.1.1"}
+	cfgPath := filepath.Join(dir, "irongrid.yaml")
+	if err := cfg.Save(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	certDir := filepath.Join(dir, "certs")
+	if err := os.MkdirAll(certDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(certDir, "key.pem"), []byte("KEY"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	zipData, err := buildBackup(cfgPath, certDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encData, err := encryptBackup(zipData, "hunter2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isEncryptedBackup(encData) {
+		t.Fatal("encrypted backup not recognized as encrypted")
+	}
+
+	decData, err := decryptBackup(encData, "hunter2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(decData, zipData) {
+		t.Fatal("decrypted archive does not match the original plaintext archive")
+	}
+
+	restoreCertDir := filepath.Join(dir, "restored-certs")
+	restored, err := restoreFromZip(decData, restoreCertDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(restored.Upstreams, cfg.Upstreams) {
+		t.Fatalf("restored upstreams = %v, want %v", restored.Upstreams, cfg.Upstreams)
+	}
+
+	// A wrong passphrase must never reach restoreFromZip with garbage bytes.
+	if _, err := decryptBackup(encData, "wrong"); err != ErrBackupBadPassphrase {
+		t.Fatalf("err = %v, want ErrBackupBadPassphrase", err)
+	}
+}
+
 // TestRestoreRejectsZipSlip verifies that an archive whose entries escape
 // the extraction root is refused outright.
 func TestRestoreRejectsZipSlip(t *testing.T) {
