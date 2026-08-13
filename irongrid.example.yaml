@@ -37,6 +37,13 @@ server:
   # CPU, capped at 8); 1 = a single exclusive socket (no port sharing with
   # other processes); N = exactly N sockets (capped at 64).
   udp_sockets: 0
+  # debug_pprof: true            # expose Go's net/http/pprof under /debug/pprof/
+                                 # on the dashboard port, behind the same admin
+                                 # login as the REST API. Off by default: even
+                                 # authenticated, a heap profile can dump memory
+                                 # contents and a CPU/trace profile costs real
+                                 # cycles for its duration — turn on only while
+                                 # actively chasing a performance problem.
 
 # Upstream DNS servers to forward to (udp, tcp, tls, https, quic supported).
 upstreams:

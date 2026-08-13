@@ -17,6 +17,7 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"net/http/pprof"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -74,6 +75,14 @@ func NewRouter(a *App) http.Handler {
 		a.Handler.HandleAPI(w, r)
 	})
 
+	// Runtime profiling (net/http/pprof), only when explicitly enabled
+	// (server.debug_pprof) and always behind the same admin auth as the
+	// REST API — never registered on http.DefaultServeMux, so nothing else
+	// in the process can accidentally expose it unauthenticated.
+	if a.Config != nil && a.Config.Server.DebugPprof {
+		registerPprof(mux, a)
+	}
+
 	// Static web UI.
 	var webRoot fs.FS
 	if a.WebFS != nil {
@@ -86,6 +95,26 @@ func NewRouter(a *App) http.Handler {
 	})
 
 	return logRequests(mux)
+}
+
+// registerPprof mounts the standard net/http/pprof handlers at their usual
+// paths (mirroring what net/http/pprof's own init() registers on
+// http.DefaultServeMux), each wrapped in the same session/Basic auth check
+// as the REST API.
+func registerPprof(mux *http.ServeMux, a *App) {
+	wrap := func(h http.HandlerFunc) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			if !a.authorize(w, r) {
+				return
+			}
+			h(w, r)
+		}
+	}
+	mux.HandleFunc("/debug/pprof/", wrap(pprof.Index))
+	mux.HandleFunc("/debug/pprof/cmdline", wrap(pprof.Cmdline))
+	mux.HandleFunc("/debug/pprof/profile", wrap(pprof.Profile))
+	mux.HandleFunc("/debug/pprof/symbol", wrap(pprof.Symbol))
+	mux.HandleFunc("/debug/pprof/trace", wrap(pprof.Trace))
 }
 
 // sessionCookie is the signed login cookie. It keeps the dashboard logged in

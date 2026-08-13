@@ -348,6 +348,12 @@ go run ./bench/dnsload -addr 10.0.0.5:53 -dur 30s -qps 20000
 make bench-reuseport  # 1 socket vs 8, 5s each
 ```
 
+For profiling a live instance rather than a synthetic benchmark, set
+`server.debug_pprof: true` to expose Go's `net/http/pprof` under
+`/debug/pprof/` on the dashboard port — gated behind the same admin login as
+the REST API, and off by default (a heap profile can dump memory contents;
+a CPU/trace profile costs real cycles for its duration).
+
 ### Hot-path allocation trims
 
 Each query used to pay for a reply `dns.Msg` (only ~2% of queries use it),

@@ -14,6 +14,61 @@ import (
 	"github.com/andybalholm/brotli"
 )
 
+// TestPprofDisabledByDefault verifies /debug/pprof/ isn't registered at all
+// when server.debug_pprof is left at its zero-value default: an
+// unauthenticated request must fall through to the SPA catch-all (200, the
+// same as any other unknown path) rather than hit pprof's own auth check
+// (401) — 401 here would mean the route exists and just happens to reject
+// this particular request, not that it's absent.
+func TestPprofDisabledByDefault(t *testing.T) {
+	a := testApp(t)
+	router := NewRouter(a)
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil))
+	if rr.Code == http.StatusUnauthorized {
+		t.Fatal("pprof route responded 401 while disabled — it must not be registered at all")
+	}
+	if strings.Contains(rr.Body.String(), "Types of profiles available") {
+		t.Fatal("pprof index content served while disabled")
+	}
+}
+
+// TestPprofRequiresAuth verifies that once enabled, every pprof endpoint
+// still sits behind the same auth as the REST API — an unauthenticated
+// request must never see profiling data.
+func TestPprofRequiresAuth(t *testing.T) {
+	a := testApp(t)
+	a.Config.Server.DebugPprof = true
+	router := NewRouter(a)
+
+	for _, path := range []string{"/debug/pprof/", "/debug/pprof/cmdline", "/debug/pprof/profile?seconds=0", "/debug/pprof/symbol", "/debug/pprof/heap"} {
+		rr := httptest.NewRecorder()
+		router.ServeHTTP(rr, httptest.NewRequest(http.MethodGet, path, nil))
+		if rr.Code != http.StatusUnauthorized {
+			t.Errorf("%s: status = %d, want 401 without credentials", path, rr.Code)
+		}
+	}
+}
+
+// TestPprofServesWhenAuthorized verifies an authenticated request to the
+// pprof index actually reaches the handler (not just "not 401").
+func TestPprofServesWhenAuthorized(t *testing.T) {
+	a := testApp(t)
+	a.Config.Server.DebugPprof = true
+	router := NewRouter(a)
+
+	req := httptest.NewRequest(http.MethodGet, "/debug/pprof/", nil)
+	req.SetBasicAuth("admin", "secret123")
+	rr := httptest.NewRecorder()
+	router.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 for an authorized pprof index request", rr.Code)
+	}
+	if !strings.Contains(rr.Body.String(), "pprof") {
+		t.Fatalf("body doesn't look like the pprof index: %q", rr.Body.String())
+	}
+}
+
 // TestServeFromFSContentType guards the SPA fallback: refreshing a client-side
 // route like /blocklists hits the server directly, which falls back to serving
 // index.html. The fallback must be served as text/html — serving it as

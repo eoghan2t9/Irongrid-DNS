@@ -309,6 +309,12 @@ type ServerConfig struct {
 	// carrying a stale/forged server cookie is answered BADCOOKIE instead
 	// of being processed — blunting off-path spoofing and cache pollution.
 	Cookies bool `yaml:"cookies"`
+	// DebugPprof exposes Go's net/http/pprof endpoints under /debug/pprof/,
+	// gated behind the same session/Basic auth as the REST API. Off by
+	// default: even authenticated, a heap profile can dump memory contents
+	// and a CPU/trace profile ties up real cycles for its duration — opt in
+	// only while actively chasing a performance problem.
+	DebugPprof bool `yaml:"debug_pprof"`
 }
 
 // CacheConfig points at the Dragonfly instance that is the authoritative
