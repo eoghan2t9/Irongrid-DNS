@@ -35,6 +35,10 @@ var backupCertExts = map[string]bool{
 // (restoreConfig). A header rather than a query parameter keeps the secret
 // out of default access-log formats, which log the request line/URI but not
 // headers.
+//
+//nolint:gosec // G101: this is an HTTP header NAME, not a credential value —
+// gosec pattern-matches "passphrase" in the identifier regardless of what
+// the string actually holds.
 const backupPassphraseHeader = "X-Backup-Passphrase"
 
 // backupConfig serves a downloadable archive of the config file and the
@@ -68,6 +72,9 @@ func (h *Handler) backupConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", contentType)
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="irongrid-backup-%s.%s"`, time.Now().Format("20060102-150405"), ext))
+	//nolint:gosec // G705: data is a binary zip/encrypted archive served with
+	// Content-Disposition: attachment and a non-HTML Content-Type — it is
+	// never reflected as HTML, so XSS taint analysis doesn't apply.
 	_, _ = w.Write(data)
 }
 
