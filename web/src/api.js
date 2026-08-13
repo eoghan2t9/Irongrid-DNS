@@ -132,12 +132,15 @@ export const api = {
   config: () => request('/api/config'),
   saveConfig: (cfg) => request('/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) }),
   reloadConfig: () => request('/api/config/reload', { method: 'POST' }),
-  configBackup: async () => {
+  configBackup: async (passphrase) => {
     // Raw fetch so we can return a blob for the zip download (auth header is
     // attached like request(); after a reload the session cookie covers it).
+    // The passphrase (if any) rides in a header, not a query string, so it
+    // doesn't end up in server access logs.
     const headers = {}
     const auth = authHeader()
     if (auth) headers.Authorization = auth
+    if (passphrase) headers['X-Backup-Passphrase'] = passphrase
     let resp
     try {
       resp = await fetch('/api/config/backup', { headers })
@@ -155,11 +158,13 @@ export const api = {
     }
     return resp.blob()
   },
-  configRestore: (file) => {
+  configRestore: (file, passphrase) => {
     // Multipart upload; the browser sets the boundary automatically, so no
-    // Content-Type header is sent.
+    // Content-Type header is sent. passphrase is ignored server-side for a
+    // plain (unencrypted) archive, so it's always safe to include it.
     const fd = new FormData()
     fd.append('file', file)
+    if (passphrase) fd.append('passphrase', passphrase)
     return request('/api/config/restore', { method: 'POST', body: fd })
   },
   diagDNS: (name, type) => request(`/api/diag/dns?name=${encodeURIComponent(name)}&type=${encodeURIComponent(type)}`),

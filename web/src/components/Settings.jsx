@@ -79,6 +79,7 @@ export default function Settings({ onSessionInvalidated }) {
   const [backupErr, setBackupErr] = useState('')
   const [restoring, setRestoring] = useState(false)
   const [restoreMsg, setRestoreMsg] = useState('')
+  const [backupPassphrase, setBackupPassphrase] = useState('')
 
   const load = useCallback(async () => {
     try {
@@ -352,16 +353,17 @@ export default function Settings({ onSessionInvalidated }) {
     setBackupErr('')
     setRestoreMsg('')
     try {
-      const blob = await api.configBackup()
+      const blob = await api.configBackup(backupPassphrase)
       const url = URL.createObjectURL(blob)
       const a = document.createElement('a')
       a.href = url
-      a.download = `irongrid-backup-${new Date().toISOString().slice(0, 10)}.zip`
+      const ext = backupPassphrase ? 'zip.enc' : 'zip'
+      a.download = `irongrid-backup-${new Date().toISOString().slice(0, 10)}.${ext}`
       document.body.appendChild(a)
       a.click()
       a.remove()
       URL.revokeObjectURL(url)
-      toast('Backup downloaded')
+      toast(backupPassphrase ? 'Encrypted backup downloaded' : 'Backup downloaded')
     } catch (e) {
       setBackupErr(e.message)
     } finally {
@@ -378,7 +380,7 @@ export default function Settings({ onSessionInvalidated }) {
     setBackupErr('')
     setRestoreMsg('')
     try {
-      const res = await api.configRestore(file)
+      const res = await api.configRestore(file, backupPassphrase)
       const notes = (res.restart_required && res.restart_required.length)
         ? ` Restart needed for: ${res.restart_required.join(', ')}.`
         : ''
@@ -1055,17 +1057,45 @@ export default function Settings({ onSessionInvalidated }) {
         <p className="dim small" style={{ marginTop: -6 }}>
           Download an archive of the config file and TLS certificates — handy before upgrades or when moving
           servers. The archive contains the <strong>TLS private key</strong> and the password hash, so keep it as
-          secure as a key file.
+          secure as a key file — or set a passphrase below to encrypt it.
         </p>
+        <div className="form-grid" style={{ marginTop: 10 }}>
+          <label>
+            Passphrase (optional)
+            <input
+              className="input"
+              type="password"
+              autoComplete="new-password"
+              placeholder="Leave blank for an unencrypted backup"
+              value={backupPassphrase}
+              onChange={(e) => setBackupPassphrase(e.target.value)}
+            />
+          </label>
+        </div>
+        {backupPassphrase && (
+          <p className="dim small" style={{ marginTop: 4 }}>
+            There is no way to recover an encrypted backup without this passphrase — if it's lost, the archive is
+            unusable.
+          </p>
+        )}
         <div className="quick-actions" style={{ marginTop: 10 }}>
           <button className="btn small" type="button" onClick={downloadBackup} disabled={backupBusy}>
             {backupBusy ? 'Packing…' : '⬇ Download backup'}
           </button>
           <label className="btn small" style={{ margin: 0 }}>
             {restoring ? 'Restoring…' : '⬆ Restore backup'}
-            <input type="file" accept=".zip,application/zip" style={{ display: 'none' }} onChange={onRestoreFile} disabled={restoring} />
+            <input
+              type="file"
+              accept=".zip,.enc,application/zip,application/octet-stream"
+              style={{ display: 'none' }}
+              onChange={onRestoreFile}
+              disabled={restoring}
+            />
           </label>
         </div>
+        <p className="dim small" style={{ marginTop: 4 }}>
+          To restore an encrypted backup, enter its passphrase above first, then choose the file.
+        </p>
         {backupErr && <div className="error-banner" style={{ marginTop: 8 }}>{backupErr}</div>}
         {restoreMsg && <div className="info-banner" style={{ marginTop: 8 }}>{restoreMsg}</div>}
       </div>
