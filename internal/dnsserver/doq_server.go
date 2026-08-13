@@ -142,14 +142,24 @@ type doqResponseWriter struct {
 }
 
 func (w *doqResponseWriter) WriteMsg(m *dns.Msg) error {
-	packed, err := m.Pack()
+	buf := getPackBuf()
+	packed, err := m.PackBuffer(buf)
 	if err != nil {
+		putPackBuf(buf)
 		return err
 	}
-	buf := make([]byte, 2+len(packed))
-	binary.BigEndian.PutUint16(buf[:2], uint16(len(packed)))
-	copy(buf[2:], packed)
-	_, err = w.stream.Write(buf)
+	// RFC 9250 prefixes each message with its 2-byte length. Two writes
+	// (instead of copying packed into a combined buffer) avoids needing to
+	// know whether PackBuffer packed into buf in place or had to allocate
+	// its own — either way packed is written and recycled untouched.
+	var lenBuf [2]byte
+	binary.BigEndian.PutUint16(lenBuf[:], uint16(len(packed)))
+	if _, err := w.stream.Write(lenBuf[:]); err != nil {
+		putPackBuf(packed)
+		return err
+	}
+	_, err = w.stream.Write(packed)
+	putPackBuf(packed)
 	return err
 }
 

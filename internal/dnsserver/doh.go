@@ -252,14 +252,19 @@ type dohResponseWriter struct {
 }
 
 func (w *dohResponseWriter) WriteMsg(m *dns.Msg) error {
-	packed, err := m.Pack()
+	buf := getPackBuf()
+	packed, err := m.PackBuffer(buf)
 	if err != nil {
+		putPackBuf(buf)
 		return err
 	}
 	w.httpW.Header().Set("Content-Type", dnsMessageContentType)
 	w.httpW.Header().Set("Cache-Control", "no-store")
 	w.httpW.WriteHeader(http.StatusOK)
+	// http.ResponseWriter.Write copies/sends packed synchronously before
+	// returning, so it's safe to recycle right after regardless of error.
 	_, err = w.httpW.Write(packed)
+	putPackBuf(packed)
 	return err
 }
 

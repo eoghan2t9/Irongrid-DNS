@@ -363,6 +363,13 @@ lazily on the error paths, the cache write takes ownership of the response
 after it's been written to the client, and a single query message is reused
 across failover attempts (all five transports treat the query as read-only).
 
+DoH and DoQ pack their own wire format outside the UDP/TCP/DoT server loop,
+so they got no buffer reuse from `miekg/dns` — every response allocated a
+fresh pack buffer. Both now draw from a self-tuning `sync.Pool` of byte
+slices (`PackBuffer` instead of `Pack`), starting at the same 4 KB the UDP
+reader already sizes for and growing to fit the largest message actually
+seen instead of guessing a fixed cap.
+
 ## Installation options
 
 ### 1. Interactive TUI wizard (recommended)
