@@ -110,6 +110,15 @@ type Upstream struct {
 	// time it was pooled so stale connections can be evicted before reuse.
 	connPool chan *pooledConn
 
+	// udpPool holds warm connected UDP sockets (nil for non-UDP
+	// transports). UDP has no handshake to amortize, but every query still
+	// pays socket/connect/close syscalls without one. Each socket is used
+	// by exactly one exchange at a time (get → exchange → put), so a reply
+	// can never be misread as the answer to a later query on the same
+	// socket. Entries carry the pool time like the TCP pool so a socket a
+	// NAT may have dropped while idle is closed rather than reused.
+	udpPool chan *pooledConn
+
 	// DoQ keeps a single persistent QUIC connection and opens a new stream
 	// per query instead of a new connection — that's the entire point of
 	// QUIC's multiplexing, which a fresh quic.DialAddr per query (the
@@ -185,6 +194,8 @@ func Parse(spec string) (*Upstream, error) {
 	switch u.Transport {
 	case TCP, TLS:
 		u.connPool = make(chan *pooledConn, upstreamPoolSize)
+	case UDP:
+		u.udpPool = make(chan *pooledConn, upstreamPoolSize)
 	}
 	switch u.Transport {
 	case UDP:
@@ -233,6 +244,9 @@ func Parse(spec string) (*Upstream, error) {
 func NewWithTLS(transport Transport, addr, host string, tlsConf *tls.Config) *Upstream {
 	u := &Upstream{Transport: transport, Addr: addr, Host: host, tlsConf: tlsConf}
 	switch u.Transport {
+	case UDP:
+		u.udpPool = make(chan *pooledConn, upstreamPoolSize)
+		u.udpClient = &dns.Client{Net: "udp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
 	case TCP:
 		u.connPool = make(chan *pooledConn, upstreamPoolSize)
 		u.tcpClient = &dns.Client{Net: "tcp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
@@ -301,13 +315,50 @@ func (u *Upstream) Query(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 
 func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns.Msg, error) {
 	if !tcp {
-		// UDP is connectionless — there's no handshake to amortize, so
-		// pooling buys nothing (a fresh "dial" is just a local socket()).
+		// UDP is connectionless — there's no handshake to amortize — but a
+		// fresh "dial" is still three syscalls (socket, connect, close) per
+		// query. A small pool of connected sockets amortizes them: each
+		// socket is used by one exchange at a time (get → exchange → put),
+		// so replies can never cross between queries.
 		c := u.udpClient
 		if c == nil {
 			c = &dns.Client{Net: "udp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
 		}
-		r, _, err := c.ExchangeContext(ctx, m, u.Addr)
+		var (
+			r   *dns.Msg
+			err error
+		)
+		if conn := u.udpGetConn(); conn != nil {
+			r, _, err = c.ExchangeWithConnContext(ctx, m, conn)
+			if err != nil {
+				// The pooled socket may have gone stale while idle (a NAT
+				// dropped it, the server restarted): close it and retry on a
+				// fresh dial rather than failing the query over a warm-socket
+				// hiccup — the same recovery the TCP pool uses.
+				conn.Close()
+			} else {
+				u.udpPutConn(conn)
+			}
+		}
+		if err != nil || r == nil {
+			// Pool empty (no pooled attempt happened), or the pooled socket
+			// failed: dial a socket, exchange on it, and — on success — put
+			// it in the pool so the next query reuses it. (A plain
+			// ExchangeContext would dial and immediately close its own
+			// socket, which is exactly the per-query syscall churn the pool
+			// exists to avoid.)
+			conn, derr := c.DialContext(ctx, u.Addr)
+			if derr != nil {
+				err = derr
+			} else {
+				r, _, err = c.ExchangeWithConnContext(ctx, m, conn)
+				if err != nil {
+					conn.Close()
+				} else {
+					u.udpPutConn(conn)
+				}
+			}
+		}
 		if err == nil && r != nil && !r.Truncated {
 			u.markResult(nil)
 			return r, nil
@@ -441,6 +492,36 @@ func (u *Upstream) putConn(c *dns.Conn) {
 	}
 }
 
+// udpGetConn pops a warm connected socket from the UDP pool, or nil when
+// none are available (including when the pool isn't configured). A socket
+// that sat idle in the pool past poolMaxIdle is presumed dead — a NAT may
+// have dropped it — and is closed instead of returned, so reuse never
+// wastes a query on a socket that can't deliver.
+func (u *Upstream) udpGetConn() *dns.Conn {
+	for {
+		select {
+		case pc := <-u.udpPool:
+			if time.Since(pc.pooledAt) > poolMaxIdle {
+				pc.conn.Close()
+				continue
+			}
+			return pc.conn
+		default:
+			return nil
+		}
+	}
+}
+
+// udpPutConn returns a socket to the UDP pool, closing it instead when the
+// pool is full (or unconfigured).
+func (u *Upstream) udpPutConn(c *dns.Conn) {
+	select {
+	case u.udpPool <- &pooledConn{conn: c, pooledAt: time.Now()}:
+	default:
+		c.Close()
+	}
+}
+
 // Close releases any pooled/persistent connections this upstream holds.
 // Called when a config reload replaces the upstream list — without it, the
 // TCP/DoT pool and DoQ's persistent QUIC connection would leak sockets on
@@ -454,6 +535,17 @@ func (u *Upstream) Close() {
 				pc.conn.Close()
 			default:
 				break drain
+			}
+		}
+	}
+	if u.udpPool != nil {
+	drainUDP:
+		for {
+			select {
+			case pc := <-u.udpPool:
+				pc.conn.Close()
+			default:
+				break drainUDP
 			}
 		}
 	}

@@ -93,6 +93,34 @@ func TestIPRules(t *testing.T) {
 	}
 }
 
+// TestHasIPRulesGate verifies the hot-path gate tracks the IP rule sets:
+// false when empty (the common domain-only list setup), true once any IP
+// rule is loaded, and false again when the last one is removed or the
+// engine is reset.
+func TestHasIPRulesGate(t *testing.T) {
+	e := NewEngine()
+	if e.HasIPRules() {
+		t.Fatal("empty engine must not report IP rules")
+	}
+	if _, err := e.LoadList("ip", "ip", []byte("1.2.3.4\n")); err != nil {
+		t.Fatal(err)
+	}
+	if !e.HasIPRules() {
+		t.Fatal("engine with an IP rule must report HasIPRules")
+	}
+	e.RemoveIPBlock("1.2.3.4")
+	if e.HasIPRules() {
+		t.Fatal("engine with no IP rules must not report HasIPRules")
+	}
+	if _, err := e.LoadList("ip", "ip", []byte("9.9.9.9\n")); err != nil {
+		t.Fatal(err)
+	}
+	e.Reset()
+	if e.HasIPRules() {
+		t.Fatal("Reset must clear the IP-rule gate")
+	}
+}
+
 // TestWhitelistLargeSubtree guards the ancestor-walk whitelist match against
 // regressing back to a linear scan: it must still find a match sitting deep
 // in a large allow-list, and correctly miss for a domain absent from it.

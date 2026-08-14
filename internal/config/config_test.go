@@ -108,6 +108,19 @@ func TestUDPSocketsValidation(t *testing.T) {
 	}
 }
 
+func TestUDPWorkersValidation(t *testing.T) {
+	c := validBase()
+	c.Server.UDPWorkers = -1
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "udp_workers") {
+		t.Errorf("err = %v, want negative server.udp_workers rejected", err)
+	}
+	c = validBase()
+	c.Server.UDPWorkers = 64 // explicit worker count is fine
+	if err := c.Validate(); err != nil {
+		t.Errorf("valid server.udp_workers rejected: %v", err)
+	}
+}
+
 func validBase() *Config {
 	return &Config{
 		Server: ServerConfig{

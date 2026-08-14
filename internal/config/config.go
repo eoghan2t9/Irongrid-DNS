@@ -298,6 +298,12 @@ type ServerConfig struct {
 	// exclusive binding — the pre-reuseport behaviour); N = exactly N
 	// sockets (capped at 64).
 	UDPSockets int `yaml:"udp_sockets"`
+	// UDPWorkers is how many handler workers each plain-UDP socket's read
+	// loop dispatches to. The workers replace miekg/dns's
+	// goroutine-per-datagram model, so a flood costs zero goroutine
+	// creation and bounded memory. 0 = auto (4 × CPU per socket, floor 16,
+	// capped 256); N = exactly N workers per socket (capped at 512).
+	UDPWorkers int `yaml:"udp_workers"`
 	// Padding pads responses on the encrypted transports (DoT/DoH/DoH3/DoQ)
 	// to fixed 128-byte block boundaries (RFC 7830), so an observer of the
 	// encrypted stream cannot infer which domain was queried from the
@@ -759,6 +765,9 @@ func (c *Config) validate() error {
 	}
 	if c.Server.UDPSockets < 0 {
 		return fmt.Errorf("server.udp_sockets must be >= 0 (0 = auto, 1 = single exclusive socket)")
+	}
+	if c.Server.UDPWorkers < 0 {
+		return fmt.Errorf("server.udp_workers must be >= 0 (0 = auto, N = workers per UDP socket)")
 	}
 	// DoH3 and DoQ are both QUIC over UDP on the address they bind. Two
 	// QUIC listeners on one UDP address would each accept the other's

@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -303,6 +304,10 @@ func (h *Handler) getStatus(w http.ResponseWriter) {
 		"listeners":   listeners,
 		"udp_sockets": udpSocks,
 		"doq_sockets": doqSocks,
+		// num_cpu is the tuned GOMAXPROCS the UDP auto sizing runs off
+		// (cgroup-aware via internal/tuning), so the dashboard's
+		// "recommended values" can compute the exact same numbers.
+		"num_cpu":     runtime.GOMAXPROCS(0),
 		"cache_ok":    cacheOK,
 		"tunnel":      h.Tunnel.Status(),
 		"root_hints":  rootHints,

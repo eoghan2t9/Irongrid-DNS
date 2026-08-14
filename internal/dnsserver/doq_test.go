@@ -10,6 +10,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cert"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
@@ -24,7 +25,14 @@ func TestDoQRoundTrip(t *testing.T) {
 	}
 	engine.Compile()
 
-	h := NewHandler(engine, nil, nil, nil, "nxdomain", 600, 5*time.Second)
+	// A UDP upstream plus a response cache so the cache-hit path — served
+	// from the stored packed bytes via writeRaw's RFC 9250 length-prefixed
+	// write — is exercised over a real QUIC stream too.
+	upAddr := startUDPTestServer(t, "9.9.9.9", 0)
+	c := cache.NewLocalOnly(time.Hour, time.Minute, 512, 0)
+	h := NewHandler(engine, c, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: upAddr},
+	}, nil, "nxdomain", 600, 5*time.Second)
 
 	certDir := filepath.Join(t.TempDir(), "certs")
 	tlsConf, err := cert.LoadOrGenerate("", "", certDir, []string{"localhost", "127.0.0.1"})
@@ -78,4 +86,33 @@ func TestDoQRoundTrip(t *testing.T) {
 		t.Fatalf("expected NXDOMAIN for blocked domain, got rcode %d", resp2.Rcode)
 	}
 	t.Log("blocked domain correctly answered NXDOMAIN over DoQ")
+
+	// Cache-hit path: resolve once (populating the cache), wait for the
+	// background cache write, then resolve again — the second answer comes
+	// from the stored packed bytes over the raw DoQ write path.
+	warm := new(dns.Msg)
+	warm.SetQuestion("cached.example.com.", dns.TypeA)
+	if resp3, err := client.Query(context.Background(), warm); err != nil || resp3 == nil || len(resp3.Answer) == 0 {
+		t.Fatalf("cache-warm query failed: resp=%v err=%v", resp3, err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if c.Lookup(warm.Question[0]).Msg() != nil {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	hit := new(dns.Msg)
+	hit.SetQuestion("cached.example.com.", dns.TypeA)
+	resp4, err := client.Query(context.Background(), hit)
+	if err != nil {
+		t.Fatalf("cache-hit query failed: %v", err)
+	}
+	if resp4 == nil || len(resp4.Answer) == 0 {
+		t.Fatalf("expected a cached answer, got %v", resp4)
+	}
+	if a, ok := resp4.Answer[0].(*dns.A); !ok || a.A.String() != "9.9.9.9" {
+		t.Fatalf("cached answer = %v, want A 9.9.9.9", resp4.Answer[0])
+	}
+	t.Log("cache-hit path answered from the raw packed bytes over DoQ")
 }

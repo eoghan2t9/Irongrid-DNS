@@ -72,11 +72,22 @@ func (f *fakeWriter) WriteMsg(m *dns.Msg) error {
 	f.msg = m.Copy()
 	return nil
 }
-func (f *fakeWriter) Write(b []byte) (int, error) { return len(b), nil }
-func (f *fakeWriter) Close() error                { return nil }
-func (f *fakeWriter) TsigStatus() error           { return nil }
-func (f *fakeWriter) TsigTimersOnly(b bool)       {}
-func (f *fakeWriter) Hijack()                     {}
+
+// Write receives the raw packed bytes the handler's pack-once fast path
+// sends (a real transport writes them to the wire verbatim), so unpacking
+// them into f.msg mirrors what a real client receives. A malformed payload
+// leaves f.msg nil rather than failing the write.
+func (f *fakeWriter) Write(b []byte) (int, error) {
+	m := new(dns.Msg)
+	if err := m.Unpack(b); err == nil {
+		f.msg = m
+	}
+	return len(b), nil
+}
+func (f *fakeWriter) Close() error          { return nil }
+func (f *fakeWriter) TsigStatus() error     { return nil }
+func (f *fakeWriter) TsigTimersOnly(b bool) {}
+func (f *fakeWriter) Hijack()               {}
 
 // TestHandlerUpstreamQuerySingleOPT verifies the query forwarded to an
 // upstream carries exactly one EDNS OPT record even when the client sent its
@@ -1393,8 +1404,8 @@ func TestHandlerServeStale(t *testing.T) {
 	// a fresh negative would shadow the serve-stale entry on the next query,
 	// and the whole point of serve-stale is that the last known good answer
 	// keeps winning while re-resolution fails.
-	if res := c.Lookup(q().Question[0]); res.Msg != nil && res.Negative {
-		t.Fatalf("failure was negatively cached despite a serve-stale entry: %v", res.Msg)
+	if res := c.Lookup(q().Question[0]); res.Msg() != nil && res.Negative {
+		t.Fatalf("failure was negatively cached despite a serve-stale entry: %v", res.Msg())
 	}
 }
 
@@ -1439,12 +1450,12 @@ func TestHandlerFailureNegativelyCached(t *testing.T) {
 	question := fw.msg.Question[0]
 	appeared := false
 	for i := 0; i < 40; i++ {
-		if res := c.Lookup(question); res.Msg != nil {
+		if res := c.Lookup(question); res.Msg() != nil {
 			if !res.Negative {
-				t.Fatalf("expected a negative cache entry, got positive %v", res.Msg)
+				t.Fatalf("expected a negative cache entry, got positive %v", res.Msg())
 			}
-			if res.Msg.Rcode != dns.RcodeServerFailure {
-				t.Fatalf("cached rcode = %d, want SERVFAIL", res.Msg.Rcode)
+			if res.Msg().Rcode != dns.RcodeServerFailure {
+				t.Fatalf("cached rcode = %d, want SERVFAIL", res.Msg().Rcode)
 			}
 			appeared = true
 			break
@@ -1459,7 +1470,7 @@ func TestHandlerFailureNegativelyCached(t *testing.T) {
 	// linger for the 1h negative TTL.
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if c.Lookup(question).Msg == nil {
+		if c.Lookup(question).Msg() == nil {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -1542,5 +1553,59 @@ func TestCapTTL(t *testing.T) {
 	}
 	if got := opt.Hdr.Ttl; got != 0x00008000 {
 		t.Errorf("OPT TTL/flags = %#x, want untouched 0x00008000", got)
+	}
+}
+
+// BenchmarkHandlerCacheHit measures the whole served-cache-hit pipeline:
+// question hashing, filter decision, L1 cache lookup and the raw-byte write
+// path (no Unpack, no re-Pack). The fake writer unpacks the bytes it
+// receives like a real client stack would, so the handler-side savings are
+// what moves the needle, not the sink.
+func BenchmarkHandlerCacheHit(b *testing.B) {
+	c := cache.NewLocalOnly(time.Hour, time.Minute, 512, 0)
+	h := NewHandler(filter.NewEngine(), c, nil, nil, "nxdomain", 600, 5*time.Second)
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	h.ServeDNS(&fakeWriter{}, m) // warm the cache (async write; poll)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if c.Lookup(m.Question[0]).Msg() != nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if c.Lookup(m.Question[0]).Msg() == nil {
+		b.Fatal("cache not warmed")
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		fw := &fakeWriter{}
+		h.ServeDNS(fw, m)
+		if fw.msg == nil {
+			b.Fatal("no response")
+		}
+	}
+}
+
+// TestHandlerIPBlockGated verifies the answer-IP blocking path still blocks
+// through the HasIPRules gate: an engine holding an IP rule blocks an
+// upstream answer whose address matches.
+func TestHandlerIPBlockGated(t *testing.T) {
+	upAddr := startUDPTestServer(t, "1.2.3.4", 0)
+	engine := filter.NewEngine()
+	if _, err := engine.LoadList("ip", "ip list", []byte("1.2.3.4\n")); err != nil {
+		t.Fatalf("load list: %v", err)
+	}
+	engine.Compile()
+	if !engine.HasIPRules() {
+		t.Fatal("engine with an IP rule must report HasIPRules")
+	}
+	h := NewHandler(engine, nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: upAddr}}, nil, "nxdomain", 600, 5*time.Second)
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, m)
+	if fw.msg == nil || fw.msg.Rcode != dns.RcodeNameError {
+		t.Fatalf("expected the IP-blocked answer to be NXDOMAIN, got %v", fw.msg)
 	}
 }

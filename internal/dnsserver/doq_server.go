@@ -164,6 +164,14 @@ func (w *doqResponseWriter) WriteMsg(m *dns.Msg) error {
 }
 
 func (w *doqResponseWriter) Write(b []byte) (int, error) {
+	// RFC 9250: each message is prefixed with its 2-byte length. Write is
+	// the raw-byte path the handler's pack-once write uses, so the framing
+	// lives here (WriteMsg keeps its own packing + framing).
+	var lenBuf [2]byte
+	binary.BigEndian.PutUint16(lenBuf[:], uint16(len(b)))
+	if _, err := w.stream.Write(lenBuf[:]); err != nil {
+		return 0, err
+	}
 	return w.stream.Write(b)
 }
 

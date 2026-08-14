@@ -277,6 +277,9 @@ func main() {
 	// (server.udp_sockets: 0 = auto, 1 = exclusive single socket, N =
 	// explicit). Re-applied before every listener restart below.
 	dnsMgr.SetUDPSockets(cfg.Server.UDPSockets)
+	// Handler-worker count per plain-UDP socket (server.udp_workers: 0 =
+	// auto, N = exactly N per socket). Same lifecycle as udp_sockets.
+	dnsMgr.SetUDPWorkers(cfg.Server.UDPWorkers)
 	// webSharesDoH reports whether the dashboard and DoH share one HTTPS port
 	// (server.web_listen == server.listen_doh with web_tls on). In that case
 	// the web server also serves /dns-query and no standalone DoH listener is
@@ -804,6 +807,7 @@ func main() {
 		//    before anything is swapped. Note: UDP/TCP/DoT bind failures are
 		//    reported asynchronously via the results channel, not as errors.
 		dnsMgr.SetUDPSockets(cfg.Server.UDPSockets)
+		dnsMgr.SetUDPWorkers(cfg.Server.UDPWorkers)
 		if err := dnsMgr.Restart(
 			cfg.Server.ListenUDP, cfg.Server.ListenTCP,
 			cfg.Server.ListenDoT, dohAddr(), cfg.Server.ListenDoH3, cfg.Server.ListenDoQ,

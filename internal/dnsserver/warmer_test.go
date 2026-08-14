@@ -78,15 +78,18 @@ func TestWarmerWarmsActiveDomains(t *testing.T) {
 
 	w.run(context.Background())
 
-	// warm.com was resolved and cached for both A and AAAA.
+	// warm.com was resolved and cached for both A and AAAA. The cache lives
+	// in the handler's hot-swappable settings snapshot (the Handler.Cache
+	// field was removed when settings became an atomic pointer).
+	cache := h.settings.Load().Cache
 	for _, qt := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		q := dns.Question{Name: "warm.com.", Qtype: qt, Qclass: dns.ClassINET}
-		if got := h.Cache.Get(context.Background(), q); got == nil || len(got.Answer) == 0 {
+		if got := cache.Get(context.Background(), q); got == nil || len(got.Answer) == 0 {
 			t.Fatalf("warm.com %s not cached after warming: %v", dns.TypeToString[qt], got)
 		}
 	}
 	// The blacklisted domain must never have been resolved/warmed.
-	if got := h.Cache.Get(context.Background(), dns.Question{Name: "blocked.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}); got != nil {
+	if got := cache.Get(context.Background(), dns.Question{Name: "blocked.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}); got != nil {
 		t.Fatalf("blacklisted domain was warmed: %v", got)
 	}
 

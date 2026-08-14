@@ -8,6 +8,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -85,47 +86,21 @@ type DHCPHostResolver interface {
 // Handler is the shared request pipeline for all listeners.
 type Handler struct {
 	Engine *filter.Engine
-	Cache  *cache.Cache
 	Log    *querylog.Log
 	// DHCPHosts resolves locally-assigned client hostnames (set at boot;
 	// never swapped — the DHCP server lives for the process).
 	DHCPHosts DHCPHostResolver
 
-	// mu guards the hot-swappable settings below so the API can live-apply
-	// config changes without a restart.
-	mu           sync.RWMutex
-	Upstreams    []*upstream.Upstream
-	UpstreamMode string // "race" or "sequential" (see UpstreamModeRace/Sequential)
-	// UpstreamRoutes is conditional (split-horizon) routing: per-domain
-	// upstream sets that win over the global forwarders and client-group
-	// upstream overrides (the most specific intent wins). Set via
-	// SetUpstreamRoutes.
-	UpstreamRoutes []UpstreamRoute
-	BlockResponse  string
-	BlockTTL       uint32
-	Timeout        time.Duration
-	// FailureTTL is how long a resolution failure (upstream never answered,
-	// no serve-stale entry) is negatively cached as SERVFAIL; <= 0 uses the
-	// cache's configured negative TTL. Set via SetFailureTTL; snapshot on
-	// the hot path like the other tunables.
-	FailureTTL   time.Duration
-	Rewriter     *filter.Rewriter // local DNS records; never nil, may be empty
-	ClientRouter *ClientRouter    // per-client policy; never nil, may be empty
-	RateLimiter  *RateLimiter     // nil disables rate limiting
-	Geo          *geoip.Blocker   // nil disables geo-blocking
-	IPBanner     *geoip.Banner    // nil disables IP/honeypot blocking
-	// TrustUDP opt-in: when true, a honeypot hit over plain UDP auto-blocks
-	// its source address too. Off by default — a UDP source can be spoofed,
-	// so enabling this lets a spoofing attacker permanently block an
-	// innocent victim; only meaningful on a trusted network where clients
-	// are real (the flag does nothing unless an IP banner is installed).
-	TrustUDP        bool
-	DNSSECEnabled   bool
-	DNSSECRequireAD bool
-	// CNAMECloakingProtection checks every CNAME hop in an upstream answer
-	// against the filter engine, not just the originally queried name. Set
-	// via SetCNAMECloakingProtection.
-	CNAMECloakingProtection bool
+	// settings is the immutable snapshot of every hot-swappable knob the
+	// request path reads (see handlerSettings). serve() loads it with one
+	// atomic pointer load per query instead of an RLock copying 17 fields;
+	// the Set* methods swap in a fresh copy (serialized by setMu, which the
+	// read path never takes), so a loaded snapshot is never mutated and
+	// concurrent readers always see a consistent view.
+	settings atomic.Pointer[handlerSettings]
+	// setMu serializes settings swaps (config reloads are rare; the hot
+	// path never takes it).
+	setMu sync.Mutex
 	// Padding pads responses on the encrypted transports (DoT/DoH/DoH3/DoQ)
 	// to fixed 128-byte blocks (RFC 7830) so message lengths don't leak
 	// which domain was queried. Set via SetPadding. Atomic because write()
@@ -152,21 +127,62 @@ type Handler struct {
 	flight singleflight.Group
 }
 
+// handlerSettings is one immutable snapshot of the handler's hot-swappable
+// configuration, published via Handler.settings. Fields are only ever
+// replaced whole, never mutated in place, so a query that loaded the
+// snapshot can read it without any lock.
+type handlerSettings struct {
+	Upstreams    []*upstream.Upstream
+	UpstreamMode string // "race" or "sequential" (see UpstreamModeRace/Sequential)
+	// UpstreamRoutes is conditional (split-horizon) routing: per-domain
+	// upstream sets that win over the global forwarders and client-group
+	// upstream overrides (the most specific intent wins). Set via
+	// SetUpstreamRoutes.
+	UpstreamRoutes []UpstreamRoute
+	BlockResponse  string
+	BlockTTL       uint32
+	Timeout        time.Duration
+	// FailureTTL is how long a resolution failure (upstream never answered,
+	// no serve-stale entry) is negatively cached as SERVFAIL; <= 0 uses the
+	// cache's configured negative TTL.
+	FailureTTL  time.Duration
+	Cache       *cache.Cache
+	Rewriter    *filter.Rewriter // local DNS records; never nil, may be empty
+	ClientRouter *ClientRouter   // per-client policy; never nil, may be empty
+	RateLimiter *RateLimiter     // nil disables rate limiting
+	Geo         *geoip.Blocker   // nil disables geo-blocking
+	IPBanner    *geoip.Banner    // nil disables IP/honeypot blocking
+	// TrustUDP opt-in: when true, a honeypot hit over plain UDP auto-blocks
+	// its source address too. Off by default — a UDP source can be spoofed,
+	// so enabling this lets a spoofing attacker permanently block an
+	// innocent victim; only meaningful on a trusted network where clients
+	// are real (the flag does nothing unless an IP banner is installed).
+	TrustUDP        bool
+	DNSSECEnabled   bool
+	DNSSECRequireAD bool
+	// CNAMECloakingProtection checks every CNAME hop in an upstream answer
+	// against the filter engine, not just the originally queried name. Set
+	// via SetCNAMECloakingProtection.
+	CNAMECloakingProtection bool
+}
+
 // NewHandler builds a handler with default stats.
 func NewHandler(engine *filter.Engine, c *cache.Cache, ups []*upstream.Upstream, ql *querylog.Log, blockResp string, blockTTL uint32, timeout time.Duration) *Handler {
 	h := &Handler{
-		Engine:        engine,
-		Cache:         c,
-		Upstreams:     ups,
-		UpstreamMode:  UpstreamModeRace,
-		Log:           ql,
-		BlockResponse: blockResp,
-		BlockTTL:      blockTTL,
-		Timeout:       timeout,
-		Rewriter:      filter.NewRewriter(),
-		ClientRouter:  NewClientRouter(),
-		Stats:         newStats(),
+		Engine: engine,
+		Log:    ql,
+		Stats:  newStats(),
 	}
+	h.settings.Store(&handlerSettings{
+		Upstreams:    ups,
+		UpstreamMode: UpstreamModeRace,
+		Cache:        c,
+		BlockResponse: blockResp,
+		BlockTTL:     blockTTL,
+		Timeout:      timeout,
+		Rewriter:     filter.NewRewriter(),
+		ClientRouter: NewClientRouter(),
+	})
 	// Server-cookie HMAC key. crypto/rand failure is effectively impossible
 	// (kernel entropy); the time-seeded fallback keeps DNS cookies working
 	// on a pathological system rather than silently disabling them.
@@ -237,20 +253,34 @@ func ParseRoutes(specs []RouteSpec) ([]UpstreamRoute, error) {
 	return compiled, nil
 }
 
+// swapSettings replaces the published settings snapshot with ns (a copy the
+// caller has already modified). The swap and the post-swap cleanup of the
+// old snapshot (closing replaced upstreams, …) run under setMu so two
+// concurrent reloads can't interleave; readers never take the lock.
+func (h *Handler) swapSettings(ns *handlerSettings, cleanup func(old *handlerSettings)) {
+	h.setMu.Lock()
+	defer h.setMu.Unlock()
+	old := h.settings.Load()
+	h.settings.Store(ns)
+	if cleanup != nil {
+		cleanup(old)
+	}
+}
+
 // SetUpstreamRoutes hot-swaps the conditional per-domain upstream routing.
 // Routes must come from ParseRoutes (which does the upstream parsing); the
 // previous routes' upstreams are closed after the swap (they hold pooled
 // TCP/DoT connections and persistent QUIC sessions, like SetUpstreams).
 func (h *Handler) SetUpstreamRoutes(routes []UpstreamRoute) {
-	h.mu.Lock()
-	old := h.UpstreamRoutes
-	h.UpstreamRoutes = routes
-	h.mu.Unlock()
-	for _, rt := range old {
-		for _, u := range rt.Upstreams {
-			u.Close()
+	ns := *h.settings.Load()
+	ns.UpstreamRoutes = routes
+	h.swapSettings(&ns, func(old *handlerSettings) {
+		for _, rt := range old.UpstreamRoutes {
+			for _, u := range rt.Upstreams {
+				u.Close()
+			}
 		}
-	}
+	})
 }
 
 // routeMatch returns the most specific route whose domain matches name
@@ -272,116 +302,112 @@ func routeMatch(routes []UpstreamRoute, name string) *UpstreamRoute {
 
 // SetUpstreams hot-swaps the upstream forwarders (config live-apply).
 func (h *Handler) SetUpstreams(ups []*upstream.Upstream) {
-	h.mu.Lock()
-	old := h.Upstreams
-	h.Upstreams = ups
-	h.mu.Unlock()
-	// TCP/DoT keep a pooled connection and DoQ keeps a persistent QUIC
-	// connection; without closing the replaced upstreams, every config
-	// reload that touches the upstream list would leak sockets for the
-	// life of the process.
-	for _, u := range old {
-		u.Close()
-	}
+	ns := *h.settings.Load()
+	ns.Upstreams = ups
+	h.swapSettings(&ns, func(old *handlerSettings) {
+		// TCP/DoT keep a pooled connection and DoQ keeps a persistent QUIC
+		// connection; without closing the replaced upstreams, every config
+		// reload that touches the upstream list would leak sockets for the
+		// life of the process.
+		for _, u := range old.Upstreams {
+			u.Close()
+		}
+	})
 }
 
 // SetCache hot-swaps the response cache (config reload).
 func (h *Handler) SetCache(c *cache.Cache) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.Cache = c
+	ns := *h.settings.Load()
+	ns.Cache = c
+	h.swapSettings(&ns, nil)
 }
 
 // SetBlockPolicy hot-swaps the block response mode and TTL.
 func (h *Handler) SetBlockPolicy(resp string, ttl uint32) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.BlockResponse = resp
-	h.BlockTTL = ttl
+	ns := *h.settings.Load()
+	ns.BlockResponse = resp
+	ns.BlockTTL = ttl
+	h.swapSettings(&ns, nil)
 }
 
 // SetTimeout hot-swaps the per-query upstream timeout.
 func (h *Handler) SetTimeout(d time.Duration) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.Timeout = d
+	ns := *h.settings.Load()
+	ns.Timeout = d
+	h.swapSettings(&ns, nil)
 }
 
 // SetUpstreamMode hot-swaps the multi-upstream resolution strategy
 // (UpstreamModeRace queries every upstream at once and uses the fastest
 // answer; UpstreamModeSequential tries them in list order, failing over).
 func (h *Handler) SetUpstreamMode(mode string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.UpstreamMode = mode
+	ns := *h.settings.Load()
+	ns.UpstreamMode = mode
+	h.swapSettings(&ns, nil)
 }
 
 // SetFailureTTL hot-swaps how long a resolution failure is negatively
 // cached as SERVFAIL; <= 0 restores the cache's configured negative TTL.
 func (h *Handler) SetFailureTTL(d time.Duration) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.FailureTTL = d
+	ns := *h.settings.Load()
+	ns.FailureTTL = d
+	h.swapSettings(&ns, nil)
 }
 
 // SetRewriter hot-swaps the local DNS records (config live-apply).
 func (h *Handler) SetRewriter(rw *filter.Rewriter) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.Rewriter = rw
+	ns := *h.settings.Load()
+	ns.Rewriter = rw
+	h.swapSettings(&ns, nil)
 }
 
 // SetClientRouter hot-swaps the per-client policy routing table.
 func (h *Handler) SetClientRouter(cr *ClientRouter) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.ClientRouter = cr
+	ns := *h.settings.Load()
+	ns.ClientRouter = cr
+	h.swapSettings(&ns, nil)
 }
 
 // SetRateLimiter hot-swaps the rate limiter; nil disables rate limiting.
 func (h *Handler) SetRateLimiter(rl *RateLimiter) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.RateLimiter = rl
+	ns := *h.settings.Load()
+	ns.RateLimiter = rl
+	h.swapSettings(&ns, nil)
 }
 
 // SetGeo hot-swaps the geo blocker; nil disables geo-blocking.
 func (h *Handler) SetGeo(g *geoip.Blocker) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.Geo = g
+	ns := *h.settings.Load()
+	ns.Geo = g
+	h.swapSettings(&ns, nil)
 }
 
 // SetIPBanner hot-swaps the client-IP banner (explicit block list + honeypot
 // auto-blocks); nil disables it.
 func (h *Handler) SetIPBanner(b *geoip.Banner) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.IPBanner = b
+	ns := *h.settings.Load()
+	ns.IPBanner = b
+	h.swapSettings(&ns, nil)
 }
 
 // SetTrustUDP hot-swaps the opt-in that lets plain-UDP honeypot hits
 // auto-block their source (see TrustUDP's doc comment on the struct).
 func (h *Handler) SetTrustUDP(on bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.TrustUDP = on
+	ns := *h.settings.Load()
+	ns.TrustUDP = on
+	h.swapSettings(&ns, nil)
 }
 
 // CurrentIPBanner returns the active banner (nil when disabled), for the
 // API's blocked-list/unblock endpoints.
 func (h *Handler) CurrentIPBanner() *geoip.Banner {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return h.IPBanner
+	return h.settings.Load().IPBanner
 }
 
 // BlockedClients returns the clients currently under an auto-block (from the
 // rate limiter), for the dashboard.
 func (h *Handler) BlockedClients() []BlockedClient {
-	h.mu.RLock()
-	rl := h.RateLimiter
-	h.mu.RUnlock()
+	rl := h.settings.Load().RateLimiter
 	if rl == nil {
 		return nil
 	}
@@ -390,10 +416,7 @@ func (h *Handler) BlockedClients() []BlockedClient {
 
 // UnblockClient lifts an auto-blocked client's cooldown early.
 func (h *Handler) UnblockClient(ip string) {
-	h.mu.RLock()
-	rl := h.RateLimiter
-	h.mu.RUnlock()
-	if rl != nil {
+	if rl := h.settings.Load().RateLimiter; rl != nil {
 		rl.Unblock(ip)
 	}
 }
@@ -402,17 +425,17 @@ func (h *Handler) UnblockClient(ip string) {
 // what "enabled" actually means: trusting an encrypted, validating upstream,
 // not local chain-of-trust validation).
 func (h *Handler) SetDNSSEC(enabled, requireAD bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.DNSSECEnabled = enabled
-	h.DNSSECRequireAD = requireAD
+	ns := *h.settings.Load()
+	ns.DNSSECEnabled = enabled
+	ns.DNSSECRequireAD = requireAD
+	h.swapSettings(&ns, nil)
 }
 
 // SetCNAMECloakingProtection hot-swaps CNAME cloaking protection.
 func (h *Handler) SetCNAMECloakingProtection(enabled bool) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.CNAMECloakingProtection = enabled
+	ns := *h.settings.Load()
+	ns.CNAMECloakingProtection = enabled
+	h.swapSettings(&ns, nil)
 }
 
 // SetPadding hot-swaps RFC 7830 response padding on the encrypted transports.
@@ -432,27 +455,27 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		p.Add(1)
 	}
 
-	// Snapshot hot-swappable settings once so the pipeline below is race-free.
-	h.mu.RLock()
-	upstreams := h.Upstreams
-	upstreamMode := h.UpstreamMode
-	routes := h.UpstreamRoutes
-	blockResp := h.BlockResponse
-	blockTTL := h.BlockTTL
-	timeout := h.Timeout
-	failureTTL := h.FailureTTL
-	cache := h.Cache
-	rewriter := h.Rewriter
-	clientRouter := h.ClientRouter
-	rateLimiter := h.RateLimiter
-	geo := h.Geo
-	ipbanner := h.IPBanner
-	trustUDP := h.TrustUDP
-	dnssecEnabled := h.DNSSECEnabled
-	dnssecRequireAD := h.DNSSECRequireAD
-	cnameCloakingEnabled := h.CNAMECloakingProtection
+	// One atomic load per query instead of an RLock snapshot: the settings
+	// pointer is swapped whole by the Set* methods, never mutated in place.
+	s := h.settings.Load()
+	upstreams := s.Upstreams
+	upstreamMode := s.UpstreamMode
+	routes := s.UpstreamRoutes
+	blockResp := s.BlockResponse
+	blockTTL := s.BlockTTL
+	timeout := s.Timeout
+	failureTTL := s.FailureTTL
+	cch := s.Cache
+	rewriter := s.Rewriter
+	clientRouter := s.ClientRouter
+	rateLimiter := s.RateLimiter
+	geo := s.Geo
+	ipbanner := s.IPBanner
+	trustUDP := s.TrustUDP
+	dnssecEnabled := s.DNSSECEnabled
+	dnssecRequireAD := s.DNSSECRequireAD
+	cnameCloakingEnabled := s.CNAMECloakingProtection
 	cookiesOn := h.Cookies.Load()
-	h.mu.RUnlock()
 
 	if r == nil || len(r.Question) == 0 {
 		m := getMsg()
@@ -696,30 +719,30 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	// than stall. A hit may also be stale (RFC 8767): an entry past its TTL
 	// but still within its serve-stale window, which we only answer from if
 	// re-resolution below fails.
-	var stale *dns.Msg
-	if cache != nil && !isMetaQuery(q) {
+	var stale cache.LookupResult
+	if cch != nil && !isMetaQuery(q) {
 		// Lookup is context-free: the L1 hit path allocates nothing, and the
 		// L2 read is bounded by the cache's own lookup budget (see
 		// cache.defaultLookupTimeout), so a slow or down cache tier can't
-		// stall the query.
-		hit := cache.Lookup(q)
-		if hit.Msg != nil && !hit.Stale {
-			hit.Msg.Id = r.Id
+		// stall the query. A fresh hit is served straight from the stored
+		// packed bytes — writeRaw patches the query ID and rebases the
+		// answer TTLs in a private copy, so no Unpack and no re-pack ever
+		// happens on the hit path.
+		hit := cch.Lookup(q)
+		if len(hit.Raw) > 0 && !hit.Stale {
 			h.Stats.Cached.Add(1)
 			reason := "cache"
 			if hit.Negative {
 				reason = "cache-negative"
 			}
-			h.record(client, qname, q, "cached", reason, "", start, hit.Msg)
-			_ = h.write(w, hit.Msg, r, proto)
-			// cache.Lookup always does a fresh Unpack on read and never
-			// retains what it hands back (unlike resp, below), so it's safe
-			// to recycle once write() returns.
-			putMsg(hit.Msg)
+			// record needs the rcode and answer count; both are header
+			// fields, read off the packed bytes without decoding.
+			h.recordRaw(client, qname, q, "cached", reason, "", start, hit.Raw)
+			_ = h.writeRaw(w, hit, r, proto)
 			return
 		}
-		if hit.Msg != nil {
-			stale = hit.Msg
+		if len(hit.Raw) > 0 {
+			stale = hit
 		}
 	}
 
@@ -764,14 +787,16 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	resp, usedUp, err = h.resolveUpstreams(ctx, r, q, upstreams, upstreamMode, upstreamQuery)
 	// RFC 8767: an upstream that *answers* SERVFAIL is also a resolution
 	// failure — serve stale rather than propagating the failure.
-	if err == nil && resp != nil && resp.Rcode == dns.RcodeServerFailure && stale != nil {
-		stale.Id = r.Id
-		capTTL(stale, staleServeTTL)
-		h.Stats.Cached.Add(1)
-		h.record(client, qname, q, "cached", "stale", usedUp, start, stale)
-		_ = h.write(w, stale, r, proto)
-		putMsg(stale) // fresh per-read unpack from the cache, safe once written
-		return
+	if err == nil && resp != nil && resp.Rcode == dns.RcodeServerFailure && len(stale.Raw) > 0 {
+		if m := stale.Msg(); m != nil {
+			m.Id = r.Id
+			capTTL(m, staleServeTTL)
+			h.Stats.Cached.Add(1)
+			h.record(client, qname, q, "cached", "stale", usedUp, start, m)
+			_ = h.write(w, m, r, proto)
+			putMsg(m) // fresh per-read decode, safe once written
+			return
+		}
 	}
 	if err != nil || resp == nil {
 		// Serve-stale: re-resolution failed but a previously cached answer
@@ -782,14 +807,16 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		// answer was validated when first cached if requireAD was on then;
 		// serving it during an outage is the deliberate availability
 		// trade-off of serve-stale.
-		if stale != nil {
-			stale.Id = r.Id
-			capTTL(stale, staleServeTTL)
-			h.Stats.Cached.Add(1)
-			h.record(client, qname, q, "cached", "stale", usedUp, start, stale)
-			_ = h.write(w, stale, r, proto)
-			putMsg(stale) // fresh per-read unpack from the cache, safe once written
-			return
+		if len(stale.Raw) > 0 {
+			if m := stale.Msg(); m != nil {
+				m.Id = r.Id
+				capTTL(m, staleServeTTL)
+				h.Stats.Cached.Add(1)
+				h.record(client, qname, q, "cached", "stale", usedUp, start, m)
+				_ = h.write(w, m, r, proto)
+				putMsg(m) // fresh per-read decode, safe once written
+				return
+			}
 		}
 		h.Stats.Errors.Add(1)
 		// Not putMsg'd: when cache != nil this is handed unmodified into a
@@ -819,13 +846,13 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		// exclusively this goroutine's and the cache writer can take it
 		// directly — no copy (SetNegative mutates the message: SetReply,
 		// Compress, Pack).
-		if cache != nil && stale == nil && !isMetaQuery(q) {
+		if cch != nil && len(stale.Raw) == 0 && !isMetaQuery(q) {
 			go func() {
 				cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer ccancel()
 				// failureTTL <= 0 falls back to the cache's configured
 				// negative TTL (cache.failure_ttl knob).
-				cache.SetNegative(cctx, q, m, failureTTL)
+				cch.SetNegative(cctx, q, m, failureTTL)
 			}()
 		}
 		return
@@ -846,13 +873,18 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	}
 
 	// 7. IP-based blocking: if the blocklists contain IP rules, check the
-	//    answers (A/AAAA) returned by the upstream.
-	if blockedByIP, reason := engine.CheckIPs(answerIPs(resp)); blockedByIP {
-		blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
-		h.Stats.Blocked.Add(1)
-		h.record(client, qname, q, "blocked", reason, usedUp, start, blocked)
-		_ = h.write(w, blocked, r, proto)
-		return
+	//    answers (A/AAAA) returned by the upstream. The gate is an atomic
+	//    read so the common domain-only list setup skips the answer walk
+	//    entirely — answerIPs allocates a slice and ip.String() per address
+	//    on every upstream response otherwise.
+	if engine.HasIPRules() {
+		if blockedByIP, reason := engine.CheckIPs(answerIPs(resp)); blockedByIP {
+			blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
+			h.Stats.Blocked.Add(1)
+			h.record(client, qname, q, "blocked", reason, usedUp, start, blocked)
+			_ = h.write(w, blocked, r, proto)
+			return
+		}
 	}
 
 	// 7.5 CNAME cloaking protection: a tracker can disguise itself behind a
@@ -894,29 +926,59 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	//    client write to finish, but DNS responses are small and that write
 	//    virtually never blocks. Zero TTLs fall back to the configured
 	//    Dragonfly cache lifetimes.
-	if cache != nil && !isMetaQuery(q) {
+	if cch != nil && !isMetaQuery(q) {
 		go func() {
 			cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer ccancel()
 			if len(resp.Answer) > 0 {
-				cache.Set(cctx, q, resp, 0)
+				cch.Set(cctx, q, resp, 0)
 			} else {
-				cache.SetNegative(cctx, q, resp, 0)
+				cch.SetNegative(cctx, q, resp, 0)
 			}
 		}()
 	}
 }
 
 func (h *Handler) record(client, qname string, q dns.Question, action, reason, upstreamName string, start time.Time, m *dns.Msg) {
-	h.latency.record(time.Since(start))
-	if h.Log == nil {
-		return
-	}
-	answers := 0
-	rcode := dns.RcodeServerFailure
+	rcode, answers := dns.RcodeServerFailure, 0
 	if m != nil {
 		rcode = m.Rcode
 		answers = len(m.Answer)
+	}
+	h.recordEntry(client, qname, q, action, reason, upstreamName, start, rcode, answers)
+}
+
+// recordRaw is record for a cache hit served from packed bytes: the rcode
+// and answer count are header fields, read off the wire form without
+// decoding the message into a dns.Msg.
+func (h *Handler) recordRaw(client, qname string, q dns.Question, action, reason, upstreamName string, start time.Time, raw []byte) {
+	h.recordEntry(client, qname, q, action, reason, upstreamName, start, packedRcode(raw), packedAnCount(raw))
+}
+
+// packedRcode returns the header rcode (lower 4 bits of byte 3) of a packed
+// DNS message, or SERVFAIL for a too-short one. All cached negatives are
+// NOERROR/NXDOMAIN/SERVFAIL — well under the 16 rcode values the header
+// byte can express — so extended-rcode bits never matter here.
+func packedRcode(raw []byte) int {
+	if len(raw) < 4 {
+		return dns.RcodeServerFailure
+	}
+	return int(raw[3] & 0x0F)
+}
+
+// packedAnCount returns the Answer-section record count from a packed DNS
+// message's header (bytes 6-7), or 0 for a too-short one.
+func packedAnCount(raw []byte) int {
+	if len(raw) < 12 {
+		return 0
+	}
+	return int(binary.BigEndian.Uint16(raw[6:8]))
+}
+
+func (h *Handler) recordEntry(client, qname string, q dns.Question, action, reason, upstreamName string, start time.Time, rcode, answers int) {
+	h.latency.record(time.Since(start))
+	if h.Log == nil {
+		return
 	}
 	h.Log.Record(querylog.Entry{
 		Time:           start,
@@ -1082,6 +1144,35 @@ func padMessage(m *dns.Msg, block int) *dns.Msg {
 // answer must not be stored for every other client.
 func (h *Handler) write(w dns.ResponseWriter, m *dns.Msg, r *dns.Msg, proto string) error {
 	m.Compress = true
+	// Fast path: pack the response once into a pooled buffer and hand the
+	// bytes straight to the transport. This is the every-query path — the
+	// old code packed once for the m.Len() size check and again inside
+	// WriteMsg (and a third time for a UDP truncation). Only the rare
+	// per-client transformations below (an oversized datagram for a
+	// small-buffer client, RFC 7830 padding, RFC 7873 cookie attachment)
+	// fall back to the decoded-message path, which copies the message so
+	// the caller's — resp about to be handed to the background cache
+	// writer — is never mutated.
+	pad := h.Padding.Load() && (proto == "dot" || proto == "doh" || proto == "doh3" || proto == "doq")
+	cookie := h.Cookies.Load() && requestClientCookie(r) != ""
+	if !pad && !cookie {
+		buf := getPackBuf()
+		packed, err := m.PackBuffer(buf)
+		if err != nil {
+			putPackBuf(buf)
+			return err
+		}
+		if proto != "udp" || len(packed) <= clientUDPSize(r) {
+			_, werr := w.Write(packed)
+			putPackBuf(packed)
+			return werr
+		}
+		putPackBuf(buf)
+	}
+	// Slow path: a per-client transformation is needed. Padding only helps
+	// where the stream is encrypted anyway — on plain UDP the padded
+	// datagram length leaks just as much as the unpadded one, and padding
+	// must not inflate a datagram toward the client's buffer limit.
 	out := m
 	if proto == "udp" {
 		if limit := clientUDPSize(r); m.Len() > limit {
@@ -1090,19 +1181,69 @@ func (h *Handler) write(w dns.ResponseWriter, m *dns.Msg, r *dns.Msg, proto stri
 			out = c
 		}
 	}
-	// Padding only helps where the stream is encrypted anyway — on plain UDP
-	// the padded datagram length leaks just as much as the unpadded one, and
-	// padding must not inflate a datagram toward the client's buffer limit.
-	if h.Padding.Load() && (proto == "dot" || proto == "doh" || proto == "doh3" || proto == "doq") {
+	if pad {
 		out = padMessage(out, 128)
 	}
-	if h.Cookies.Load() {
-		if cc := requestClientCookie(r); cc != "" {
-			cookie := cc + h.serverCookie(clientIPOf(w.RemoteAddr()), cc)
-			out = attachCookie(out, cookie)
-		}
+	if cookie {
+		cc := requestClientCookie(r)
+		out = attachCookie(out, cc+h.serverCookie(clientIPOf(w.RemoteAddr()), cc))
 	}
 	return w.WriteMsg(out)
+}
+
+// writeRaw serves a cache hit straight from its stored packed bytes,
+// skipping the Unpack→re-Pack round trip entirely: the query ID is patched
+// (bytes 0-1) and positive-entry answer TTLs are rebased to their remaining
+// lifetime at the precomputed byte offsets, all in a private pooled copy
+// that is written out and recycled. The stored bytes are never mutated.
+//
+// The few responses that need a real message fall back to the decoded path
+// (write): RFC 7830 padding, RFC 7873 cookie attachment, and a UDP datagram
+// that exceeds the client's advertised buffer (truncation needs the RR
+// structure). An L2-sourced hit without TTL offsets also decodes — its
+// re-warm into L1 records them, so every later hit is raw.
+func (h *Handler) writeRaw(w dns.ResponseWriter, res cache.LookupResult, r *dns.Msg, proto string) error {
+	raw := res.Raw
+	pad := h.Padding.Load() && (proto == "dot" || proto == "doh" || proto == "doh3" || proto == "doq")
+	cookie := h.Cookies.Load() && requestClientCookie(r) != ""
+	rebaseOK := res.Negative || len(res.TTLOffsets) > 0
+	if !rebaseOK || pad || cookie || (proto == "udp" && len(raw) > clientUDPSize(r)) {
+		m := res.Msg()
+		if m == nil {
+			return nil // corrupt entry: answer nothing rather than garbage
+		}
+		m.Id = r.Id
+		return h.write(w, m, r, proto)
+	}
+	buf := getPackBuf()
+	if len(raw) > len(buf) {
+		buf = make([]byte, len(raw))
+	}
+	n := copy(buf, raw)
+	// Rebase the query ID to this request's (the stored bytes carry the
+	// original query's ID).
+	buf[0], buf[1] = byte(r.Id>>8), byte(r.Id)
+	if !res.Negative {
+		// Rebase every answer TTL to its remaining lifetime, floor 1 so a
+		// client never caches a zero-TTL answer as immortal — the same
+		// arithmetic unpackEntry performs on the decoded path.
+		elapsed := time.Now().Unix() - res.StoredAt
+		for _, off := range res.TTLOffsets {
+			if int(off)+4 > n {
+				break
+			}
+			ttl := binary.BigEndian.Uint32(buf[off : off+4])
+			if elapsed > 0 && ttl > uint32(elapsed) {
+				ttl -= uint32(elapsed)
+			} else {
+				ttl = 1
+			}
+			binary.BigEndian.PutUint32(buf[off:off+4], ttl)
+		}
+	}
+	_, err := w.Write(buf[:n])
+	putPackBuf(buf)
+	return err
 }
 
 // newReply allocates the empty response skeleton used by the error, NODATA
@@ -1410,12 +1551,11 @@ func raceUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*
 // resolve through the exact same path — snapshotting the hot-swappable
 // upstreams and cache at call time.
 func (h *Handler) resolveAndCache(ctx context.Context, q dns.Question) error {
-	h.mu.RLock()
-	ups := h.Upstreams
-	routes := h.UpstreamRoutes
-	cache := h.Cache
-	mode := h.UpstreamMode
-	h.mu.RUnlock()
+	s := h.settings.Load()
+	ups := s.Upstreams
+	routes := s.UpstreamRoutes
+	cache := s.Cache
+	mode := s.UpstreamMode
 	// Conditional routes apply to background resolutions too: a prefetched
 	// or warmed question under a routed subtree must resolve through the
 	// same upstreams a live query would use, or the cached entry could
@@ -1658,9 +1798,7 @@ type UpstreamHealth struct {
 
 // UpstreamHealth snapshots the current upstream set's circuit state.
 func (h *Handler) UpstreamHealth() []UpstreamHealth {
-	h.mu.RLock()
-	ups := h.Upstreams
-	h.mu.RUnlock()
+	ups := h.settings.Load().Upstreams
 	out := make([]UpstreamHealth, 0, len(ups))
 	for _, u := range ups {
 		out = append(out, UpstreamHealth{

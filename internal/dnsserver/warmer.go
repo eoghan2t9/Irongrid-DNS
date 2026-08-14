@@ -221,12 +221,12 @@ func (w *Warmer) run(ctx context.Context) {
 	// warmer warms through the *global* engine/upstreams — it has no client
 	// IP, so per-client-group policies don't apply (their answers share the
 	// same cache and can overwrite a warmed entry, exactly as two clients
-	// in different groups already do today).
-	w.h.mu.RLock()
-	cache := w.h.Cache
+	// in different groups already do today). The settings snapshot is one
+	// atomic load; the engine is fixed for the process.
+	s := w.h.settings.Load()
+	cache := s.Cache
 	engine := w.h.Engine
-	rewriter := w.h.Rewriter
-	w.h.mu.RUnlock()
+	rewriter := s.Rewriter
 	if cache == nil {
 		return
 	}

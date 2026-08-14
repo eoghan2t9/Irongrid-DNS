@@ -27,7 +27,7 @@ const SETTINGS_SECTIONS = [
 const empty = () => ({
   server: {
     listen_udp: '', listen_tcp: '', listen_dot: '', listen_doh: '', listen_doh3: '', listen_doq: '',
-    doh_path: '/dns-query', web_listen: '', web_tls: false, web_redirect: false, web_redirect_port: 80, timeout_sec: 5, udp_sockets: 0, padding: false, cookies: false,
+    doh_path: '/dns-query', web_listen: '', web_tls: false, web_redirect: false, web_redirect_port: 80, timeout_sec: 5, udp_sockets: 0, udp_workers: 0, padding: false, cookies: false,
   },
   upstreams: [],
   upstream_mode: 'race',
@@ -80,6 +80,10 @@ export default function Settings({ onSessionInvalidated }) {
   const [restoring, setRestoring] = useState(false)
   const [restoreMsg, setRestoreMsg] = useState('')
   const [backupPassphrase, setBackupPassphrase] = useState('')
+  // numCPU is the server's tuned CPU count from /api/status (num_cpu — the
+  // same GOMAXPROCS the Go-side auto sizing runs off), used by the
+  // "recommended values" button for the UDP settings.
+  const [numCPU, setNumCPU] = useState(null)
 
   const load = useCallback(async () => {
     try {
@@ -90,6 +94,9 @@ export default function Settings({ onSessionInvalidated }) {
     // A fresh load reflects the authoritative config, so any unsaved
     // benchmark adds are gone (or saved) — clear the tracking.
     setBenchmarkAdded([])
+    try {
+      setNumCPU((await api.status()).num_cpu ?? null)
+    } catch { /* ignore */ }
   }, [])
 
   const loadAbuse = useCallback(async () => {
@@ -232,6 +239,34 @@ export default function Settings({ onSessionInvalidated }) {
     } catch (e) {
       toast('Block failed: ' + e.message, 'error')
     }
+  }
+
+  // applyRecommendedUDP fills the UDP socket/worker fields with the values
+  // the server itself would pick in auto mode (0): one SO_REUSEPORT socket
+  // per CPU capped at 8, and 4 x CPU workers per socket (floor 16, capped
+  // 256), computed from the live status's num_cpu. Pinning the concrete
+  // numbers instead of leaving 0 makes them visible and tweakable.
+  const applyRecommendedUDP = async () => {
+    let cpu = numCPU
+    if (cpu == null) {
+      try {
+        const s = await api.status()
+        cpu = s.num_cpu ?? null
+        setNumCPU(cpu)
+      } catch (e) {
+        toast('Could not read the server CPU count: ' + e.message, 'error')
+        return
+      }
+    }
+    if (cpu == null || cpu < 1) {
+      toast('Server CPU count unknown — cannot compute recommended values', 'error')
+      return
+    }
+    const sockets = Math.max(1, Math.min(8, cpu))
+    const workers = Math.max(16, Math.min(256, 4 * cpu))
+    set('server.udp_sockets', sockets)
+    set('server.udp_workers', workers)
+    toast(`Set recommended values for a ${cpu}-CPU server: ${sockets} UDP socket(s), ${workers} workers per socket.`)
   }
 
   const restart = async () => {
@@ -551,6 +586,18 @@ export default function Settings({ onSessionInvalidated }) {
           {number('Redirect listener port', 'server.web_redirect_port')}
           {number('Upstream timeout (s)', 'server.timeout_sec')}
           {number('UDP sockets (0 = auto)', 'server.udp_sockets', 'SO_REUSEPORT sockets for the UDP + DoQ + DoH3 listeners; 0 = one per CPU (auto, capped), 1 = single exclusive socket, N = exactly N')}
+          {number('UDP workers per socket (0 = auto)', 'server.udp_workers', 'Handler workers per plain-UDP socket; 0 = 4 x CPU (auto, capped), N = exactly N (capped at 512)')}
+          <div className="field span-2">
+            <span className="field-label">Recommended values</span>
+            <button className="btn small" type="button" onClick={applyRecommendedUDP} style={{ alignSelf: 'flex-start' }}>
+              Set recommended
+            </button>
+            <span className="field-hint">
+              {numCPU
+                ? `Server CPU count: ${numCPU}. Fills the two fields above with the auto-mode numbers (1 socket per CPU, capped at 8; 4 workers per CPU, floor 16).`
+                : 'Fills the two fields above with the auto-mode numbers for this server.'}
+            </span>
+          </div>
           {toggle('Pad encrypted responses (RFC 7830)', 'server.padding')}
           {toggle('DNS cookies (RFC 7873)', 'server.cookies')}
         </div>

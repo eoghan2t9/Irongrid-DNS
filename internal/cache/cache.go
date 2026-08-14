@@ -404,6 +404,77 @@ func (c *Cache) negKey(h uint64) string {
 	return c.prefix + "neg:" + strconv.FormatUint(h, 16)
 }
 
+// ttlOffsets walks a packed DNS message and returns the byte offset (relative
+// to msg) of the TTL field of every Answer-section RR. The raw serve path
+// uses these offsets to rebase TTLs in place on a private copy of the bytes,
+// which is what lets a cache hit skip Unpack entirely. Returns nil when the
+// message is malformed or has no answers (negative entries never call this —
+// their TTLs are not rebased). Runs only off the hot path (cache writes and
+// L2-miss re-warms).
+func ttlOffsets(msg []byte) []uint32 {
+	if len(msg) < 12 {
+		return nil
+	}
+	qd := int(binary.BigEndian.Uint16(msg[4:6]))
+	an := int(binary.BigEndian.Uint16(msg[6:8]))
+	if an == 0 {
+		return nil
+	}
+	off := 12
+	// Skip the question section: QNAME (never compressed in a message we
+	// packed, but handle a pointer defensively) + qtype + qclass.
+	for i := 0; i < qd; i++ {
+		n, ok := skipPackedName(msg, off)
+		if !ok || n+4 > len(msg) {
+			return nil
+		}
+		off = n + 4
+	}
+	out := make([]uint32, 0, an)
+	for i := 0; i < an; i++ {
+		n, ok := skipPackedName(msg, off)
+		// type(2) + class(2) + ttl(4) + rdlength(2) = 10 bytes after the name.
+		if !ok || n+10 > len(msg) {
+			return nil
+		}
+		// TTL field starts after the name and the 2-byte type + 2-byte class.
+		out = append(out, uint32(n+4))
+		rdlen := int(binary.BigEndian.Uint16(msg[n+8 : n+10]))
+		off = n + 10 + rdlen
+		if off > len(msg) {
+			return nil
+		}
+	}
+	return out
+}
+
+// skipPackedName returns the offset just past the name starting at off: a
+// run of length-prefixed labels terminated by a zero byte, or a 2-byte
+// compression pointer (0xC0-prefixed). ok is false when the walk runs off
+// the end of the message.
+func skipPackedName(msg []byte, off int) (int, bool) {
+	for {
+		if off >= len(msg) {
+			return 0, false
+		}
+		b := msg[off]
+		switch {
+		case b&0xC0 == 0xC0: // compression pointer: 2 bytes total
+			if off+2 > len(msg) {
+				return 0, false
+			}
+			return off + 2, true
+		case b == 0: // terminal zero label
+			return off + 1, true
+		default: // label: length byte + label bytes
+			off += 1 + int(b)
+			if off > len(msg) {
+				return 0, false
+			}
+		}
+	}
+}
+
 // ---- positive answers ----
 
 // cacheEntryPrefix marks the stored value format: an 8-byte big-endian store
@@ -426,7 +497,7 @@ func (c *Cache) getPositive(ctx context.Context, h uint64) *dns.Msg {
 		return nil
 	}
 	now := time.Now()
-	if raw, _, stale, ok := c.l1.get(h, false, now); ok && !stale {
+	if raw, _, stale, _, ok := c.l1.get(h, false, now); ok && !stale {
 		c.l1Hits.Add(1)
 		return unpackEntry(raw, now)
 	}
@@ -435,19 +506,49 @@ func (c *Cache) getPositive(ctx context.Context, h uint64) *dns.Msg {
 	if !ok {
 		return nil
 	}
-	c.l1.set(h, false, raw, c.ttl, now)
+	c.l1.set(h, false, raw, c.ttl, now, ttlOffsets(raw[cacheEntryPrefixLen:]))
 	return unpackEntry(raw, now)
 }
 
-// LookupResult is the outcome of a cache lookup. Msg is nil on a miss.
-// Negative reports whether the entry is a cached NXDOMAIN/empty answer.
-// Stale means the entry has expired but is still within its serve-stale
-// window: the caller should attempt re-resolution first and only answer
-// from it when that fails (RFC 8767 stale-while-error).
+// LookupResult is the outcome of a cache lookup. Raw is nil on a miss.
+//
+// Raw holds the stored packed DNS response (without the 8-byte store
+// timestamp prefix), so a hit can be served straight off the wire without
+// decoding it into a *dns.Msg — the handler patches the query ID (bytes
+// 0-1) and, for positive entries, rebases answer TTLs at TTLOffsets in a
+// private copy. Negative reports whether Raw is a cached NXDOMAIN/NODATA/
+// empty answer; Stale means the entry has expired but is still within its
+// serve-stale window: the caller should attempt re-resolution first and only
+// answer from it when that fails (RFC 8767 stale-while-error). StoredAt is
+// the store timestamp (Unix seconds) for positive entries, the reference for
+// TTL rebasing.
+//
+// Msg() decodes Raw into a *dns.Msg with TTLs rebased to their remaining
+// lifetime. Call it at most once per result (each call allocates a fresh
+// message); the fast path never needs it.
 type LookupResult struct {
-	Msg      *dns.Msg
-	Negative bool
-	Stale    bool
+	Raw        []byte
+	Negative   bool
+	Stale      bool
+	StoredAt   int64
+	TTLOffsets []uint32
+}
+
+// Msg decodes Raw into a *dns.Msg, rebasing positive-entry TTLs to their
+// remaining lifetime exactly like the pre-raw Lookup did. Returns nil for a
+// miss or a corrupt entry. The message is freshly allocated and safe to
+// recycle by the caller (nothing in the cache retains it).
+func (res LookupResult) Msg() *dns.Msg {
+	if len(res.Raw) == 0 {
+		return nil
+	}
+	if res.Negative {
+		return unpackNegative(res.Raw)
+	}
+	buf := make([]byte, cacheEntryPrefixLen+len(res.Raw))
+	binary.BigEndian.PutUint64(buf[:cacheEntryPrefixLen], uint64(res.StoredAt))
+	copy(buf[cacheEntryPrefixLen:], res.Raw)
+	return unpackEntry(buf, time.Now())
 }
 
 // prefetchLead is how close to expiry a served positive entry must be before
@@ -523,12 +624,14 @@ func (c *Cache) negPrefetchLead() time.Duration {
 // Lookup checks both the positive and negative entries for q, hashing the
 // question once and reusing it for both. It is the DNS hot path, so L1
 // (in-process, no network) is probed without allocating anything — no key
-// string, no context. Only when nothing fresh is found locally does this
-// touch L2, and then it fetches both keys in a single Redis MGET (instead of
-// two sequential GETs) bounded by the configured lookup budget — a domain
-// this instance has never seen before (an L1 miss on both) would otherwise
-// pay for two round trips to Dragonfly before the query ever reaches
-// upstream.
+// string, no context, and — on a hit — no dns.Msg decode either: the stored
+// packed bytes are returned as-is (LookupResult.Raw) so the handler can
+// patch the ID and TTLs and write them straight to the client. Only when
+// nothing fresh is found locally does this touch L2, and then it fetches
+// both keys in a single Redis MGET (instead of two sequential GETs) bounded
+// by the configured lookup budget — a domain this instance has never seen
+// before (an L1 miss on both) would otherwise pay for two round trips to
+// Dragonfly before the query ever reaches upstream.
 //
 // A fresh positive hit near the end of its lifetime also schedules a
 // background prefetch so the next query finds a warm entry (see
@@ -543,20 +646,18 @@ func (c *Cache) Lookup(q dns.Question) LookupResult {
 	h := keyHash(q)
 	now := time.Now()
 
-	var staleMsg *dns.Msg
-	var staleNeg bool
+	var stale LookupResult
 
 	if c.l1 != nil {
-		posRaw, posRemaining, posStale, posOK := c.l1.get(h, false, now)
+		posRaw, posRemaining, posStale, posOff, posOK := c.l1.get(h, false, now)
 		if posOK && !posStale {
 			c.l1Hits.Add(1)
 			c.maybePrefetch(q, h, posRemaining, false)
-			return LookupResult{Msg: unpackEntry(posRaw, now)}
+			return positiveResult(posRaw, posOff)
 		}
-		negRaw, negRemaining, negStale, negOK := c.l1.get(h, true, now)
+		negRaw, negRemaining, negStale, _, negOK := c.l1.get(h, true, now)
 		if negOK && !negStale {
 			c.l1Hits.Add(1)
-			m := unpackNegative(negRaw)
 			// Prefetch NXDOMAIN and NODATA negatives (stable, legitimate
 			// answers — the classic repeat case is a stale AAAA probe for an
 			// A-only domain, which is NODATA: NOERROR with no answers) but
@@ -565,28 +666,25 @@ func (c *Cache) Lookup(q dns.Question) LookupResult {
 			// the failing upstream on every query instead of letting the
 			// failure cache absorb the retries. Blocked domains never reach
 			// the cache at all, so this can't leak a blocked lookup upstream.
-			if m != nil && m.Rcode != dns.RcodeServerFailure {
+			if rcodeOf(negRaw) != dns.RcodeServerFailure {
 				c.maybePrefetch(q, h, negRemaining, true)
 			}
-			return LookupResult{Msg: m, Negative: true}
+			return LookupResult{Raw: negRaw, Negative: true}
 		}
 		// Nothing fresh: a stale pos or neg entry (already probed above — no
 		// need to re-fetch it) is the RFC 8767 fallback for when L2 and the
 		// upstream both fail.
 		switch {
 		case posOK && posStale:
-			staleMsg = unpackEntry(posRaw, now)
+			stale = positiveResult(posRaw, posOff)
+			stale.Stale = true
 		case negOK && negStale:
-			staleMsg = unpackNegative(negRaw)
-			staleNeg = true
+			stale = LookupResult{Raw: negRaw, Negative: true, Stale: true}
 		}
 		c.l1Misses.Add(1)
 	}
 	if c.client == nil {
-		if staleMsg != nil {
-			return LookupResult{Msg: staleMsg, Negative: staleNeg, Stale: true}
-		}
-		return LookupResult{}
+		return stale
 	}
 	// L1 miss: one MGET to Dragonfly for both keys. The budget context is
 	// created only here — never on the hit path — so a slow or down cache
@@ -595,37 +693,61 @@ func (c *Cache) Lookup(q dns.Question) LookupResult {
 	defer cancel()
 	vals, err := c.client.MGet(ctx, c.msgKey(h), c.negKey(h)).Result()
 	if err != nil {
-		if staleMsg != nil {
-			return LookupResult{Msg: staleMsg, Negative: staleNeg, Stale: true}
-		}
-		return LookupResult{}
+		return stale
 	}
 	posRaw, negRaw, ok := decodeMGetResult(vals)
 	if !ok {
-		if staleMsg != nil {
-			return LookupResult{Msg: staleMsg, Negative: staleNeg, Stale: true}
-		}
-		return LookupResult{}
+		return stale
 	}
 	if posRaw != nil {
-		if c.l1 != nil {
-			c.l1.set(h, false, posRaw, c.ttl, now)
+		if len(posRaw) <= cacheEntryPrefixLen {
+			return stale
 		}
-		return LookupResult{Msg: unpackEntry(posRaw, now)}
+		// Compute the TTL offsets here (off the hot path — this is the miss
+		// path) so this hit and every later L1 hit can serve the raw bytes.
+		off := ttlOffsets(posRaw[cacheEntryPrefixLen:])
+		if c.l1 != nil {
+			c.l1.set(h, false, posRaw, c.ttl, now, off)
+		}
+		return positiveResult(posRaw, off)
 	}
 	if negRaw != nil {
 		if c.l1 != nil {
 			// A fresh negative supersedes any stale positive in L1 so the
 			// stale one can't keep shadowing the neg key on later lookups.
 			c.l1.del(h, false)
-			c.l1.set(h, true, negRaw, c.negativeTTL, now)
+			c.l1.set(h, true, negRaw, c.negativeTTL, now, nil)
 		}
-		return LookupResult{Msg: unpackNegative(negRaw), Negative: true}
+		return LookupResult{Raw: negRaw, Negative: true}
 	}
-	if staleMsg != nil {
-		return LookupResult{Msg: staleMsg, Negative: staleNeg, Stale: true}
+	return stale
+}
+
+// positiveResult builds a positive LookupResult from stored bytes that carry
+// the 8-byte store-timestamp prefix. off may be nil (an L2-sourced hit on
+// the first miss); the entry is still served, the handler just falls back to
+// the decoded-message path when it needs TTL rebasing.
+func positiveResult(posRaw []byte, off []uint32) LookupResult {
+	if len(posRaw) <= cacheEntryPrefixLen {
+		return LookupResult{}
 	}
-	return LookupResult{}
+	return LookupResult{
+		Raw:        posRaw[cacheEntryPrefixLen:],
+		StoredAt:   int64(binary.BigEndian.Uint64(posRaw[:cacheEntryPrefixLen])),
+		TTLOffsets: off,
+	}
+}
+
+// rcodeOf returns the header rcode (lower 4 bits of byte 3) of a packed
+// message, or SERVFAIL for a malformed/too-short one. All cached negatives
+// are NOERROR/NXDOMAIN/SERVFAIL — well under the 16 rcode values the header
+// byte can express — so the extended-rcode bits in the OPT TTL never matter
+// here.
+func rcodeOf(raw []byte) int {
+	if len(raw) < 4 {
+		return dns.RcodeServerFailure
+	}
+	return int(raw[3] & 0x0F)
 }
 
 // Fresh reports whether q is already answered by a fresh (positive or
@@ -639,10 +761,10 @@ func (c *Cache) Fresh(q dns.Question) bool {
 	h := keyHash(q)
 	now := time.Now()
 	if c.l1 != nil {
-		if raw, _, stale, ok := c.l1.get(h, false, now); ok && !stale && len(raw) > 0 {
+		if raw, _, stale, _, ok := c.l1.get(h, false, now); ok && !stale && len(raw) > 0 {
 			return true
 		}
-		if raw, _, stale, ok := c.l1.get(h, true, now); ok && !stale && len(raw) > 0 {
+		if raw, _, stale, _, ok := c.l1.get(h, true, now); ok && !stale && len(raw) > 0 {
 			return true
 		}
 	}
@@ -754,7 +876,9 @@ func (c *Cache) Set(ctx context.Context, q dns.Question, m *dns.Msg, capTTL time
 	copy(buf[cacheEntryPrefixLen:], packed)
 	h := keyHash(q)
 	if c.l1 != nil {
-		c.l1.set(h, false, buf, ttl, now)
+		// Record the Answer-TTL offsets once here (off the hot path) so
+		// every L1 hit can rebase TTLs on the raw bytes without unpacking.
+		c.l1.set(h, false, buf, ttl, now, ttlOffsets(packed))
 	}
 	c.enqueueL2(ctx, c.msgKey(h), buf, ttl)
 }
@@ -781,7 +905,7 @@ func (c *Cache) SetNegative(ctx context.Context, q dns.Question, m *dns.Msg, ttl
 	h := keyHash(q)
 	now := time.Now()
 	if c.l1 != nil {
-		c.l1.set(h, true, raw, ttl, now)
+		c.l1.set(h, true, raw, ttl, now, nil)
 	}
 	c.enqueueL2(ctx, c.negKey(h), raw, ttl)
 }
@@ -799,7 +923,7 @@ func (c *Cache) getNegative(ctx context.Context, h uint64) *dns.Msg {
 		return nil
 	}
 	now := time.Now()
-	if raw, _, stale, ok := c.l1.get(h, true, now); ok && !stale {
+	if raw, _, stale, _, ok := c.l1.get(h, true, now); ok && !stale {
 		c.l1Hits.Add(1)
 		return unpackNegative(raw)
 	}
@@ -808,7 +932,7 @@ func (c *Cache) getNegative(ctx context.Context, h uint64) *dns.Msg {
 	if !ok {
 		return nil
 	}
-	c.l1.set(h, true, raw, c.negativeTTL, now)
+	c.l1.set(h, true, raw, c.negativeTTL, now, nil)
 	return unpackNegative(raw)
 }
 

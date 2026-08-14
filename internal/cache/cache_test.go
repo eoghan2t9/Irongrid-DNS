@@ -2,7 +2,10 @@ package cache
 
 import (
 	"context"
+	"encoding/binary"
+	"fmt"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -118,7 +121,7 @@ func TestL1Counters(t *testing.T) {
 	ctx := context.Background()
 
 	// A clean miss counts one miss.
-	if res := c.Lookup(aQuestion()); res.Msg != nil {
+	if res := c.Lookup(aQuestion()); res.Msg() != nil {
 		t.Fatal("expected a miss before anything is cached")
 	}
 	if h, m := c.L1Counters(); h != 0 || m != 1 {
@@ -128,7 +131,7 @@ func TestL1Counters(t *testing.T) {
 	// A served positive lookup counts one hit (Lookup probes pos+neg keys
 	// internally, so it must still count once).
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
-	if res := c.Lookup(aQuestion()); res.Msg == nil || res.Negative || res.Stale {
+	if res := c.Lookup(aQuestion()); res.Msg() == nil || res.Negative || res.Stale {
 		t.Fatal("expected a fresh positive L1 hit")
 	}
 	if h, m := c.L1Counters(); h != 1 || m != 1 {
@@ -158,9 +161,9 @@ func BenchmarkL1Get(b *testing.B) {
 }
 
 // BenchmarkLookupL1Hit measures the handler's actual cache path (Lookup): a
-// pure L1 hit — no key-string building, no context, no Redis. The remaining
-// allocations are dominated by m.Unpack decoding the stored answer into a
-// dns.Msg (the payload every hit must produce), not by the probe itself.
+// pure L1 hit — no key-string building, no context, no Redis. The hit path
+// returns the stored packed bytes without decoding them into a dns.Msg, so
+// it stays allocation-free (the handler writes those bytes straight out).
 func BenchmarkLookupL1Hit(b *testing.B) {
 	c := l1onlyCache(time.Hour, time.Minute)
 	q := aQuestion()
@@ -176,7 +179,7 @@ func TestLookupL1Positive(t *testing.T) {
 	ctx := context.Background()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
 	res := c.Lookup(aQuestion())
-	if res.Msg == nil {
+	if res.Msg() == nil {
 		t.Fatal("expected a hit")
 	}
 	if res.Negative {
@@ -192,7 +195,7 @@ func TestLookupL1Negative(t *testing.T) {
 	ctx := context.Background()
 	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
 	res := c.Lookup(aQuestion())
-	if res.Msg == nil {
+	if res.Msg() == nil {
 		t.Fatal("expected a hit")
 	}
 	if !res.Negative {
@@ -207,8 +210,8 @@ func TestLookupL1Negative(t *testing.T) {
 func TestLookupMissWithNilClient(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
 	res := c.Lookup(aQuestion())
-	if res.Msg != nil || res.Negative {
-		t.Fatalf("expected a clean miss, got msg=%v negative=%v", res.Msg, res.Negative)
+	if res.Msg() != nil || res.Negative {
+		t.Fatalf("expected a clean miss, got msg=%v negative=%v", res.Msg(), res.Negative)
 	}
 }
 
@@ -223,7 +226,7 @@ func TestLookupStale(t *testing.T) {
 
 	time.Sleep(400 * time.Millisecond)
 	res := c.Lookup(aQuestion())
-	if res.Msg == nil {
+	if res.Msg() == nil {
 		t.Fatal("expected the stale entry to still be servable")
 	}
 	if !res.Stale {
@@ -236,7 +239,7 @@ func TestLookupStale(t *testing.T) {
 	// Once the serve-stale window itself passes the entry is evicted, and
 	// the next lookup is a plain miss.
 	time.Sleep(2200 * time.Millisecond)
-	if res := c.Lookup(aQuestion()); res.Msg != nil {
+	if res := c.Lookup(aQuestion()); res.Msg() != nil {
 		t.Fatal("entry should miss once the serve-stale window passes")
 	}
 }
@@ -292,7 +295,7 @@ func TestPrefetchNearExpiry(t *testing.T) {
 
 	// Fresh entry with ~5s of life left: no prefetch.
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
-	if res := c.Lookup(aQuestion()); res.Msg == nil {
+	if res := c.Lookup(aQuestion()); res.Msg() == nil {
 		t.Fatal("expected a hit")
 	}
 	select {
@@ -303,7 +306,7 @@ func TestPrefetchNearExpiry(t *testing.T) {
 
 	// Wait until the entry is within the 1s prefetch lead, then trigger.
 	time.Sleep(4200 * time.Millisecond)
-	if res := c.Lookup(aQuestion()); res.Msg == nil {
+	if res := c.Lookup(aQuestion()); res.Msg() == nil {
 		t.Fatal("expected a hit")
 	}
 	select {
@@ -351,13 +354,13 @@ func TestL1FIFOEviction(t *testing.T) {
 	// h=0, h=l1Shards and h=2*l1Shards all mask to shard 0.
 	hs := []uint64{0, l1Shards, 2 * l1Shards}
 	for i, h := range hs {
-		c.set(h, false, []byte{byte(i)}, time.Hour, now)
+		c.set(h, false, []byte{byte(i)}, time.Hour, now, nil)
 	}
-	if _, _, _, ok := c.get(hs[0], false, now); ok {
+	if _, _, _, _, ok := c.get(hs[0], false, now); ok {
 		t.Fatal("oldest-inserted entry should have been evicted first")
 	}
 	for _, h := range hs[1:] {
-		if _, _, _, ok := c.get(h, false, now); !ok {
+		if _, _, _, _, ok := c.get(h, false, now); !ok {
 			t.Fatal("newer entry should still be cached")
 		}
 	}
@@ -395,7 +398,7 @@ func TestNegativePrefetch(t *testing.T) {
 	// SERVFAIL negative near expiry: must NOT prefetch.
 	c.SetNegative(ctx, aQuestion(), servfailResponse(), 0)
 	time.Sleep(1200 * time.Millisecond) // remaining ~0.8s < 1s lead
-	if res := c.Lookup(aQuestion()); res.Msg == nil || !res.Negative {
+	if res := c.Lookup(aQuestion()); res.Msg() == nil || !res.Negative {
 		t.Fatal("expected a negative hit")
 	}
 	select {
@@ -407,7 +410,7 @@ func TestNegativePrefetch(t *testing.T) {
 	// NXDOMAIN negative near expiry: must prefetch.
 	c.SetNegative(ctx, aQuestion(), nxdomainResponse(), 0)
 	time.Sleep(1200 * time.Millisecond)
-	if res := c.Lookup(aQuestion()); res.Msg == nil || !res.Negative {
+	if res := c.Lookup(aQuestion()); res.Msg() == nil || !res.Negative {
 		t.Fatal("expected a negative hit")
 	}
 	select {
@@ -423,7 +426,7 @@ func TestNegativePrefetch(t *testing.T) {
 	// A-only domain) near expiry: must prefetch too.
 	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
 	time.Sleep(1200 * time.Millisecond)
-	if res := c.Lookup(aQuestion()); res.Msg == nil || !res.Negative {
+	if res := c.Lookup(aQuestion()); res.Msg() == nil || !res.Negative {
 		t.Fatal("expected a negative hit")
 	}
 	select {
@@ -467,5 +470,127 @@ func TestDecodeMGetResult(t *testing.T) {
 				t.Errorf("negRaw = %q, want %q", neg, c.wantNeg)
 			}
 		})
+	}
+}
+
+// TestLookupRawPositive verifies a positive L1 hit is returned as raw packed
+// bytes with the recorded TTL offsets and store timestamp — the data the
+// handler's raw serve path needs — and that Msg() still decodes it into a
+// correctly-TTL'd dns.Msg for the fallback paths.
+func TestLookupRawPositive(t *testing.T) {
+	c := l1onlyCache(time.Hour, time.Minute)
+	ctx := context.Background()
+	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
+
+	res := c.Lookup(aQuestion())
+	if res.Raw == nil || res.Negative || res.Stale {
+		t.Fatalf("expected a fresh positive raw hit, got %+v", res)
+	}
+	if res.StoredAt == 0 {
+		t.Fatal("StoredAt must be set for a positive entry")
+	}
+	// One A record -> exactly one TTL offset.
+	if len(res.TTLOffsets) != 1 {
+		t.Fatalf("TTLOffsets = %v, want one offset", res.TTLOffsets)
+	}
+	// The raw bytes must be a valid message whose answer matches.
+	m := res.Msg()
+	if m == nil || len(m.Answer) != 1 {
+		t.Fatalf("Msg() = %v, want one answer", m)
+	}
+	a, ok := m.Answer[0].(*dns.A)
+	if !ok || a.A.String() != "1.2.3.4" {
+		t.Fatalf("answer = %v, want A 1.2.3.4", m.Answer[0])
+	}
+}
+
+// TestLookupRawNegative verifies a negative L1 hit is raw too, tagged
+// Negative and without TTL offsets (negative TTLs are never rebased).
+func TestLookupRawNegative(t *testing.T) {
+	c := l1onlyCache(time.Hour, time.Minute)
+	ctx := context.Background()
+	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
+
+	res := c.Lookup(aQuestion())
+	if res.Raw == nil || !res.Negative || res.Stale {
+		t.Fatalf("expected a fresh negative raw hit, got %+v", res)
+	}
+	if len(res.TTLOffsets) != 0 {
+		t.Fatalf("negative entry must carry no TTL offsets, got %v", res.TTLOffsets)
+	}
+}
+
+// TestLookupRawMultiAnswerTTLOffsets verifies the packed-message scanner on
+// a realistic compressed multi-RR answer (eight distinct-owner TXT records):
+// every Answer-section TTL is located and reads its original value.
+func TestLookupRawMultiAnswerTTLOffsets(t *testing.T) {
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeTXT)
+	m.Response = true
+	for i := 0; i < 8; i++ {
+		m.Answer = append(m.Answer, &dns.TXT{
+			Hdr: dns.RR_Header{Name: fmt.Sprintf("txt%d.example.com.", i), Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60},
+			// RFC 1035 caps each TXT character-string at 255 bytes, so split
+			// 400 chars across two strings (240 + 160) like real records.
+			Txt: []string{strings.Repeat("0123456789abcdef", 15), strings.Repeat("0123456789abcdef", 10)},
+		})
+	}
+	m.Compress = true
+	packed, err := m.Pack()
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	off := ttlOffsets(packed)
+	if len(off) != 8 {
+		t.Fatalf("offsets = %v, want 8", off)
+	}
+	for _, o := range off {
+		if int(o)+4 > len(packed) {
+			t.Fatalf("offset %d out of range", o)
+		}
+		if ttl := binary.BigEndian.Uint32(packed[o : o+4]); ttl != 60 {
+			t.Fatalf("offset %d reads TTL %d, want 60", o, ttl)
+		}
+	}
+}
+
+// TestLookupRawMsgRebasesTTL verifies the lazy Msg() path rebases answer
+// TTLs to the remaining lifetime, exactly like the pre-raw Lookup did.
+func TestLookupRawMsgRebasesTTL(t *testing.T) {
+	c := l1onlyCache(time.Hour, time.Minute)
+	ctx := context.Background()
+	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
+	time.Sleep(1100 * time.Millisecond)
+
+	res := c.Lookup(aQuestion())
+	if res.Raw == nil {
+		t.Fatal("expected a hit")
+	}
+	m := res.Msg()
+	if m == nil || len(m.Answer) != 1 {
+		t.Fatalf("Msg() = %v, want one answer", m)
+	}
+	ttl := m.Answer[0].Header().Ttl
+	if ttl >= 3600 || ttl < 3590 {
+		t.Fatalf("rebased TTL = %d, want ~3599 (elapsed ~1s)", ttl)
+	}
+}
+
+// TestLookupRawStaleKeepsRaw verifies an expired-but-stale entry still
+// exposes its raw bytes so the handler can answer from it (after decoding)
+// when re-resolution fails.
+func TestLookupRawStaleKeepsRaw(t *testing.T) {
+	c := l1onlyCache(300*time.Millisecond, time.Minute)
+	c.l1.staleTTL = 2 * time.Second
+	ctx := context.Background()
+	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
+	time.Sleep(500 * time.Millisecond)
+
+	res := c.Lookup(aQuestion())
+	if res.Raw == nil || !res.Stale {
+		t.Fatalf("expected a stale raw entry, got %+v", res)
+	}
+	if m := res.Msg(); m == nil {
+		t.Fatal("stale entry must still decode")
 	}
 }

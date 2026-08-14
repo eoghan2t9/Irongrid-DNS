@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -216,6 +217,54 @@ func TestTCPUpstreamReusesConnection(t *testing.T) {
 	}
 	if got := accepted.Load(); got != 1 {
 		t.Fatalf("server accepted %d connections for 3 sequential queries, want 1 (pooled reuse)", got)
+	}
+}
+
+// TestUDPUpstreamReusesSocket verifies the UDP socket pool: only the first
+// of several sequential queries dials a fresh socket; the rest reuse the
+// pooled connected socket instead of paying socket/connect/close syscalls
+// per query. The dial count comes from the Dialer's Control hook, which the
+// kernel invokes once per socket.
+func TestUDPUpstreamReusesSocket(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP("1.2.3.4"),
+		})
+		_ = w.WriteMsg(m)
+	})}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	var dials atomic.Int32
+	u := &Upstream{Transport: UDP, Addr: pc.LocalAddr().String()}
+	u.udpPool = make(chan *pooledConn, upstreamPoolSize)
+	u.udpClient = &dns.Client{Net: "udp", Timeout: 8 * time.Second, Dialer: &net.Dialer{
+		Timeout: 8 * time.Second,
+		Control: func(network, address string, c syscall.RawConn) error {
+			dials.Add(1)
+			return nil
+		},
+	}}
+	t.Cleanup(u.Close)
+
+	for i := 0; i < 3; i++ {
+		r, err := u.Query(context.Background(), aQuery())
+		if err != nil {
+			t.Fatalf("query %d: %v", i, err)
+		}
+		if len(r.Answer) == 0 {
+			t.Fatalf("query %d: no answer", i)
+		}
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("client dialed %d sockets for 3 sequential queries, want 1 (pooled reuse)", got)
 	}
 }
 

@@ -37,6 +37,11 @@ server:
   # CPU, capped at 8); 1 = a single exclusive socket (no port sharing with
   # other processes); N = exactly N sockets (capped at 64).
   udp_sockets: 0
+  # Handler workers per plain-UDP socket (the worker pool replaces
+  # goroutine-per-datagram, so a flood costs no goroutine churn). 0 = auto
+  # (4 x CPU per socket, floor 16, capped 256); N = exactly N per socket
+  # (capped at 512).
+  # udp_workers: 0
   # debug_pprof: true            # expose Go's net/http/pprof under /debug/pprof/
                                  # on the dashboard port, behind the same admin
                                  # login as the REST API. Off by default: even

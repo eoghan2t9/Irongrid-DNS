@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 )
 
 // Action is the outcome of a filter decision.
@@ -62,6 +63,12 @@ type Engine struct {
 
 	totalBlockedDomains int
 	totalIPRules        int
+
+	// hasIPRules is true whenever any IP rule (block or allow) is present,
+	// so the DNS hot path can skip its answer-IP walk entirely for the
+	// common domain-only list setups. It is maintained under e.mu wherever
+	// the IP sets change (syncIPFlag) and read lock-free.
+	hasIPRules atomic.Bool
 }
 
 // NewEngine returns an empty engine.
@@ -99,6 +106,13 @@ func (e *Engine) Reset() {
 	e.listNames = map[string]string{}
 	e.totalBlockedDomains = 0
 	e.totalIPRules = 0
+	e.hasIPRules.Store(false)
+}
+
+// syncIPFlag recomputes the hasIPRules gate from the current IP rule sets.
+// Callers hold e.mu.
+func (e *Engine) syncIPFlag() {
+	e.hasIPRules.Store(len(e.blockIPs) > 0 || len(e.allowIPs) > 0)
 }
 
 // SetUserLists replaces the explicit blacklist/whitelist entries.
@@ -165,6 +179,7 @@ func (e *Engine) LoadList(id, name string, content []byte) (ParseResult, error) 
 		e.domainList, &e.listBlockRegex, &e.listAllowRegex)
 	e.totalBlockedDomains += res.Domains + res.ExactDomains + res.Regexes
 	e.totalIPRules += res.IPs
+	e.syncIPFlag()
 	return res, nil
 }
 
@@ -200,7 +215,13 @@ func (e *Engine) Compile() {
 			e.blockDomains[domain] = struct{}{}
 		}
 	}
+	e.syncIPFlag()
 }
+
+// HasIPRules reports whether the engine holds any IP rules (block or allow).
+// The DNS hot path gates its answer-IP walk on this atomic read, so the
+// common domain-only list setup skips the per-answer IP check entirely.
+func (e *Engine) HasIPRules() bool { return e.hasIPRules.Load() }
 
 // DecideDomain evaluates a fully qualified query name (with trailing dot).
 func (e *Engine) DecideDomain(qname string) Decision {
@@ -299,6 +320,7 @@ func (e *Engine) AddIPBlock(ip string) {
 	defer e.mu.Unlock()
 	if parsed := net.ParseIP(ip); parsed != nil {
 		e.blockIPs[parsed.String()] = struct{}{}
+		e.syncIPFlag()
 	}
 }
 
@@ -308,6 +330,7 @@ func (e *Engine) RemoveIPBlock(ip string) {
 	defer e.mu.Unlock()
 	if parsed := net.ParseIP(ip); parsed != nil {
 		delete(e.blockIPs, parsed.String())
+		e.syncIPFlag()
 	}
 }
 

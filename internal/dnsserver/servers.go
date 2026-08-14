@@ -51,6 +51,10 @@ type Manager struct {
 	// = a single exclusive socket. Applied by main at boot and on reload
 	// before the listeners are (re)started.
 	udpSockets int
+	// udpWorkers is the configured handler-worker count per plain-UDP socket
+	// (server.udp_workers): 0 = auto (4 × CPU, floor 16, capped 256), N =
+	// exactly N per socket. Same lifecycle as udpSockets.
+	udpWorkers int
 	// udpBound / doqBound are the socket counts the plain UDP and DoQ
 	// listeners actually bound (what server.udp_sockets resolved to on this
 	// platform), for the dashboard's status. Reset on Restart, re-set by
@@ -59,7 +63,11 @@ type Manager struct {
 	doqBound int
 	mu       sync.Mutex
 	servers  []*dns.Server
-	httpSrv  interface {
+	// udpSrvs are the plain-UDP worker-pool listeners (one per socket).
+	// They are tracked separately from dns.Server because their shutdown is
+	// their own Close, not a dns.Server's ShutdownContext.
+	udpSrvs []*udpServer
+	httpSrv interface {
 		Shutdown(ctx context.Context) error
 	}
 	doqLns []*quic.Listener
@@ -82,12 +90,32 @@ func (m *Manager) SetUDPSockets(n int) {
 	m.mu.Unlock()
 }
 
+// SetUDPWorkers sets how many handler workers each plain-UDP socket's read
+// loop dispatches to (server.udp_workers): 0 = auto (4 × CPU per socket,
+// floor 16, capped 256), N = exactly N per socket (capped at 512). Applied
+// before Start/Restart like SetUDPSockets; the running listeners are not
+// touched by a call after they are up.
+func (m *Manager) SetUDPWorkers(n int) {
+	m.mu.Lock()
+	m.udpWorkers = n
+	m.mu.Unlock()
+}
+
 // udpSocketCount returns how many sockets the UDP-family listeners bind,
 // resolving the configured server.udp_sockets value (see udpSocketCountFor).
 func (m *Manager) udpSocketCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return udpSocketCountFor(m.udpSockets)
+}
+
+// udpWorkerCount returns how many handler workers each plain-UDP socket's
+// read loop dispatches to, resolving the configured server.udp_workers value
+// (see udpWorkersFor).
+func (m *Manager) udpWorkerCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return udpWorkersFor(m.udpWorkers)
 }
 
 // UDPListenerSockets reports how many sockets the plain UDP and DoQ
@@ -149,9 +177,8 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 	if !tcp {
 		// UDP: create the sockets ourselves so the kernel receive/send
 		// buffers can be raised (miekg/dns dials its own listener with the
-		// OS defaults otherwise). ActivateAndServe is used because
-		// ListenAndServe would replace the injected PacketConn with its
-		// own socket.
+		// OS defaults otherwise), then serve each from a worker-pool server
+		// (see udpServer) instead of miekg/dns's goroutine-per-packet loop.
 		//
 		// Where the platform supports it, the address is bound from several
 		// SO_REUSEPORT sockets (one per CPU, capped — see udpSocketCount):
@@ -174,10 +201,12 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 		}
 		log.Printf("[dns] %s listener on %s (%d %s)", proto, addr, len(pcs), noun)
 		for _, pc := range pcs {
-			srv := &dns.Server{Net: "udp", PacketConn: pc, UDPSize: udpMaxPacketSize, Handler: handler}
-			m.servers = append(m.servers, srv)
+			srv := newUDPServer(pc, handler, m.udpWorkerCount())
+			m.mu.Lock()
+			m.udpSrvs = append(m.udpSrvs, srv)
+			m.mu.Unlock()
 			go func() {
-				if err := srv.ActivateAndServe(); err != nil {
+				if err := srv.Serve(); err != nil {
 					log.Printf("[dns] %s listener on %s stopped: %v", proto, addr, err)
 					m.results <- Listener{Proto: proto, Addr: addr, Err: err}
 				}
@@ -237,6 +266,9 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	for _, s := range m.servers {
 		_ = s.ShutdownContext(ctx)
 	}
+	for _, s := range m.udpSrvs {
+		s.Close()
+	}
 	if m.httpSrv != nil {
 		_ = m.httpSrv.Shutdown(ctx)
 	}
@@ -269,6 +301,7 @@ func (m *Manager) Restart(udpAddr, tcpAddr, dotAddr, dohAddr, doh3Addr, doqAddr,
 	cancel()
 	m.mu.Lock()
 	m.servers = nil
+	m.udpSrvs = nil
 	m.httpSrv = nil
 	m.doqLns = nil
 	m.http3Srvs = nil

@@ -270,6 +270,7 @@ func (w *dohResponseWriter) WriteMsg(m *dns.Msg) error {
 
 func (w *dohResponseWriter) Write(b []byte) (int, error) {
 	w.httpW.Header().Set("Content-Type", dnsMessageContentType)
+	w.httpW.Header().Set("Cache-Control", "no-store")
 	return w.httpW.Write(b)
 }
 

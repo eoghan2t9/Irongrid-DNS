@@ -31,8 +31,15 @@ type l1Key struct {
 // data that was previously cached locally — Dragonfly expires its copies at
 // the same TTL, so an expired L1 entry is never stale-able again after this
 // window passes and the next cold miss just resolves upstream.
+// ttlOff holds the byte offsets (relative to the packed message, after the
+// store-timestamp prefix) of every Answer-section record's TTL field,
+// computed once when the entry is written. Reads use them to rebase TTLs
+// directly in a private copy of the packed bytes — no Unpack — so a cache
+// hit can be served without decoding a single RR. nil for negative entries
+// (their TTLs are never rebased).
 type l1Entry struct {
 	raw        []byte
+	ttlOff     []uint32
 	expires    time.Time
 	staleUntil time.Time // expires + staleTTL; serves stale before this
 }
@@ -119,31 +126,35 @@ func (c *l1Cache) shard(h uint64) *l1Shard {
 //     serve-stale window (remaining is 0) — the caller may serve it if
 //     re-resolution fails;
 //   - ok=false: a miss; entries past their stale window are evicted lazily.
-func (c *l1Cache) get(h uint64, neg bool, now time.Time) (raw []byte, remaining time.Duration, stale bool, ok bool) {
+//
+// ttlOff are the entry's stored Answer-TTL byte offsets (nil for negative
+// entries); callers pass them straight through to the raw serve path.
+func (c *l1Cache) get(h uint64, neg bool, now time.Time) (raw []byte, remaining time.Duration, stale bool, ttlOff []uint32, ok bool) {
 	key := l1Key{h: h, neg: neg}
 	s := c.shard(h)
 	s.mu.RLock()
 	e, ok := s.m[key]
 	s.mu.RUnlock()
 	if !ok {
-		return nil, 0, false, false
+		return nil, 0, false, nil, false
 	}
 	if now.Before(e.expires) {
-		return e.raw, e.expires.Sub(now), false, true
+		return e.raw, e.expires.Sub(now), false, e.ttlOff, true
 	}
 	if now.Before(e.staleUntil) {
-		return e.raw, 0, true, true
+		return e.raw, 0, true, e.ttlOff, true
 	}
 	c.del(h, neg)
-	return nil, 0, false, false
+	return nil, 0, false, nil, false
 }
 
-// set stores raw under the question hash with a TTL. Each shard keeps an
-// insertion-order queue, so a full shard evicts the oldest-inserted entry
-// rather than whichever map entry Go happens to iterate first — the old
-// scheme could evict a hot domain while cold entries lingered. Memory stays
-// bounded under high query cardinality.
-func (c *l1Cache) set(h uint64, neg bool, raw []byte, ttl time.Duration, now time.Time) {
+// set stores raw under the question hash with a TTL, alongside the byte
+// offsets of every Answer-section TTL in raw (nil for negative entries — see
+// l1Entry.ttlOff). Each shard keeps an insertion-order queue, so a full
+// shard evicts the oldest-inserted entry rather than whichever map entry Go
+// happens to iterate first — the old scheme could evict a hot domain while
+// cold entries lingered. Memory stays bounded under high query cardinality.
+func (c *l1Cache) set(h uint64, neg bool, raw []byte, ttl time.Duration, now time.Time, ttlOff []uint32) {
 	if ttl <= 0 || len(raw) == 0 {
 		return
 	}
@@ -153,7 +164,7 @@ func (c *l1Cache) set(h uint64, neg bool, raw []byte, ttl time.Duration, now tim
 	defer s.mu.Unlock()
 	if c.cap > 0 {
 		if _, exists := s.m[key]; !exists {
-			s.m[key] = l1Entry{raw: raw, expires: now.Add(ttl), staleUntil: now.Add(ttl + c.staleTTL)}
+			s.m[key] = l1Entry{raw: raw, ttlOff: ttlOff, expires: now.Add(ttl), staleUntil: now.Add(ttl + c.staleTTL)}
 			s.queue = append(s.queue, key)
 			s.evictToCap(c.cap)
 			// Dead queue slots (deleted/expired keys) accumulate as the map
@@ -173,7 +184,7 @@ func (c *l1Cache) set(h uint64, neg bool, raw []byte, ttl time.Duration, now tim
 		// approximation; the L2-hit re-warm path re-sets the same key in
 		// place without churning the queue.
 	}
-	s.m[key] = l1Entry{raw: raw, expires: now.Add(ttl), staleUntil: now.Add(ttl + c.staleTTL)}
+	s.m[key] = l1Entry{raw: raw, ttlOff: ttlOff, expires: now.Add(ttl), staleUntil: now.Add(ttl + c.staleTTL)}
 }
 
 // evictToCap pops queue entries until the shard map is at or under cap.

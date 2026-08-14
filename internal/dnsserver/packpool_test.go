@@ -26,22 +26,20 @@ func TestPackBufPoolRoundTrip(t *testing.T) {
 // doesn't clamp back down to udpMaxPacketSize.
 func TestPackBufPoolGrows(t *testing.T) {
 	big := make([]byte, udpMaxPacketSize*4)
-	putPackBuf(big)
-
-	// This Get isn't guaranteed to return the exact buffer just put back
-	// (sync.Pool makes no such promise), but across a few tries at least one
-	// should, since nothing else is contending for the pool in this test.
-	found := false
-	for i := 0; i < 50; i++ {
+	// sync.Pool gives no retention guarantee: a GC can clear the pool at any
+	// time, and under -race the runtime GCs often. So instead of seeding
+	// once and hoping, re-seed on every iteration — each cycle puts a big
+	// buffer and pulls one item out, so a cleared pool is immediately
+	// restocked and every subsequent Get has a large buffer to find. Any
+	// small buffer drawn is put back, so the pool can only drift toward big.
+	for i := 0; i < 100; i++ {
+		putPackBuf(big)
 		got := getPackBuf()
 		if cap(got) >= udpMaxPacketSize*4 {
-			found = true
 			putPackBuf(got)
-			break
+			return
 		}
 		putPackBuf(got)
 	}
-	if !found {
-		t.Fatal("pool never returned the larger buffer — put did not preserve capacity")
-	}
+	t.Fatal("pool never returned the larger buffer — put did not preserve capacity")
 }
