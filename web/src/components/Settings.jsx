@@ -572,19 +572,28 @@ export default function Settings({ onSessionInvalidated }) {
 
       <div className="card" id="settings-listeners">
         <h3>Server listeners</h3>
+        <h4 className="field-group">Plain DNS</h4>
         <div className="form-grid">
           {text('UDP listener', 'server.listen_udp', 'plain DNS over UDP, "" disables', '0.0.0.0:53')}
           {text('TCP listener', 'server.listen_tcp', null, '0.0.0.0:53')}
+        </div>
+        <h4 className="field-group">Encrypted DNS</h4>
+        <div className="form-grid">
           {text('DoT (TLS)', 'server.listen_dot', null, '0.0.0.0:853')}
           {text('DoH (HTTPS)', 'server.listen_doh', null, '0.0.0.0:443')}
           {text('DoH3 (HTTP/3)', 'server.listen_doh3', 'DNS over HTTP/3 over UDP — same /dns-query path as DoH; typically the DoH port (443) since TCP and UDP ports are independent. Must differ from the DoQ address.', '0.0.0.0:443')}
           {text('DoQ (QUIC)', 'server.listen_doq', null, '0.0.0.0:853')}
           {text('DoH path', 'server.doh_path', null, '/dns-query')}
+        </div>
+        <h4 className="field-group">Dashboard &amp; web</h4>
+        <div className="form-grid">
           {text('Web dashboard', 'server.web_listen', null, '0.0.0.0:8080')}
           {toggle('Serve dashboard over HTTPS (web_tls)', 'server.web_tls')}
           {toggle('Redirect plain HTTP to HTTPS (web_redirect)', 'server.web_redirect')}
           {number('Redirect listener port', 'server.web_redirect_port')}
-          {number('Upstream timeout (s)', 'server.timeout_sec')}
+        </div>
+        <h4 className="field-group">UDP performance</h4>
+        <div className="form-grid">
           {number('UDP sockets (0 = auto)', 'server.udp_sockets', 'SO_REUSEPORT sockets for the UDP + DoQ + DoH3 listeners; 0 = one per CPU (auto, capped), 1 = single exclusive socket, N = exactly N')}
           {number('UDP workers per socket (0 = auto)', 'server.udp_workers', 'Handler workers per plain-UDP socket; 0 = 4 x CPU (auto, capped), N = exactly N (capped at 512)')}
           <div className="field span-2">
@@ -598,6 +607,10 @@ export default function Settings({ onSessionInvalidated }) {
                 : 'Fills the two fields above with the auto-mode numbers for this server.'}
             </span>
           </div>
+        </div>
+        <h4 className="field-group">General</h4>
+        <div className="form-grid">
+          {number('Upstream timeout (s)', 'server.timeout_sec')}
           {toggle('Pad encrypted responses (RFC 7830)', 'server.padding')}
           {toggle('DNS cookies (RFC 7873)', 'server.cookies')}
         </div>

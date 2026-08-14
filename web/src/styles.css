@@ -967,6 +967,23 @@ select.input {
   gap: 12px;
   align-items: end;
 }
+
+/* Sub-headings that group the fields inside a Settings card, so a dense
+   card (e.g. Server listeners) reads as labelled sections instead of one
+   undifferentiated grid. */
+.field-group {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin: 20px 0 10px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--border);
+}
+.card .field-group:first-child {
+  margin-top: 0;
+}
 .span-2 {
   grid-column: span 2;
 }
