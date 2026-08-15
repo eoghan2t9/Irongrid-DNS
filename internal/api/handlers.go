@@ -932,6 +932,7 @@ type serverPayload struct {
 	ListenTCP       string `json:"listen_tcp"`
 	ListenDoT       string `json:"listen_dot"`
 	ListenDoH       string `json:"listen_doh"`
+	ListenDoH3      string `json:"listen_doh3"`
 	ListenDoQ       string `json:"listen_doq"`
 	DoHPath         string `json:"doh_path"`
 	WebListen       string `json:"web_listen"`
@@ -943,6 +944,13 @@ type serverPayload struct {
 	// binds: 0 = auto (one per CPU, capped), 1 = a single exclusive socket,
 	// N = exactly N.
 	UDPSockets int `json:"udp_sockets"`
+	// UDPWorkers is how many handler workers each plain-UDP socket's read
+	// loop dispatches to: 0 = auto (4 x CPU, floor 16, capped 256), N =
+	// exactly N per socket (capped at 512).
+	UDPWorkers int  `json:"udp_workers"`
+	Padding    bool `json:"padding"`
+	Cookies    bool `json:"cookies"`
+	DebugPprof bool `json:"debug_pprof"`
 }
 
 type cachePayload struct {
@@ -1059,6 +1067,7 @@ func payloadFromConfig(c *config.Config) configPayload {
 			ListenTCP:       c.Server.ListenTCP,
 			ListenDoT:       c.Server.ListenDoT,
 			ListenDoH:       c.Server.ListenDoH,
+			ListenDoH3:      c.Server.ListenDoH3,
 			ListenDoQ:       c.Server.ListenDoQ,
 			DoHPath:         c.Server.DoHPath,
 			WebListen:       c.Server.WebListen,
@@ -1067,6 +1076,10 @@ func payloadFromConfig(c *config.Config) configPayload {
 			WebRedirectPort: c.Server.WebRedirectPort,
 			TimeoutSec:      c.Server.TimeoutSec,
 			UDPSockets:      c.Server.UDPSockets,
+			UDPWorkers:      c.Server.UDPWorkers,
+			Padding:         c.Server.Padding,
+			Cookies:         c.Server.Cookies,
+			DebugPprof:      c.Server.DebugPprof,
 		},
 		Upstreams:    c.Upstreams,
 		UpstreamMode: c.UpstreamMode,
@@ -1287,6 +1300,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			ListenTCP:       p.Server.ListenTCP,
 			ListenDoT:       p.Server.ListenDoT,
 			ListenDoH:       p.Server.ListenDoH,
+			ListenDoH3:      p.Server.ListenDoH3,
 			ListenDoQ:       p.Server.ListenDoQ,
 			DoHPath:         p.Server.DoHPath,
 			WebListen:       p.Server.WebListen,
@@ -1295,6 +1309,10 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			WebRedirectPort: p.Server.WebRedirectPort,
 			TimeoutSec:      p.Server.TimeoutSec,
 			UDPSockets:      p.Server.UDPSockets,
+			UDPWorkers:      p.Server.UDPWorkers,
+			Padding:         p.Server.Padding,
+			Cookies:         p.Server.Cookies,
+			DebugPprof:      p.Server.DebugPprof,
 		},
 		Upstreams:    p.Upstreams,
 		UpstreamMode: p.UpstreamMode,

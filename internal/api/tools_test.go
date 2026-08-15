@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"reflect"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -381,6 +382,64 @@ func TestConfigPayloadUpstreamMode(t *testing.T) {
 	p = payloadFromConfig(c)
 	if p.UpstreamMode != "sequential" {
 		t.Fatalf("payload upstream_mode = %q, want sequential", p.UpstreamMode)
+	}
+}
+
+// TestConfigPayloadServerRoundTrip verifies every server section field
+// survives the payload mapping in both directions. The save handler rebuilds
+// the config from the payload and GET re-emits it, so a field missing from
+// either direction silently reverts to its default on the next save — the
+// exact bug that dropped listen_doh3/padding/cookies/debug_pprof (and later
+// udp_workers) on every Settings save.
+func TestConfigPayloadServerRoundTrip(t *testing.T) {
+	c := config.Default()
+	c.Server = config.ServerConfig{
+		ListenUDP:       "0.0.0.0:53",
+		ListenTCP:       "0.0.0.0:53",
+		ListenDoT:       "0.0.0.0:853",
+		ListenDoH:       "0.0.0.0:443",
+		ListenDoH3:      "0.0.0.0:443",
+		ListenDoQ:       "0.0.0.0:853",
+		DoHPath:         "/dns-query",
+		WebListen:       "0.0.0.0:443",
+		WebTLS:          true,
+		WebRedirect:     true,
+		WebRedirectPort: 80,
+		TimeoutSec:      2,
+		UDPSockets:      4,
+		UDPWorkers:      32,
+		Padding:         true,
+		Cookies:         true,
+		DebugPprof:      true,
+	}
+	p := payloadFromConfig(c)
+	if p.Server.ListenDoH3 != "0.0.0.0:443" || p.Server.UDPWorkers != 32 || !p.Server.Padding || !p.Server.Cookies || !p.Server.DebugPprof {
+		t.Fatalf("payload dropped server fields: %+v", p.Server)
+	}
+
+	// Reverse direction: the applyPayload copy. Build the payload back into
+	// a fresh config the same way the save handler does.
+	cfg := &config.Config{Server: config.ServerConfig{
+		ListenUDP:       p.Server.ListenUDP,
+		ListenTCP:       p.Server.ListenTCP,
+		ListenDoT:       p.Server.ListenDoT,
+		ListenDoH:       p.Server.ListenDoH,
+		ListenDoH3:      p.Server.ListenDoH3,
+		ListenDoQ:       p.Server.ListenDoQ,
+		DoHPath:         p.Server.DoHPath,
+		WebListen:       p.Server.WebListen,
+		WebTLS:          p.Server.WebTLS,
+		WebRedirect:     p.Server.WebRedirect,
+		WebRedirectPort: p.Server.WebRedirectPort,
+		TimeoutSec:      p.Server.TimeoutSec,
+		UDPSockets:      p.Server.UDPSockets,
+		UDPWorkers:      p.Server.UDPWorkers,
+		Padding:         p.Server.Padding,
+		Cookies:         p.Server.Cookies,
+		DebugPprof:      p.Server.DebugPprof,
+	}}
+	if !reflect.DeepEqual(c.Server, cfg.Server) {
+		t.Fatalf("server round-trip mismatch:\n got %+v\nwant %+v", cfg.Server, c.Server)
 	}
 }
 
