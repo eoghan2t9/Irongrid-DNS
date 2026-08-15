@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 320 64" width="320" height="64" role="img" aria-label="Irongrid DNS">
+  <!-- Irongrid logo lockup, light variant: same mark and wordmark but with
+       light text for dark backgrounds (GitHub dark theme). Paired with
+       assets/logo.svg via <picture> + prefers-color-scheme in the README. -->
+  <title>Irongrid DNS</title>
+  <defs>
+    <linearGradient id="brand" x1="8" y1="56" x2="56" y2="8" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6b9af1"/>
+      <stop offset="1" stop-color="#4a7fe8"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(8 8)">
+    <rect x="0" y="0" width="48" height="48" rx="10" fill="url(#brand)"/>
+    <circle cx="24" cy="24" r="9" fill="#fff"/>
+  </g>
+  <text x="72" y="42" font-family="SFMono-Regular, Consolas, monospace" font-size="34" font-weight="700" fill="#e6e6e4">IRONGRID</text>
+  <text x="240" y="42" font-family="SFMono-Regular, Consolas, monospace" font-size="34" font-weight="700" fill="#4a90e2">DNS</text>
+</svg>
