@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
-import { useToast } from '../toast'
+import { useToast } from '../toast-context'
 
 // Rewrites is a dedicated page for local DNS records — split out of the
 // Settings mega-form since it's a full list-editing UI in its own right.
@@ -24,7 +24,9 @@ export default function Rewrites() {
     }
   }, [toast])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    load()
+  }, [load])
 
   const setRewrite = (i, patch) => {
     setRewrites((prev) => prev.map((r, x) => (x === i ? { ...r, ...patch } : r)))
@@ -68,8 +70,8 @@ export default function Rewrites() {
         </div>
         <p className="dim small">
           Answer a domain yourself instead of forwarding it — e.g. <code>nas.home</code> → <code>192.168.1.10</code>.
-          Takes priority over blocklists and the cache. Domain may start with <code>*.</code> to cover a whole
-          subtree; a CNAME rule answers any query type. Applied live — no restart needed.
+          Takes priority over blocklists and the cache. Domain may start with <code>*.</code> to cover a whole subtree;
+          a CNAME rule answers any query type. Applied live — no restart needed.
         </p>
       </div>
 
@@ -84,7 +86,12 @@ export default function Rewrites() {
                 value={rw.domain || ''}
                 onChange={(e) => setRewrite(i, { domain: e.target.value })}
               />
-              <select className="input" value={rw.type || 'A'} onChange={(e) => setRewrite(i, { type: e.target.value })} aria-label="Record type">
+              <select
+                className="input"
+                value={rw.type || 'A'}
+                onChange={(e) => setRewrite(i, { type: e.target.value })}
+                aria-label="Record type"
+              >
                 <option value="A">A</option>
                 <option value="AAAA">AAAA</option>
                 <option value="CNAME">CNAME</option>
@@ -105,12 +112,21 @@ export default function Rewrites() {
                 onChange={(e) => setRewrite(i, { ttl: Number(e.target.value) })}
                 aria-label="TTL in seconds"
               />
-              <button className="btn small danger" type="button" onClick={() => removeRewrite(i)} aria-label={`Remove ${rw.domain || 'this record'}`}>✕</button>
+              <button
+                className="btn small danger"
+                type="button"
+                onClick={() => removeRewrite(i)}
+                aria-label={`Remove ${rw.domain || 'this record'}`}
+              >
+                ✕
+              </button>
             </div>
           </div>
         ))}
         <div className="quick-actions" style={{ marginTop: 12 }}>
-          <button className="btn small" type="button" onClick={addRewrite}>+ Add record</button>
+          <button className="btn small" type="button" onClick={addRewrite}>
+            + Add record
+          </button>
         </div>
       </div>
     </div>

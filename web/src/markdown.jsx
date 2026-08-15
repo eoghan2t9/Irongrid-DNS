@@ -1,4 +1,3 @@
-
 // rich turns the GitHub changelog's **bold** and [label](url) into nodes.
 export function rich(text) {
   const out = []
@@ -16,7 +15,7 @@ export function rich(text) {
       out.push(
         <a key={k++} href={mm[2]} target="_blank" rel="noreferrer">
           {mm[1]}
-        </a>
+        </a>,
       )
     }
     last = m.index + tok.length

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api } from '../api'
-import { useToast } from '../toast'
+import { useToast } from '../toast-context'
 import SiteScanner from './SiteScanner'
 
 const QTYPES = ['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT', 'SOA', 'SRV', 'PTR', 'CAA', 'TLSA', 'ANY']
@@ -12,7 +12,9 @@ const SOURCES = [
 ]
 
 function rcodeBadge(rcode) {
-  const cls = { NOERROR: 'badge-allowed', NXDOMAIN: 'badge-warn', SERVFAIL: 'badge-error', REFUSED: 'badge-error' }[rcode] || 'badge-cached'
+  const cls =
+    { NOERROR: 'badge-allowed', NXDOMAIN: 'badge-warn', SERVFAIL: 'badge-error', REFUSED: 'badge-error' }[rcode] ||
+    'badge-cached'
   return <span className={`badge ${cls}`}>{rcode}</span>
 }
 
@@ -41,9 +43,13 @@ function ResolveTable({ results }) {
           {res.error ? (
             <div className="error-text small">{res.error}</div>
           ) : (res.answers || []).length === 0 ? (
-            <div className="dim small" style={{ marginTop: 8 }}>No answers ({res.rcode})</div>
+            <div className="dim small" style={{ marginTop: 8 }}>
+              No answers ({res.rcode})
+            </div>
           ) : (
-            <pre className="log-view" style={{ marginTop: 8 }}>{(res.answers || []).join('\n')}</pre>
+            <pre className="log-view" style={{ marginTop: 8 }}>
+              {(res.answers || []).join('\n')}
+            </pre>
           )}
         </div>
       ))}
@@ -67,7 +73,9 @@ function ResolveTool() {
   const run = async (e) => {
     e.preventDefault()
     if (!name.trim()) return
-    setBusy(true); setErr(''); setRes(null)
+    setBusy(true)
+    setErr('')
+    setRes(null)
     try {
       setRes(await api.toolsResolve({ name: name.trim(), type, rd, do: doBit, cd, sources }))
     } catch (ex) {
@@ -81,9 +89,16 @@ function ResolveTool() {
       <h3>DNS lookup</h3>
       <p className="dim small">dig-style lookup through any combination of your upstreams and public resolvers.</p>
       <form onSubmit={run} className="form-grid">
-        <input className="input" placeholder="example.com or 1.2.3.4" value={name} onChange={(e) => setName(e.target.value)} />
+        <input
+          className="input"
+          placeholder="example.com or 1.2.3.4"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
         <select className="input" value={type} onChange={(e) => setType(e.target.value)}>
-          {QTYPES.map((t) => <option key={t}>{t}</option>)}
+          {QTYPES.map((t) => (
+            <option key={t}>{t}</option>
+          ))}
         </select>
         <button className="btn primary" type="submit" disabled={busy || sources.length === 0}>
           {busy ? 'Resolving…' : 'Look up'}
@@ -96,11 +111,21 @@ function ResolveTool() {
             {s.label}
           </label>
         ))}
-        <label className="toggle-label"><input type="checkbox" checked={rd} onChange={(e) => setRd(e.target.checked)} /> RD</label>
-        <label className="toggle-label"><input type="checkbox" checked={doBit} onChange={(e) => setDoBit(e.target.checked)} /> DO</label>
-        <label className="toggle-label"><input type="checkbox" checked={cd} onChange={(e) => setCd(e.target.checked)} /> CD</label>
+        <label className="toggle-label">
+          <input type="checkbox" checked={rd} onChange={(e) => setRd(e.target.checked)} /> RD
+        </label>
+        <label className="toggle-label">
+          <input type="checkbox" checked={doBit} onChange={(e) => setDoBit(e.target.checked)} /> DO
+        </label>
+        <label className="toggle-label">
+          <input type="checkbox" checked={cd} onChange={(e) => setCd(e.target.checked)} /> CD
+        </label>
       </div>
-      {err && <div className="error-banner" style={{ marginTop: 10 }}>{err}</div>}
+      {err && (
+        <div className="error-banner" style={{ marginTop: 10 }}>
+          {err}
+        </div>
+      )}
       <ResolveTable results={res?.results} />
     </div>
   )
@@ -116,9 +141,20 @@ function PropagationTool() {
   const run = async (e) => {
     e.preventDefault()
     if (!name.trim()) return
-    setBusy(true); setErr(''); setRes(null)
+    setBusy(true)
+    setErr('')
+    setRes(null)
     try {
-      setRes(await api.toolsResolve({ name: name.trim(), type, rd: true, do: false, cd: false, sources: ['cloudflare', 'google', 'quad9', 'local'] }))
+      setRes(
+        await api.toolsResolve({
+          name: name.trim(),
+          type,
+          rd: true,
+          do: false,
+          cd: false,
+          sources: ['cloudflare', 'google', 'quad9', 'local'],
+        }),
+      )
     } catch (ex) {
       setErr(ex.message)
     }
@@ -128,15 +164,25 @@ function PropagationTool() {
   return (
     <div className="card">
       <h3>Propagation check</h3>
-      <p className="dim small">Is your change live everywhere yet? Compares the answer from each public resolver plus your own upstreams.</p>
+      <p className="dim small">
+        Is your change live everywhere yet? Compares the answer from each public resolver plus your own upstreams.
+      </p>
       <form onSubmit={run} className="form-grid">
         <input className="input" placeholder="example.com" value={name} onChange={(e) => setName(e.target.value)} />
         <select className="input" value={type} onChange={(e) => setType(e.target.value)}>
-          {QTYPES.map((t) => <option key={t}>{t}</option>)}
+          {QTYPES.map((t) => (
+            <option key={t}>{t}</option>
+          ))}
         </select>
-        <button className="btn" type="submit" disabled={busy}>{busy ? 'Checking…' : 'Check propagation'}</button>
+        <button className="btn" type="submit" disabled={busy}>
+          {busy ? 'Checking…' : 'Check propagation'}
+        </button>
       </form>
-      {err && <div className="error-banner" style={{ marginTop: 10 }}>{err}</div>}
+      {err && (
+        <div className="error-banner" style={{ marginTop: 10 }}>
+          {err}
+        </div>
+      )}
       <ResolveTable results={res?.results} />
     </div>
   )
@@ -151,7 +197,9 @@ function MailTool() {
   const run = async (e) => {
     e.preventDefault()
     if (!domain.trim()) return
-    setBusy(true); setErr(''); setRes(null)
+    setBusy(true)
+    setErr('')
+    setRes(null)
     try {
       setRes(await api.toolsMail(domain.trim()))
     } catch (ex) {
@@ -163,50 +211,95 @@ function MailTool() {
   return (
     <div className="card">
       <h3>Mail records</h3>
-      <p className="dim small">MX, SPF, DKIM (default selector), DMARC and CAA for a domain — will email to it deliver and is it protected from spoofing?</p>
+      <p className="dim small">
+        MX, SPF, DKIM (default selector), DMARC and CAA for a domain — will email to it deliver and is it protected from
+        spoofing?
+      </p>
       <form onSubmit={run} className="form-grid">
         <input className="input" placeholder="example.com" value={domain} onChange={(e) => setDomain(e.target.value)} />
-        <button className="btn" type="submit" disabled={busy}>{busy ? 'Checking…' : 'Check mail records'}</button>
+        <button className="btn" type="submit" disabled={busy}>
+          {busy ? 'Checking…' : 'Check mail records'}
+        </button>
       </form>
-      {err && <div className="error-banner" style={{ marginTop: 10 }}>{err}</div>}
+      {err && (
+        <div className="error-banner" style={{ marginTop: 10 }}>
+          {err}
+        </div>
+      )}
       {res && (
         <table className="table" style={{ marginTop: 12 }}>
           <tbody>
             <tr>
-              <td className="mono" style={{ width: 60 }}>MX</td>
+              <td className="mono" style={{ width: 60 }}>
+                MX
+              </td>
               <td style={{ width: 130 }}>
-                {res.mx_error ? <span className="badge badge-warn">Missing</span> : <span className="badge badge-allowed">{res.mx.length} server{res.mx.length === 1 ? '' : 's'}</span>}
+                {res.mx_error ? (
+                  <span className="badge badge-warn">Missing</span>
+                ) : (
+                  <span className="badge badge-allowed">
+                    {res.mx.length} server{res.mx.length === 1 ? '' : 's'}
+                  </span>
+                )}
               </td>
               <td className="mono small dim">{res.mx.join(', ') || res.mx_error}</td>
             </tr>
             <tr>
               <td className="mono">SPF</td>
               <td>
-                {res.spf_error ? <span className="badge badge-warn">Missing</span> : res.spf_ok ? <span className="badge badge-allowed">OK</span> : <span className="badge badge-warn">Issues</span>}
+                {res.spf_error ? (
+                  <span className="badge badge-warn">Missing</span>
+                ) : res.spf_ok ? (
+                  <span className="badge badge-allowed">OK</span>
+                ) : (
+                  <span className="badge badge-warn">Issues</span>
+                )}
               </td>
               <td className="small">
                 {res.spf && <div className="mono dim">{res.spf}</div>}
                 {res.spf_error && <div className="dim">{res.spf_error}</div>}
-                {res.spf_issues?.map((i) => <div key={i} className="error-text small">{i}</div>)}
+                {res.spf_issues?.map((i) => (
+                  <div key={i} className="error-text small">
+                    {i}
+                  </div>
+                ))}
               </td>
             </tr>
             <tr>
               <td className="mono">DKIM</td>
-              <td>{res.dkim_ok ? <span className="badge badge-allowed">Present</span> : <span className="badge badge-warn">Missing</span>}</td>
+              <td>
+                {res.dkim_ok ? (
+                  <span className="badge badge-allowed">Present</span>
+                ) : (
+                  <span className="badge badge-warn">Missing</span>
+                )}
+              </td>
               <td className="dim small mono">{res.dkim || res.dkim_error}</td>
             </tr>
             <tr>
               <td className="mono">DMARC</td>
               <td>
                 {res.dmarc ? (
-                  res.dmarc_policy === 'reject' ? <span className="badge badge-allowed">p={res.dmarc_policy}</span> : <span className="badge badge-warn">p={res.dmarc_policy}</span>
-                ) : <span className="badge badge-warn">Missing</span>}
+                  res.dmarc_policy === 'reject' ? (
+                    <span className="badge badge-allowed">p={res.dmarc_policy}</span>
+                  ) : (
+                    <span className="badge badge-warn">p={res.dmarc_policy}</span>
+                  )
+                ) : (
+                  <span className="badge badge-warn">Missing</span>
+                )}
               </td>
               <td className="dim small mono">{res.dmarc || res.dmarc_error}</td>
             </tr>
             <tr>
               <td className="mono">CAA</td>
-              <td>{res.caa.length ? <span className="badge badge-allowed">Configured</span> : <span className="badge badge-cached">Open</span>}</td>
+              <td>
+                {res.caa.length ? (
+                  <span className="badge badge-allowed">Configured</span>
+                ) : (
+                  <span className="badge badge-cached">Open</span>
+                )}
+              </td>
               <td className="dim small mono">{res.caa.join(', ') || res.caa_error}</td>
             </tr>
           </tbody>
@@ -225,7 +318,9 @@ function RBLTool() {
   const run = async (e) => {
     e.preventDefault()
     if (!ip.trim()) return
-    setBusy(true); setErr(''); setRes(null)
+    setBusy(true)
+    setErr('')
+    setRes(null)
     try {
       setRes(await api.toolsRBL(ip.trim()))
     } catch (ex) {
@@ -240,13 +335,23 @@ function RBLTool() {
       <p className="dim small">Is an IP address listed on DNS-based spam blocklists?</p>
       <form onSubmit={run} className="form-grid">
         <input className="input" placeholder="1.2.3.4" value={ip} onChange={(e) => setIP(e.target.value)} />
-        <button className="btn" type="submit" disabled={busy}>{busy ? 'Checking…' : 'Check reputation'}</button>
+        <button className="btn" type="submit" disabled={busy}>
+          {busy ? 'Checking…' : 'Check reputation'}
+        </button>
       </form>
-      {err && <div className="error-banner" style={{ marginTop: 10 }}>{err}</div>}
+      {err && (
+        <div className="error-banner" style={{ marginTop: 10 }}>
+          {err}
+        </div>
+      )}
       {res && (
         <table className="table" style={{ marginTop: 12 }}>
           <thead>
-            <tr><th>Blocklist</th><th>Status</th><th>Detail</th></tr>
+            <tr>
+              <th>Blocklist</th>
+              <th>Status</th>
+              <th>Detail</th>
+            </tr>
           </thead>
           <tbody>
             {res.checks.map((c) => (
@@ -256,9 +361,13 @@ function RBLTool() {
                   <div className="dim small mono">{c.zone}</div>
                 </td>
                 <td>
-                  {c.error ? <span className="badge badge-error">Error</span>
-                    : c.listed ? <span className="badge badge-blocked">Listed {c.code}</span>
-                    : <span className="badge badge-allowed">Clean</span>}
+                  {c.error ? (
+                    <span className="badge badge-error">Error</span>
+                  ) : c.listed ? (
+                    <span className="badge badge-blocked">Listed {c.code}</span>
+                  ) : (
+                    <span className="badge badge-allowed">Clean</span>
+                  )}
                 </td>
                 <td className="dim small">{c.reason || c.error || ''}</td>
               </tr>
@@ -279,7 +388,9 @@ function AXFRTool() {
   const run = async (e) => {
     e.preventDefault()
     if (!domain.trim()) return
-    setBusy(true); setErr(''); setRes(null)
+    setBusy(true)
+    setErr('')
+    setRes(null)
     try {
       setRes(await api.toolsAXFR(domain.trim()))
     } catch (ex) {
@@ -294,15 +405,29 @@ function AXFRTool() {
       <p className="dim small">Would any of this domain's nameservers hand over its full zone to anyone who asks?</p>
       <form onSubmit={run} className="form-grid">
         <input className="input" placeholder="example.com" value={domain} onChange={(e) => setDomain(e.target.value)} />
-        <button className="btn" type="submit" disabled={busy}>{busy ? 'Checking…' : 'Check AXFR'}</button>
+        <button className="btn" type="submit" disabled={busy}>
+          {busy ? 'Checking…' : 'Check AXFR'}
+        </button>
       </form>
-      {err && <div className="error-banner" style={{ marginTop: 10 }}>{err}</div>}
+      {err && (
+        <div className="error-banner" style={{ marginTop: 10 }}>
+          {err}
+        </div>
+      )}
       {res && (
         <>
-          {res.note && <div className="info-banner" style={{ marginTop: 10 }}>{res.note}</div>}
+          {res.note && (
+            <div className="info-banner" style={{ marginTop: 10 }}>
+              {res.note}
+            </div>
+          )}
           <table className="table" style={{ marginTop: 12 }}>
             <thead>
-              <tr><th>Nameserver</th><th>Address</th><th>Result</th></tr>
+              <tr>
+                <th>Nameserver</th>
+                <th>Address</th>
+                <th>Result</th>
+              </tr>
             </thead>
             <tbody>
               {res.nameservers.map((n, i) => (
@@ -310,9 +435,13 @@ function AXFRTool() {
                   <td className="mono">{n.host}</td>
                   <td className="mono dim">{n.address || '—'}</td>
                   <td>
-                    {n.error ? <span className="badge badge-warn">Refused / error</span>
-                      : n.axfr ? <span className="badge badge-blocked">Vulnerable — {n.records} records leaked</span>
-                      : <span className="badge badge-allowed">Safe</span>}
+                    {n.error ? (
+                      <span className="badge badge-warn">Refused / error</span>
+                    ) : n.axfr ? (
+                      <span className="badge badge-blocked">Vulnerable — {n.records} records leaked</span>
+                    ) : (
+                      <span className="badge badge-allowed">Safe</span>
+                    )}
                     {n.error && <div className="dim small">{n.error}</div>}
                   </td>
                 </tr>
@@ -336,7 +465,10 @@ function SubdomainTool() {
   const run = async (e) => {
     e.preventDefault()
     if (!domain.trim()) return
-    setBusy(true); setErr(''); setRes(null); setAllowed({})
+    setBusy(true)
+    setErr('')
+    setRes(null)
+    setAllowed({})
     try {
       setRes(await api.toolsSubdomains(domain.trim()))
     } catch (ex) {
@@ -369,7 +501,9 @@ function SubdomainTool() {
     if (ok.length) toast(`Allowed ${ok.length} blocked subdomain${ok.length === 1 ? '' : 's'}`)
     setAllowed((s) => {
       const n = { ...s }
-      ok.forEach((d) => { n[d] = true })
+      ok.forEach((d) => {
+        n[d] = true
+      })
       return n
     })
   }
@@ -377,12 +511,21 @@ function SubdomainTool() {
   return (
     <div className="card">
       <h3>Subdomain audit</h3>
-      <p className="dim small">Finds a domain's subdomains via certificate transparency (crt.sh) and flags the ones your blocklists cover — often the source of a "half-broken" site.</p>
+      <p className="dim small">
+        Finds a domain's subdomains via certificate transparency (crt.sh) and flags the ones your blocklists cover —
+        often the source of a "half-broken" site.
+      </p>
       <form onSubmit={run} className="form-grid">
         <input className="input" placeholder="example.com" value={domain} onChange={(e) => setDomain(e.target.value)} />
-        <button className="btn" type="submit" disabled={busy}>{busy ? 'Scanning…' : 'Audit subdomains'}</button>
+        <button className="btn" type="submit" disabled={busy}>
+          {busy ? 'Scanning…' : 'Audit subdomains'}
+        </button>
       </form>
-      {err && <div className="error-banner" style={{ marginTop: 10 }}>{err}</div>}
+      {err && (
+        <div className="error-banner" style={{ marginTop: 10 }}>
+          {err}
+        </div>
+      )}
       {res && (
         <>
           <div className="row-between" style={{ marginTop: 12 }}>
@@ -392,29 +535,46 @@ function SubdomainTool() {
               {res.truncated && ' · list truncated'}
             </div>
             {res.blocked > 0 && (
-              <button className="btn small" onClick={allowAll}>Allow all blocked</button>
+              <button className="btn small" onClick={allowAll}>
+                Allow all blocked
+              </button>
             )}
           </div>
           <div style={{ maxHeight: 360, overflowY: 'auto', marginTop: 10 }}>
             <table className="table">
               <thead>
-                <tr><th>Subdomain</th><th>Status</th><th>Blocked by</th><th className="action-col"></th></tr>
+                <tr>
+                  <th>Subdomain</th>
+                  <th>Status</th>
+                  <th>Blocked by</th>
+                  <th className="action-col"></th>
+                </tr>
               </thead>
               <tbody>
                 {res.domains.map((x) => {
                   const already = allowed[x.domain]
                   return (
                     <tr key={x.domain} className={x.blocked ? '' : 'row-dim'}>
-                      <td className="entry-cell" title={x.domain}>{x.domain}</td>
+                      <td className="entry-cell" title={x.domain}>
+                        {x.domain}
+                      </td>
                       <td>
                         <span className={`badge ${x.blocked ? 'badge-blocked' : 'badge-allowed'}`}>
                           {x.blocked ? 'Blocked' : 'Allowed'}
                         </span>
                       </td>
-                      <td className="dim small">{x.blocked ? (x.list || 'blocklist') : ''}</td>
+                      <td className="dim small">{x.blocked ? x.list || 'blocklist' : ''}</td>
                       <td className="action-col">
-                        {x.blocked && !already && <button className="btn small" onClick={() => allowOne(x.domain)}>Allow</button>}
-                        {x.blocked && already && <button className="btn small" disabled>✓ Allowed</button>}
+                        {x.blocked && !already && (
+                          <button className="btn small" onClick={() => allowOne(x.domain)}>
+                            Allow
+                          </button>
+                        )}
+                        {x.blocked && already && (
+                          <button className="btn small" disabled>
+                            ✓ Allowed
+                          </button>
+                        )}
                       </td>
                     </tr>
                   )

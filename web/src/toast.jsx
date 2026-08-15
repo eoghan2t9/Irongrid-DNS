@@ -1,6 +1,5 @@
-import { createContext, useCallback, useContext, useRef, useState } from 'react'
-
-const ToastContext = createContext(null)
+import { useCallback, useRef, useState } from 'react'
+import { ToastContext } from './toast-context'
 
 // ToastProvider renders a fixed-position, auto-dismissing stack of status
 // messages. Mounted once at the app root so any page can report a
@@ -19,12 +18,15 @@ export function ToastProvider({ children }) {
   // toast(message, type): type 'info' (default) or 'error'. Errors stay up
   // longer since they're more likely to need reading closely, but both are
   // dismissible early by clicking.
-  const toast = useCallback((message, type = 'info') => {
-    const id = ++idRef.current
-    setToasts((prev) => [...prev, { id, message, type }])
-    setTimeout(() => dismiss(id), type === 'error' ? 7000 : 4000)
-    return id
-  }, [dismiss])
+  const toast = useCallback(
+    (message, type = 'info') => {
+      const id = ++idRef.current
+      setToasts((prev) => [...prev, { id, message, type }])
+      setTimeout(() => dismiss(id), type === 'error' ? 7000 : 4000)
+      return id
+    },
+    [dismiss],
+  )
 
   return (
     <ToastContext.Provider value={toast}>
@@ -46,12 +48,4 @@ export function ToastProvider({ children }) {
       </div>
     </ToastContext.Provider>
   )
-}
-
-// useToast returns a toast(message, type) function. Must be called from
-// inside a ToastProvider (mounted once in main.jsx around <App />).
-export function useToast() {
-  const toast = useContext(ToastContext)
-  if (!toast) throw new Error('useToast must be used within a ToastProvider')
-  return toast
 }

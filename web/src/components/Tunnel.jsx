@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
-import { useToast } from '../toast'
+import { useToast } from '../toast-context'
 
 export default function Tunnel() {
   const toast = useToast()
@@ -15,7 +15,9 @@ export default function Tunnel() {
     try {
       const s = await api.tunnelStatus()
       setStatus(s)
-    } catch { /* ignore */ }
+    } catch {
+      /* ignore */
+    }
   }, [])
 
   useEffect(() => {
@@ -23,7 +25,8 @@ export default function Tunnel() {
     // Pre-fill the form from the persisted config: once a token / config
     // path has been saved (tunnelStart persists it), it survives restarts
     // and shows up here without re-typing.
-    api.config()
+    api
+      .config()
       .then((cfg) => {
         const t = cfg?.tunnel
         if (!t) return
@@ -41,7 +44,10 @@ export default function Tunnel() {
       .catch(() => {})
     const t = setInterval(() => {
       load()
-      api.tunnelLog().then((r) => setLogLines(r.lines || [])).catch(() => {})
+      api
+        .tunnelLog()
+        .then((r) => setLogLines(r.lines || []))
+        .catch(() => {})
     }, 5000)
     return () => clearInterval(t)
   }, [load])
@@ -83,13 +89,13 @@ export default function Tunnel() {
           </span>
         </div>
         <p className="dim">
-          The cloudflared agent is compiled into this binary — no external installation needed.
-          Expose your DoH endpoint (<code>/dns-query</code>) or the dashboard to the internet,
-          or route a hostname for Android Private DNS.
+          The cloudflared agent is compiled into this binary — no external installation needed. Expose your DoH endpoint
+          (<code>/dns-query</code>) or the dashboard to the internet, or route a hostname for Android Private DNS.
         </p>
         {status?.started && (
           <div className="dim small">
-            Mode: <span className="mono">{status.mode}</span> · started {new Date(status.started).toLocaleString([], { hour12: false })}
+            Mode: <span className="mono">{status.mode}</span> · started{' '}
+            {new Date(status.started).toLocaleString([], { hour12: false })}
             {status.error && <div className="error-text">Last error: {status.error}</div>}
           </div>
         )}
@@ -98,7 +104,8 @@ export default function Tunnel() {
       <div className="card">
         <h3>{status?.running ? 'Tunnel is running' : 'Start a tunnel'}</h3>
         <form onSubmit={start} className="form-grid">
-          <label className="input-label">Mode
+          <label className="input-label">
+            Mode
             <select className="input" value={mode} onChange={(e) => setMode(e.target.value)}>
               <option value="quick">Quick tunnel (trycloudflare.com, no auth)</option>
               <option value="token">Named tunnel (Zero Trust token)</option>
@@ -106,22 +113,41 @@ export default function Tunnel() {
             </select>
           </label>
           {mode === 'quick' && (
-            <input className="input" placeholder="Origin URL" value={origin} onChange={(e) => setOrigin(e.target.value)} />
+            <input
+              className="input"
+              placeholder="Origin URL"
+              value={origin}
+              onChange={(e) => setOrigin(e.target.value)}
+            />
           )}
           {mode === 'token' && (
-            <input className="input span-2" placeholder="Tunnel token" value={token} onChange={(e) => setToken(e.target.value)} />
+            <input
+              className="input span-2"
+              placeholder="Tunnel token"
+              value={token}
+              onChange={(e) => setToken(e.target.value)}
+            />
           )}
           {mode === 'config' && (
-            <input className="input span-2" placeholder="Path to cloudflared config YAML" value={configFile} onChange={(e) => setConfigFile(e.target.value)} />
+            <input
+              className="input span-2"
+              placeholder="Path to cloudflared config YAML"
+              value={configFile}
+              onChange={(e) => setConfigFile(e.target.value)}
+            />
           )}
           <div className="row">
-            <button className="btn primary" type="submit" disabled={status?.running}>Start</button>
-            <button className="btn danger" type="button" onClick={stop} disabled={!status?.running}>Stop</button>
+            <button className="btn primary" type="submit" disabled={status?.running}>
+              Start
+            </button>
+            <button className="btn danger" type="button" onClick={stop} disabled={!status?.running}>
+              Stop
+            </button>
           </div>
         </form>
         <p className="dim small">
-          Starting saves these settings to the config file, so the tunnel auto-starts on boot.
-          Stopping disables auto-start (the token stays saved for next time).
+          Starting saves these settings to the config file, so the tunnel auto-starts on boot. Stopping disables
+          auto-start (the token stays saved for next time).
         </p>
       </div>
 
@@ -135,8 +161,11 @@ export default function Tunnel() {
       <div className="card hint-card">
         <h3>Android Private DNS setup</h3>
         <p className="dim">
-          1. Create a named tunnel in Cloudflare Zero Trust and paste its token here.<br />
-          2. Route your hostname (e.g. <code>dns.example.com</code>) to <code>https://localhost:8443</code> (your DoH server).<br />
+          1. Create a named tunnel in Cloudflare Zero Trust and paste its token here.
+          <br />
+          2. Route your hostname (e.g. <code>dns.example.com</code>) to <code>https://localhost:8443</code> (your DoH
+          server).
+          <br />
           3. On Android: Settings → Network → Private DNS → <code>dns.example.com</code>.
         </p>
       </div>

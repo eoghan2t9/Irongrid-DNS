@@ -1,12 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest'
-import {
-  api,
-  setAuthHandler,
-  setCredentials,
-  clearCredentials,
-  hasCredentials,
-  restoreCredentials,
-} from './api'
+import { api, setAuthHandler, setCredentials, clearCredentials, hasCredentials, restoreCredentials } from './api'
 
 describe('api credentials', () => {
   beforeEach(() => {
@@ -70,7 +63,9 @@ describe('api request', () => {
   })
 
   it('surfaces the server error message on a non-OK response', async () => {
-    globalThis.fetch = vi.fn().mockResolvedValue({ status: 400, ok: false, json: async () => ({ error: 'bad request' }) })
+    globalThis.fetch = vi
+      .fn()
+      .mockResolvedValue({ status: 400, ok: false, json: async () => ({ error: 'bad request' }) })
     await expect(api.status()).rejects.toThrow('bad request')
   })
 

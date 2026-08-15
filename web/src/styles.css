@@ -1120,6 +1120,13 @@ textarea.input {
   width: 46px;
   text-align: right;
 }
+.actions-cell {
+  white-space: nowrap;
+  text-align: right;
+}
+.actions-cell .btn {
+  margin-left: 6px;
+}
 
 .badge {
   display: inline-block;
@@ -1562,18 +1569,23 @@ textarea.input {
   }
 }
 
-/* ---------- settings jump-nav ---------- */
-.settings-jump {
+/* ---------- settings tab strip ---------- */
+.settings-tabs {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
   margin-top: 14px;
 }
-.settings-jump .btn {
+.settings-tabs .btn {
   text-decoration: none;
 }
-.settings-jump .btn:hover {
+.settings-tabs .btn:hover {
   transform: none;
+}
+.settings-tabs .btn.active {
+  border-color: var(--cyan);
+  color: var(--cyan);
+  background: rgba(91, 141, 239, 0.12);
 }
 
 /* ---------- settings form ---------- */
@@ -2523,19 +2535,19 @@ code {
     grid-template-columns: 1fr;
     gap: 14px;
   }
-  /* The 17 settings jump-links wrap into a tall button wall on narrow
-     screens — keep them on one swipeable row instead. */
-  .settings-jump {
+  /* The six settings tabs wrap into a tall button wall on narrow screens —
+     keep them on one swipeable row instead. */
+  .settings-tabs {
     flex-wrap: nowrap;
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
     scrollbar-width: none;
     padding-bottom: 2px;
   }
-  .settings-jump::-webkit-scrollbar {
+  .settings-tabs::-webkit-scrollbar {
     display: none;
   }
-  .settings-jump .btn {
+  .settings-tabs .btn {
     flex-shrink: 0;
     white-space: nowrap;
   }

@@ -504,7 +504,6 @@ export default function App() {
   return (
     <div className="shell">
       <aside className={`sidebar ${navOpen ? 'open' : ''}`}>
-        {' '}
         <div className="brand">
           <div className="brand-mark">
             <Logo size={17} />
@@ -600,7 +599,6 @@ export default function App() {
               its own strip, right-aligned, so neither row squashes the
               other. */}
           <div className="topbar-actions">
-            {' '}
             <button
               className="btn ghost small theme-btn"
               onClick={toggleTheme}

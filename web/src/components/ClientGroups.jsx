@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
-import { useToast } from '../toast'
+import { useToast } from '../toast-context'
 import { LineListField } from './ui'
 
 // ClientGroups is a dedicated page for per-client policy — split out of the
@@ -24,7 +24,9 @@ export default function ClientGroups() {
     }
   }, [toast])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    load()
+  }, [load])
 
   const setGroup = (i, patch) => {
     setGroups((prev) => prev.map((g, x) => (x === i ? { ...g, ...patch } : g)))
@@ -78,20 +80,32 @@ export default function ClientGroups() {
           </div>
         </div>
         <p className="dim small">
-          Apply a different policy to specific devices/subnets — e.g. a kids' device group with stricter
-          blocklists, or an IoT VLAN pinned to specific upstreams. The first matching group wins; clients matching
-          none use the global filtering and upstreams in Settings. Leave "Blocklist IDs" empty to use every enabled
-          global blocklist. Applied live — no restart needed.
+          Apply a different policy to specific devices/subnets — e.g. a kids' device group with stricter blocklists, or
+          an IoT VLAN pinned to specific upstreams. The first matching group wins; clients matching none use the global
+          filtering and upstreams in Settings. Leave "Blocklist IDs" empty to use every enabled global blocklist.
+          Applied live — no restart needed.
         </p>
       </div>
 
       <div className="card">
-        {groups.length === 0 && <div className="empty">No client groups yet — every client uses the global policy.</div>}
+        {groups.length === 0 && (
+          <div className="empty">No client groups yet — every client uses the global policy.</div>
+        )}
         {groups.map((g, i) => (
           <div className="blocklist-row" key={i}>
             <div className="list-row">
-              <input className="input" placeholder="id (e.g. kids)" value={g.id || ''} onChange={(e) => setGroup(i, { id: e.target.value })} />
-              <input className="input" placeholder="Name" value={g.name || ''} onChange={(e) => setGroup(i, { name: e.target.value })} />
+              <input
+                className="input"
+                placeholder="id (e.g. kids)"
+                value={g.id || ''}
+                onChange={(e) => setGroup(i, { id: e.target.value })}
+              />
+              <input
+                className="input"
+                placeholder="Name"
+                value={g.name || ''}
+                onChange={(e) => setGroup(i, { name: e.target.value })}
+              />
               <label className="switch" title="Enabled">
                 <input
                   type="checkbox"
@@ -101,29 +115,48 @@ export default function ClientGroups() {
                 />
                 <span className="slider" />
               </label>
-              <button className="btn small danger" type="button" onClick={() => removeGroup(i)} aria-label={`Remove group ${g.name || g.id || i + 1}`}>✕</button>
+              <button
+                className="btn small danger"
+                type="button"
+                onClick={() => removeGroup(i)}
+                aria-label={`Remove group ${g.name || g.id || i + 1}`}
+              >
+                ✕
+              </button>
             </div>
             <div className="form-grid">
-              {field('Client CIDRs / IPs', 'one per line, e.g. 192.168.1.50 or 10.0.5.0/24', (
-                <LineListField value={g.cidrs} onChange={(v) => setGroup(i, { cidrs: v })} rows={2} />
-              ))}
-              {field('Blocklist IDs', 'one per line; empty = all enabled global blocklists', (
-                <LineListField value={g.blocklists} onChange={(v) => setGroup(i, { blocklists: v })} rows={2} />
-              ))}
-              {field('Extra whitelist', 'one per line, added to the global whitelist', (
-                <LineListField value={g.whitelist} onChange={(v) => setGroup(i, { whitelist: v })} rows={2} />
-              ))}
-              {field('Extra blacklist', 'one per line, added to the global blacklist', (
-                <LineListField value={g.blacklist} onChange={(v) => setGroup(i, { blacklist: v })} rows={2} />
-              ))}
-              {field('Upstream override', 'one per line, e.g. udp://1.1.1.1:53 or recursive://; empty = use the global upstreams in Settings', (
-                <LineListField value={g.upstreams} onChange={(v) => setGroup(i, { upstreams: v })} rows={2} />
-              ))}
+              {field(
+                'Client CIDRs / IPs',
+                'one per line, e.g. 192.168.1.50 or 10.0.5.0/24',
+                <LineListField value={g.cidrs} onChange={(v) => setGroup(i, { cidrs: v })} rows={2} />,
+              )}
+              {field(
+                'Blocklist IDs',
+                'one per line; empty = all enabled global blocklists',
+                <LineListField value={g.blocklists} onChange={(v) => setGroup(i, { blocklists: v })} rows={2} />,
+              )}
+              {field(
+                'Extra whitelist',
+                'one per line, added to the global whitelist',
+                <LineListField value={g.whitelist} onChange={(v) => setGroup(i, { whitelist: v })} rows={2} />,
+              )}
+              {field(
+                'Extra blacklist',
+                'one per line, added to the global blacklist',
+                <LineListField value={g.blacklist} onChange={(v) => setGroup(i, { blacklist: v })} rows={2} />,
+              )}
+              {field(
+                'Upstream override',
+                'one per line, e.g. udp://1.1.1.1:53 or recursive://; empty = use the global upstreams in Settings',
+                <LineListField value={g.upstreams} onChange={(v) => setGroup(i, { upstreams: v })} rows={2} />,
+              )}
             </div>
           </div>
         ))}
         <div className="quick-actions" style={{ marginTop: 12 }}>
-          <button className="btn small" type="button" onClick={addGroup}>+ Add group</button>
+          <button className="btn small" type="button" onClick={addGroup}>
+            + Add group
+          </button>
         </div>
       </div>
     </div>

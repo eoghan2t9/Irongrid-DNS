@@ -33,7 +33,10 @@ export default function Changelog() {
           <p className="field-hint" style={{ fontSize: 13, margin: 0 }}>
             Release notes for Irongrid DNS
             {data?.current_version ? (
-              <> — you're running <span className="chip chip-new">{data.current_version}</span></>
+              <>
+                {' '}
+                — you're running <span className="chip chip-new">{data.current_version}</span>
+              </>
             ) : null}
           </p>
         </div>
@@ -64,9 +67,7 @@ export default function Changelog() {
               <header className="row-between changelog-entry-head">
                 <div className="changelog-tags">
                   <span className="chip chip-new">{r.tag_name}</span>
-                  {r.name && r.name !== r.tag_name && (
-                    <span className="changelog-name">{r.name}</span>
-                  )}
+                  {r.name && r.name !== r.tag_name && <span className="changelog-name">{r.name}</span>}
                 </div>
                 <div className="changelog-meta">
                   {r.published_at && (

@@ -30,7 +30,10 @@ export default function QueryLog() {
   // address bar on mount.
   const [client, setClient] = useState(() => new URLSearchParams(window.location.search).get('client') || '')
   const [autoRefresh, setAutoRefresh] = useState(true)
-  const [busy, setBusy] = useState(false)
+  // Re-entry guard so overlapping loads (auto-refresh tick, manual load,
+  // visibility re-fetch) don't stack duplicate fetches. A ref, not state:
+  // the guard must be synchronous and the value is never rendered.
+  const busyRef = useRef(false)
   // The domain filter input, so the global / shortcut can jump straight to
   // it (the App shell dispatches 'irongrid:focus-log-search').
   const domainRef = useRef(null)
@@ -78,15 +81,15 @@ export default function QueryLog() {
   }, [entries])
 
   const load = useCallback(async () => {
-    if (busy) return
-    setBusy(true)
+    if (busyRef.current) return
+    busyRef.current = true
     try {
       const res = await api.log({ limit: 200, action, domain, qtype, client })
       setEntries(res.entries || [])
     } catch {
       /* ignore transient */
     }
-    setBusy(false)
+    busyRef.current = false
   }, [action, domain, qtype, client])
 
   useEffect(() => {

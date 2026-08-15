@@ -330,7 +330,7 @@ function SetupChecklist({ items, onNavigate }) {
               ? 'Everything on the list is set up — you are ready to go.'
               : `${remaining.length} thing${remaining.length === 1 ? '' : 's'} left — tap one to jump straight to it.`}
           </p>
-        </div>{' '}
+        </div>
         <button
           className="btn ghost small"
           type="button"
@@ -1045,9 +1045,10 @@ function BlockedClientsCard() {
 
   const hasHoney = honey.length > 0
   const hasRate = rate.length > 0
+  const blockPrefix = (ip) => (ip.includes(':') ? 64 : 24)
   return (
-    <div className="card">
-      <div className="row-between">
+    <div className="card table-card">
+      <div className="row-between" style={{ padding: '12px 8px 8px' }}>
         <h3 style={{ margin: 0 }}>Blocked clients</h3>
         <div className="row">
           <span className="dim small">honeypot hits &amp; rate-limit auto-blocks</span>
@@ -1062,124 +1063,113 @@ function BlockedClientsCard() {
         </div>
       </div>
       {msg && (
-        <div className="text-ok small" style={{ marginTop: 8 }}>
+        <div className="text-ok small" style={{ margin: '4px 8px 0' }}>
           {msg}
         </div>
       )}
       {error && (
-        <div className="error-text small" style={{ marginTop: 8 }}>
+        <div className="error-text small" style={{ margin: '4px 8px 0' }}>
           {error}
         </div>
       )}
-      <div className="stack" style={{ marginTop: 8 }}>
-        {!hasHoney && !hasRate ? (
-          <p className="dim small" style={{ margin: 0 }}>
-            No clients currently blocked. Honeypot hits over TCP/DoT/DoH/DoQ and rate-limit offenders appear here.
-            Spoofed-UDP sources are refused but never auto-blocked — they can&apos;t be trusted — so a pure UDP flood
-            can show nothing here even while the <strong>Honeypot hits</strong> counter climbs. Export CSV and ⓘ ASN
-            work whenever clients do get blocked.
-          </p>
-        ) : (
-          <>
-            {hasHoney && (
-              <div>
-                <div className="dim small" style={{ marginBottom: 6 }}>
-                  <span className="badge badge-honeypot">Honeypot</span> — blocked permanently, dropped at the firewall
-                </div>
-                {honey.map((ip) => (
-                  <div key={ip}>
-                    <div className="list-row">
-                      <div style={{ minWidth: 0 }}>
-                        <div className="mono">{ip}</div>
-                        {hosts[ip] && (
-                          <div className="dim small client-host" title={hosts[ip]}>
-                            {hosts[ip]}
-                          </div>
-                        )}
-                        {asns[ip]?.asn && (
-                          <div
-                            className="dim small client-host"
-                            title={`${asns[ip].asn} · ${asns[ip].holder || asns[ip].name || ''}${asns[ip].prefix ? ` · ${asns[ip].prefix}` : ''}`}
-                          >
-                            {asns[ip].asn} · {asns[ip].holder || asns[ip].name}
-                          </div>
-                        )}
-                      </div>
-                      <button className="btn small" type="button" onClick={() => report(ip)} disabled={reporting[ip]}>
-                        {reporting[ip] ? 'Reporting…' : 'Report'}
-                      </button>
-                      <button className="btn small" type="button" onClick={() => toggleAsn(ip)}>
-                        ⓘ ASN
-                      </button>
-                      <button className="btn small" type="button" onClick={() => blockNet(ip, 0)}>
-                        Block IP
-                      </button>
-                      <button
-                        className="btn small"
-                        type="button"
-                        onClick={() => blockNet(ip, ip.includes(':') ? 64 : 24)}
-                      >
-                        Block /{ip.includes(':') ? 64 : 24}
-                      </button>
-                      <button className="btn small danger" type="button" onClick={() => act(() => api.geoUnblock(ip))}>
-                        Unblock
-                      </button>
+      {!hasHoney && !hasRate ? (
+        <p className="dim small" style={{ margin: '14px 8px' }}>
+          No clients currently blocked — honeypot hits and rate-limit offenders appear here. Spoofed-UDP flood sources
+          are refused but never auto-blocked, so a pure UDP flood can show an empty list even while the{' '}
+          <strong>Honeypot hits</strong> counter climbs.
+        </p>
+      ) : (
+        <table className="table">
+          <thead>
+            <tr>
+              <th>Client</th>
+              <th>Source</th>
+              <th>Blocked</th>
+              <th className="actions-cell">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {honey.map((ip) => (
+              <tr key={ip}>
+                <td>
+                  <div className="mono">{ip}</div>
+                  {hosts[ip] && (
+                    <div className="dim small client-host" title={hosts[ip]}>
+                      {hosts[ip]}
                     </div>
-                    <AsnRow ip={ip} />
-                  </div>
-                ))}
-              </div>
-            )}
-            {hasRate && (
-              <div>
-                <div className="dim small" style={{ marginBottom: 6 }}>
-                  <span className="badge badge-error">Rate limit</span> — hammering clients refused until cooldown
-                </div>
-                {rate.map((b) => (
-                  <div key={b.ip}>
-                    <div className="list-row" style={{ alignItems: 'flex-start' }}>
-                      <div style={{ minWidth: 0 }}>
-                        <div className="mono">{b.ip}</div>
-                        {hosts[b.ip] && (
-                          <div className="dim small client-host" title={hosts[b.ip]}>
-                            {hosts[b.ip]}
-                          </div>
-                        )}
-                        {asns[b.ip]?.asn && (
-                          <div
-                            className="dim small client-host"
-                            title={`${asns[b.ip].asn} · ${asns[b.ip].holder || asns[b.ip].name || ''}${asns[b.ip].prefix ? ` · ${asns[b.ip].prefix}` : ''}`}
-                          >
-                            {asns[b.ip].asn} · {asns[b.ip].holder || asns[b.ip].name}
-                          </div>
-                        )}
-                        {b.blocked_until && (
-                          <span className="dim small">
-                            {' '}
-                            · blocked until {new Date(b.blocked_until).toLocaleString()}
-                            {b.blocks ? ` · ${b.blocks}×` : ''}
-                          </span>
-                        )}
-                      </div>
-                      <button className="btn small" type="button" onClick={() => toggleAsn(b.ip)}>
-                        ⓘ ASN
-                      </button>
-                      <button
-                        className="btn small danger"
-                        type="button"
-                        onClick={() => act(() => api.rateUnblock(b.ip))}
-                      >
-                        Unblock
-                      </button>
+                  )}
+                  {asns[ip]?.asn && (
+                    <div
+                      className="dim small client-host"
+                      title={`${asns[ip].asn} · ${asns[ip].holder || asns[ip].name || ''}${asns[ip].prefix ? ` · ${asns[ip].prefix}` : ''}`}
+                    >
+                      {asns[ip].asn} · {asns[ip].holder || asns[ip].name}
                     </div>
-                    <AsnRow ip={b.ip} />
-                  </div>
-                ))}
-              </div>
-            )}
-          </>
-        )}
-      </div>
+                  )}
+                  <AsnRow ip={ip} />
+                </td>
+                <td>
+                  <span className="badge badge-honeypot">Honeypot</span>
+                </td>
+                <td className="dim small">permanently · firewall drop</td>
+                <td className="actions-cell">
+                  <button className="btn ghost tiny" type="button" onClick={() => report(ip)} disabled={reporting[ip]}>
+                    {reporting[ip] ? 'Reporting…' : 'Report'}
+                  </button>
+                  <button className="btn ghost tiny" type="button" onClick={() => toggleAsn(ip)}>
+                    ASN
+                  </button>
+                  <button className="btn tiny" type="button" onClick={() => blockNet(ip, 0)}>
+                    Block IP
+                  </button>
+                  <button className="btn tiny" type="button" onClick={() => blockNet(ip, blockPrefix(ip))}>
+                    Block /{blockPrefix(ip)}
+                  </button>
+                  <button className="btn tiny danger" type="button" onClick={() => act(() => api.geoUnblock(ip))}>
+                    Unblock
+                  </button>
+                </td>
+              </tr>
+            ))}
+            {rate.map((b) => (
+              <tr key={b.ip}>
+                <td>
+                  <div className="mono">{b.ip}</div>
+                  {hosts[b.ip] && (
+                    <div className="dim small client-host" title={hosts[b.ip]}>
+                      {hosts[b.ip]}
+                    </div>
+                  )}
+                  {asns[b.ip]?.asn && (
+                    <div
+                      className="dim small client-host"
+                      title={`${asns[b.ip].asn} · ${asns[b.ip].holder || asns[b.ip].name || ''}${asns[b.ip].prefix ? ` · ${asns[b.ip].prefix}` : ''}`}
+                    >
+                      {asns[b.ip].asn} · {asns[b.ip].holder || asns[b.ip].name}
+                    </div>
+                  )}
+                  <AsnRow ip={b.ip} />
+                </td>
+                <td>
+                  <span className="badge badge-error">Rate limit</span>
+                </td>
+                <td className="dim small">
+                  {b.blocked_until ? `until ${new Date(b.blocked_until).toLocaleString()}` : 'refused'}
+                  {b.blocks ? ` · ${b.blocks}×` : ''}
+                </td>
+                <td className="actions-cell">
+                  <button className="btn ghost tiny" type="button" onClick={() => toggleAsn(b.ip)}>
+                    ASN
+                  </button>
+                  <button className="btn tiny danger" type="button" onClick={() => act(() => api.rateUnblock(b.ip))}>
+                    Unblock
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   )
 }

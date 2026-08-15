@@ -11,7 +11,9 @@ function authHeader() {
   return 'Basic ' + btoa(`${credentials.user}:${credentials.pass}`)
 }
 
-export function setAuthHandler(fn) { onUnauthorized = fn }
+export function setAuthHandler(fn) {
+  onUnauthorized = fn
+}
 export function setCredentials(user, pass) {
   credentials = { user, pass }
   localStorage.setItem('irongrid_user', user)
@@ -67,7 +69,9 @@ export const api = {
   stats: () => request('/api/stats'),
   log: (params = {}) => {
     const q = new URLSearchParams()
-    Object.entries(params).forEach(([k, v]) => { if (v) q.set(k, v) })
+    Object.entries(params).forEach(([k, v]) => {
+      if (v) q.set(k, v)
+    })
     return request('/api/log?' + q.toString())
   },
   clearLog: () => request('/api/log', { method: 'DELETE' }),
@@ -83,33 +87,113 @@ export const api = {
   },
   lists: () => request('/api/lists'),
   catalog: () => request('/api/lists/catalog'),
-  addList: (body) => request('/api/lists', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
-  updateList: (id, body) => request(`/api/lists/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  addList: (body) =>
+    request('/api/lists', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  updateList: (id, body) =>
+    request(`/api/lists/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
   deleteList: (id) => request(`/api/lists/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   refreshLists: () => request('/api/lists/refresh', { method: 'POST' }),
   refreshList: (id) => request(`/api/lists/${encodeURIComponent(id)}/fetch`, { method: 'POST' }),
   getFilterList: (kind) => request(`/api/filter/${kind}`),
-  addFilterEntry: (kind, entry) => request(`/api/filter/${kind}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entry }) }),
-  deleteFilterEntry: (kind, entry) => request('/api/filter/delete', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ kind, entry }) }),
-  checkFilter: (entry) => request('/api/filter/check', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entry }) }),
-  siteCheck: (url) => request('/api/filter/site', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url }) }),
-  toolsResolve: (body) => request('/api/tools/resolve', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
-  toolsMail: (domain) => request('/api/tools/mail', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain }) }),
-  toolsRBL: (ip) => request('/api/tools/rbl', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) }),
-  toolsAXFR: (domain) => request('/api/tools/axfr', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain }) }),
-  toolsSubdomains: (domain) => request('/api/tools/subdomains', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ domain }) }),
+  addFilterEntry: (kind, entry) =>
+    request(`/api/filter/${kind}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entry }),
+    }),
+  deleteFilterEntry: (kind, entry) =>
+    request('/api/filter/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind, entry }),
+    }),
+  checkFilter: (entry) =>
+    request('/api/filter/check', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ entry }),
+    }),
+  siteCheck: (url) =>
+    request('/api/filter/site', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    }),
+  toolsResolve: (body) =>
+    request('/api/tools/resolve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  toolsMail: (domain) =>
+    request('/api/tools/mail', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ domain }),
+    }),
+  toolsRBL: (ip) =>
+    request('/api/tools/rbl', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip }),
+    }),
+  toolsAXFR: (domain) =>
+    request('/api/tools/axfr', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ domain }),
+    }),
+  toolsSubdomains: (domain) =>
+    request('/api/tools/subdomains', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ domain }),
+    }),
   toolsFastest: () => request('/api/tools/fastest', { method: 'POST' }),
   flushCache: () => request('/api/cache/flush', { method: 'POST' }),
   warmCache: () => request('/api/cache/warm', { method: 'POST' }),
   rateBlocked: () => request('/api/rate/blocked'),
-  rateUnblock: (ip) => request('/api/rate/unblock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) }),
+  rateUnblock: (ip) =>
+    request('/api/rate/unblock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip }),
+    }),
   geoStatus: () => request('/api/geo/status'),
   geoRefresh: () => request('/api/geo/refresh', { method: 'POST' }),
   geoBlocked: () => request('/api/geo/blocked'),
-  geoUnblock: (ip) => request('/api/geo/unblock', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) }),
-  geoBlockIP: (ip, prefix) => request('/api/geo/blockip', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip, prefix }) }),
-  abuseReport: (ip) => request('/api/abuse/report', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) }),
-  abuseASN: (ip) => request('/api/abuse/asn', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ip }) }),
+  geoUnblock: (ip) =>
+    request('/api/geo/unblock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip }),
+    }),
+  geoBlockIP: (ip, prefix) =>
+    request('/api/geo/blockip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip, prefix }),
+    }),
+  abuseReport: (ip) =>
+    request('/api/abuse/report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip }),
+    }),
+  abuseASN: (ip) =>
+    request('/api/abuse/asn', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip }),
+    }),
   abuseExport: async () => {
     // Raw fetch so we can return a blob for the CSV download (auth header is
     // attached like request(); after a reload the session cookie covers it).
@@ -125,12 +209,22 @@ export const api = {
     return resp.blob()
   },
   tunnelStatus: () => request('/api/tunnel/status'),
-  tunnelStart: (body) => request('/api/tunnel/start', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  tunnelStart: (body) =>
+    request('/api/tunnel/start', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
   tunnelStop: () => request('/api/tunnel/stop', { method: 'POST' }),
   tunnelLog: () => request('/api/tunnel/log'),
   dhcpLeases: () => request('/api/dhcp/leases'),
   config: () => request('/api/config'),
-  saveConfig: (cfg) => request('/api/config', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) }),
+  saveConfig: (cfg) =>
+    request('/api/config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(cfg),
+    }),
   reloadConfig: () => request('/api/config/reload', { method: 'POST' }),
   configBackup: async (passphrase) => {
     // Raw fetch so we can return a blob for the zip download (auth header is
@@ -172,8 +266,18 @@ export const api = {
   updateChangelog: () => request('/api/update/changelog'),
   updateInstall: () => request('/api/update/install', { method: 'POST' }),
   tlsStatus: () => request('/api/tls'),
-  tlsGenerate: (body) => request('/api/tls/generate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
-  tlsUpload: (body) => request('/api/tls/upload', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }),
+  tlsGenerate: (body) =>
+    request('/api/tls/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  tlsUpload: (body) =>
+    request('/api/tls/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
   tlsAcmeIssue: () => request('/api/tls/acme/issue', { method: 'POST' }),
   tlsCertDownload: async () => {
     // Raw fetch so we can return a blob (the auth header is attached the
@@ -190,4 +294,3 @@ export const api = {
     return resp.blob()
   },
 }
-

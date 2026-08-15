@@ -5,6 +5,41 @@ import { renderMarkdown } from '../markdown'
 const DISMISS_KEY = 'irongrid_dismissed_update'
 const INSTALL_CMD = 'curl -fsSL https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.sh | bash'
 
+// Stroke-only SVG icons (the app's icon standard — see App.jsx's navSvg)
+// replacing the ⬆/⬇ emoji that can render in color on some platforms.
+const UpIcon = (
+  <svg
+    width="12"
+    height="12"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2.2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M12 19V5" />
+    <polyline points="5 12 12 5 19 12" />
+  </svg>
+)
+const DownloadIcon = (
+  <svg
+    width="12"
+    height="12"
+    viewBox="0 0 24 24"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth="2.2"
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M12 5v14" />
+    <polyline points="19 12 12 19 5 12" />
+  </svg>
+)
+
 export default function UpdateChecker({ onNavigate }) {
   const [info, setInfo] = useState(null)
   const [loading, setLoading] = useState(false)
@@ -32,7 +67,7 @@ export default function UpdateChecker({ onNavigate }) {
         setLoading(false)
       }
     },
-    [loading]
+    [loading],
   )
 
   // Auto-check once shortly after the dashboard loads. The guard lives
@@ -115,7 +150,8 @@ export default function UpdateChecker({ onNavigate }) {
         disabled={loading}
         title={info?.error ? `Update check failed: ${info.error}` : 'Check for updates'}
       >
-        ⬆ {loading ? 'Checking…' : 'Updates'}
+        {UpIcon}
+        {loading ? 'Checking…' : 'Updates'}
         {badge && <span className="updater-dot" />}
       </button>
 
@@ -129,7 +165,9 @@ export default function UpdateChecker({ onNavigate }) {
                   <span className="chip">{info.current_version}</span>
                   <span className="modal-arrow">→</span>
                   <span className="chip chip-new">{info.latest_version}</span>
-                  {info.published_at && <span className="modal-date">released {new Date(info.published_at).toLocaleDateString()}</span>}
+                  {info.published_at && (
+                    <span className="modal-date">released {new Date(info.published_at).toLocaleDateString()}</span>
+                  )}
                 </div>
               </div>
               <button className="modal-x" onClick={() => setShow(false)} aria-label="Close">
@@ -154,11 +192,19 @@ export default function UpdateChecker({ onNavigate }) {
             <div className="modal-foot">
               {info.download_url ? (
                 <button className="btn primary" onClick={install} disabled={installing !== 'idle'}>
-                  {installing === 'downloading'
-                    ? '⬇ Downloading…'
-                    : installing === 'restarting'
-                      ? '⟳ Restarting…'
-                      : `⬇ Install ${info.latest_version}`}
+                  {installing === 'downloading' ? (
+                    <>
+                      {DownloadIcon}
+                      Downloading…
+                    </>
+                  ) : installing === 'restarting' ? (
+                    '⟳ Restarting…'
+                  ) : (
+                    <>
+                      {DownloadIcon}
+                      Install {info.latest_version}
+                    </>
+                  )}
                 </button>
               ) : (
                 info.release_url && (
