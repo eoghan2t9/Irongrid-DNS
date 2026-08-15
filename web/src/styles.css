@@ -1023,8 +1023,10 @@ select.input {
 
 /* Sub-headings that group the fields inside a Settings card, so a dense
    card (e.g. Server listeners) reads as labelled sections instead of one
-   undifferentiated grid. */
-.field-group {
+   undifferentiated grid. The .card . qualifier outranks the generic
+   .card h4 { margin: 0 } rule (0,2,0 vs 0,1,1) so the section spacing
+   survives — without it the headings sit flush against the fields. */
+.card .field-group {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.08em;
@@ -2510,6 +2512,23 @@ code {
   }
   .form-grid {
     grid-template-columns: 1fr;
+    gap: 14px;
+  }
+  /* The 17 settings jump-links wrap into a tall button wall on narrow
+     screens — keep them on one swipeable row instead. */
+  .settings-jump {
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    padding-bottom: 2px;
+  }
+  .settings-jump::-webkit-scrollbar {
+    display: none;
+  }
+  .settings-jump .btn {
+    flex-shrink: 0;
+    white-space: nowrap;
   }
   .table-card {
     padding: 6px 8px 10px;
