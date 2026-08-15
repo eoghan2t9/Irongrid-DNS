@@ -9,6 +9,8 @@
 # Frontend build artifacts (built in CI / make web; placeholder dist/index.html is committed)
 web/node_modules/
 web/dist/assets/
+web/dist/favicon.svg
+web/dist/apple-touch-icon.png
 
 # Agent memory (local-only; never committed — loaded at session start)
 /AGENTS.md

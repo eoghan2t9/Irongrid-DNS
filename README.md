@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="assets/banner.svg" width="100%" alt="Irongrid DNS — fast, private, self-hosted, ad-blocking DNS server">
+  <img src="assets/logo.svg" width="320" alt="Irongrid DNS">
 </p>
 
 <p align="center">
@@ -25,11 +25,13 @@
   <a href="#development"><img src="https://img.shields.io/badge/-Development-d99a1b?style=for-the-badge" alt="Development"></a>
 </p>
 
-# Irongrid DNS
-
 A fast, self-hosted, ad-blocking DNS server written in pure Go — a single
 self-contained binary with a modern web dashboard. Built to replace slow
 commercial ad-blocking DNS with sub-millisecond local responses.
+
+<p align="center">
+  <img src="assets/banner.svg" width="100%" alt="Irongrid DNS — fast, private, self-hosted, ad-blocking DNS server">
+</p>
 
 ## Highlights
 
