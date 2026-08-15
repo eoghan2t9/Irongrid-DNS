@@ -482,6 +482,15 @@ body {
 .menu-btn:active {
   opacity: 0.8;
 }
+/* Brand mark in the topbar, mobile only (the sidebar is off-canvas on
+   narrow screens, so the logo keeps the app branded with the menu closed). */
+.topbar-logo {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--cyan);
+  flex-shrink: 0;
+}
 .sidebar-backdrop {
   display: none;
 }
@@ -2442,6 +2451,9 @@ code {
     grid-template-columns: 1fr;
   }
   .menu-btn {
+    display: inline-flex;
+  }
+  .topbar-logo {
     display: inline-flex;
   }
   .sidebar {

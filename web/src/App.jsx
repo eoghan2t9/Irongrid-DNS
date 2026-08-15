@@ -585,6 +585,12 @@ export default function App() {
             <button className="menu-btn" onClick={() => setNavOpen(true)} aria-label="Open navigation">
               ☰
             </button>
+            {/* The brand mark next to the hamburger, mobile only: the sidebar
+                (and its brand) is off-canvas on narrow screens, so the logo
+                keeps the app branded even with the menu closed. */}
+            <span className="topbar-logo" aria-hidden="true">
+              <Logo size={17} />
+            </span>
             <div>
               <div className="topbar-title">{NAV.find((n) => n.id === view)?.label}</div>
               <div className="topbar-sub">{NAV.find((n) => n.id === view)?.desc}</div>

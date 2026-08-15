@@ -1,5 +1,10 @@
 <p align="center">
-  <img src="assets/logo.svg" width="320" alt="Irongrid DNS">
+  <!-- The navy wordmark reads on GitHub's light theme; the light variant is
+       swapped in on dark themes via the standard prefers-color-scheme trick. -->
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/logo-light.svg" />
+    <img src="assets/logo.svg" width="320" alt="Irongrid DNS" />
+  </picture>
 </p>
 
 <p align="center">
