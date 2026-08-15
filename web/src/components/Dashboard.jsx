@@ -844,9 +844,11 @@ function Sparkline({ data }) {
           </g>
         ))}
         <path className="spark-blocked" d={area(blockedLine)} style={{ fill: `url(#${uid}-blocked)` }} />
-        <path className="spark-blocked-line" d={blockedLine} />
+        {/* pathLength="1" normalises the path length so the CSS draw-in can
+            use a constant dash length for any data shape */}
+        <path className="spark-blocked-line" d={blockedLine} pathLength={1} />
         <path className="spark-total" d={area(totalLine)} style={{ fill: `url(#${uid}-total)` }} />
-        <path className="spark-total-line" d={totalLine} />
+        <path className="spark-total-line" d={totalLine} pathLength={1} />
       </svg>
       <div className="spark-legend">
         <span>

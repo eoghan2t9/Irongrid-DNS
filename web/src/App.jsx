@@ -601,7 +601,9 @@ export default function App() {
               title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
               aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
             >
-              {theme === 'dark' ? SunIcon : MoonIcon}
+              <span key={theme} className="theme-icon">
+                {theme === 'dark' ? SunIcon : MoonIcon}
+              </span>
             </button>
             <button
               className="btn ghost small palette-trigger"
@@ -1012,7 +1014,9 @@ function Login({ onLogin, notice, theme, onToggleTheme }) {
         title={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
         aria-label={theme === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
       >
-        {theme === 'dark' ? SunIcon : MoonIcon}
+        <span key={theme} className="theme-icon">
+          {theme === 'dark' ? SunIcon : MoonIcon}
+        </span>
       </button>
       <form className="login-card" onSubmit={submit}>
         <div className="login-logo">
