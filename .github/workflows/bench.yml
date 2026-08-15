@@ -9,6 +9,12 @@ on:
   pull_request:
   workflow_dispatch:
 
+# Only the newest bench run per PR matters (the numbers are informational) —
+# cancel any superseded run instead of queueing it behind the latest.
+concurrency:
+  group: bench-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 

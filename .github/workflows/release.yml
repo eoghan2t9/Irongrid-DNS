@@ -6,18 +6,27 @@ on:
       - 'v*'
   workflow_dispatch:
 
+concurrency:
+  group: release-${{ github.ref }}
+  # A re-push of the same tag / a manual re-run supersedes the previous run;
+  # different tags are different groups, so they never cancel each other.
+  cancel-in-progress: true
+
 permissions:
   contents: write
   packages: write
+  actions: write # artifact upload/download between jobs
 
 jobs:
-  release:
+  # ---- frontend: lint, test and build the React dashboard, then hand the
+  # fresh web/dist to the release job as an artifact. Runs in parallel with
+  # the Go checks — nothing there needs a rebuilt frontend (the committed
+  # web/dist/index.html placeholder satisfies go:embed all:dist).
+  frontend:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Set up Node (frontend)
         uses: actions/setup-node@v4
@@ -33,6 +42,25 @@ jobs:
           npm run lint
           npm test
           npm run build
+
+      - name: Upload web/dist for the release job
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+          if-no-files-found: error
+
+  # ---- checks: golangci-lint, govulncheck, vet and the race tests.
+  # Deliberately NOT a dependency of the release job — the release publishes
+  # as soon as the binaries cross-compile and smoke-test clean, while these
+  # run in parallel and report on this job. A tag push is no longer held
+  # hostage by the slowest checks; fix anything they flag in the next
+  # release (they still run on every release, so nothing silently regresses).
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -52,7 +80,40 @@ jobs:
 
       - name: Scan for known vulnerabilities (govulncheck)
         run: |
-          go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+          # Pinned version so the tool itself is deterministic and the
+          # downloaded module reuses the Go module cache instead of
+          # re-resolving @latest on every run.
+          go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+
+      - name: Verify tests (race detector, incl. PTY-driven installer E2E)
+        run: |
+          go vet ./...
+          go test -race ./...
+
+  # ---- release: cross-compile every platform with the fresh web/dist,
+  # smoke-test, write the changelog, publish the GitHub release, then build
+  # and push the GHCR image. Gated on the frontend build only.
+  release:
+    needs: frontend
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history for the changelog's git-log ranges.
+          fetch-depth: 0
+
+      - name: Download fresh web/dist
+        uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: web/dist
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.6'
+          cache: true
 
       - name: Derive version metadata
         id: meta
@@ -93,11 +154,6 @@ jobs:
               -o "dist/${name}" ./cmd/irongrid
           done
           cd dist && sha256sum irongrid-* > SHA256SUMS.txt
-
-      - name: Verify tests (race detector, incl. PTY-driven installer E2E)
-        run: |
-          go vet ./...
-          go test -race ./...
 
       - name: Smoke-test the linux binary
         run: |
