@@ -914,6 +914,11 @@ type geoBlockPayload struct {
 	// Off by default — spoofed UDP could otherwise be used to block
 	// innocent victims.
 	TrustUDP bool `json:"trust_udp"`
+	// HoneypotUDPBlock is the bounded UDP-honeypot block window (duration
+	// string, "" = off): the source of a plain-UDP honeypot hit is blocked
+	// via the rate limiter for this long instead of earning the permanent
+	// banner/firewall block trust_udp grants.
+	HoneypotUDPBlock string `json:"honeypot_udp_block"`
 }
 
 // abusePayload holds the AbuseIPDB API key used for one-click reporting of
@@ -1191,8 +1196,9 @@ func payloadFromConfig(c *config.Config) configPayload {
 		IPs:        c.GeoBlock.IPs,
 		Honeypots:  c.GeoBlock.Honeypots,
 		BaseURL:    c.GeoBlock.BaseURL,
-		AutoUpdate: durationOrEmpty(c.GeoBlock.AutoUpdate),
-		TrustUDP:   c.GeoBlock.TrustUDP,
+		AutoUpdate:       durationOrEmpty(c.GeoBlock.AutoUpdate),
+		TrustUDP:         c.GeoBlock.TrustUDP,
+		HoneypotUDPBlock: durationOrEmpty(c.GeoBlock.HoneypotUDPBlock),
 	}
 	p.Abuse = abusePayload{AbuseIPDBKey: c.Abuse.AbuseIPDBKey}
 	p.DNSSEC = dnssecPayload{Enabled: c.DNSSEC.Enabled, RequireAD: c.DNSSEC.RequireAD}
@@ -1270,6 +1276,10 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	geoAutoUpdate, err := parseDur(p.GeoBlock.AutoUpdate)
 	if err != nil {
 		return nil, fmt.Errorf("geo_block.auto_update: %w", err)
+	}
+	geoUDPBlock, err := parseDur(p.GeoBlock.HoneypotUDPBlock)
+	if err != nil {
+		return nil, fmt.Errorf("geo_block.honeypot_udp_block: %w", err)
 	}
 	leaseTime, err := parseDur(p.DHCP.LeaseTime)
 	if err != nil {
@@ -1402,9 +1412,10 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			Allowlist:  p.GeoBlock.Allowlist,
 			IPs:        p.GeoBlock.IPs,
 			Honeypots:  p.GeoBlock.Honeypots,
-			BaseURL:    p.GeoBlock.BaseURL,
-			AutoUpdate: geoAutoUpdate,
-			TrustUDP:   p.GeoBlock.TrustUDP,
+			BaseURL:          p.GeoBlock.BaseURL,
+			AutoUpdate:       geoAutoUpdate,
+			TrustUDP:         p.GeoBlock.TrustUDP,
+			HoneypotUDPBlock: geoUDPBlock,
 		},
 		Abuse: config.AbuseConfig{
 			AbuseIPDBKey: p.Abuse.AbuseIPDBKey,

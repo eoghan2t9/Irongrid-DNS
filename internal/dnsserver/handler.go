@@ -157,7 +157,15 @@ type handlerSettings struct {
 	// so enabling this lets a spoofing attacker permanently block an
 	// innocent victim; only meaningful on a trusted network where clients
 	// are real (the flag does nothing unless an IP banner is installed).
-	TrustUDP        bool
+	TrustUDP bool
+	// HoneypotUDPBlock, when > 0, is the bounded middle ground for UDP
+	// honeypot hits: the source is auto-blocked via the rate limiter for
+	// this window (dropped at the DNS layer, expiring automatically,
+	// visible and unblockable on the dashboard) instead of earning the
+	// permanent banner/firewall block that trust_udp grants. A spoofed
+	// packet can then only block a victim for the window, never forever.
+	// Does nothing unless a rate limiter is installed.
+	HoneypotUDPBlock time.Duration
 	DNSSECEnabled   bool
 	DNSSECRequireAD bool
 	// CNAMECloakingProtection checks every CNAME hop in an upstream answer
@@ -398,6 +406,14 @@ func (h *Handler) SetTrustUDP(on bool) {
 	h.swapSettings(&ns, nil)
 }
 
+// SetHoneypotUDPBlock hot-swaps the bounded UDP-honeypot block window (see
+// HoneypotUDPBlock's doc comment on the struct); <= 0 disables it.
+func (h *Handler) SetHoneypotUDPBlock(d time.Duration) {
+	ns := *h.settings.Load()
+	ns.HoneypotUDPBlock = d
+	h.swapSettings(&ns, nil)
+}
+
 // CurrentIPBanner returns the active banner (nil when disabled), for the
 // API's blocked-list/unblock endpoints.
 func (h *Handler) CurrentIPBanner() *geoip.Banner {
@@ -472,6 +488,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	geo := s.Geo
 	ipbanner := s.IPBanner
 	trustUDP := s.TrustUDP
+	honeypotUDPBlock := s.HoneypotUDPBlock
 	dnssecEnabled := s.DNSSECEnabled
 	dnssecRequireAD := s.DNSSECRequireAD
 	cnameCloakingEnabled := s.CNAMECloakingProtection
@@ -575,24 +592,40 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	// transport (TCP/DoT/DoH/DoQ), which required a real handshake, so
 	// the source address is genuine. A plain-UDP source can be trivially
 	// spoofed — trusting it would let anyone permanently block an
-	// innocent victim with a single spoofed packet — and an unrecognised
-	// transport is treated the same way. Anything else is refused but
-	// never auto-blocked, unless the operator explicitly opted into
-	// trusting UDP sources (geo_block.trust_udp) on a network where
-	// clients are real: the same trust model the rate limiter uses for
-	// its silent-drop/REFUSED split.
+	// innocent victim with a single spoofed packet — so UDP honeypot hits
+	// are never answered at all (replying to a spoofed packet is pure
+	// amplification, the same rationale behind the rate limiter's UDP
+	// silent drop) and never earn a permanent block. The operator has two
+	// opt-ins that give a UDP source teeth: trust_udp (permanent block,
+	// trusted networks only) and honeypot_udp_block (a bounded window via
+	// the rate limiter, so a spoofed packet can only block a victim until
+	// the window elapses).
 	if ipbanner != nil && ipbanner.LookupHoneypot(qname) {
-		// Connection-oriented transports (a real handshake) always auto-block;
-		// plain UDP only when the operator opted in via trust_udp.
 		trusted := proto == "tcp" || proto == "dot" || proto == "doh" || proto == "doq"
-		if client != "" && (trusted || trustUDP) {
-			if err := ipbanner.Block(client); err != nil {
-				//nolint:gosec // G706: client is a socket-derived IP, no control chars
-				log.Printf("[geo] honeypot: blocking client %s: %v", client, err)
+		if client != "" {
+			switch {
+			case trusted || trustUDP:
+				// Permanent block (persisted + firewall drop): a real
+				// handshake proves the source, and trust_udp is the
+				// operator's explicit opt-in for trusted networks.
+				if err := ipbanner.Block(client); err != nil {
+					//nolint:gosec // G706: client is a socket-derived IP, no control chars
+					log.Printf("[geo] honeypot: blocking client %s: %v", client, err)
+				}
+			case honeypotUDPBlock > 0 && rateLimiter != nil:
+				// Bounded block: the source is dropped at the DNS layer
+				// for the window, then freed — surfaced on the dashboard's
+				// blocked-clients list and liftable early via Unblock.
+				rateLimiter.ForceBlock(client, honeypotUDPBlock)
 			}
 		}
 		h.Stats.Blocked.Add(1)
 		h.Stats.Honeypot.Add(1)
+		if proto == "udp" {
+			// Silent drop: answering a spoofed UDP honeypot packet would
+			// amplify it, and a flooder deserves no feedback.
+			return
+		}
 		refused := getMsg()
 		refused.SetReply(r)
 		refused.Rcode = dns.RcodeRefused

@@ -336,6 +336,29 @@ func TestValidateGeoBlockIPsAndHoneypots(t *testing.T) {
 	}
 }
 
+func TestValidateGeoBlockHoneypotUDPBlock(t *testing.T) {
+	c := validBase()
+	c.GeoBlock = GeoBlockConfig{Enabled: true, Countries: []string{"RU"}, HoneypotUDPBlock: 10 * time.Minute}
+	c.RateLimit = RateLimitConfig{Enabled: true, QPS: 10, Burst: 20}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid honeypot_udp_block config rejected: %v", err)
+	}
+
+	// The bounded UDP block runs on the rate limiter — without it the knob
+	// would silently never fire.
+	c = validBase()
+	c.GeoBlock = GeoBlockConfig{Enabled: true, Countries: []string{"RU"}, HoneypotUDPBlock: 10 * time.Minute}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "rate_limit.enabled") {
+		t.Fatalf("err = %v, want honeypot_udp_block-requires-rate-limit error", err)
+	}
+
+	c = validBase()
+	c.GeoBlock = GeoBlockConfig{Enabled: true, Countries: []string{"RU"}, HoneypotUDPBlock: -time.Minute}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "honeypot_udp_block") {
+		t.Fatalf("err = %v, want honeypot_udp_block >= 0 error", err)
+	}
+}
+
 func TestGeoAutoUpdateDefault(t *testing.T) {
 	if d := Default().GeoBlock.AutoUpdate; d != 168*time.Hour {
 		t.Errorf("geo_block.auto_update default = %v, want 168h (weekly)", d)

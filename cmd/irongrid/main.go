@@ -402,6 +402,10 @@ func main() {
 		// Opt-in: let plain-UDP honeypot hits auto-block their source too
 		// (off by default — spoofed UDP must not be able to block victims).
 		handler.SetTrustUDP(g.TrustUDP)
+		// Bounded alternative to trust_udp: auto-block the source of a
+		// plain-UDP honeypot hit for this window via the rate limiter
+		// (expires on its own, never a permanent firewall drop).
+		handler.SetHoneypotUDPBlock(g.HoneypotUDPBlock)
 		banner.OnBlock = func(ip string) {
 			if err := fwMgr.AddIP(ip); err != nil {
 				log.Printf("[firewall] add blocked client %s: %v", ip, err)

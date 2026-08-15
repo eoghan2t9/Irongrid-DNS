@@ -233,6 +233,14 @@ type GeoBlockConfig struct {
 	// innocent victim with a single packet. Only turn it on for a trusted
 	// network where client addresses are genuine.
 	TrustUDP bool `yaml:"trust_udp"`
+	// HoneypotUDPBlock, when > 0, is the bounded middle ground for UDP
+	// honeypot hits: the source is auto-blocked via the rate limiter for
+	// this window (dropped at the DNS layer, expiring automatically,
+	// unblockable on the dashboard) instead of earning the permanent
+	// banner/firewall block trust_udp grants. A spoofed packet can then
+	// only block a victim for the window, never forever. Requires
+	// rate_limit.enabled (the block runs on the rate limiter); 0 disables.
+	HoneypotUDPBlock time.Duration `yaml:"honeypot_udp_block"`
 	// BaseURL overrides where per-country CIDR lists are fetched from; the
 	// lowercase country code and file are appended as
 	// "<cc>/ipv4-aggregated.txt" and "<cc>/ipv6-aggregated.txt" (the
@@ -940,6 +948,15 @@ func (c *Config) validate() error {
 	}
 	if c.GeoBlock.AutoUpdate < 0 {
 		return fmt.Errorf("geo_block.auto_update must be >= 0 (0 disables automatic refreshes)")
+	}
+	if c.GeoBlock.HoneypotUDPBlock < 0 {
+		return fmt.Errorf("geo_block.honeypot_udp_block must be >= 0 (0 disables the bounded UDP honeypot block)")
+	}
+	// The bounded UDP block runs on the rate limiter — without it there is
+	// nowhere to park the temporary block, so the knob would silently never
+	// fire (mirrors the rate_limit.auto_block coupling above).
+	if c.GeoBlock.HoneypotUDPBlock > 0 && !c.RateLimit.Enabled {
+		return fmt.Errorf("geo_block.honeypot_udp_block requires rate_limit.enabled (the bounded UDP honeypot block runs on the rate limiter)")
 	}
 	return nil
 }

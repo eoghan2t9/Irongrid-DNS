@@ -792,8 +792,17 @@ export default function Settings({ onSessionInvalidated }) {
           {toggle('Enable geo blocking', 'geo_block.enabled')}
           {textarea('Blocked countries (ISO 3166-1 alpha-2)', 'geo_block.countries', 'one per line, e.g. RU, CN, KP')}
           {textarea('Blocked client IPs / CIDRs', 'geo_block.ips', 'always refused regardless of country — e.g. known proxy-exit ranges like 38.11.0.0/17; feeds DNS and the host firewall')}
-          {textarea('Honeypot domains', 'geo_block.honeypots', 'one per line — a trap matches the domain AND every subdomain under it (DDoS floods randomise the first label), so any client that queries it over TCP/DoT/DoH/DoQ is blocked permanently (persisted, dropped at the firewall) until you unblock it below; spoofable UDP queries are refused but never auto-block; trap traffic is not written to the query log')}
-          {toggle('Trust UDP honeypot hits (auto-block UDP sources)', 'geo_block.trust_udp')}
+          {textarea('Honeypot domains', 'geo_block.honeypots', 'one per line — a trap matches the domain AND every subdomain under it (DDoS floods randomise the first label); a client that queries it over TCP/DoT/DoH/DoQ is blocked permanently (persisted, dropped at the firewall) until you unblock it below; plain-UDP hits are silently dropped (never answered — replying would amplify a spoofed flood) and never auto-block unless you enable the bounded UDP block or trust_udp below; trap traffic is not written to the query log')}
+          {toggle('Trust UDP honeypot hits (permanent auto-block)', 'geo_block.trust_udp')}
+          {field('Auto-block UDP honeypot sources (bounded)', 'drop plain-UDP honeypot traffic and block its source for this window via the rate limiter — the middle ground between never blocking UDP (a flood never stops) and trust_udp (permanent blocks a spoofed source could abuse). Needs rate limiting enabled. Blocked sources show on the dashboard with a countdown and can be unblocked early.', (
+            <select className="input" value={deepGet('geo_block.honeypot_udp_block', '') || ''} onChange={(e) => set('geo_block.honeypot_udp_block', e.target.value)}>
+              <option value="">Disabled</option>
+              <option value="5m">5 minutes</option>
+              <option value="10m">10 minutes</option>
+              <option value="30m">30 minutes</option>
+              <option value="1h">1 hour</option>
+            </select>
+          ))}
           {textarea('Allowlist (IPs / CIDRs)', 'geo_block.allowlist', 'clients that are never geo-blocked')}
           {text('Data source URL (optional)', 'geo_block.base_url', 'defaults to ipverse/rir-ip; appends &lt;cc&gt;/ipv4-aggregated.txt and &lt;cc&gt;/ipv6-aggregated.txt (lowercase codes)')}
           {field('Auto-refresh country data', 'how often the per-country CIDR lists re-fetch themselves', (

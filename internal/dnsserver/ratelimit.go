@@ -117,35 +117,7 @@ func (rl *RateLimiter) Allow(client string) bool {
 	defer s.mu.Unlock()
 	b, ok := s.buckets[client]
 	if !ok {
-		if len(s.buckets) >= rlMaxPerShard {
-			// Enforce the cap strictly: idle buckets go first, and if
-			// everyone is still active (a spoofed-IP flood keeps every
-			// lastSeen fresh), drop least-recently-seen buckets until the
-			// shard is back under the cap. The map size must never be
-			// attacker-controlled — that would turn the defense itself into
-			// a memory-exhaustion vector. (The trade-off: a blocked bucket
-			// can be evicted under extreme pressure and its cooldown
-			// forgotten — acceptable for a blunt abuse defense, and the
-			// client is re-blocked on the next burst of violations.)
-			for k, e := range s.buckets {
-				if now.Sub(e.lastSeen) > rlIdleEvict {
-					delete(s.buckets, k)
-				}
-			}
-			for len(s.buckets) >= rlMaxPerShard {
-				var oldest string
-				var oldestSeen time.Time
-				for k, e := range s.buckets {
-					if oldest == "" || e.lastSeen.Before(oldestSeen) {
-						oldest, oldestSeen = k, e.lastSeen
-					}
-				}
-				if oldest == "" {
-					break
-				}
-				delete(s.buckets, oldest)
-			}
-		}
+		evictLocked(s, now)
 		s.buckets[client] = &rlBucket{tokens: rl.burst - 1, lastSeen: now, queries: 1, firstSeen: now}
 		return true
 	}
@@ -173,6 +145,63 @@ func (rl *RateLimiter) Allow(client string) bool {
 	}
 	b.tokens--
 	return true
+}
+
+// evictLocked keeps a shard's bucket map under rlMaxPerShard: idle buckets
+// go first, and if everyone is still active (a spoofed-IP flood keeps every
+// lastSeen fresh), least-recently-seen buckets are dropped until the shard
+// is back under the cap. The map size must never be attacker-controlled —
+// that would turn the defense itself into a memory-exhaustion vector. (The
+// trade-off: a blocked bucket can be evicted under extreme pressure and its
+// cooldown forgotten — acceptable for a blunt abuse defense, and the client
+// is re-blocked on the next burst of violations.) Caller holds s.mu.
+func evictLocked(s *rlShard, now time.Time) {
+	if len(s.buckets) < rlMaxPerShard {
+		return
+	}
+	for k, e := range s.buckets {
+		if now.Sub(e.lastSeen) > rlIdleEvict {
+			delete(s.buckets, k)
+		}
+	}
+	for len(s.buckets) >= rlMaxPerShard {
+		var oldest string
+		var oldestSeen time.Time
+		for k, e := range s.buckets {
+			if oldest == "" || e.lastSeen.Before(oldestSeen) {
+				oldest, oldestSeen = k, e.lastSeen
+			}
+		}
+		delete(s.buckets, oldest)
+	}
+}
+
+// ForceBlock puts client under an auto-block for d without waiting for
+// violations to accumulate — the DNS handler uses it when a honeypot hit
+// over plain UDP (a spoofable source that must never earn a permanent
+// firewall drop) needs the source dropped at the DNS layer for a bounded
+// window. The block is temporary by construction: it expires after d like a
+// violation-triggered block, is visible in BlockedList, and can be lifted
+// early with Unblock.
+func (rl *RateLimiter) ForceBlock(client string, d time.Duration) {
+	if client == "" || d <= 0 {
+		return
+	}
+	s := rl.shard(client)
+	now := time.Now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b, ok := s.buckets[client]
+	if !ok {
+		evictLocked(s, now)
+		b = &rlBucket{lastSeen: now, firstSeen: now}
+		s.buckets[client] = b
+	}
+	b.blockedUntil = now.Add(d)
+	b.violations = 0
+	b.firstViol = time.Time{}
+	b.blocks++
+	b.lastSeen = now
 }
 
 // recordViolationLocked counts a rate-limit rejection toward the auto-block

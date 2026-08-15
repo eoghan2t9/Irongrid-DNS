@@ -896,7 +896,8 @@ func TestHandlerGeoBlockedClientRefusedEveryTransport(t *testing.T) {
 // refused on every domain. Auto-blocking only fires over connection-oriented
 // transports: a spoofable UDP source must never be able to permanently block
 // an innocent victim (see the serve() comment), so UDP honeypot queries are
-// refused but leave the client unblocked.
+// silently dropped (never answered — replying would amplify a spoofed
+// packet) and leave the client unblocked.
 func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 	addr := startUDPTestServer(t, "1.1.1.1", 0)
 	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
@@ -917,13 +918,14 @@ func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 	if blocked.msg == nil || blocked.msg.Rcode != dns.RcodeRefused {
 		t.Fatalf("banner-blocked client: expected REFUSED, got %v", blocked.msg)
 	}
-	// A honeypot query over UDP is refused but must NOT auto-block: UDP
+	// A honeypot query over UDP is silently dropped (no answer — replying
+	// to a spoofable source would amplify it) and must NOT auto-block: UDP
 	// sources can be spoofed, so trusting one would let an attacker block an
 	// innocent victim with a single spoofed packet.
 	udpClient := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
 	h.ServeDNS(udpClient, q("trap.example.com."))
-	if udpClient.msg == nil || udpClient.msg.Rcode != dns.RcodeRefused {
-		t.Fatalf("UDP honeypot query: expected REFUSED, got %v", udpClient.msg)
+	if udpClient.msg != nil {
+		t.Fatalf("UDP honeypot query: expected a silent drop, got %v", udpClient.msg)
 	}
 	if len(autoBlocked) != 0 {
 		t.Fatalf("UDP honeypot query auto-blocked the client: %v", autoBlocked)
@@ -955,11 +957,12 @@ func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 	if len(autoBlocked) != 2 || autoBlocked[1] != "198.51.100.42" {
 		t.Fatalf("OnBlock fired %v, want [203.0.113.9 198.51.100.42]", autoBlocked)
 	}
-	// Subdomain over UDP is refused but never auto-blocks (spoofable source).
+	// Subdomain over UDP is silently dropped but never auto-blocks
+	// (spoofable source).
 	udpSub := &fakeWriter{ip: net.ParseIP("198.51.100.99")}
 	h.ServeDNS(udpSub, q("rand-7e1a.trap.example.com."))
-	if udpSub.msg == nil || udpSub.msg.Rcode != dns.RcodeRefused {
-		t.Fatalf("UDP subdomain honeypot query: expected REFUSED, got %v", udpSub.msg)
+	if udpSub.msg != nil {
+		t.Fatalf("UDP subdomain honeypot query: expected a silent drop, got %v", udpSub.msg)
 	}
 	if len(autoBlocked) != 2 {
 		t.Fatalf("UDP subdomain honeypot query auto-blocked the client: %v", autoBlocked)
@@ -1046,13 +1049,13 @@ func TestHandlerHoneypotNotLogged(t *testing.T) {
 		m.SetQuestion(name, dns.TypeA)
 		return m
 	}
-	// Honeypot hits (apex over UDP, random subdomain over UDP) are refused
-	// and must not reach the log.
+	// Honeypot hits (apex over UDP, random subdomain over UDP) are silently
+	// dropped and must not reach the log.
 	for _, name := range []string{"trap.example.com.", "rand-9f2a.trap.example.com."} {
 		fw := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
 		h.ServeDNS(fw, q(name))
-		if fw.msg == nil || fw.msg.Rcode != dns.RcodeRefused {
-			t.Fatalf("honeypot query %s: expected REFUSED, got %v", name, fw.msg)
+		if fw.msg != nil {
+			t.Fatalf("honeypot query %s: expected a silent drop, got %v", name, fw.msg)
 		}
 	}
 	// A normal query is served and logged as usual.
@@ -1081,10 +1084,10 @@ func TestHandlerHoneypotNotLogged(t *testing.T) {
 }
 
 // TestHandlerHoneypotTrustUDP verifies the opt-in trust_udp flag: normally a
-// plain-UDP honeypot hit is refused but never auto-blocks its source (UDP can
-// be spoofed, so trusting it would let an attacker block an innocent victim).
-// With TrustUDP set, the UDP source is auto-blocked too — an operator choice
-// for trusted networks.
+// plain-UDP honeypot hit is silently dropped and never auto-blocks its source
+// (UDP can be spoofed, so trusting it would let an attacker block an innocent
+// victim). With TrustUDP set, the UDP source is auto-blocked too (permanently
+// — persisted + firewall drop) — an operator choice for trusted networks.
 func TestHandlerHoneypotTrustUDP(t *testing.T) {
 	addr := startUDPTestServer(t, "1.1.1.1", 0)
 	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
@@ -1101,8 +1104,8 @@ func TestHandlerHoneypotTrustUDP(t *testing.T) {
 	}
 	fw := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
 	h.ServeDNS(fw, q("trap.example.com."))
-	if fw.msg == nil || fw.msg.Rcode != dns.RcodeRefused {
-		t.Fatalf("UDP honeypot query with trust_udp: expected REFUSED, got %v", fw.msg)
+	if fw.msg != nil {
+		t.Fatalf("UDP honeypot query with trust_udp: expected a silent drop, got %v", fw.msg)
 	}
 	if len(autoBlocked) != 1 || autoBlocked[0] != "203.0.113.9" {
 		t.Fatalf("trust_udp OnBlock fired %v, want [203.0.113.9]", autoBlocked)
@@ -1112,6 +1115,80 @@ func TestHandlerHoneypotTrustUDP(t *testing.T) {
 	h.ServeDNS(again, q("example.com."))
 	if again.msg == nil || again.msg.Rcode != dns.RcodeRefused {
 		t.Fatalf("trust_udp auto-blocked client on a normal domain: expected REFUSED, got %v", again.msg)
+	}
+}
+
+// TestHandlerHoneypotUDPBoundedBlock verifies the honeypot_udp_block knob:
+// a plain-UDP honeypot hit is silently dropped (never answered) and its
+// source is auto-blocked via the rate limiter for a bounded window — not the
+// banner's permanent block (a UDP source can be spoofed, so a single spoofed
+// packet must not be able to block a victim forever). The blocked source is
+// dropped at the DNS layer (its UDP queries get no answer), shows up on the
+// dashboard's blocked-clients list with an expiry, and can be unblocked
+// early. Trusted transports still earn the permanent banner block regardless
+// of the knob.
+func TestHandlerHoneypotUDPBoundedBlock(t *testing.T) {
+	addr := startUDPTestServer(t, "1.1.1.1", 0)
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
+	banner := geoip.NewBanner("", nil, nil, []string{"trap.example.com"})
+	var autoBlocked []string
+	banner.OnBlock = func(ip string) { autoBlocked = append(autoBlocked, ip) }
+	h.SetIPBanner(banner)
+	h.SetRateLimiter(NewRateLimiter(10, 10))
+	h.SetHoneypotUDPBlock(10 * time.Minute)
+
+	q := func(name string) *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion(name, dns.TypeA)
+		return m
+	}
+	// A UDP honeypot hit is silently dropped and never reaches the banner
+	// (no permanent block, no OnBlock).
+	fw := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
+	h.ServeDNS(fw, q("trap.example.com."))
+	if fw.msg != nil {
+		t.Fatalf("UDP honeypot query with honeypot_udp_block: expected a silent drop, got %v", fw.msg)
+	}
+	if len(autoBlocked) != 0 {
+		t.Fatalf("honeypot_udp_block triggered a permanent banner block: %v", autoBlocked)
+	}
+	// The source is under a bounded rate-limiter block instead, visible on
+	// the dashboard's blocked-clients list with an expiry.
+	var blocked []BlockedClient
+	for _, c := range h.BlockedClients() {
+		if c.IP == "203.0.113.9" {
+			blocked = append(blocked, c)
+		}
+	}
+	if len(blocked) != 1 {
+		t.Fatalf("BlockedClients = %+v, want one bounded block for 203.0.113.9", h.BlockedClients())
+	}
+	if expiry := time.Until(blocked[0].BlockedUntil); expiry > 10*time.Minute || expiry <= 9*time.Minute {
+		t.Fatalf("block expiry = %v, want ~10m", expiry)
+	}
+	// While blocked, the source's normal UDP queries are dropped too — the
+	// flood stops at the DNS layer.
+	dropped := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
+	h.ServeDNS(dropped, q("example.com."))
+	if dropped.msg != nil {
+		t.Fatalf("bounded-blocked UDP client on a normal domain: expected a silent drop, got %v", dropped.msg)
+	}
+	// Unblocking early admits the client again.
+	h.UnblockClient("203.0.113.9")
+	ok := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
+	h.ServeDNS(ok, q("example.com."))
+	if ok.msg == nil || len(ok.msg.Answer) == 0 {
+		t.Fatalf("unblocked client should resolve normal domains again, got %v", ok.msg)
+	}
+	// Control: a TCP honeypot hit from a different client still earns the
+	// permanent banner block — the knob only affects plain UDP.
+	tcpClient := &fakeWriter{ip: net.ParseIP("198.51.100.42")}
+	h.ServeDNSWithProto(tcpClient, q("trap.example.com."), "tcp")
+	if tcpClient.msg == nil || tcpClient.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("TCP honeypot query: expected REFUSED, got %v", tcpClient.msg)
+	}
+	if len(autoBlocked) != 1 || autoBlocked[0] != "198.51.100.42" {
+		t.Fatalf("TCP honeypot OnBlock fired %v, want [198.51.100.42]", autoBlocked)
 	}
 }
 
