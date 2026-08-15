@@ -23,10 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v6
         with:
           # Keep the same pinned patch as release.yml (go1.26.6 fixes the
           # stdlib vulns govulncheck reports in earlier 1.26.x).
@@ -59,7 +59,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload raw results
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: bench-results
           path: |
