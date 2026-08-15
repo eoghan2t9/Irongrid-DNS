@@ -1,9 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast'
-
-const linesOf = (v) => (v || []).join('\n')
-const parseLines = (s) => s.split('\n').map((x) => x.trim()).filter(Boolean)
+import { LineListField } from './ui'
 
 // ClientGroups is a dedicated page for per-client policy — split out of the
 // Settings mega-form for the same reason as Rewrites. Round-trips the whole
@@ -107,19 +105,19 @@ export default function ClientGroups() {
             </div>
             <div className="form-grid">
               {field('Client CIDRs / IPs', 'one per line, e.g. 192.168.1.50 or 10.0.5.0/24', (
-                <textarea className="input mono" rows={2} value={linesOf(g.cidrs)} onChange={(e) => setGroup(i, { cidrs: parseLines(e.target.value) })} />
+                <LineListField value={g.cidrs} onChange={(v) => setGroup(i, { cidrs: v })} rows={2} />
               ))}
               {field('Blocklist IDs', 'one per line; empty = all enabled global blocklists', (
-                <textarea className="input mono" rows={2} value={linesOf(g.blocklists)} onChange={(e) => setGroup(i, { blocklists: parseLines(e.target.value) })} />
+                <LineListField value={g.blocklists} onChange={(v) => setGroup(i, { blocklists: v })} rows={2} />
               ))}
               {field('Extra whitelist', 'one per line, added to the global whitelist', (
-                <textarea className="input mono" rows={2} value={linesOf(g.whitelist)} onChange={(e) => setGroup(i, { whitelist: parseLines(e.target.value) })} />
+                <LineListField value={g.whitelist} onChange={(v) => setGroup(i, { whitelist: v })} rows={2} />
               ))}
               {field('Extra blacklist', 'one per line, added to the global blacklist', (
-                <textarea className="input mono" rows={2} value={linesOf(g.blacklist)} onChange={(e) => setGroup(i, { blacklist: parseLines(e.target.value) })} />
+                <LineListField value={g.blacklist} onChange={(v) => setGroup(i, { blacklist: v })} rows={2} />
               ))}
               {field('Upstream override', 'one per line, e.g. udp://1.1.1.1:53 or recursive://; empty = use the global upstreams in Settings', (
-                <textarea className="input mono" rows={2} value={linesOf(g.upstreams)} onChange={(e) => setGroup(i, { upstreams: parseLines(e.target.value) })} />
+                <LineListField value={g.upstreams} onChange={(v) => setGroup(i, { upstreams: v })} rows={2} />
               ))}
             </div>
           </div>

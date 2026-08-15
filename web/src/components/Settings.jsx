@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast'
+import { LineListField } from './ui'
 
 // Sections for the Settings jump-nav — every card above keeps its id in
 // this list so the anchors stay in sync with the page.
@@ -493,15 +494,11 @@ export default function Settings({ onSessionInvalidated }) {
       />
     ))
 
+  // LineListField holds a draft while typing so Enter creates a real new
+  // line; the list is normalised into the config only on blur.
   const textarea = (label, path, hint) =>
     field(label, hint, (
-      <textarea
-        className="input mono"
-        rows={3}
-        value={(deepGet(path, []) || []).join('\n')}
-        onChange={(e) => set(path, e.target.value.split('\n').map((s) => s.trim()).filter(Boolean))}
-        placeholder="one entry per line"
-      />
+      <LineListField value={deepGet(path, []) || []} onChange={(v) => set(path, v)} placeholder="one entry per line" />
     ))
 
   const number = (label, path, hint) =>
@@ -647,12 +644,11 @@ export default function Settings({ onSessionInvalidated }) {
         {(deepGet('upstream_routes', []) || []).map((rt, i) => (
           <div className="list-row" key={i} style={{ alignItems: 'flex-start' }}>
             <input className="input mono" placeholder="domain (e.g. lan)" value={rt.domain || ''} onChange={(e) => setRoute(i, 'domain', e.target.value)} style={{ maxWidth: 200 }} />
-            <textarea
-              className="input mono"
+            <LineListField
+              value={rt.upstreams || []}
+              onChange={(v) => setRoute(i, 'upstreams', v)}
               placeholder={'upstreams, one per line (udp://, tls://, …)'}
               rows={2}
-              value={(rt.upstreams || []).join('\n')}
-              onChange={(e) => setRoute(i, 'upstreams', e.target.value.split('\n').map((s) => s.trim()).filter(Boolean))}
               style={{ flex: 1, minHeight: 44 }}
             />
             <button className="btn small danger" type="button" onClick={() => removeRoute(i)}>✕</button>
