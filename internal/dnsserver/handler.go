@@ -530,6 +530,22 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		return
 	}
 
+	// 0.2 EDNS version check (RFC 6891 §6.1.3): a query advertising an EDNS
+	//     version we don't implement is answered BADVERS instead of being
+	//     processed — options under an unknown version may not mean what
+	//     we'd assume, so nothing past the OPT record is safe to interpret
+	//     until the client falls back to a version we support. Only version
+	//     0 is defined today, so this only ever fires against a client
+	//     probing for/expecting a future EDNS version.
+	if opt := r.IsEdns0(); opt != nil && opt.Version() != 0 {
+		m := newReply(r)
+		m.Rcode = dns.RcodeBadVers
+		m.SetEdns0(ednsUDPSize, false)
+		_ = h.write(w, m, r, proto)
+		putMsg(m)
+		return
+	}
+
 	// 0.25 DNS cookies (RFC 7873): a client that sends a COOKIE option gets
 	//    its client cookie echoed with our HMAC server cookie on every
 	//    response (attached in write), and a query carrying a stale or
@@ -674,6 +690,28 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		refused.Rcode = dns.RcodeRefused
 		_ = h.write(w, refused, r, proto)
 		putMsg(refused)
+		return
+	}
+
+	// 0.7 ANY minimization (RFC 8482): QTYPE=ANY has no well-defined
+	//    "everything you've got" semantics for a caching resolver, and
+	//    answering it in full is a well-known reflection-amplification
+	//    vector — a small spoofed UDP query can pull back a large
+	//    multi-RRset response. Like every other major resolver (BIND,
+	//    Unbound, PowerDNS, …), ANY gets a minimal synthetic response
+	//    instead of real processing: a single HINFO record, RFC 8482's
+	//    suggested stand-in, with nothing forwarded from cache or upstream.
+	if q.Qtype == dns.TypeANY {
+		m := newReply(r)
+		m.Answer = append(m.Answer, &dns.HINFO{
+			Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeHINFO, Class: dns.ClassINET, Ttl: anyMinimalTTL},
+			Cpu: "RFC8482",
+			Os:  "",
+		})
+		h.Stats.Allowed.Add(1)
+		h.record(client, qname, q, "minimal", "rfc8482-any", "", start, m)
+		_ = h.write(w, m, r, proto)
+		putMsg(m)
 		return
 	}
 
@@ -1772,6 +1810,11 @@ func reverseNameIP(name string) net.IP {
 // minimum minus 48 bytes of IP/UDP/DNS headers). Bigger answers flow over
 // the TCP fallback instead of being dropped as fragments.
 const ednsUDPSize = 1232
+
+// anyMinimalTTL is the TTL on the synthetic HINFO record returned for
+// QTYPE=ANY (RFC 8482). Short-lived: it's not real data, just a marker, so
+// there's no reason for a resolver downstream of us to hold onto it.
+const anyMinimalTTL = 60
 
 // capTTL floors every record's TTL at max across Answer, Ns and Extra — a
 // stale negative answer's SOA in the Authority section would otherwise let a

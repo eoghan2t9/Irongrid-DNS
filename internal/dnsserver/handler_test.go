@@ -1841,3 +1841,54 @@ func TestHandlerRecoversFromPanic(t *testing.T) {
 		t.Fatalf("handler did not survive to serve a second query: %v", fw2.msg)
 	}
 }
+
+// TestHandlerBadEDNSVersionRejected verifies a query advertising an EDNS
+// version we don't implement (RFC 6891 §6.1.3) gets BADVERS instead of being
+// processed as a normal query.
+func TestHandlerBadEDNSVersionRejected(t *testing.T) {
+	h := NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, 5*time.Second)
+
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	m.SetEdns0(4096, false)
+	m.IsEdns0().SetVersion(1)
+
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, m)
+
+	if fw.msg == nil {
+		t.Fatal("expected a response, got none")
+	}
+	if fw.msg.Rcode != dns.RcodeBadVers {
+		t.Fatalf("rcode = %v, want BADVERS", fw.msg.Rcode)
+	}
+	if len(fw.msg.Answer) != 0 {
+		t.Fatalf("BADVERS response should carry no answer data, got %v", fw.msg.Answer)
+	}
+}
+
+// TestHandlerANYQueryMinimized verifies QTYPE=ANY (RFC 8482) gets a minimal
+// synthetic HINFO response instead of full processing, and never reaches
+// upstream (an upstream that would panic/fail proves the short-circuit).
+func TestHandlerANYQueryMinimized(t *testing.T) {
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: "127.0.0.1:1"}}, nil, "nxdomain", 600, 5*time.Second)
+
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeANY)
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, m)
+
+	if fw.msg == nil {
+		t.Fatal("expected a response, got none")
+	}
+	if fw.msg.Rcode != dns.RcodeSuccess {
+		t.Fatalf("rcode = %v, want NOERROR", fw.msg.Rcode)
+	}
+	if len(fw.msg.Answer) != 1 {
+		t.Fatalf("expected exactly one synthetic answer, got %v", fw.msg.Answer)
+	}
+	hinfo, ok := fw.msg.Answer[0].(*dns.HINFO)
+	if !ok || hinfo.Cpu != "RFC8482" {
+		t.Fatalf("unexpected answer: %v", fw.msg.Answer[0])
+	}
+}
