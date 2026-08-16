@@ -72,6 +72,19 @@ export default function ServerTab({ f }) {
           {toggle('Pad encrypted responses (RFC 7830)', 'server.padding')}
           {toggle('DNS cookies (RFC 7873)', 'server.cookies')}
         </div>
+        <h4 className="field-group">Connection limits (flood protection)</h4>
+        <div className="form-grid">
+          {number(
+            'Max TCP/DoT connections per client (0 = unlimited)',
+            'server.max_tcp_conns_per_ip',
+            'Caps concurrent connections one IP may hold on the plain-TCP and DoT listeners — stops connection floods and slowloris-style attacks from exhausting file descriptors and goroutines. Connections past the cap are closed at accept. 0 = unlimited (default).',
+          )}
+          {number(
+            'Max HTTP connections per client (0 = unlimited)',
+            'server.max_http_conns_per_ip',
+            'Caps concurrent connections one IP may hold on the DoH listener (and the shared dashboard+DoH HTTPS listener when they share a port). Same rationale as the TCP cap. 0 = unlimited (default).',
+          )}
+        </div>
       </div>
 
       <div className="card">

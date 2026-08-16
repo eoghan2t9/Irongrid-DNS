@@ -229,6 +229,7 @@ func main() {
 	handler.SetRewriter(dnsserver.BuildRewriter(cfg.Rewrites))
 	handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
 	handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
+	handler.SetNXGuard(dnsserver.BuildNXGuard(cfg.RateLimit.NXGuard))
 	handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
 	handler.SetCNAMECloakingProtection(cfg.Filter.CNAMECloakingProtection)
 	// RFC 7830 response padding and RFC 7873 DNS cookies (server.padding /
@@ -280,6 +281,9 @@ func main() {
 	// Handler-worker count per plain-UDP socket (server.udp_workers: 0 =
 	// auto, N = exactly N per socket). Same lifecycle as udp_sockets.
 	dnsMgr.SetUDPWorkers(cfg.Server.UDPWorkers)
+	// Per-IP concurrent-connection caps (server.max_tcp_conns_per_ip /
+	// server.max_http_conns_per_ip; 0 = unlimited). Same lifecycle.
+	dnsMgr.SetConnLimits(cfg.Server.MaxTCPConnsPerIP, cfg.Server.MaxHTTPConnsPerIP)
 	// webSharesDoH reports whether the dashboard and DoH share one HTTPS port
 	// (server.web_listen == server.listen_doh with web_tls on). In that case
 	// the web server also serves /dns-query and no standalone DoH listener is
@@ -570,9 +574,12 @@ func main() {
 	}
 
 	// ---- web server (dashboard + API) ----
+	// ConnState enforces the per-IP connection cap (server.max_http_conns_per_ip)
+	// when the dashboard shares its port with DoH — a no-op (nil) otherwise.
 	webSrv := &http.Server{
 		Addr:         cfg.Server.WebListen,
 		Handler:      webHandler(),
+		ConnState:    dnsMgr.HTTPConnState(),
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 30 * time.Second,
 	}
@@ -718,6 +725,7 @@ func main() {
 			newWeb := &http.Server{
 				Addr:         cfg.Server.WebListen,
 				Handler:      webHandler(),
+				ConnState:    dnsMgr.HTTPConnState(),
 				ReadTimeout:  30 * time.Second,
 				WriteTimeout: 30 * time.Second,
 			}
@@ -812,6 +820,7 @@ func main() {
 		//    reported asynchronously via the results channel, not as errors.
 		dnsMgr.SetUDPSockets(cfg.Server.UDPSockets)
 		dnsMgr.SetUDPWorkers(cfg.Server.UDPWorkers)
+		dnsMgr.SetConnLimits(cfg.Server.MaxTCPConnsPerIP, cfg.Server.MaxHTTPConnsPerIP)
 		if err := dnsMgr.Restart(
 			cfg.Server.ListenUDP, cfg.Server.ListenTCP,
 			cfg.Server.ListenDoT, dohAddr(), cfg.Server.ListenDoH3, cfg.Server.ListenDoQ,
@@ -834,6 +843,7 @@ func main() {
 		handler.SetRewriter(dnsserver.BuildRewriter(cfg.Rewrites))
 		handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
 		handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
+		handler.SetNXGuard(dnsserver.BuildNXGuard(cfg.RateLimit.NXGuard))
 		handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
 		handler.SetCNAMECloakingProtection(cfg.Filter.CNAMECloakingProtection)
 		handler.SetPadding(cfg.Server.Padding)
@@ -889,6 +899,7 @@ func main() {
 			newWeb := &http.Server{
 				Addr:         cfg.Server.WebListen,
 				Handler:      webHandler(),
+				ConnState:    dnsMgr.HTTPConnState(),
 				ReadTimeout:  30 * time.Second,
 				WriteTimeout: 30 * time.Second,
 			}

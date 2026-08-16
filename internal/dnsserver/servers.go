@@ -22,6 +22,17 @@ const (
 	// EDNS0 queries), vs miekg/dns's 512-byte default which silently
 	// truncates anything bigger.
 	udpMaxPacketSize = 4096
+
+	// tcpReadTimeout / tcpWriteTimeout bound each read/write on the plain-TCP
+	// and DoT listeners (miekg/dns defaults: 2s read, 2s write). Slightly more
+	// generous so a slow but legitimate client on a congested link isn't cut
+	// off mid-message, while still bounding a slowloris-style connection that
+	// sends nothing.
+	tcpReadTimeout  = 5 * time.Second
+	tcpWriteTimeout = 5 * time.Second
+	// tcpIdleTimeout bounds how long a connection may sit idle between
+	// queries (miekg/dns default: 8s per RFC 5966). Kept at the default.
+	tcpIdleTimeout = 8 * time.Second
 )
 
 // protoHandler tags every query with the listener's protocol so stats stay
@@ -61,8 +72,16 @@ type Manager struct {
 	// startClassic/startDoQ.
 	udpBound int
 	doqBound int
-	mu       sync.Mutex
-	servers  []*dns.Server
+	// connLim caps concurrent connections per client IP on the plain-TCP and
+	// DoT listeners (server.max_tcp_conns_per_ip; nil = unlimited). Built by
+	// SetConnLimits, applied at Start/Restart, and replaced on reload.
+	connLim *connLimiter
+	// httpLim caps concurrent connections per client IP on the DoH listener
+	// and the shared dashboard+DoH HTTPS listener (server.max_http_conns_per_ip;
+	// nil = unlimited). Same lifecycle as connLim.
+	httpLim *connLimiter
+	mu      sync.Mutex
+	servers []*dns.Server
 	// udpSrvs are the plain-UDP worker-pool listeners (one per socket).
 	// They are tracked separately from dns.Server because their shutdown is
 	// their own Close, not a dns.Server's ShutdownContext.
@@ -98,6 +117,39 @@ func (m *Manager) SetUDPSockets(n int) {
 func (m *Manager) SetUDPWorkers(n int) {
 	m.mu.Lock()
 	m.udpWorkers = n
+	m.mu.Unlock()
+}
+
+// limitTCPListener wraps ln with the per-IP connection cap when one is
+// configured (server.max_tcp_conns_per_ip), returning ln unchanged otherwise.
+// The caller hands the result to a dns.Server (or tls.NewListener for DoT).
+func (m *Manager) limitTCPListener(ln net.Listener) net.Listener {
+	m.mu.Lock()
+	lim := m.connLim
+	m.mu.Unlock()
+	if lim == nil {
+		return ln
+	}
+	return &limitListener{Listener: ln, lim: lim}
+}
+
+// SetConnLimits sets the per-IP concurrent-connection caps for the TCP/DoT
+// listeners (maxTCP) and the DoH/shared-HTTP listener (maxHTTP); a value <= 0
+// leaves that transport unlimited. Applied before Start/Restart like the
+// other listener knobs; the running listeners are not touched by a call after
+// they are up (reload restarts them via Restart).
+func (m *Manager) SetConnLimits(maxTCP, maxHTTP int) {
+	m.mu.Lock()
+	if maxTCP > 0 {
+		m.connLim = newConnLimiter(maxTCP)
+	} else {
+		m.connLim = nil
+	}
+	if maxHTTP > 0 {
+		m.httpLim = newConnLimiter(maxHTTP)
+	} else {
+		m.httpLim = nil
+	}
 	m.mu.Unlock()
 }
 
@@ -218,12 +270,21 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 	// socket buffers are raised here too (accepted connections inherit them).
 	// Handing the pre-built listener to the dns.Server means ActivateAndServe
 	// must serve it (ListenAndServe would replace it with its own socket).
+	// When a per-IP connection cap is configured, the listener is wrapped so
+	// connections past the cap are closed at accept without a reply.
 	ln, err := tuning.ListenConfig().Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		m.results <- Listener{Proto: proto, Addr: addr, Err: err}
 		return
 	}
-	srv := &dns.Server{Net: "tcp", Listener: ln, Handler: handler}
+	srv := &dns.Server{
+		Net:          "tcp",
+		Listener:     m.limitTCPListener(ln),
+		Handler:      handler,
+		ReadTimeout:  tcpReadTimeout,
+		WriteTimeout: tcpWriteTimeout,
+		IdleTimeout:  func() time.Duration { return tcpIdleTimeout },
+	}
 	m.servers = append(m.servers, srv)
 	go func() {
 		log.Printf("[dns] %s listener on %s", proto, addr)
@@ -236,18 +297,23 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 
 func (m *Manager) startDoT(addr string) {
 	// Same tuned socket as plain TCP; miekg/dns serves a Listener we hand it
-	// as-is, so the TLS wrapping is done here before it is passed along.
+	// as-is, so the TLS wrapping is done here before it is passed along. The
+	// per-IP connection cap wraps the raw TCP listener (before TLS), so a
+	// rejected connection never even starts a handshake.
 	ln, err := tuning.ListenConfig().Listen(context.Background(), "tcp", addr)
 	if err != nil {
 		m.results <- Listener{Proto: "dot", Addr: addr, Err: err}
 		return
 	}
 	srv := &dns.Server{
-		Addr:      addr,
-		Net:       "tcp-tls",
-		Listener:  tls.NewListener(ln, m.tlsConf),
-		TLSConfig: m.tlsConf,
-		Handler:   protoHandler{m.handler, "dot"},
+		Addr:         addr,
+		Net:          "tcp-tls",
+		Listener:     tls.NewListener(m.limitTCPListener(ln), m.tlsConf),
+		TLSConfig:    m.tlsConf,
+		Handler:      protoHandler{m.handler, "dot"},
+		ReadTimeout:  tcpReadTimeout,
+		WriteTimeout: tcpWriteTimeout,
+		IdleTimeout:  func() time.Duration { return tcpIdleTimeout },
 	}
 	m.servers = append(m.servers, srv)
 	go func() {

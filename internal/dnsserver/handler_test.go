@@ -1633,6 +1633,115 @@ func TestCapTTL(t *testing.T) {
 	}
 }
 
+// startNXDOMAINServer runs a UDP DNS server that answers every query with
+// NXDOMAIN — the response a random-subdomain flood elicits.
+func startNXDOMAINServer(t *testing.T) string {
+	t.Helper()
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeNameError
+		_ = w.WriteMsg(m)
+	})
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: mux}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	return pc.LocalAddr().String()
+}
+
+// TestHandlerNXGuardBlocksFlood verifies the NXDOMAIN flood guard end to end
+// through the handler: a client whose random-subdomain burst reaches the
+// threshold gets its queries refused (silent UDP drop) until the cooldown
+// elapses.
+func TestHandlerNXGuardBlocksFlood(t *testing.T) {
+	upAddr := startNXDOMAINServer(t)
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: upAddr},
+	}, nil, "nxdomain", 600, 5*time.Second)
+	// Threshold 2: two NXDOMAIN responses trip the guard.
+	h.SetNXGuard(NewNXGuard(2, time.Minute, time.Minute))
+
+	ask := func() *dns.Msg {
+		m := new(dns.Msg)
+		// Random subdomain so every query is a cache miss -> upstream NXDOMAIN.
+		m.SetQuestion(fmt.Sprintf("rand%d.example.com.", time.Now().UnixNano()), dns.TypeA)
+		fw := &fakeWriter{}
+		h.ServeDNS(fw, m)
+		return fw.msg
+	}
+
+	// First two queries get real NXDOMAIN answers and count toward the guard.
+	for i := 0; i < 2; i++ {
+		if resp := ask(); resp == nil || resp.Rcode != dns.RcodeNameError {
+			t.Fatalf("query %d: want NXDOMAIN, got %v", i+1, resp)
+		}
+	}
+	// The burst tripped the threshold: the third query is silently dropped
+	// (no response at all, matching the rate limiter's UDP drop).
+	if resp := ask(); resp != nil {
+		t.Fatalf("query past the guard threshold must be dropped, got %v", resp)
+	}
+	// A different client prefix is unaffected.
+	m := new(dns.Msg)
+	m.SetQuestion(fmt.Sprintf("other%d.example.com.", time.Now().UnixNano()), dns.TypeA)
+	fw := &fakeWriter{ip: net.IPv4(10, 9, 8, 7)}
+	h.ServeDNS(fw, m)
+	if fw.msg == nil || fw.msg.Rcode != dns.RcodeNameError {
+		t.Fatalf("a different client must still be answered, got %v", fw.msg)
+	}
+}
+
+// BenchmarkHandlerUpstreamMiss measures the cache-miss path — the one that
+// matters under load and in a flood: filter decision, rate limiter, EDNS
+// rewrite, upstream round trip, compression and the write. Distinct names
+// keep every iteration a genuine miss (no singleflight merging). This is the
+// benchmark the PGO profile is collected from, so the profile reflects the
+// real query path rather than the cache fast path alone.
+func BenchmarkHandlerUpstreamMiss(b *testing.B) {
+	// A real UDP upstream over loopback, answering with an A record — the
+	// same shape the test helpers use, but benchmark-compatible (Cleanup on
+	// *testing.B).
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Answer = append(m.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP("1.2.3.4"),
+		})
+		_ = w.WriteMsg(m)
+	})
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		b.Fatal(err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: mux}
+	go func() { _ = srv.ActivateAndServe() }()
+	b.Cleanup(func() { _ = srv.Shutdown() })
+
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: pc.LocalAddr().String()},
+	}, nil, "nxdomain", 600, 5*time.Second)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		m := new(dns.Msg)
+		// 1024 distinct names so b.N > 1024 still mostly misses.
+		m.SetQuestion(fmt.Sprintf("bench%d.example.com.", i%1024), dns.TypeA)
+		fw := &fakeWriter{}
+		h.ServeDNS(fw, m)
+		if fw.msg == nil {
+			b.Fatal("no response")
+		}
+	}
+}
+
 // BenchmarkHandlerCacheHit measures the whole served-cache-hit pipeline:
 // question hashing, filter decision, L1 cache lookup and the raw-byte write
 // path (no Unpack, no re-Pack). The fake writer unpacks the bytes it

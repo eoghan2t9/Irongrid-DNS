@@ -145,13 +145,14 @@ type handlerSettings struct {
 	// FailureTTL is how long a resolution failure (upstream never answered,
 	// no serve-stale entry) is negatively cached as SERVFAIL; <= 0 uses the
 	// cache's configured negative TTL.
-	FailureTTL  time.Duration
-	Cache       *cache.Cache
-	Rewriter    *filter.Rewriter // local DNS records; never nil, may be empty
-	ClientRouter *ClientRouter   // per-client policy; never nil, may be empty
-	RateLimiter *RateLimiter     // nil disables rate limiting
-	Geo         *geoip.Blocker   // nil disables geo-blocking
-	IPBanner    *geoip.Banner    // nil disables IP/honeypot blocking
+	FailureTTL   time.Duration
+	Cache        *cache.Cache
+	Rewriter     *filter.Rewriter // local DNS records; never nil, may be empty
+	ClientRouter *ClientRouter    // per-client policy; never nil, may be empty
+	RateLimiter  *RateLimiter     // nil disables rate limiting
+	NXGuard      *NXGuard         // nil disables the NXDOMAIN flood guard
+	Geo          *geoip.Blocker   // nil disables geo-blocking
+	IPBanner     *geoip.Banner    // nil disables IP/honeypot blocking
 	// TrustUDP opt-in: when true, a honeypot hit over plain UDP auto-blocks
 	// its source address too. Off by default — a UDP source can be spoofed,
 	// so enabling this lets a spoofing attacker permanently block an
@@ -166,8 +167,8 @@ type handlerSettings struct {
 	// packet can then only block a victim for the window, never forever.
 	// Does nothing unless a rate limiter is installed.
 	HoneypotUDPBlock time.Duration
-	DNSSECEnabled   bool
-	DNSSECRequireAD bool
+	DNSSECEnabled    bool
+	DNSSECRequireAD  bool
 	// CNAMECloakingProtection checks every CNAME hop in an upstream answer
 	// against the filter engine, not just the originally queried name. Set
 	// via SetCNAMECloakingProtection.
@@ -182,14 +183,14 @@ func NewHandler(engine *filter.Engine, c *cache.Cache, ups []*upstream.Upstream,
 		Stats:  newStats(),
 	}
 	h.settings.Store(&handlerSettings{
-		Upstreams:    ups,
-		UpstreamMode: UpstreamModeRace,
-		Cache:        c,
+		Upstreams:     ups,
+		UpstreamMode:  UpstreamModeRace,
+		Cache:         c,
 		BlockResponse: blockResp,
-		BlockTTL:     blockTTL,
-		Timeout:      timeout,
-		Rewriter:     filter.NewRewriter(),
-		ClientRouter: NewClientRouter(),
+		BlockTTL:      blockTTL,
+		Timeout:       timeout,
+		Rewriter:      filter.NewRewriter(),
+		ClientRouter:  NewClientRouter(),
 	})
 	// Server-cookie HMAC key. crypto/rand failure is effectively impossible
 	// (kernel entropy); the time-seeded fallback keeps DNS cookies working
@@ -383,6 +384,13 @@ func (h *Handler) SetRateLimiter(rl *RateLimiter) {
 	h.swapSettings(&ns, nil)
 }
 
+// SetNXGuard hot-swaps the NXDOMAIN flood guard; nil disables it.
+func (h *Handler) SetNXGuard(g *NXGuard) {
+	ns := *h.settings.Load()
+	ns.NXGuard = g
+	h.swapSettings(&ns, nil)
+}
+
 // SetGeo hot-swaps the geo blocker; nil disables geo-blocking.
 func (h *Handler) SetGeo(g *geoip.Blocker) {
 	ns := *h.settings.Load()
@@ -485,6 +493,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	rewriter := s.Rewriter
 	clientRouter := s.ClientRouter
 	rateLimiter := s.RateLimiter
+	nxGuard := s.NXGuard
 	geo := s.Geo
 	ipbanner := s.IPBanner
 	trustUDP := s.TrustUDP
@@ -540,6 +549,22 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	//    small. Connection-oriented protocols (TCP/DoT/DoH/DoQ) already
 	//    required a real handshake, so REFUSED is safe there.
 	if rateLimiter != nil && !rateLimiter.Allow(client) {
+		h.Stats.Errors.Add(1)
+		if proto == "udp" {
+			return
+		}
+		refused := getMsg()
+		refused.SetReply(r)
+		refused.Rcode = dns.RcodeRefused
+		_ = h.write(w, refused, r, proto)
+		putMsg(refused)
+		return
+	}
+	// 0.1 NXDOMAIN flood guard: a prefix currently serving a random-subdomain
+	//    flood is refused the same way as a rate-limited client — silent UDP
+	//    drop, REFUSED on the stream transports. The check runs before any
+	//    real work so a blocked prefix can't burn cache/upstream resources.
+	if nxGuard != nil && !nxGuard.Allow(clientPrefix(client)) {
 		h.Stats.Errors.Add(1)
 		if proto == "udp" {
 			return
@@ -767,6 +792,12 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			reason := "cache"
 			if hit.Negative {
 				reason = "cache-negative"
+				// A cached NXDOMAIN is a genuine missing name (blocked
+				// responses are never cached), so it counts toward the
+				// NXDOMAIN flood guard just like an upstream NXDOMAIN.
+				if nxGuard != nil && packedRcode(hit.Raw) == dns.RcodeNameError {
+					nxGuard.NoteNX(clientPrefix(client))
+				}
 			}
 			// record needs the rcode and answer count; both are header
 			// fields, read off the packed bytes without decoding.
@@ -818,6 +849,15 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		err    error
 	)
 	resp, usedUp, err = h.resolveUpstreams(ctx, r, q, upstreams, upstreamMode, upstreamQuery)
+	// NXDOMAIN flood guard: an upstream NXDOMAIN is the flood's signature
+	// (random subdomains under a victim domain), so it's counted here — the
+	// guard's Allow check at the top of serve() then refuses the prefix once
+	// the burst trips the threshold. Blocked responses never reach this
+	// point (they're answered before forwarding), so legit blocklist
+	// NXDOMAINs aren't counted as flood traffic.
+	if nxGuard != nil && err == nil && resp != nil && resp.Rcode == dns.RcodeNameError {
+		nxGuard.NoteNX(clientPrefix(client))
+	}
 	// RFC 8767: an upstream that *answers* SERVFAIL is also a resolution
 	// failure — serve stale rather than propagating the failure.
 	if err == nil && resp != nil && resp.Rcode == dns.RcodeServerFailure && len(stale.Raw) > 0 {

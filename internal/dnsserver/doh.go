@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/http2"
@@ -54,6 +55,45 @@ func (m *Manager) dohMux(path, proto string) *http.ServeMux {
 	return mux
 }
 
+// HTTPConnState returns the ConnState callback enforcing the per-IP HTTP
+// connection cap (server.max_http_conns_per_ip), or nil when unlimited. The
+// standalone DoH listener and main's shared dashboard+DoH HTTPS listener both
+// attach it, so one knob covers every HTTP transport that serves /dns-query.
+//
+// net/http always fires StateClosed for a connection it accepted — including
+// one this callback closed at StateNew — so acquisitions are tracked per
+// connection (acquiredConns) and a StateClosed only releases a slot that was
+// actually acquired. Without that, closing an over-cap connection at StateNew
+// would later release another client's slot.
+func (m *Manager) HTTPConnState() func(net.Conn, http.ConnState) {
+	m.mu.Lock()
+	lim := m.httpLim
+	m.mu.Unlock()
+	if lim == nil {
+		return nil
+	}
+	var acquired sync.Map // net.Conn -> struct{}: conns holding a slot
+	return func(c net.Conn, s http.ConnState) {
+		ip := clientIPOf(c.RemoteAddr())
+		switch s {
+		case http.StateNew:
+			if lim.acquire(ip) {
+				acquired.Store(c, struct{}{})
+			} else {
+				// Over the cap: refuse the connection outright rather than
+				// letting it sit in the accept queue. Not stored in
+				// acquiredConns, so its StateClosed (which always follows)
+				// releases nothing.
+				_ = c.Close()
+			}
+		case http.StateClosed, http.StateHijacked:
+			if _, ok := acquired.LoadAndDelete(c); ok {
+				lim.release(ip)
+			}
+		}
+	}
+}
+
 // startDoH launches the RFC 8484 DNS-over-HTTPS server.
 func (m *Manager) startDoH(addr, path string) error {
 	mux := m.dohMux(path, "doh")
@@ -66,6 +106,7 @@ func (m *Manager) startDoH(addr, path string) error {
 		Addr:         addr,
 		Handler:      mux,
 		TLSConfig:    dohTLS,
+		ConnState:    m.HTTPConnState(),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  120 * time.Second,

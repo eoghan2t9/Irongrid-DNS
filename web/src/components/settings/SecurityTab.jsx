@@ -22,7 +22,18 @@ export default function SecurityTab({ f }) {
           {toggle('Auto-block repeat offenders', 'rate_limit.auto_block')}
           {number('Violations before blocking', 'rate_limit.block_after')}
           {text('Block cooldown', 'rate_limit.block_for', 'e.g. 10m, 1h', '10m')}
+          {toggle('NXDOMAIN flood guard', 'rate_limit.nxdomain_guard.enabled')}
+          {number('NXDOMAINs before blocking (per prefix)', 'rate_limit.nxdomain_guard.threshold')}
+          {text('Counting window', 'rate_limit.nxdomain_guard.window', 'e.g. 30s, 1m', '30s')}
+          {text('Flood cooldown', 'rate_limit.nxdomain_guard.block_for', 'e.g. 10m, 1h', '10m')}
         </div>
+        <p className="dim small" style={{ marginTop: 8 }}>
+          The <strong>NXDOMAIN flood guard</strong> throttles random-subdomain ("water torture") attacks: it counts
+          NXDOMAIN responses served per client prefix (IPv4 /24, IPv6 /64) and refuses every query from a prefix that
+          produces the threshold within the counting window, for the cooldown. Unlike per-IP rate limiting, a flood
+          spread over many sources or churned IPv6 privacy addresses can't dodge it. Works independently of rate
+          limiting. Off by default.
+        </p>
         <h4 style={{ margin: '16px 0 10px' }}>Currently blocked clients</h4>
         {f.blocked.length === 0 ? (
           <p className="dim small">No clients are currently auto-blocked.</p>

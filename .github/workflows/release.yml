@@ -122,7 +122,18 @@ jobs:
           echo "commit=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
           echo "built=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      - name: Cross-compile all platforms
+      # Collect a PGO profile from the query-path benchmarks on the runner
+      # (linux/amd64). PGO profiles are symbol-based, so this one profile
+      # applies to every cross-compile target below — the release binaries
+      # ship with profile-guided optimization at no extra per-platform cost.
+      - name: Collect PGO profile
+        run: |
+          go test ./internal/dnsserver -run '^$' \
+            -bench 'BenchmarkHandler(UpstreamMiss|CacheHit)$' -benchtime=10s \
+            -cpuprofile pgo.pprof
+          ls -lh pgo.pprof
+
+      - name: Cross-compile all platforms (PGO)
         env:
           LDFLAGS: >-
             -s -w
@@ -138,7 +149,7 @@ jobs:
             name="irongrid-${os}-${arch}${ext}"
             echo "  -> ${name}"
             CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" \
-              go build -trimpath -ldflags "${LDFLAGS}" \
+              go build -trimpath -pgo=pgo.pprof -ldflags "${LDFLAGS}" \
               -o "dist/${name}" ./cmd/irongrid
           done
           # Extra opt-in builds for modern x86_64 (AVX2/BMI2 etc via
@@ -150,7 +161,7 @@ jobs:
             name="irongrid-${os}-${arch}-v3${ext}"
             echo "  -> ${name} (GOAMD64=v3)"
             CGO_ENABLED=0 GOOS="${os}" GOARCH="${arch}" GOAMD64=v3 \
-              go build -trimpath -ldflags "${LDFLAGS}" \
+              go build -trimpath -pgo=pgo.pprof -ldflags "${LDFLAGS}" \
               -o "dist/${name}" ./cmd/irongrid
           done
           cd dist && sha256sum irongrid-* > SHA256SUMS.txt

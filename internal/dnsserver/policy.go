@@ -35,6 +35,17 @@ func BuildRateLimiter(rl config.RateLimitConfig) *RateLimiter {
 	return lim
 }
 
+// BuildNXGuard returns the NXDOMAIN flood guard for g, or nil when disabled
+// (nil is the Handler's "no guard" state). It is independent of the rate
+// limiter — a random-subdomain flood can spread over many sources without
+// tripping any per-IP bucket, which is exactly why the guard exists.
+func BuildNXGuard(g config.NXGuardConfig) *NXGuard {
+	if !g.Enabled {
+		return nil
+	}
+	return NewNXGuard(g.Threshold, g.Window, g.BlockFor)
+}
+
 // BuildClientRouter compiles cfg.ClientGroups into a ClientRouter: each
 // enabled group gets its own filter.Engine, built from the same cached
 // blocklist content the global engine uses (lists.GetContent avoids

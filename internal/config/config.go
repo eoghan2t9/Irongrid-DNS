@@ -196,6 +196,26 @@ type RateLimitConfig struct {
 	AutoBlock  bool          `yaml:"auto_block"`
 	BlockAfter int           `yaml:"block_after"` // violations required to trigger; default 3
 	BlockFor   time.Duration `yaml:"block_for"`   // cooldown; default 10m
+	// NXGuard throttles random-subdomain ("water torture") floods: it counts
+	// NXDOMAIN responses served per client prefix (IPv4 /24, IPv6 /64) and
+	// refuses every query from a prefix that produces Threshold NXDOMAINs
+	// within Window for BlockFor. Unlike the per-IP token bucket above, a
+	// flood spread over many sources or churned IPv6 privacy addresses can't
+	// dodge it. Off by default; independent of rate_limit.enabled.
+	NXGuard NXGuardConfig `yaml:"nxdomain_guard"`
+}
+
+// NXGuardConfig tunes the NXDOMAIN flood guard (rate_limit.nxdomain_guard).
+type NXGuardConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Threshold is how many NXDOMAIN responses a prefix may produce within
+	// Window before it is refused; default 30.
+	Threshold int `yaml:"threshold"`
+	// Window is how long a burst may accumulate toward Threshold; default
+	// 30s.
+	Window time.Duration `yaml:"window"`
+	// BlockFor is how long a tripped prefix is refused; default 10m.
+	BlockFor time.Duration `yaml:"block_for"`
 }
 
 // GeoBlockConfig blocks queries by the country of the client's source IP.
@@ -329,6 +349,19 @@ type ServerConfig struct {
 	// and a CPU/trace profile ties up real cycles for its duration — opt in
 	// only while actively chasing a performance problem.
 	DebugPprof bool `yaml:"debug_pprof"`
+	// MaxTCPConnsPerIP caps how many concurrent connections one client IP
+	// may hold on the plain-TCP and DoT listeners (0 = unlimited, the
+	// default). It stops connection floods and slowloris-style attacks from
+	// exhausting file descriptors and goroutines — the rate limiter only
+	// sees clients that actually send queries, so a flood of half-open
+	// connections needs a connection counter instead. Connections past the
+	// cap are closed at accept without a reply.
+	MaxTCPConnsPerIP int `yaml:"max_tcp_conns_per_ip"`
+	// MaxHTTPConnsPerIP caps how many concurrent connections one client IP
+	// may hold on the DoH listener (and the shared dashboard+DoH HTTPS
+	// listener when they share a port); 0 = unlimited, the default. Same
+	// rationale as max_tcp_conns_per_ip for the HTTP transports.
+	MaxHTTPConnsPerIP int `yaml:"max_http_conns_per_ip"`
 }
 
 // CacheConfig points at the Dragonfly instance that is the authoritative
@@ -540,6 +573,15 @@ func Default() *Config {
 			AutoBlock:  false,
 			BlockAfter: 3,
 			BlockFor:   10 * time.Minute,
+			// NXDOMAIN flood guard: off by default, with sane values ready to
+			// flip on (30 NXDOMAIN responses per prefix within 30s -> 10m
+			// refusal).
+			NXGuard: NXGuardConfig{
+				Enabled:   false,
+				Threshold: 30,
+				Window:    30 * time.Second,
+				BlockFor:  10 * time.Minute,
+			},
 		},
 		GeoBlock: GeoBlockConfig{
 			AutoUpdate: 168 * time.Hour,
@@ -777,6 +819,12 @@ func (c *Config) validate() error {
 	if c.Server.UDPWorkers < 0 {
 		return fmt.Errorf("server.udp_workers must be >= 0 (0 = auto, N = workers per UDP socket)")
 	}
+	if c.Server.MaxTCPConnsPerIP < 0 {
+		return fmt.Errorf("server.max_tcp_conns_per_ip must be >= 0 (0 = unlimited)")
+	}
+	if c.Server.MaxHTTPConnsPerIP < 0 {
+		return fmt.Errorf("server.max_http_conns_per_ip must be >= 0 (0 = unlimited)")
+	}
 	// DoH3 and DoQ are both QUIC over UDP on the address they bind. Two
 	// QUIC listeners on one UDP address would each accept the other's
 	// connections and fail the ALPN negotiation — an operator mistake that
@@ -913,6 +961,17 @@ func (c *Config) validate() error {
 			if c.RateLimit.BlockFor <= 0 {
 				return fmt.Errorf("rate_limit.block_for must be positive when auto_block is enabled")
 			}
+		}
+	}
+	if c.RateLimit.NXGuard.Enabled {
+		if c.RateLimit.NXGuard.Threshold < 1 {
+			return fmt.Errorf("rate_limit.nxdomain_guard.threshold must be >= 1 when enabled")
+		}
+		if c.RateLimit.NXGuard.Window <= 0 {
+			return fmt.Errorf("rate_limit.nxdomain_guard.window must be positive when enabled")
+		}
+		if c.RateLimit.NXGuard.BlockFor <= 0 {
+			return fmt.Errorf("rate_limit.nxdomain_guard.block_for must be positive when enabled")
 		}
 	}
 	for i, cc := range c.GeoBlock.Countries {

@@ -307,10 +307,10 @@ func (h *Handler) getStatus(w http.ResponseWriter) {
 		// num_cpu is the tuned GOMAXPROCS the UDP auto sizing runs off
 		// (cgroup-aware via internal/tuning), so the dashboard's
 		// "recommended values" can compute the exact same numbers.
-		"num_cpu":     runtime.GOMAXPROCS(0),
-		"cache_ok":    cacheOK,
-		"tunnel":      h.Tunnel.Status(),
-		"root_hints":  rootHints,
+		"num_cpu":    runtime.GOMAXPROCS(0),
+		"cache_ok":   cacheOK,
+		"tunnel":     h.Tunnel.Status(),
+		"root_hints": rootHints,
 		// System tuning state: file-descriptor limit, socket buffers, Linux
 		// socket sysctls and the Go runtime settings (dashboard card).
 		"tuning": tuningStatus,
@@ -894,12 +894,22 @@ type clientGroupPayload struct {
 }
 
 type rateLimitPayload struct {
-	Enabled    bool   `json:"enabled"`
-	QPS        int    `json:"qps"`
-	Burst      int    `json:"burst"`
-	AutoBlock  bool   `json:"auto_block"`
-	BlockAfter int    `json:"block_after"`
-	BlockFor   string `json:"block_for"` // duration string
+	Enabled    bool           `json:"enabled"`
+	QPS        int            `json:"qps"`
+	Burst      int            `json:"burst"`
+	AutoBlock  bool           `json:"auto_block"`
+	BlockAfter int            `json:"block_after"`
+	BlockFor   string         `json:"block_for"` // duration string
+	NXGuard    nxGuardPayload `json:"nxdomain_guard"`
+}
+
+// nxGuardPayload is the NXDOMAIN flood guard block of the rate-limit
+// settings (rate_limit.nxdomain_guard). Durations are human strings.
+type nxGuardPayload struct {
+	Enabled   bool   `json:"enabled"`
+	Threshold int    `json:"threshold"`
+	Window    string `json:"window"`    // duration string
+	BlockFor  string `json:"block_for"` // duration string
 }
 
 type geoBlockPayload struct {
@@ -956,6 +966,12 @@ type serverPayload struct {
 	Padding    bool `json:"padding"`
 	Cookies    bool `json:"cookies"`
 	DebugPprof bool `json:"debug_pprof"`
+	// MaxTCPConnsPerIP caps concurrent connections per client IP on the
+	// TCP/DoT listeners (0 = unlimited).
+	MaxTCPConnsPerIP int `json:"max_tcp_conns_per_ip"`
+	// MaxHTTPConnsPerIP caps concurrent connections per client IP on the
+	// DoH/shared-HTTP listener (0 = unlimited).
+	MaxHTTPConnsPerIP int `json:"max_http_conns_per_ip"`
 }
 
 type cachePayload struct {
@@ -1068,23 +1084,25 @@ func durationOrEmpty(d time.Duration) string {
 func payloadFromConfig(c *config.Config) configPayload {
 	p := configPayload{
 		Server: serverPayload{
-			ListenUDP:       c.Server.ListenUDP,
-			ListenTCP:       c.Server.ListenTCP,
-			ListenDoT:       c.Server.ListenDoT,
-			ListenDoH:       c.Server.ListenDoH,
-			ListenDoH3:      c.Server.ListenDoH3,
-			ListenDoQ:       c.Server.ListenDoQ,
-			DoHPath:         c.Server.DoHPath,
-			WebListen:       c.Server.WebListen,
-			WebTLS:          c.Server.WebTLS,
-			WebRedirect:     c.Server.WebRedirect,
-			WebRedirectPort: c.Server.WebRedirectPort,
-			TimeoutSec:      c.Server.TimeoutSec,
-			UDPSockets:      c.Server.UDPSockets,
-			UDPWorkers:      c.Server.UDPWorkers,
-			Padding:         c.Server.Padding,
-			Cookies:         c.Server.Cookies,
-			DebugPprof:      c.Server.DebugPprof,
+			ListenUDP:         c.Server.ListenUDP,
+			ListenTCP:         c.Server.ListenTCP,
+			ListenDoT:         c.Server.ListenDoT,
+			ListenDoH:         c.Server.ListenDoH,
+			ListenDoH3:        c.Server.ListenDoH3,
+			ListenDoQ:         c.Server.ListenDoQ,
+			DoHPath:           c.Server.DoHPath,
+			WebListen:         c.Server.WebListen,
+			WebTLS:            c.Server.WebTLS,
+			WebRedirect:       c.Server.WebRedirect,
+			WebRedirectPort:   c.Server.WebRedirectPort,
+			TimeoutSec:        c.Server.TimeoutSec,
+			UDPSockets:        c.Server.UDPSockets,
+			UDPWorkers:        c.Server.UDPWorkers,
+			Padding:           c.Server.Padding,
+			Cookies:           c.Server.Cookies,
+			DebugPprof:        c.Server.DebugPprof,
+			MaxTCPConnsPerIP:  c.Server.MaxTCPConnsPerIP,
+			MaxHTTPConnsPerIP: c.Server.MaxHTTPConnsPerIP,
 		},
 		Upstreams:    c.Upstreams,
 		UpstreamMode: c.UpstreamMode,
@@ -1188,14 +1206,20 @@ func payloadFromConfig(c *config.Config) configPayload {
 		AutoBlock:  c.RateLimit.AutoBlock,
 		BlockAfter: c.RateLimit.BlockAfter,
 		BlockFor:   durationOrEmpty(c.RateLimit.BlockFor),
+		NXGuard: nxGuardPayload{
+			Enabled:   c.RateLimit.NXGuard.Enabled,
+			Threshold: c.RateLimit.NXGuard.Threshold,
+			Window:    durationOrEmpty(c.RateLimit.NXGuard.Window),
+			BlockFor:  durationOrEmpty(c.RateLimit.NXGuard.BlockFor),
+		},
 	}
 	p.GeoBlock = geoBlockPayload{
-		Enabled:    c.GeoBlock.Enabled,
-		Countries:  c.GeoBlock.Countries,
-		Allowlist:  c.GeoBlock.Allowlist,
-		IPs:        c.GeoBlock.IPs,
-		Honeypots:  c.GeoBlock.Honeypots,
-		BaseURL:    c.GeoBlock.BaseURL,
+		Enabled:          c.GeoBlock.Enabled,
+		Countries:        c.GeoBlock.Countries,
+		Allowlist:        c.GeoBlock.Allowlist,
+		IPs:              c.GeoBlock.IPs,
+		Honeypots:        c.GeoBlock.Honeypots,
+		BaseURL:          c.GeoBlock.BaseURL,
 		AutoUpdate:       durationOrEmpty(c.GeoBlock.AutoUpdate),
 		TrustUDP:         c.GeoBlock.TrustUDP,
 		HoneypotUDPBlock: durationOrEmpty(c.GeoBlock.HoneypotUDPBlock),
@@ -1273,6 +1297,14 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rate_limit.block_for: %w", err)
 	}
+	nxWindow, err := parseDur(p.RateLimit.NXGuard.Window)
+	if err != nil {
+		return nil, fmt.Errorf("rate_limit.nxdomain_guard.window: %w", err)
+	}
+	nxBlockFor, err := parseDur(p.RateLimit.NXGuard.BlockFor)
+	if err != nil {
+		return nil, fmt.Errorf("rate_limit.nxdomain_guard.block_for: %w", err)
+	}
 	geoAutoUpdate, err := parseDur(p.GeoBlock.AutoUpdate)
 	if err != nil {
 		return nil, fmt.Errorf("geo_block.auto_update: %w", err)
@@ -1306,23 +1338,25 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 
 	cfg := &config.Config{
 		Server: config.ServerConfig{
-			ListenUDP:       p.Server.ListenUDP,
-			ListenTCP:       p.Server.ListenTCP,
-			ListenDoT:       p.Server.ListenDoT,
-			ListenDoH:       p.Server.ListenDoH,
-			ListenDoH3:      p.Server.ListenDoH3,
-			ListenDoQ:       p.Server.ListenDoQ,
-			DoHPath:         p.Server.DoHPath,
-			WebListen:       p.Server.WebListen,
-			WebTLS:          p.Server.WebTLS,
-			WebRedirect:     p.Server.WebRedirect,
-			WebRedirectPort: p.Server.WebRedirectPort,
-			TimeoutSec:      p.Server.TimeoutSec,
-			UDPSockets:      p.Server.UDPSockets,
-			UDPWorkers:      p.Server.UDPWorkers,
-			Padding:         p.Server.Padding,
-			Cookies:         p.Server.Cookies,
-			DebugPprof:      p.Server.DebugPprof,
+			ListenUDP:         p.Server.ListenUDP,
+			ListenTCP:         p.Server.ListenTCP,
+			ListenDoT:         p.Server.ListenDoT,
+			ListenDoH:         p.Server.ListenDoH,
+			ListenDoH3:        p.Server.ListenDoH3,
+			ListenDoQ:         p.Server.ListenDoQ,
+			DoHPath:           p.Server.DoHPath,
+			WebListen:         p.Server.WebListen,
+			WebTLS:            p.Server.WebTLS,
+			WebRedirect:       p.Server.WebRedirect,
+			WebRedirectPort:   p.Server.WebRedirectPort,
+			TimeoutSec:        p.Server.TimeoutSec,
+			UDPSockets:        p.Server.UDPSockets,
+			UDPWorkers:        p.Server.UDPWorkers,
+			Padding:           p.Server.Padding,
+			Cookies:           p.Server.Cookies,
+			DebugPprof:        p.Server.DebugPprof,
+			MaxTCPConnsPerIP:  p.Server.MaxTCPConnsPerIP,
+			MaxHTTPConnsPerIP: p.Server.MaxHTTPConnsPerIP,
 		},
 		Upstreams:    p.Upstreams,
 		UpstreamMode: p.UpstreamMode,
@@ -1405,13 +1439,19 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			AutoBlock:  p.RateLimit.AutoBlock,
 			BlockAfter: p.RateLimit.BlockAfter,
 			BlockFor:   blockFor,
+			NXGuard: config.NXGuardConfig{
+				Enabled:   p.RateLimit.NXGuard.Enabled,
+				Threshold: p.RateLimit.NXGuard.Threshold,
+				Window:    nxWindow,
+				BlockFor:  nxBlockFor,
+			},
 		},
 		GeoBlock: config.GeoBlockConfig{
-			Enabled:    p.GeoBlock.Enabled,
-			Countries:  p.GeoBlock.Countries,
-			Allowlist:  p.GeoBlock.Allowlist,
-			IPs:        p.GeoBlock.IPs,
-			Honeypots:  p.GeoBlock.Honeypots,
+			Enabled:          p.GeoBlock.Enabled,
+			Countries:        p.GeoBlock.Countries,
+			Allowlist:        p.GeoBlock.Allowlist,
+			IPs:              p.GeoBlock.IPs,
+			Honeypots:        p.GeoBlock.Honeypots,
 			BaseURL:          p.GeoBlock.BaseURL,
 			AutoUpdate:       geoAutoUpdate,
 			TrustUDP:         p.GeoBlock.TrustUDP,

@@ -270,6 +270,56 @@ func TestValidateRateLimitAutoBlock(t *testing.T) {
 	}
 }
 
+func TestValidateNXGuard(t *testing.T) {
+	c := validBase()
+	c.RateLimit = RateLimitConfig{
+		Enabled: false, // the NXDOMAIN guard is independent of the token bucket
+		NXGuard: NXGuardConfig{Enabled: true, Threshold: 30, Window: 30 * time.Second, BlockFor: 10 * time.Minute},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid nxdomain_guard config rejected: %v", err)
+	}
+	c.RateLimit.NXGuard.Threshold = 0
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "threshold") {
+		t.Fatalf("err = %v, want nxdomain_guard.threshold error", err)
+	}
+	c = validBase()
+	c.RateLimit.NXGuard = NXGuardConfig{Enabled: true, Threshold: 10, Window: 0, BlockFor: time.Minute}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "window") {
+		t.Fatalf("err = %v, want nxdomain_guard.window error", err)
+	}
+	c = validBase()
+	c.RateLimit.NXGuard = NXGuardConfig{Enabled: true, Threshold: 10, Window: time.Minute, BlockFor: 0}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "block_for") {
+		t.Fatalf("err = %v, want nxdomain_guard.block_for error", err)
+	}
+	// Disabled guard with zeroed values must pass (the defaults are applied
+	// at construction, not validation).
+	c = validBase()
+	c.RateLimit.NXGuard = NXGuardConfig{}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("disabled nxdomain_guard rejected: %v", err)
+	}
+}
+
+func TestValidateConnCaps(t *testing.T) {
+	c := validBase()
+	c.Server.MaxTCPConnsPerIP = 32
+	c.Server.MaxHTTPConnsPerIP = 64
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid conn caps rejected: %v", err)
+	}
+	c.Server.MaxTCPConnsPerIP = -1
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "max_tcp_conns_per_ip") {
+		t.Fatalf("err = %v, want max_tcp_conns_per_ip error", err)
+	}
+	c = validBase()
+	c.Server.MaxHTTPConnsPerIP = -1
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "max_http_conns_per_ip") {
+		t.Fatalf("err = %v, want max_http_conns_per_ip error", err)
+	}
+}
+
 func TestValidateGeoBlock(t *testing.T) {
 	c := validBase()
 	c.GeoBlock = GeoBlockConfig{
