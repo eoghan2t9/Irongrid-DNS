@@ -49,23 +49,18 @@ export default function ServerTab({ f }) {
             'server.udp_workers',
             'Handler workers per plain-UDP socket; 0 = 4 x CPU (auto, capped), N = exactly N (capped at 512)',
           )}
-          <div className="field span-2">
-            <span className="field-label">Recommended values</span>
-            <button
-              className="btn small"
-              type="button"
-              onClick={f.applyRecommendedUDP}
-              style={{ alignSelf: 'flex-start' }}
-            >
-              Set recommended
-            </button>
-            <span className="field-hint">
-              {f.numCPU
-                ? `Server CPU count: ${f.numCPU}. Fills the two fields above with the auto-mode numbers (1 socket per CPU, capped at 8; 4 workers per CPU, floor 16).`
-                : 'Fills the two fields above with the auto-mode numbers for this server.'}
-            </span>
-          </div>
         </div>
+        <div className="row-between" style={{ marginTop: 12 }}>
+          <span className="field-label">Recommended values</span>
+          <button className="btn small" type="button" onClick={f.applyRecommendedUDP}>
+            Set recommended
+          </button>
+        </div>
+        <p className="dim small" style={{ marginTop: 4 }}>
+          {f.numCPU
+            ? `Server CPU count: ${f.numCPU}. Fills the two fields above with the auto-mode numbers (1 socket per CPU, capped at 8; 4 workers per CPU, floor 16).`
+            : 'Fills the two fields above with the auto-mode numbers for this server.'}
+        </p>
         <h4 className="field-group">General</h4>
         <div className="form-grid">
           {number('Upstream timeout (s)', 'server.timeout_sec')}

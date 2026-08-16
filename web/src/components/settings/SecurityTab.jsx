@@ -38,36 +38,38 @@ export default function SecurityTab({ f }) {
         {f.blocked.length === 0 ? (
           <p className="dim small">No clients are currently auto-blocked.</p>
         ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Client</th>
-                <th>Blocked</th>
-                <th className="actions-cell">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {f.blocked.map((b) => (
-                <tr key={b.ip}>
-                  <td>
-                    <div className="mono">{b.ip}</div>
-                    {b.first_seen && (
-                      <div className="dim small">first seen {new Date(b.first_seen).toLocaleString()}</div>
-                    )}
-                  </td>
-                  <td className="dim small">
-                    until {new Date(b.blocked_until).toLocaleString()} · {b.queries ?? 0} queries · blocked{' '}
-                    {b.blocks ?? 0}×
-                  </td>
-                  <td className="actions-cell">
-                    <button className="btn tiny danger" type="button" onClick={() => f.unblock(b.ip)}>
-                      Unblock
-                    </button>
-                  </td>
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Client</th>
+                  <th>Blocked</th>
+                  <th className="actions-cell">Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {f.blocked.map((b) => (
+                  <tr key={b.ip}>
+                    <td>
+                      <div className="mono">{b.ip}</div>
+                      {b.first_seen && (
+                        <div className="dim small">first seen {new Date(b.first_seen).toLocaleString()}</div>
+                      )}
+                    </td>
+                    <td className="dim small">
+                      until {new Date(b.blocked_until).toLocaleString()} · {b.queries ?? 0} queries · blocked{' '}
+                      {b.blocks ?? 0}×
+                    </td>
+                    <td className="actions-cell">
+                      <button className="btn tiny danger" type="button" onClick={() => f.unblock(b.ip)}>
+                        Unblock
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
         <div className="quick-actions" style={{ marginTop: 8 }}>
           <button className="btn small" type="button" onClick={f.loadAbuse}>
@@ -160,74 +162,78 @@ export default function SecurityTab({ f }) {
         {f.honeyBlocked.length === 0 ? (
           <p className="dim small">No clients blocked yet — honeypot-domain queries auto-block their client here.</p>
         ) : (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Client</th>
-                <th>Blocked</th>
-                <th className="actions-cell">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {f.honeyBlocked.map((ip) => (
-                <tr key={ip}>
-                  <td>
-                    <div className="mono">{ip}</div>
-                  </td>
-                  <td className="dim small">permanently · firewall drop</td>
-                  <td className="actions-cell">
-                    <button className="btn ghost tiny" type="button" onClick={() => f.reportAbuse(ip)}>
-                      Report
-                    </button>
-                    <button className="btn tiny" type="button" onClick={() => f.blockNet(ip, 0)}>
-                      Block IP
-                    </button>
-                    <button
-                      className="btn tiny"
-                      type="button"
-                      onClick={() => f.blockNet(ip, ip.includes(':') ? 64 : 24)}
-                    >
-                      Block /{ip.includes(':') ? 64 : 24}
-                    </button>
-                    <button className="btn tiny danger" type="button" onClick={() => f.unblockHoney(ip)}>
-                      Unblock
-                    </button>
-                  </td>
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Client</th>
+                  <th>Blocked</th>
+                  <th className="actions-cell">Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {f.honeyBlocked.map((ip) => (
+                  <tr key={ip}>
+                    <td>
+                      <div className="mono">{ip}</div>
+                    </td>
+                    <td className="dim small">permanently · firewall drop</td>
+                    <td className="actions-cell">
+                      <button className="btn ghost tiny" type="button" onClick={() => f.reportAbuse(ip)}>
+                        Report
+                      </button>
+                      <button className="btn tiny" type="button" onClick={() => f.blockNet(ip, 0)}>
+                        Block IP
+                      </button>
+                      <button
+                        className="btn tiny"
+                        type="button"
+                        onClick={() => f.blockNet(ip, ip.includes(':') ? 64 : 24)}
+                      >
+                        Block /{ip.includes(':') ? 64 : 24}
+                      </button>
+                      <button className="btn tiny danger" type="button" onClick={() => f.unblockHoney(ip)}>
+                        Unblock
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
         <h4 style={{ margin: '16px 0 10px' }}>Geo data status</h4>
         {f.geoInfo && f.geoInfo.countries && f.geoInfo.countries.length > 0 ? (
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Code</th>
-                <th>Ranges</th>
-                <th>Last updated</th>
-                <th>Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {f.geoInfo.countries.map((c) => (
-                <tr key={c.code}>
-                  <td className="mono">{c.code}</td>
-                  <td className="dim small">
-                    {c.ipv4_ranges} IPv4 · {c.ipv6_ranges} IPv6
-                  </td>
-                  <td className="dim small">{c.last_fetch ? new Date(c.last_fetch).toLocaleString() : '—'}</td>
-                  <td>
-                    {c.error ? (
-                      <span className="error-text small">{c.error}</span>
-                    ) : (
-                      <span className="badge badge-allowed">loaded</span>
-                    )}
-                  </td>
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Code</th>
+                  <th>Ranges</th>
+                  <th>Last updated</th>
+                  <th>Status</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {f.geoInfo.countries.map((c) => (
+                  <tr key={c.code}>
+                    <td className="mono">{c.code}</td>
+                    <td className="dim small">
+                      {c.ipv4_ranges} IPv4 · {c.ipv6_ranges} IPv6
+                    </td>
+                    <td className="dim small">{c.last_fetch ? new Date(c.last_fetch).toLocaleString() : '—'}</td>
+                    <td>
+                      {c.error ? (
+                        <span className="error-text small">{c.error}</span>
+                      ) : (
+                        <span className="badge badge-allowed">loaded</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         ) : (
           <p className="dim small">
             No country data loaded — countries are optional; blocked-IP and honeypot blocking above work without them.

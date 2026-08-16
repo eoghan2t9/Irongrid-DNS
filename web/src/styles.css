@@ -1056,6 +1056,13 @@ textarea.input {
   padding: 6px 10px 10px;
   overflow-x: auto;
 }
+/* Table scroll wrapper: a table with wide columns (long IPs, several action
+   buttons) scrolls horizontally inside its card instead of pushing past the
+   card edge on narrow viewports. */
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
 .table {
   width: 100%;
   border-collapse: collapse;
