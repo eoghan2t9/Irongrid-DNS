@@ -220,13 +220,27 @@ func (s *udpServer) handleRecovered(job udpJob) {
 	s.handle(job)
 }
 
+// reqPool recycles the inbound *dns.Msg across datagrams. Handler.serve
+// (handler.go) only ever lets the request's *question* escape past its
+// synchronous return — as a dns.Question value copy into the background
+// cache-write goroutines and querylog — never the *dns.Msg itself: every
+// reply is built with SetReply/newReply, which copies request.Question[0]
+// into a fresh slice rather than aliasing the request's, and the one
+// outbound-forwarding path (upstreamQuery := r.Copy() in resolveUpstreams)
+// takes a deep copy rather than the pointer. So once ServeDNS returns, req
+// is exclusively this worker's again.
+var reqPool = sync.Pool{New: func() any { return new(dns.Msg) }}
+
 // handle unpacks one datagram and runs the handler, then returns the read
-// buffer to the pool. Unpack copies every name and record into the *dns.Msg,
-// and the handler never retains the request past its synchronous return, so
-// recycling here is safe.
+// buffer and request to their pools. Unpack copies every name and record
+// into the *dns.Msg, so the buffer is free the moment it returns.
 func (s *udpServer) handle(job udpJob) {
 	defer s.bufs.Put(job.bp)
-	req := new(dns.Msg)
+	req := reqPool.Get().(*dns.Msg)
+	defer func() {
+		*req = dns.Msg{}
+		reqPool.Put(req)
+	}()
 	if err := req.Unpack((*job.bp)[:job.n]); err != nil {
 		// Unparseable: drop, matching miekg/dns's serveDNS (a FORMERR reply
 		// to a malformed datagram is amplification surface).

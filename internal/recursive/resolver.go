@@ -36,6 +36,28 @@ const (
 	// ednsUDPSize is the UDP payload size advertised on queries to
 	// nameservers (see dnsserver.ednsUDPSize for the reasoning).
 	ednsUDPSize = 1232
+
+	// nsConnPoolSize bounds warm connections kept per (network, address)
+	// pair — a cache of ready-to-reuse connections, not a concurrency limit:
+	// a query that finds the pool empty just dials fresh, same as before
+	// pooling existed. Mirrors upstream.upstreamPoolSize.
+	nsConnPoolSize = 2
+	// nsConnPoolMaxKeys bounds how many distinct (network, address) pairs
+	// get pooled at all. Unlike upstream.Upstream's fixed forwarder set, a
+	// resolver may talk to thousands of distinct authoritative servers over
+	// its lifetime, most queried exactly once (a random domain's own
+	// nameservers) — pooling every one of them would grow unbounded pool
+	// state for a long-running process. Root and TLD servers are hit on
+	// nearly every cold cache-miss walk and are the first ones pooled, so
+	// the cap naturally concentrates the reuse benefit on the addresses that
+	// are actually hot. An address that shows up once the cap is full just
+	// dials fresh, exactly like the no-pooling case.
+	nsConnPoolMaxKeys = 512
+	// nsPoolMaxIdle mirrors upstream.poolMaxIdle: a connection idle in the
+	// pool longer than this is presumed stale (the server closed it) and
+	// evicted instead of reused, so reuse never wastes a query on a
+	// guaranteed EOF.
+	nsPoolMaxIdle = 20 * time.Second
 )
 
 // defaultServerTimeout is the package-wide per-server exchange timeout used
@@ -86,6 +108,20 @@ type Resolver struct {
 	// nsFlight coalesces concurrent address lookups for the same glueless
 	// nameserver hostname into one referral walk (see resolveNSAddr).
 	nsFlight singleflight.Group
+
+	// connPools holds warm connections to nameservers, keyed by "network|addr"
+	// (e.g. "udp|198.41.0.4:53"), bounded to nsConnPoolMaxKeys distinct keys
+	// by poolKeyCount. See exchange/getConn/putConn.
+	connPools    sync.Map
+	poolKeyCount atomic.Int64
+}
+
+// nsPooledConn is a warm connection tagged with the moment it was returned
+// to the pool, so getConn can evict connections that sat idle too long.
+// Mirrors upstream.pooledConn.
+type nsPooledConn struct {
+	conn     *dns.Conn
+	pooledAt time.Time
 }
 
 type delegation struct {
@@ -260,12 +296,12 @@ func (r *Resolver) queryServers(ctx context.Context, servers []string, q dns.Que
 			// msg.Id while sending, so the same message cannot be handed to
 			// several servers concurrently (the rule raceUpstreams follows).
 			qm := m.Copy()
-			resp, err := exchange(qctx, addr, qm, "udp", timeout)
+			resp, err := r.exchange(qctx, addr, qm, "udp", timeout)
 			if err == nil && resp.Truncated {
 				// A truncated UDP reply falls back to TCP on the same
 				// server, like a client would; the TCP attempt's error (if
 				// any) supersedes the UDP one.
-				if tcpResp, tcpErr := exchange(qctx, addr, qm, "tcp", timeout); tcpErr == nil {
+				if tcpResp, tcpErr := r.exchange(qctx, addr, qm, "tcp", timeout); tcpErr == nil {
 					resp = tcpResp
 				} else {
 					err = tcpErr
@@ -292,13 +328,109 @@ func (r *Resolver) queryServers(ctx context.Context, servers []string, q dns.Que
 
 // exchange sends one query to one nameserver over network ("udp" or "tcp")
 // bounded by timeout — the resolver's effective per-server budget, itself
-// capped by the caller's overall context.
-func exchange(ctx context.Context, addr string, m *dns.Msg, network string, timeout time.Duration) (*dns.Msg, error) {
+// capped by the caller's overall context. Reuses a warm connection from the
+// resolver's pool when one is available (for TCP this skips a full
+// connection setup — there's no TLS handshake to save on plain nameserver
+// TCP, but the three-way handshake itself is real latency on every hop of a
+// cold walk) and dials fresh otherwise, exactly like upstream.pooledExchange
+// does for the fixed forwarder set.
+func (r *Resolver) exchange(ctx context.Context, addr string, m *dns.Msg, network string, timeout time.Duration) (*dns.Msg, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	c := &dns.Client{Net: network, Timeout: timeout}
-	resp, _, err := c.ExchangeContext(cctx, m, addr)
-	return resp, err
+	if conn := r.getConn(network, addr); conn != nil {
+		resp, _, err := c.ExchangeWithConnContext(cctx, m, conn)
+		if err == nil {
+			r.putConn(network, addr, conn)
+			return resp, nil
+		}
+		conn.Close()
+		// The pooled connection may have gone stale while idle (the
+		// nameserver closed it, a NAT dropped it) — fall through to a fresh
+		// dial rather than failing the query over a warm-connection hiccup.
+	}
+	conn, err := c.DialContext(cctx, addr)
+	if err != nil {
+		return nil, err
+	}
+	resp, _, err := c.ExchangeWithConnContext(cctx, m, conn)
+	if err != nil {
+		conn.Close()
+		return nil, err
+	}
+	r.putConn(network, addr, conn)
+	return resp, nil
+}
+
+// getConn pops a warm connection from the pool for (network, addr), or nil
+// if none are available (including when nothing has ever been pooled for
+// that key). A connection that sat idle longer than nsPoolMaxIdle is
+// presumed stale and closed instead of returned, so reuse never wastes a
+// query on a guaranteed EOF.
+func (r *Resolver) getConn(network, addr string) *dns.Conn {
+	v, ok := r.connPools.Load(network + "|" + addr)
+	if !ok {
+		return nil
+	}
+	pool := v.(chan *nsPooledConn)
+	for {
+		select {
+		case pc := <-pool:
+			if time.Since(pc.pooledAt) > nsPoolMaxIdle {
+				pc.conn.Close()
+				continue
+			}
+			return pc.conn
+		default:
+			return nil
+		}
+	}
+}
+
+// putConn returns a connection to the pool for (network, addr), closing it
+// instead if the per-key pool is full or the key cap (nsConnPoolMaxKeys) has
+// already been reached for a brand-new key.
+func (r *Resolver) putConn(network, addr string, c *dns.Conn) {
+	key := network + "|" + addr
+	v, ok := r.connPools.Load(key)
+	if !ok {
+		if r.poolKeyCount.Load() >= nsConnPoolMaxKeys {
+			c.Close()
+			return
+		}
+		newPool := make(chan *nsPooledConn, nsConnPoolSize)
+		actual, loaded := r.connPools.LoadOrStore(key, newPool)
+		if !loaded {
+			r.poolKeyCount.Add(1)
+		}
+		v = actual
+	}
+	pool := v.(chan *nsPooledConn)
+	select {
+	case pool <- &nsPooledConn{conn: c, pooledAt: time.Now()}:
+	default:
+		c.Close()
+	}
+}
+
+// Close releases every pooled connection. Called when a config reload
+// replaces the recursive upstream (and with it, this Resolver) so warm
+// connections from the outgoing instance don't leak.
+func (r *Resolver) Close() {
+	r.connPools.Range(func(key, v any) bool {
+		pool := v.(chan *nsPooledConn)
+	drain:
+		for {
+			select {
+			case pc := <-pool:
+				pc.conn.Close()
+			default:
+				break drain
+			}
+		}
+		r.connPools.Delete(key)
+		return true
+	})
 }
 
 // nsInfo is one delegated nameserver: its hostname, plus any glue addresses

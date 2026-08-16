@@ -31,9 +31,48 @@ type Decision struct {
 	ListName string
 }
 
-// Engine holds the compiled rule sets. All fields are guarded by mu.
+// ruleSet is the immutable snapshot DecideDomain/CheckIPs/Stats/Lists read
+// lock-free. Every field is a private copy made at publish time — once
+// stored in Engine.rs, nothing ever mutates it again, so concurrent readers
+// need no lock. This trades a copy on every write-side call (LoadList batch
+// completion, AddIPBlock/RemoveIPBlock, Reset — all config-reload-frequency,
+// never per-query) for lock-free reads on the DNS hot path, which runs on
+// every query that isn't already resolved by an earlier rewrite/cache/DHCP
+// hit.
+type ruleSet struct {
+	blockDomains map[string]struct{}
+	blockExact   map[string]struct{}
+	blockIPs     map[string]struct{}
+	allowDomains map[string]struct{}
+	allowExact   map[string]struct{}
+	allowIPs     map[string]struct{}
+	blockRegex   []RegexRule
+	allowRegex   []RegexRule
+	domainList   map[string]string
+	listNames    map[string]string
+
+	totalBlockedDomains int
+	totalIPRules        int
+	userWhitelistLen    int
+	userBlacklistLen    int
+}
+
+var emptyRuleSet = &ruleSet{
+	blockDomains: map[string]struct{}{},
+	blockExact:   map[string]struct{}{},
+	blockIPs:     map[string]struct{}{},
+	allowDomains: map[string]struct{}{},
+	allowExact:   map[string]struct{}{},
+	allowIPs:     map[string]struct{}{},
+	domainList:   map[string]string{},
+	listNames:    map[string]string{},
+}
+
+// Engine holds the compiled rule sets. The mutable fields below (the
+// write-side working state) are guarded by mu; DecideDomain and CheckIPs
+// never take mu — they read the atomically-published rs snapshot instead.
 type Engine struct {
-	mu sync.RWMutex
+	mu sync.Mutex
 
 	blockDomains map[string]struct{}
 	blockExact   map[string]struct{}
@@ -46,6 +85,18 @@ type Engine struct {
 	// them linearly). Compile rebuilds them from the two sources below, so
 	// repeated Compile calls are idempotent: listBlockRegex/listAllowRegex
 	// come from LoadList, userBlockRegex/userAllowRegex from SetUserLists.
+	//
+	// Scaling note: every query that reaches the regex stage pays one RE2
+	// match per rule, in list order, until one hits or the list is
+	// exhausted (RE2 itself is linear-time per match, so this is safe from
+	// ReDoS, just not free). Fine at the sizes AdGuard-style manual/inline
+	// regex rules realistically reach (tens to low hundreds); an operator
+	// loading thousands of regex rules would feel this on every query that
+	// isn't resolved by an earlier exact/domain/subtree hit. There's no
+	// structural fix without building a regex-combining engine (and RE2
+	// alternation of that many patterns isn't free either) — if this ever
+	// becomes the bottleneck, the fix is bounding/warning on regex rule
+	// count, not a rewrite here.
 	blockRegex     []RegexRule
 	allowRegex     []RegexRule
 	listBlockRegex []RegexRule
@@ -69,11 +120,14 @@ type Engine struct {
 	// common domain-only list setups. It is maintained under e.mu wherever
 	// the IP sets change (syncIPFlag) and read lock-free.
 	hasIPRules atomic.Bool
+
+	// rs is the published snapshot DecideDomain/CheckIPs/Stats/Lists read.
+	rs atomic.Pointer[ruleSet]
 }
 
 // NewEngine returns an empty engine.
 func NewEngine() *Engine {
-	return &Engine{
+	e := &Engine{
 		blockDomains: map[string]struct{}{},
 		blockExact:   map[string]struct{}{},
 		blockIPs:     map[string]struct{}{},
@@ -83,6 +137,8 @@ func NewEngine() *Engine {
 		domainList:   map[string]string{},
 		listNames:    map[string]string{},
 	}
+	e.rs.Store(emptyRuleSet)
+	return e
 }
 
 // Reset clears every rule so a fresh reload replaces (not accumulates) state.
@@ -107,6 +163,48 @@ func (e *Engine) Reset() {
 	e.totalBlockedDomains = 0
 	e.totalIPRules = 0
 	e.hasIPRules.Store(false)
+	e.rs.Store(emptyRuleSet)
+}
+
+// publishLocked builds a fresh, private ruleSet from the current working
+// state and atomically publishes it. Callers must hold e.mu. Every map is
+// copied rather than referenced: the working maps keep being mutated in
+// place by later LoadList/Compile/AddIPBlock calls, so a published snapshot
+// must never alias them, or a concurrent lock-free reader would race with
+// that later mutation.
+func (e *Engine) publishLocked() {
+	e.rs.Store(&ruleSet{
+		blockDomains:        cloneStrSet(e.blockDomains),
+		blockExact:          cloneStrSet(e.blockExact),
+		blockIPs:            cloneStrSet(e.blockIPs),
+		allowDomains:        cloneStrSet(e.allowDomains),
+		allowExact:          cloneStrSet(e.allowExact),
+		allowIPs:            cloneStrSet(e.allowIPs),
+		blockRegex:          e.blockRegex,
+		allowRegex:          e.allowRegex,
+		domainList:          cloneStrMap(e.domainList),
+		listNames:           cloneStrMap(e.listNames),
+		totalBlockedDomains: e.totalBlockedDomains,
+		totalIPRules:        e.totalIPRules,
+		userWhitelistLen:    len(e.userWhitelist),
+		userBlacklistLen:    len(e.userBlacklist),
+	})
+}
+
+func cloneStrSet(m map[string]struct{}) map[string]struct{} {
+	out := make(map[string]struct{}, len(m))
+	for k := range m {
+		out[k] = struct{}{}
+	}
+	return out
+}
+
+func cloneStrMap(m map[string]string) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
 }
 
 // syncIPFlag recomputes the hasIPRules gate from the current IP rule sets.
@@ -216,6 +314,7 @@ func (e *Engine) Compile() {
 		}
 	}
 	e.syncIPFlag()
+	e.publishLocked()
 }
 
 // HasIPRules reports whether the engine holds any IP rules (block or allow).
@@ -224,13 +323,17 @@ func (e *Engine) Compile() {
 func (e *Engine) HasIPRules() bool { return e.hasIPRules.Load() }
 
 // DecideDomain evaluates a fully qualified query name (with trailing dot).
+// Lock-free: it reads the published ruleSet snapshot rather than taking
+// e.mu, so concurrent queries never contend with each other here (only a
+// config reload's Compile/AddIPBlock/RemoveIPBlock briefly takes the write
+// lock, and even that never blocks a reader — Load always returns the
+// previously published snapshot until the new one is stored).
 func (e *Engine) DecideDomain(qname string) Decision {
 	qname = normalizeDomain(qname)
 	if qname == "" {
 		return Decision{Action: Allow}
 	}
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	rs := e.rs.Load()
 
 	// lastDot bounds both ancestor walks below: parent suffixes are sliced
 	// directly off qname at each '.' (zero allocation — Go string slicing
@@ -245,10 +348,10 @@ func (e *Engine) DecideDomain(qname string) Decision {
 	// lookups — same shape as the blocklist walk below — instead of scanning
 	// every whitelist entry with domainMatch, which used to cost O(len(allowDomains))
 	// per query regardless of whether it hit.
-	if _, ok := e.allowExact[qname]; ok {
+	if _, ok := rs.allowExact[qname]; ok {
 		return Decision{Action: Allow, Reason: "whitelist:" + qname}
 	}
-	if _, ok := e.allowDomains[qname]; ok {
+	if _, ok := rs.allowDomains[qname]; ok {
 		return Decision{Action: Allow, Reason: "whitelist:" + qname}
 	}
 	for i := 0; i < lastDot; i++ {
@@ -256,25 +359,25 @@ func (e *Engine) DecideDomain(qname string) Decision {
 			continue
 		}
 		parent := qname[i+1:]
-		if _, ok := e.allowDomains[parent]; ok {
+		if _, ok := rs.allowDomains[parent]; ok {
 			return Decision{Action: Allow, Reason: "whitelist:" + parent}
 		}
 	}
 	// Whitelist regexes (AdGuard @@/pattern/ exceptions) override block
 	// regexes. RE2 matching is linear-time, so even a long regex list can't
 	// be weaponised into a ReDoS.
-	for _, rr := range e.allowRegex {
+	for _, rr := range rs.allowRegex {
 		if rr.Re.MatchString(qname) {
 			return Decision{Action: Allow, Reason: "whitelist:regex"}
 		}
 	}
 
 	// Block exact matches.
-	if _, ok := e.blockExact[qname]; ok {
-		return Decision{Action: Block, Reason: "blocklist:exact", ListName: e.listNames[e.domainList[qname]]}
+	if _, ok := rs.blockExact[qname]; ok {
+		return Decision{Action: Block, Reason: "blocklist:exact", ListName: rs.listNames[rs.domainList[qname]]}
 	}
-	if _, ok := e.blockDomains[qname]; ok {
-		return Decision{Action: Block, Reason: "blocklist:" + qname, ListName: e.listNames[e.domainList[qname]]}
+	if _, ok := rs.blockDomains[qname]; ok {
+		return Decision{Action: Block, Reason: "blocklist:" + qname, ListName: rs.listNames[rs.domainList[qname]]}
 	}
 	// Block subtree matches. Walk ancestors for better reasons.
 	for i := 0; i < lastDot; i++ {
@@ -282,32 +385,31 @@ func (e *Engine) DecideDomain(qname string) Decision {
 			continue
 		}
 		parent := qname[i+1:]
-		if _, ok := e.blockDomains[parent]; ok {
-			return Decision{Action: Block, Reason: "blocklist:" + parent, ListName: e.listNames[e.domainList[parent]]}
+		if _, ok := rs.blockDomains[parent]; ok {
+			return Decision{Action: Block, Reason: "blocklist:" + parent, ListName: rs.listNames[rs.domainList[parent]]}
 		}
 	}
 	// Block regexes: matched against the full query name, so a pattern can
 	// target any label (^ads\. matches only the first label, \.ads\. any
 	// label).
-	for _, rr := range e.blockRegex {
+	for _, rr := range rs.blockRegex {
 		if rr.Re.MatchString(qname) {
-			return Decision{Action: Block, Reason: "blocklist:regex", ListName: e.listNames[rr.List]}
+			return Decision{Action: Block, Reason: "blocklist:regex", ListName: rs.listNames[rr.List]}
 		}
 	}
 	return Decision{Action: Allow}
 }
 
 // CheckIPs reports whether any of the given addresses is blocked by an IP
-// rule (and not whitelisted).
+// rule (and not whitelisted). Lock-free, same rationale as DecideDomain.
 func (e *Engine) CheckIPs(ips []net.IP) (bool, string) {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	rs := e.rs.Load()
 	for _, ip := range ips {
 		s := ip.String()
-		if _, ok := e.allowIPs[s]; ok {
+		if _, ok := rs.allowIPs[s]; ok {
 			continue
 		}
-		if _, ok := e.blockIPs[s]; ok {
+		if _, ok := rs.blockIPs[s]; ok {
 			return true, "ip-blocklist:" + s
 		}
 	}
@@ -321,6 +423,7 @@ func (e *Engine) AddIPBlock(ip string) {
 	if parsed := net.ParseIP(ip); parsed != nil {
 		e.blockIPs[parsed.String()] = struct{}{}
 		e.syncIPFlag()
+		e.publishLocked()
 	}
 }
 
@@ -331,30 +434,29 @@ func (e *Engine) RemoveIPBlock(ip string) {
 	if parsed := net.ParseIP(ip); parsed != nil {
 		delete(e.blockIPs, parsed.String())
 		e.syncIPFlag()
+		e.publishLocked()
 	}
 }
 
 // Stats returns counters for the dashboard.
 func (e *Engine) Stats() map[string]int {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
+	rs := e.rs.Load()
 	return map[string]int{
-		"blocked_domains": e.totalBlockedDomains,
-		"blocked_exact":   len(e.blockExact),
-		"ip_rules":        e.totalIPRules,
-		"regex_rules":     len(e.blockRegex),
-		"whitelist":       len(e.userWhitelist),
-		"blacklist":       len(e.userBlacklist),
-		"lists":           len(e.listNames),
+		"blocked_domains": rs.totalBlockedDomains,
+		"blocked_exact":   len(rs.blockExact),
+		"ip_rules":        rs.totalIPRules,
+		"regex_rules":     len(rs.blockRegex),
+		"whitelist":       rs.userWhitelistLen,
+		"blacklist":       rs.userBlacklistLen,
+		"lists":           len(rs.listNames),
 	}
 }
 
 // Lists returns the registered list names.
 func (e *Engine) Lists() map[string]string {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	out := make(map[string]string, len(e.listNames))
-	for k, v := range e.listNames {
+	rs := e.rs.Load()
+	out := make(map[string]string, len(rs.listNames))
+	for k, v := range rs.listNames {
 		out[k] = v
 	}
 	return out
@@ -362,10 +464,9 @@ func (e *Engine) Lists() map[string]string {
 
 // SortedLists returns list IDs in stable order.
 func (e *Engine) SortedLists() []string {
-	e.mu.RLock()
-	defer e.mu.RUnlock()
-	ids := make([]string, 0, len(e.listNames))
-	for id := range e.listNames {
+	rs := e.rs.Load()
+	ids := make([]string, 0, len(rs.listNames))
+	for id := range rs.listNames {
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)

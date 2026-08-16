@@ -3,6 +3,7 @@ package recursive
 import (
 	"context"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -702,5 +703,65 @@ func TestResolverAdvertisesEDNS1232(t *testing.T) {
 	}
 	if got := gotSize.Load(); got != 1232 {
 		t.Fatalf("nameserver saw EDNS %d bytes, want 1232", got)
+	}
+}
+
+// TestResolverConnPoolReuse verifies exchange() pools a connection after a
+// successful query and reuses it (rather than dialing fresh) on the next
+// query to the same nameserver address.
+func TestResolverConnPoolReuse(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := pc.LocalAddr().String()
+	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		m := new(dns.Msg)
+		m.SetReply(r)
+		_ = w.WriteMsg(m)
+	})}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	r := New([]string{addr})
+	t.Cleanup(r.Close)
+
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	if _, err := r.exchange(context.Background(), addr, m.Copy(), "udp", time.Second); err != nil {
+		t.Fatalf("first exchange: %v", err)
+	}
+	if got := r.poolKeyCount.Load(); got != 1 {
+		t.Fatalf("poolKeyCount = %d, want 1 after a successful exchange", got)
+	}
+
+	conn := r.getConn("udp", addr)
+	if conn == nil {
+		t.Fatal("expected the connection from the first exchange to be pooled")
+	}
+	// getConn drains the single pooled entry: nothing left for a second Get
+	// until something is Put back.
+	if c := r.getConn("udp", addr); c != nil {
+		t.Fatal("expected the pool to be empty after draining its one entry")
+	}
+	conn.Close()
+}
+
+// TestResolverConnPoolKeyCap verifies the pool never tracks more than
+// nsConnPoolMaxKeys distinct (network, address) pairs — an address beyond
+// the cap must be rejected (connection closed, not pooled) rather than
+// growing pool state without bound.
+func TestResolverConnPoolKeyCap(t *testing.T) {
+	r := New([]string{"127.0.0.1:53"})
+	t.Cleanup(r.Close)
+
+	for i := 0; i < nsConnPoolMaxKeys+50; i++ {
+		c1, c2 := net.Pipe()
+		_ = c2
+		addr := "10.0.0.1:" + strconv.Itoa(i) // port varies so every key is distinct
+		r.putConn("udp", addr, &dns.Conn{Conn: c1})
+	}
+	if got := r.poolKeyCount.Load(); got != nsConnPoolMaxKeys {
+		t.Fatalf("poolKeyCount = %d, want exactly %d (capped)", got, nsConnPoolMaxKeys)
 	}
 }

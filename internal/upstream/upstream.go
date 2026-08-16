@@ -565,6 +565,9 @@ func (u *Upstream) Close() {
 	if u.client != nil {
 		u.client.CloseIdleConnections()
 	}
+	if u.resolver != nil {
+		u.resolver.Close()
+	}
 }
 
 func (u *Upstream) queryDoH(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
