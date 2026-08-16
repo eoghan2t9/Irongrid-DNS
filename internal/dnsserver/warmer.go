@@ -124,6 +124,7 @@ func (w *Warmer) Enabled() bool {
 // change is picked up without a restart.
 func (w *Warmer) Start(ctx context.Context) {
 	go func() {
+		defer recoverPanic("cache warmer")
 		w.mu.Lock()
 		enabled := w.enabled
 		w.mu.Unlock()
@@ -252,6 +253,7 @@ func (w *Warmer) run(ctx context.Context) {
 		}
 		wg.Add(1)
 		go func(name string) {
+			defer recoverPanic("cache warmer domain")
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()

@@ -1795,3 +1795,49 @@ func TestHandlerIPBlockGated(t *testing.T) {
 		t.Fatalf("expected the IP-blocked answer to be NXDOMAIN, got %v", fw.msg)
 	}
 }
+
+// panicHostResolver is a DHCPHostResolver whose lookups always panic, used to
+// inject a fault into the request path.
+type panicHostResolver struct{}
+
+func (panicHostResolver) LookupHost(name string) ([]net.IP, bool) {
+	panic("boom: simulated bug in the request path")
+}
+func (panicHostResolver) LookupPTR(ip string) (string, bool) { return "", false }
+
+// TestHandlerRecoversFromPanic verifies that a panic anywhere in the request
+// pipeline (simulated here via a DHCP host lookup) fails only that one query
+// with SERVFAIL instead of crashing the process — every listener (UDP, TCP,
+// DoT, DoH, DoQ) shares one process, so an unrecovered panic here would take
+// down DNS resolution for every client, not just the one that triggered it.
+func TestHandlerRecoversFromPanic(t *testing.T) {
+	h := NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, 5*time.Second)
+	h.DHCPHosts = panicHostResolver{}
+
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	fw := &fakeWriter{}
+
+	h.ServeDNS(fw, m) // must not panic out of this call
+
+	if fw.msg == nil {
+		t.Fatal("expected a SERVFAIL response after the recovered panic, got no response")
+	}
+	if fw.msg.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("rcode = %v, want SERVFAIL", fw.msg.Rcode)
+	}
+	if fw.msg.Id != m.Id {
+		t.Fatalf("response id = %d, want %d (rebased to the request)", fw.msg.Id, m.Id)
+	}
+	if h.Stats.Errors.Load() != 1 {
+		t.Fatalf("Stats.Errors = %d, want 1", h.Stats.Errors.Load())
+	}
+
+	// The handler (and its worker pool, in the real UDP/TCP servers) must
+	// keep working for the next query after a recovered panic.
+	fw2 := &fakeWriter{}
+	h.ServeDNS(fw2, m)
+	if fw2.msg == nil || fw2.msg.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("handler did not survive to serve a second query: %v", fw2.msg)
+	}
+}

@@ -14,6 +14,7 @@ import (
 	"log"
 	"math/bits"
 	"net"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -473,6 +474,23 @@ func (h *Handler) SetCookies(on bool) {
 }
 
 func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) {
+	// Every listener (UDP/TCP/DoT/DoH/DoH3/DoQ) funnels into this one
+	// function in this one process — an unrecovered panic anywhere in the
+	// pipeline below (filter engine, cache, upstream, DHCP host lookups, …)
+	// would otherwise crash the whole server and take down every protocol
+	// at once, not just the query that triggered it. Recovering here turns
+	// that into a single failed query.
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[dns] recovered panic serving query (client=%s proto=%s): %v\n%s", client, proto, rec, debug.Stack())
+			h.Stats.Errors.Add(1)
+			if r != nil && len(r.Question) > 0 {
+				m := new(dns.Msg)
+				m.SetRcode(r, dns.RcodeServerFailure)
+				_ = w.WriteMsg(m)
+			}
+		}
+	}()
 	start := time.Now()
 	h.Stats.Total.Add(1)
 	if p, ok := h.Stats.ByProtocol[proto]; ok {
@@ -921,6 +939,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		// Compress, Pack).
 		if cch != nil && len(stale.Raw) == 0 && !isMetaQuery(q) {
 			go func() {
+				defer recoverPanic("background cache write (failure)")
 				cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
 				defer ccancel()
 				// failureTTL <= 0 falls back to the cache's configured
@@ -1001,6 +1020,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	//    Dragonfly cache lifetimes.
 	if cch != nil && !isMetaQuery(q) {
 		go func() {
+			defer recoverPanic("background cache write")
 			cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer ccancel()
 			if len(resp.Answer) > 0 {
@@ -1585,6 +1605,17 @@ func raceUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*
 	ch := make(chan result, len(ups))
 	for _, up := range ups {
 		go func(u *upstream.Upstream) {
+			// The collector loop below always waits for exactly len(ups)
+			// sends, so a panicked goroutine must still send a result (a
+			// synthetic error) or the loop blocks forever — recovering
+			// without this would trade a process crash for a goroutine and
+			// query hang instead.
+			defer func() {
+				if rec := recover(); rec != nil {
+					log.Printf("[dns] recovered panic querying upstream %s: %v\n%s", u.Name(), rec, debug.Stack())
+					ch <- result{err: fmt.Errorf("panic querying upstream %s: %v", u.Name(), rec)}
+				}
+			}()
 			// Copy the query per upstream: each concurrent send must own the
 			// message it hands the transport — sending can mutate the message
 			// (TSIG signing does, and a library bump could change what the

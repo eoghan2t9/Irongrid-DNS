@@ -204,11 +204,20 @@ func (s *udpServer) worker() {
 	for {
 		select {
 		case job := <-s.jobs:
-			s.handle(job)
+			s.handleRecovered(job)
 		case <-s.done:
 			return
 		}
 	}
+}
+
+// handleRecovered runs handle with a panic guard. Handler.serve has its own
+// recover, but req.Unpack below runs before the handler is ever reached —
+// this is the last line of defense so a single malformed datagram can't take
+// down the worker pool (and, unrecovered, the whole process).
+func (s *udpServer) handleRecovered(job udpJob) {
+	defer recoverPanic("UDP worker")
+	s.handle(job)
 }
 
 // handle unpacks one datagram and runs the handler, then returns the read

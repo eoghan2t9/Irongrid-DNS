@@ -94,6 +94,7 @@ func (m *Manager) DoQAddr() string {
 
 func (m *Manager) handleDoQConn(conn quic.Connection) {
 	defer func() { _ = conn.CloseWithError(0, "") }()
+	defer recoverPanic("DoQ connection handler")
 	for {
 		stream, err := conn.AcceptStream(context.Background())
 		if err != nil {
@@ -105,6 +106,10 @@ func (m *Manager) handleDoQConn(conn quic.Connection) {
 
 func (m *Manager) handleDoQStream(stream quic.Stream, remote net.Addr) {
 	defer stream.Close()
+	// Handler.serve recovers panics from the handler call below, but
+	// req.Unpack runs before that — this covers the gap the same way the
+	// UDP worker's handleRecovered does.
+	defer recoverPanic("DoQ stream handler")
 	// RFC 9250: each message is prefixed with a 2-byte length field.
 	var lenBuf [2]byte
 	if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
