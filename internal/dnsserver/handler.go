@@ -482,6 +482,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	// that into a single failed query.
 	defer func() {
 		if rec := recover(); rec != nil {
+			//nolint:gosec // G706: client is a socket-derived IP, no control chars
 			log.Printf("[dns] recovered panic serving query (client=%s proto=%s): %v\n%s", client, proto, rec, debug.Stack())
 			h.Stats.Errors.Add(1)
 			if r != nil && len(r.Question) > 0 {
