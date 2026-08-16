@@ -11,8 +11,13 @@ import (
 
 func TestConnLimiterCapsPerIP(t *testing.T) {
 	cl := newConnLimiter(2)
-	if !cl.acquire("1.2.3.4") || !cl.acquire("1.2.3.4") {
-		t.Fatal("first two acquisitions within the cap must succeed")
+	// Two separate acquisitions (each consumes a slot — not one duplicated
+	// call): both must succeed within the cap.
+	if !cl.acquire("1.2.3.4") {
+		t.Fatal("first acquisition within the cap must succeed")
+	}
+	if !cl.acquire("1.2.3.4") {
+		t.Fatal("second acquisition within the cap must succeed")
 	}
 	if cl.acquire("1.2.3.4") {
 		t.Fatal("third acquisition past the cap must fail")
@@ -107,10 +112,7 @@ func TestLimitListenerRejectsOverCap(t *testing.T) {
 	_ = holder.Close()
 	// Wait for the release to propagate through the accept loop.
 	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if queryTCP(t, addr) {
-			break
-		}
+	for !queryTCP(t, addr) {
 		if time.Now().After(deadline) {
 			t.Fatal("after the holder closes, the slot must be free")
 		}
