@@ -7,6 +7,7 @@ import (
 	"net"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/miekg/dns"
@@ -59,46 +60,52 @@ func TestL1GetSet(t *testing.T) {
 // TestL1TTLRebase verifies answer TTLs are reduced by the elapsed time on
 // read (the same rebasing the L2 path applies).
 func TestL1TTLRebase(t *testing.T) {
-	c := l1onlyCache(time.Hour, time.Minute)
-	ctx := t.Context()
-	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
-	time.Sleep(1 * time.Second)
-	got := c.Get(ctx, aQuestion())
-	if got == nil {
-		t.Fatal("expected a hit")
-	}
-	a := got.Answer[0].(*dns.A)
-	if a.Hdr.Ttl >= 3600 {
-		t.Fatalf("TTL %d was not rebased down", a.Hdr.Ttl)
-	}
-	if a.Hdr.Ttl < 3599 {
-		t.Fatalf("TTL %d rebased too far after 1s", a.Hdr.Ttl)
-	}
+	synctest.Test(t, func(t *testing.T) {
+		c := l1onlyCache(time.Hour, time.Minute)
+		ctx := t.Context()
+		c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
+		time.Sleep(1 * time.Second)
+		got := c.Get(ctx, aQuestion())
+		if got == nil {
+			t.Fatal("expected a hit")
+		}
+		a := got.Answer[0].(*dns.A)
+		if a.Hdr.Ttl >= 3600 {
+			t.Fatalf("TTL %d was not rebased down", a.Hdr.Ttl)
+		}
+		if a.Hdr.Ttl < 3599 {
+			t.Fatalf("TTL %d rebased too far after 1s", a.Hdr.Ttl)
+		}
+	})
 }
 
 // TestL1CapExpiry verifies entries expire at the configured TTL cap, even
 // when the underlying record TTL is much larger.
 func TestL1CapExpiry(t *testing.T) {
-	c := l1onlyCache(300*time.Millisecond, time.Minute)
-	ctx := t.Context()
-	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
-	time.Sleep(400 * time.Millisecond)
-	if got := c.Get(ctx, aQuestion()); got != nil {
-		t.Fatal("entry should have expired at the TTL cap")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		c := l1onlyCache(300*time.Millisecond, time.Minute)
+		ctx := t.Context()
+		c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
+		time.Sleep(400 * time.Millisecond)
+		if got := c.Get(ctx, aQuestion()); got != nil {
+			t.Fatal("entry should have expired at the TTL cap")
+		}
+	})
 }
 
 func TestL1Negative(t *testing.T) {
-	c := l1onlyCache(time.Hour, 50*time.Millisecond)
-	ctx := t.Context()
-	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
-	if got := c.GetNegative(ctx, aQuestion()); got == nil {
-		t.Fatal("expected a negative hit")
-	}
-	time.Sleep(80 * time.Millisecond)
-	if got := c.GetNegative(ctx, aQuestion()); got != nil {
-		t.Fatal("expired negative entry should miss")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		c := l1onlyCache(time.Hour, 50*time.Millisecond)
+		ctx := t.Context()
+		c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
+		if got := c.GetNegative(ctx, aQuestion()); got == nil {
+			t.Fatal("expected a negative hit")
+		}
+		time.Sleep(80 * time.Millisecond)
+		if got := c.GetNegative(ctx, aQuestion()); got != nil {
+			t.Fatal("expired negative entry should miss")
+		}
+	})
 }
 
 func TestL1Flush(t *testing.T) {
@@ -217,29 +224,31 @@ func TestLookupMissWithNilClient(t *testing.T) {
 // serve-stale window is reported with Stale=true (still decodable), and is
 // reported as a plain miss once the stale window itself passes.
 func TestLookupStale(t *testing.T) {
-	c := l1onlyCache(300*time.Millisecond, time.Minute)
-	c.l1.staleTTL = 2 * time.Second
-	ctx := t.Context()
-	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
+	synctest.Test(t, func(t *testing.T) {
+		c := l1onlyCache(300*time.Millisecond, time.Minute)
+		c.l1.staleTTL = 2 * time.Second
+		ctx := t.Context()
+		c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
 
-	time.Sleep(400 * time.Millisecond)
-	res := c.Lookup(aQuestion())
-	if res.Msg() == nil {
-		t.Fatal("expected the stale entry to still be servable")
-	}
-	if !res.Stale {
-		t.Fatal("expected Stale=true inside the serve-stale window")
-	}
-	if res.Negative {
-		t.Fatal("stale entry should still be reported as positive")
-	}
+		time.Sleep(400 * time.Millisecond)
+		res := c.Lookup(aQuestion())
+		if res.Msg() == nil {
+			t.Fatal("expected the stale entry to still be servable")
+		}
+		if !res.Stale {
+			t.Fatal("expected Stale=true inside the serve-stale window")
+		}
+		if res.Negative {
+			t.Fatal("stale entry should still be reported as positive")
+		}
 
-	// Once the serve-stale window itself passes the entry is evicted, and
-	// the next lookup is a plain miss.
-	time.Sleep(2200 * time.Millisecond)
-	if res := c.Lookup(aQuestion()); res.Msg() != nil {
-		t.Fatal("entry should miss once the serve-stale window passes")
-	}
+		// Once the serve-stale window itself passes the entry is evicted, and
+		// the next lookup is a plain miss.
+		time.Sleep(2200 * time.Millisecond)
+		if res := c.Lookup(aQuestion()); res.Msg() != nil {
+			t.Fatal("entry should miss once the serve-stale window passes")
+		}
+	})
 }
 
 // TestFresh verifies the cache warmer's quiet probe: fresh positive and
@@ -247,74 +256,78 @@ func TestLookupStale(t *testing.T) {
 // counters), a miss and an expired entry report not-fresh, and the counters
 // stay untouched by probes.
 func TestFresh(t *testing.T) {
-	c := l1onlyCache(300*time.Millisecond, 50*time.Millisecond)
-	ctx := t.Context()
+	synctest.Test(t, func(t *testing.T) {
+		c := l1onlyCache(300*time.Millisecond, 50*time.Millisecond)
+		ctx := t.Context()
 
-	// Empty cache: not fresh, and the probe must not count as a miss.
-	if c.Fresh(aQuestion()) {
-		t.Fatal("empty cache reported fresh")
-	}
-	if h, m := c.L1Counters(); h != 0 || m != 0 {
-		t.Fatalf("Fresh probe counted: hits=%d misses=%d, want 0/0", h, m)
-	}
+		// Empty cache: not fresh, and the probe must not count as a miss.
+		if c.Fresh(aQuestion()) {
+			t.Fatal("empty cache reported fresh")
+		}
+		if h, m := c.L1Counters(); h != 0 || m != 0 {
+			t.Fatalf("Fresh probe counted: hits=%d misses=%d, want 0/0", h, m)
+		}
 
-	// A positive entry is fresh.
-	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
-	if !c.Fresh(aQuestion()) {
-		t.Fatal("fresh positive entry not reported fresh")
-	}
-	// A negative entry is fresh too.
-	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
-	if !c.Fresh(aQuestion()) {
-		t.Fatal("fresh negative entry not reported fresh")
-	}
-	if h, m := c.L1Counters(); h != 0 || m != 0 {
-		t.Fatalf("Fresh probe counted: hits=%d misses=%d, want 0/0", h, m)
-	}
+		// A positive entry is fresh.
+		c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
+		if !c.Fresh(aQuestion()) {
+			t.Fatal("fresh positive entry not reported fresh")
+		}
+		// A negative entry is fresh too.
+		c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
+		if !c.Fresh(aQuestion()) {
+			t.Fatal("fresh negative entry not reported fresh")
+		}
+		if h, m := c.L1Counters(); h != 0 || m != 0 {
+			t.Fatalf("Fresh probe counted: hits=%d misses=%d, want 0/0", h, m)
+		}
 
-	// After expiry the entry is no longer fresh.
-	time.Sleep(400 * time.Millisecond)
-	if c.Fresh(aQuestion()) {
-		t.Fatal("expired entry reported fresh")
-	}
+		// After expiry the entry is no longer fresh.
+		time.Sleep(400 * time.Millisecond)
+		if c.Fresh(aQuestion()) {
+			t.Fatal("expired entry reported fresh")
+		}
+	})
 }
 
 // TestPrefetchNearExpiry verifies a background refresh is scheduled when a
 // positive entry is served close to its cache-lifetime end, and that a fresh
 // entry with plenty of life left does not trigger one.
 func TestPrefetchNearExpiry(t *testing.T) {
-	c := l1onlyCache(5*time.Second, time.Minute) // lead = 1s
-	ctx := t.Context()
+	synctest.Test(t, func(t *testing.T) {
+		c := l1onlyCache(5*time.Second, time.Minute) // lead = 1s
+		ctx := t.Context()
 
-	prefetched := make(chan dns.Question, 1)
-	c.EnablePrefetch(func(cctx context.Context, q dns.Question) {
-		prefetched <- q
-	})
+		prefetched := make(chan dns.Question, 1)
+		c.EnablePrefetch(func(cctx context.Context, q dns.Question) {
+			prefetched <- q
+		})
 
-	// Fresh entry with ~5s of life left: no prefetch.
-	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
-	if res := c.Lookup(aQuestion()); res.Msg() == nil {
-		t.Fatal("expected a hit")
-	}
-	select {
-	case q := <-prefetched:
-		t.Fatalf("prefetch fired too early for %s", q.Name)
-	default:
-	}
-
-	// Wait until the entry is within the 1s prefetch lead, then trigger.
-	time.Sleep(4200 * time.Millisecond)
-	if res := c.Lookup(aQuestion()); res.Msg() == nil {
-		t.Fatal("expected a hit")
-	}
-	select {
-	case q := <-prefetched:
-		if q.Name != aQuestion().Name {
-			t.Fatalf("prefetched %s, want %s", q.Name, aQuestion().Name)
+		// Fresh entry with ~5s of life left: no prefetch.
+		c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
+		if res := c.Lookup(aQuestion()); res.Msg() == nil {
+			t.Fatal("expected a hit")
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected a prefetch once the entry neared expiry")
-	}
+		select {
+		case q := <-prefetched:
+			t.Fatalf("prefetch fired too early for %s", q.Name)
+		default:
+		}
+
+		// Wait until the entry is within the 1s prefetch lead, then trigger.
+		time.Sleep(4200 * time.Millisecond)
+		if res := c.Lookup(aQuestion()); res.Msg() == nil {
+			t.Fatal("expected a hit")
+		}
+		select {
+		case q := <-prefetched:
+			if q.Name != aQuestion().Name {
+				t.Fatalf("prefetched %s, want %s", q.Name, aQuestion().Name)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected a prefetch once the entry neared expiry")
+		}
+	})
 }
 
 // TestAutoPerShard verifies the L1 auto-sizing policy: unknown memory uses
@@ -384,57 +397,59 @@ func servfailResponse() *dns.Msg {
 // them would re-probe the failing upstream on every query instead of letting
 // the failure cache absorb the retries.
 func TestNegativePrefetch(t *testing.T) {
-	negTTL := 2 * time.Second // negPrefetchLead = max(2s/5, 1s) = 1s
-	c := l1onlyCache(5*time.Second, negTTL)
-	ctx := t.Context()
+	synctest.Test(t, func(t *testing.T) {
+		negTTL := 2 * time.Second // negPrefetchLead = max(2s/5, 1s) = 1s
+		c := l1onlyCache(5*time.Second, negTTL)
+		ctx := t.Context()
 
-	prefetched := make(chan dns.Question, 2)
-	c.EnablePrefetch(func(cctx context.Context, q dns.Question) {
-		prefetched <- q
+		prefetched := make(chan dns.Question, 2)
+		c.EnablePrefetch(func(cctx context.Context, q dns.Question) {
+			prefetched <- q
+		})
+
+		// SERVFAIL negative near expiry: must NOT prefetch.
+		c.SetNegative(ctx, aQuestion(), servfailResponse(), 0)
+		time.Sleep(1200 * time.Millisecond) // remaining ~0.8s < 1s lead
+		if res := c.Lookup(aQuestion()); res.Msg() == nil || !res.Negative {
+			t.Fatal("expected a negative hit")
+		}
+		select {
+		case q := <-prefetched:
+			t.Fatalf("SERVFAIL negative prefetched %s — failure entries must absorb retries", q.Name)
+		default:
+		}
+
+		// NXDOMAIN negative near expiry: must prefetch.
+		c.SetNegative(ctx, aQuestion(), nxdomainResponse(), 0)
+		time.Sleep(1200 * time.Millisecond)
+		if res := c.Lookup(aQuestion()); res.Msg() == nil || !res.Negative {
+			t.Fatal("expected a negative hit")
+		}
+		select {
+		case q := <-prefetched:
+			if q.Name != aQuestion().Name {
+				t.Fatalf("prefetched %s, want %s", q.Name, aQuestion().Name)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected a prefetch for the NXDOMAIN negative")
+		}
+
+		// NODATA negative (NOERROR, empty answer — e.g. an AAAA probe for an
+		// A-only domain) near expiry: must prefetch too.
+		c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
+		time.Sleep(1200 * time.Millisecond)
+		if res := c.Lookup(aQuestion()); res.Msg() == nil || !res.Negative {
+			t.Fatal("expected a negative hit")
+		}
+		select {
+		case q := <-prefetched:
+			if q.Name != aQuestion().Name {
+				t.Fatalf("prefetched %s, want %s", q.Name, aQuestion().Name)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("expected a prefetch for the NODATA negative")
+		}
 	})
-
-	// SERVFAIL negative near expiry: must NOT prefetch.
-	c.SetNegative(ctx, aQuestion(), servfailResponse(), 0)
-	time.Sleep(1200 * time.Millisecond) // remaining ~0.8s < 1s lead
-	if res := c.Lookup(aQuestion()); res.Msg() == nil || !res.Negative {
-		t.Fatal("expected a negative hit")
-	}
-	select {
-	case q := <-prefetched:
-		t.Fatalf("SERVFAIL negative prefetched %s — failure entries must absorb retries", q.Name)
-	default:
-	}
-
-	// NXDOMAIN negative near expiry: must prefetch.
-	c.SetNegative(ctx, aQuestion(), nxdomainResponse(), 0)
-	time.Sleep(1200 * time.Millisecond)
-	if res := c.Lookup(aQuestion()); res.Msg() == nil || !res.Negative {
-		t.Fatal("expected a negative hit")
-	}
-	select {
-	case q := <-prefetched:
-		if q.Name != aQuestion().Name {
-			t.Fatalf("prefetched %s, want %s", q.Name, aQuestion().Name)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected a prefetch for the NXDOMAIN negative")
-	}
-
-	// NODATA negative (NOERROR, empty answer — e.g. an AAAA probe for an
-	// A-only domain) near expiry: must prefetch too.
-	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
-	time.Sleep(1200 * time.Millisecond)
-	if res := c.Lookup(aQuestion()); res.Msg() == nil || !res.Negative {
-		t.Fatal("expected a negative hit")
-	}
-	select {
-	case q := <-prefetched:
-		if q.Name != aQuestion().Name {
-			t.Fatalf("prefetched %s, want %s", q.Name, aQuestion().Name)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("expected a prefetch for the NODATA negative")
-	}
 }
 
 // TestDecodeMGetResult exercises the MGET response parsing in isolation
@@ -555,40 +570,44 @@ func TestLookupRawMultiAnswerTTLOffsets(t *testing.T) {
 // TestLookupRawMsgRebasesTTL verifies the lazy Msg() path rebases answer
 // TTLs to the remaining lifetime, exactly like the pre-raw Lookup did.
 func TestLookupRawMsgRebasesTTL(t *testing.T) {
-	c := l1onlyCache(time.Hour, time.Minute)
-	ctx := t.Context()
-	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
-	time.Sleep(1100 * time.Millisecond)
+	synctest.Test(t, func(t *testing.T) {
+		c := l1onlyCache(time.Hour, time.Minute)
+		ctx := t.Context()
+		c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
+		time.Sleep(1100 * time.Millisecond)
 
-	res := c.Lookup(aQuestion())
-	if res.Raw == nil {
-		t.Fatal("expected a hit")
-	}
-	m := res.Msg()
-	if m == nil || len(m.Answer) != 1 {
-		t.Fatalf("Msg() = %v, want one answer", m)
-	}
-	ttl := m.Answer[0].Header().Ttl
-	if ttl >= 3600 || ttl < 3590 {
-		t.Fatalf("rebased TTL = %d, want ~3599 (elapsed ~1s)", ttl)
-	}
+		res := c.Lookup(aQuestion())
+		if res.Raw == nil {
+			t.Fatal("expected a hit")
+		}
+		m := res.Msg()
+		if m == nil || len(m.Answer) != 1 {
+			t.Fatalf("Msg() = %v, want one answer", m)
+		}
+		ttl := m.Answer[0].Header().Ttl
+		if ttl >= 3600 || ttl < 3590 {
+			t.Fatalf("rebased TTL = %d, want ~3599 (elapsed ~1s)", ttl)
+		}
+	})
 }
 
 // TestLookupRawStaleKeepsRaw verifies an expired-but-stale entry still
 // exposes its raw bytes so the handler can answer from it (after decoding)
 // when re-resolution fails.
 func TestLookupRawStaleKeepsRaw(t *testing.T) {
-	c := l1onlyCache(300*time.Millisecond, time.Minute)
-	c.l1.staleTTL = 2 * time.Second
-	ctx := t.Context()
-	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
-	time.Sleep(500 * time.Millisecond)
+	synctest.Test(t, func(t *testing.T) {
+		c := l1onlyCache(300*time.Millisecond, time.Minute)
+		c.l1.staleTTL = 2 * time.Second
+		ctx := t.Context()
+		c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
+		time.Sleep(500 * time.Millisecond)
 
-	res := c.Lookup(aQuestion())
-	if res.Raw == nil || !res.Stale {
-		t.Fatalf("expected a stale raw entry, got %+v", res)
-	}
-	if m := res.Msg(); m == nil {
-		t.Fatal("stale entry must still decode")
-	}
+		res := c.Lookup(aQuestion())
+		if res.Raw == nil || !res.Stale {
+			t.Fatalf("expected a stale raw entry, got %+v", res)
+		}
+		if m := res.Msg(); m == nil {
+			t.Fatal("stale entry must still decode")
+		}
+	})
 }

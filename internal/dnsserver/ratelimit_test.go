@@ -3,6 +3,7 @@ package dnsserver
 import (
 	"fmt"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -22,24 +23,26 @@ func TestRateLimiterAllowsUpToBurst(t *testing.T) {
 }
 
 func TestRateLimiterRefillsOverTime(t *testing.T) {
-	// NewRateLimiter clamps burst up to at least qps (same invariant
-	// config.Validate enforces), so burst=qps=5 here rather than a smaller
-	// burst that would silently get clamped up.
-	rl := NewRateLimiter(5, 5) // refills at 5/s (200ms/token)
-	for i := range 5 {
-		if !rl.Allow("5.6.7.8") {
-			t.Fatalf("request %d should be allowed within the burst of 5", i)
+	synctest.Test(t, func(t *testing.T) {
+		// NewRateLimiter clamps burst up to at least qps (same invariant
+		// config.Validate enforces), so burst=qps=5 here rather than a smaller
+		// burst that would silently get clamped up.
+		rl := NewRateLimiter(5, 5) // refills at 5/s (200ms/token)
+		for i := range 5 {
+			if !rl.Allow("5.6.7.8") {
+				t.Fatalf("request %d should be allowed within the burst of 5", i)
+			}
 		}
-	}
-	if rl.Allow("5.6.7.8") {
-		t.Fatal("6th immediate request should be denied (burst exhausted)")
-	}
-	// Comfortably longer than the 200ms/token refill time so this isn't
-	// flaky under a loaded/virtualized scheduler.
-	time.Sleep(350 * time.Millisecond)
-	if !rl.Allow("5.6.7.8") {
-		t.Fatal("request after refill window should be allowed")
-	}
+		if rl.Allow("5.6.7.8") {
+			t.Fatal("6th immediate request should be denied (burst exhausted)")
+		}
+		// Comfortably longer than the 200ms/token refill time so this isn't
+		// flaky under a loaded/virtualized scheduler.
+		time.Sleep(350 * time.Millisecond)
+		if !rl.Allow("5.6.7.8") {
+			t.Fatal("request after refill window should be allowed")
+		}
+	})
 }
 
 func TestRateLimiterPerClientIndependent(t *testing.T) {
@@ -62,51 +65,53 @@ func TestRateLimiterEmptyClientAlwaysAllowed(t *testing.T) {
 }
 
 func TestRateLimiterAutoBlockTriggersAndExpires(t *testing.T) {
-	rl := NewRateLimiter(1, 1)
-	rl.SetAutoBlock(3, 100*time.Millisecond)
+	synctest.Test(t, func(t *testing.T) {
+		rl := NewRateLimiter(1, 1)
+		rl.SetAutoBlock(3, 100*time.Millisecond)
 
-	// Hammer past the 3-violation threshold.
-	for range 10 {
-		rl.Allow("1.2.3.4")
-	}
-	if blocked, until := rl.Blocked("1.2.3.4"); !blocked {
-		t.Fatal("expected 1.2.3.4 to be auto-blocked after repeated violations")
-	} else if until.IsZero() || time.Until(until) <= 0 {
-		t.Fatalf("blockedUntil %v is not in the future", until)
-	}
-	if list := rl.BlockedList(); len(list) != 1 || list[0].IP != "1.2.3.4" {
-		t.Fatalf("BlockedList = %+v, want exactly [1.2.3.4]", list)
-	} else {
-		// Lifetime stats: every Allow call counted, exactly one block
-		// triggered, and the bucket has existed since the first query.
-		if list[0].Queries != 10 {
-			t.Errorf("Queries = %d, want 10", list[0].Queries)
+		// Hammer past the 3-violation threshold.
+		for range 10 {
+			rl.Allow("1.2.3.4")
 		}
-		if list[0].Blocks != 1 {
-			t.Errorf("Blocks = %d, want 1", list[0].Blocks)
+		if blocked, until := rl.Blocked("1.2.3.4"); !blocked {
+			t.Fatal("expected 1.2.3.4 to be auto-blocked after repeated violations")
+		} else if until.IsZero() || time.Until(until) <= 0 {
+			t.Fatalf("blockedUntil %v is not in the future", until)
 		}
-		if list[0].FirstSeen.IsZero() || list[0].FirstSeen.After(time.Now()) {
-			t.Errorf("FirstSeen %v is not a sensible past timestamp", list[0].FirstSeen)
+		if list := rl.BlockedList(); len(list) != 1 || list[0].IP != "1.2.3.4" {
+			t.Fatalf("BlockedList = %+v, want exactly [1.2.3.4]", list)
+		} else {
+			// Lifetime stats: every Allow call counted, exactly one block
+			// triggered, and the bucket has existed since the first query.
+			if list[0].Queries != 10 {
+				t.Errorf("Queries = %d, want 10", list[0].Queries)
+			}
+			if list[0].Blocks != 1 {
+				t.Errorf("Blocks = %d, want 1", list[0].Blocks)
+			}
+			if list[0].FirstSeen.IsZero() || list[0].FirstSeen.After(time.Now()) {
+				t.Errorf("FirstSeen %v is not a sensible past timestamp", list[0].FirstSeen)
+			}
 		}
-	}
 
-	// During the cooldown, Allow always refuses even after time passes.
-	time.Sleep(50 * time.Millisecond)
-	if rl.Allow("1.2.3.4") {
-		t.Fatal("blocked client was allowed mid-cooldown")
-	}
-	if blocked, _ := rl.Blocked("1.2.3.4"); !blocked {
-		t.Fatal("Blocked turned false before the cooldown elapsed")
-	}
+		// During the cooldown, Allow always refuses even after time passes.
+		time.Sleep(50 * time.Millisecond)
+		if rl.Allow("1.2.3.4") {
+			t.Fatal("blocked client was allowed mid-cooldown")
+		}
+		if blocked, _ := rl.Blocked("1.2.3.4"); !blocked {
+			t.Fatal("Blocked turned false before the cooldown elapsed")
+		}
 
-	// After the cooldown, the client starts fresh and is allowed again.
-	time.Sleep(80 * time.Millisecond)
-	if !rl.Allow("1.2.3.4") {
-		t.Fatal("client still refused after the cooldown expired")
-	}
-	if blocked, _ := rl.Blocked("1.2.3.4"); blocked {
-		t.Fatal("Blocked still true after expiry")
-	}
+		// After the cooldown, the client starts fresh and is allowed again.
+		time.Sleep(80 * time.Millisecond)
+		if !rl.Allow("1.2.3.4") {
+			t.Fatal("client still refused after the cooldown expired")
+		}
+		if blocked, _ := rl.Blocked("1.2.3.4"); blocked {
+			t.Fatal("Blocked still true after expiry")
+		}
+	})
 }
 
 func TestRateLimiterAutoBlockIsPerClient(t *testing.T) {
@@ -163,19 +168,21 @@ func TestRateLimiterUnblock(t *testing.T) {
 }
 
 func TestRateLimiterSparseViolationsDoNotBlock(t *testing.T) {
-	// Violations that only occur far apart (one per window) are throttled
-	// but must never accumulate into a block — an IP that spikes once in a
-	// while is not a hammerer.
-	rl := NewRateLimiter(1, 1)
-	rl.SetAutoBlock(3, 20*time.Millisecond)
-	for range 3 {
-		rl.Allow("7.7.7.7") // consume the burst
-		rl.Allow("7.7.7.7") // violation
-		time.Sleep(25 * time.Millisecond)
-	}
-	if blocked, _ := rl.Blocked("7.7.7.7"); blocked {
-		t.Fatal("sparse violations must not trigger the auto-block")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		// Violations that only occur far apart (one per window) are throttled
+		// but must never accumulate into a block — an IP that spikes once in a
+		// while is not a hammerer.
+		rl := NewRateLimiter(1, 1)
+		rl.SetAutoBlock(3, 20*time.Millisecond)
+		for range 3 {
+			rl.Allow("7.7.7.7") // consume the burst
+			rl.Allow("7.7.7.7") // violation
+			time.Sleep(25 * time.Millisecond)
+		}
+		if blocked, _ := rl.Blocked("7.7.7.7"); blocked {
+			t.Fatal("sparse violations must not trigger the auto-block")
+		}
+	})
 }
 
 // sameShard returns two distinct client keys that hash to the same shard, so

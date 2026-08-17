@@ -3,6 +3,7 @@ package dnsserver
 import (
 	"net"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -34,31 +35,35 @@ func TestNXGuardBlocksAtThreshold(t *testing.T) {
 }
 
 func TestNXGuardExpiresAfterBlockFor(t *testing.T) {
-	g := NewNXGuard(2, time.Minute, 100*time.Millisecond)
-	g.NoteNX("192.168.1.0")
-	g.NoteNX("192.168.1.0")
-	if g.Allow("192.168.1.0") {
-		t.Fatal("Allow must fail while the cooldown is active")
-	}
-	time.Sleep(150 * time.Millisecond)
-	if !g.Allow("192.168.1.0") {
-		t.Fatal("Allow must succeed after the cooldown elapses")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		g := NewNXGuard(2, time.Minute, 100*time.Millisecond)
+		g.NoteNX("192.168.1.0")
+		g.NoteNX("192.168.1.0")
+		if g.Allow("192.168.1.0") {
+			t.Fatal("Allow must fail while the cooldown is active")
+		}
+		time.Sleep(150 * time.Millisecond)
+		if !g.Allow("192.168.1.0") {
+			t.Fatal("Allow must succeed after the cooldown elapses")
+		}
+	})
 }
 
 func TestNXGuardSlidingWindowResets(t *testing.T) {
-	// NXDOMAINs spread beyond the window must not accumulate toward the
-	// threshold: two bursts of 2 within 10ms of each other, 50ms apart, with a
-	// 20ms window — each burst individually stays under threshold 3.
-	g := NewNXGuard(3, 20*time.Millisecond, time.Minute)
-	g.NoteNX("192.168.1.0")
-	g.NoteNX("192.168.1.0")
-	time.Sleep(50 * time.Millisecond)
-	g.NoteNX("192.168.1.0")
-	g.NoteNX("192.168.1.0")
-	if !g.Allow("192.168.1.0") {
-		t.Fatal("sparse NXDOMAIN bursts must not trip the guard")
-	}
+	synctest.Test(t, func(t *testing.T) {
+		// NXDOMAINs spread beyond the window must not accumulate toward the
+		// threshold: two bursts of 2 within 10ms of each other, 50ms apart, with a
+		// 20ms window — each burst individually stays under threshold 3.
+		g := NewNXGuard(3, 20*time.Millisecond, time.Minute)
+		g.NoteNX("192.168.1.0")
+		g.NoteNX("192.168.1.0")
+		time.Sleep(50 * time.Millisecond)
+		g.NoteNX("192.168.1.0")
+		g.NoteNX("192.168.1.0")
+		if !g.Allow("192.168.1.0") {
+			t.Fatal("sparse NXDOMAIN bursts must not trip the guard")
+		}
+	})
 }
 
 func TestNXGuardEmptyPrefixAllowed(t *testing.T) {
