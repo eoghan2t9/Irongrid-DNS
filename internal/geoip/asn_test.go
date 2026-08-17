@@ -206,10 +206,11 @@ func TestCIDRs6UnalignedRange(t *testing.T) {
 
 // TestBlockerASNRules covers the allow/block ASN precedence inside the geo
 // blocker: allow beats country and block; block beats country; both are
-// checked before the combined country ranges.
+// checked before the combined country ranges, and BlockedAs reports the
+// blocking source.
 func TestBlockerASNRules(t *testing.T) {
 	b := NewBlocker()
-	tbl, _ := LoadTable([]byte("93.0.0.0/8\n91.0.0.0/8\n"), nil)
+	tbl, _ := LoadTable([]byte("93.0.0.0/8\n91.0.0.0/8\n198.51.100.0/24\n"), nil)
 	b.AddTable("RU", tbl)
 	if err := b.SetConfig([]string{"RU"}, []string{"5.6.7.8"}); err != nil {
 		t.Fatalf("SetConfig: %v", err)
@@ -224,17 +225,33 @@ func TestBlockerASNRules(t *testing.T) {
 	if b.Blocked("91.1.2.3") {
 		t.Error("an ASN-allowlisted client inside a blocked country must pass")
 	}
+	if blocked, source := b.BlockedAs("91.1.2.3"); blocked || source != "" {
+		t.Errorf("BlockedAs(allowlisted) = %v,%q want false,\"\"", blocked, source)
+	}
 	// ASN block beats an absent country: 10.0.0.0/24 is AS3257, not RU.
 	if !b.Blocked("10.0.0.5") {
 		t.Error("an ASN-blocklisted client must be blocked even outside every blocked country")
 	}
-	// ASN block and country agree.
+	if blocked, source := b.BlockedAs("10.0.0.5"); !blocked || source != "asn" {
+		t.Errorf("BlockedAs(10.0.0.5) = %v,%q want true,\"asn\"", blocked, source)
+	}
+	// ASN block and country agree — the ASN is the reason reported.
 	if !b.Blocked("93.0.0.1") {
 		t.Error("93.0.0.1 is AS3257 and RU — must be blocked")
+	}
+	if blocked, source := b.BlockedAs("93.0.0.1"); !blocked || source != "asn" {
+		t.Errorf("BlockedAs(93.0.0.1) = %v,%q want true,\"asn\"", blocked, source)
+	}
+	// A country-only client is blocked with source "country".
+	if blocked, source := b.BlockedAs("198.51.100.7"); !blocked || source != "country" {
+		t.Errorf("BlockedAs(198.51.100.7) = %v,%q want true,\"country\"", blocked, source)
 	}
 	// Unrelated client, not blocked.
 	if b.Blocked("8.8.8.8") {
 		t.Error("8.8.8.8 must not be blocked")
+	}
+	if blocked, source := b.BlockedAs("8.8.8.8"); blocked || source != "" {
+		t.Errorf("BlockedAs(8.8.8.8) = %v,%q want false,\"\"", blocked, source)
 	}
 	// CIDR allowlist still applies.
 	if b.Blocked("5.6.7.8") {
@@ -265,14 +282,23 @@ func TestBannerASNRules(t *testing.T) {
 	if !b.Blocked("198.51.100.7") {
 		t.Error("198.51.100.7 is on the block list — must be blocked")
 	}
+	if blocked, source := b.BlockedAs("198.51.100.7"); !blocked || source != "ip" {
+		t.Errorf("BlockedAs(198.51.100.7) = %v,%q want true,\"ip\"", blocked, source)
+	}
 	// ASN allow beats the explicit block list: 203.0.113.9 is both on the
 	// list and AS13335.
 	if b.Blocked("203.0.113.9") {
 		t.Error("an ASN-allowlisted client must pass even when its IP is on the block list")
 	}
+	if blocked, source := b.BlockedAs("203.0.113.9"); blocked || source != "" {
+		t.Errorf("BlockedAs(203.0.113.9) = %v,%q want false,\"\"", blocked, source)
+	}
 	// ASN block without an explicit entry.
 	if !b.Blocked("10.0.0.5") {
 		t.Error("an ASN-blocklisted client must be blocked without an explicit IP entry")
+	}
+	if blocked, source := b.BlockedAs("10.0.0.5"); !blocked || source != "asn" {
+		t.Errorf("BlockedAs(10.0.0.5) = %v,%q want true,\"asn\"", blocked, source)
 	}
 	// Unrelated client passes.
 	if b.Blocked("104.16.0.1") {

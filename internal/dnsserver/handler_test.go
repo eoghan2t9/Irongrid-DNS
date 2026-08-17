@@ -887,6 +887,83 @@ func TestHandlerGeoBlockedClientRefusedEveryTransport(t *testing.T) {
 	}
 }
 
+// TestHandlerASNBlockedClientRefused verifies the per-ASN rules end to end:
+// a block-listed ASN's client is REFUSED and logged as asn-blocked, an
+// allow-listed ASN's client inside a blocked country is served normally, and
+// a country-only client is REFUSED with the country-blocked reason.
+func TestHandlerASNBlockedClientRefused(t *testing.T) {
+	addr := startUDPTestServer(t, "1.1.1.1", 0)
+	mr := miniredis.RunT(t)
+	ql, err := querylog.New(mr.Addr(), "", 0, 30, 0)
+	if err != nil {
+		t.Fatalf("querylog: %v", err)
+	}
+	defer ql.Close()
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, ql, "nxdomain", 600, 5*time.Second)
+
+	tbl, err := geoip.LoadTable([]byte("91.0.0.0/8\n93.0.0.0/8\n198.51.100.0/24\n"), nil)
+	if err != nil {
+		t.Fatalf("LoadTable: %v", err)
+	}
+	allow, block, err := geoip.LoadASNTables(
+		[]byte("91.0.0.0\t91.255.255.255\t13335\tRU\tCLOUDFLARE\n"+
+			"93.0.0.0\t93.255.255.255\t3257\tRU\tGTT\n"+
+			"10.0.0.0\t10.0.0.255\t3257\tUS\tGTT-TEST\n"),
+		nil, map[uint32]bool{13335: true}, map[uint32]bool{3257: true})
+	if err != nil {
+		t.Fatalf("LoadASNTables: %v", err)
+	}
+	b := geoip.NewBlocker()
+	if err := b.SetConfig([]string{"RU"}, nil); err != nil {
+		t.Fatalf("SetConfig: %v", err)
+	}
+	b.AddTable("RU", tbl)
+	b.SetASNs(allow, block)
+	h.SetGeo(b)
+
+	q := func() *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("example.com.", dns.TypeA)
+		return m
+	}
+	// A block-listed ASN's client (outside every blocked country) is REFUSED.
+	blocked := &fakeWriter{ip: net.ParseIP("10.0.0.5")}
+	h.ServeDNS(blocked, q())
+	if blocked.msg == nil || blocked.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("ASN-blocked client: expected REFUSED, got %v", blocked.msg)
+	}
+	// An allow-listed ASN's client inside a blocked country is served.
+	allowed := &fakeWriter{ip: net.ParseIP("91.1.2.3")}
+	h.ServeDNS(allowed, q())
+	if allowed.msg == nil || len(allowed.msg.Answer) == 0 {
+		t.Fatalf("ASN-allowlisted client in a blocked country was refused: %v", allowed.msg)
+	}
+	// A country-only client is REFUSED (blocking source: country).
+	country := &fakeWriter{ip: net.ParseIP("198.51.100.7")}
+	h.ServeDNS(country, q())
+	if country.msg == nil || country.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("country-blocked client: expected REFUSED, got %v", country.msg)
+	}
+
+	// The query log distinguishes the two refusal reasons.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := ql.Query(t.Context(), 100, 0, "", "", "", "")
+		if err != nil {
+			t.Fatalf("query log read: %v", err)
+		}
+		byClient := map[string]string{}
+		for _, e := range entries {
+			byClient[e.Client] = e.Reason
+		}
+		if byClient["10.0.0.5"] == "asn-blocked" && byClient["198.51.100.7"] == "country-blocked" {
+			return
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatal("expected asn-blocked / country-blocked reasons never appeared in the log")
+}
+
 // TestHandlerIPBannerAndHoneypot verifies the client-IP banner refuses
 // blocked clients (configured IPs/CIDRs), and that querying a honeypot
 // domain auto-blocks the client (firing the banner's OnBlock callback so the

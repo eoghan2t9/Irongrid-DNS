@@ -18,6 +18,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -100,6 +101,13 @@ type Handler struct {
 	Geo        *geoip.Manager
 	Firewall   *firewall.Manager
 	RebuildGeo func(cfg config.GeoBlockConfig) error
+	// GroupASN is the pruned IP→ASN table covering every client group's ASN
+	// list, refreshed by main whenever the config changes; nil when no group
+	// matches by ASN. RebuildClientGroups (re)loads it from a fresh config
+	// and rebuilds the client router — the async sibling of RebuildGeo, so a
+	// dataset download never stalls the save.
+	GroupASN            atomic.Pointer[geoip.ASNTable]
+	RebuildClientGroups func(cfg *config.Config) error
 
 	// Warmer is the proactive cache warmer; nil when not wired (tests).
 	Warmer *dnsserver.Warmer
@@ -888,6 +896,7 @@ type clientGroupPayload struct {
 	Name       string   `json:"name"`
 	Enabled    bool     `json:"enabled"`
 	CIDRs      []string `json:"cidrs"`
+	ASNs       []string `json:"asns"`
 	Blocklists []string `json:"blocklists"`
 	Whitelist  []string `json:"whitelist"`
 	Blacklist  []string `json:"blacklist"`
@@ -1199,7 +1208,7 @@ func payloadFromConfig(c *config.Config) configPayload {
 	p.ClientGroups = make([]clientGroupPayload, 0, len(c.ClientGroups))
 	for _, g := range c.ClientGroups {
 		p.ClientGroups = append(p.ClientGroups, clientGroupPayload{
-			ID: g.ID, Name: g.Name, Enabled: g.Enabled, CIDRs: g.CIDRs,
+			ID: g.ID, Name: g.Name, Enabled: g.Enabled, CIDRs: g.CIDRs, ASNs: g.ASNs,
 			Blocklists: g.Blocklists, Whitelist: g.Whitelist, Blacklist: g.Blacklist, Upstreams: g.Upstreams,
 		})
 	}
@@ -1504,7 +1513,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	}
 	for _, g := range p.ClientGroups {
 		cfg.ClientGroups = append(cfg.ClientGroups, config.ClientGroup{
-			ID: g.ID, Name: g.Name, Enabled: g.Enabled, CIDRs: g.CIDRs,
+			ID: g.ID, Name: g.Name, Enabled: g.Enabled, CIDRs: g.CIDRs, ASNs: g.ASNs,
 			Blocklists: g.Blocklists, Whitelist: g.Whitelist, Blacklist: g.Blacklist, Upstreams: g.Upstreams,
 		})
 	}
@@ -1623,7 +1632,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	// listener rebind risk, so just reapply them unconditionally rather than
 	// diffing first.
 	h.DNS.SetRewriter(dnsserver.BuildRewriter(cfg.Rewrites))
-	h.DNS.SetClientRouter(dnsserver.BuildClientRouter(cfg, h.Lists))
+	h.DNS.SetClientRouter(dnsserver.BuildClientRouter(cfg, h.Lists, h.GroupASN.Load()))
 	h.DNS.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
 	h.DNS.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
 	h.DNS.SetCNAMECloakingProtection(cfg.Filter.CNAMECloakingProtection)
@@ -1656,6 +1665,13 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	// the config save or hold cfgMu.
 	if h.RebuildGeo != nil {
 		_ = h.RebuildGeo(cfg.GeoBlock)
+	}
+	// Client-group ASN matching needs the IP→ASN dataset pruned to the new
+	// group lists; the refresh and router rebuild run asynchronously for the
+	// same reason (and the router built above with the previous table is
+	// replaced the moment the fresh one lands).
+	if h.RebuildClientGroups != nil {
+		_ = h.RebuildClientGroups(cfg)
 	}
 	return restart, nil
 }

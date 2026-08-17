@@ -238,8 +238,45 @@ func main() {
 	warmer := dnsserver.NewWarmer(handler, ql)
 	warmer.SetConfig(cfg.Warmer)
 	warmer.Start(ctx)
+	// ---- IP→ASN data (shared by geo_block rules and client-group ASN
+	// matching) ----
+	// The manager downloads the free ip2asn dataset (iptoasn.com by default)
+	// into the geo data dir; created here — before the client router below —
+	// because client groups can match clients by ASN. apiHandler is declared
+	// here too so the blocklist-change hook below (which fires after this
+	// point) can read the published group table.
+	var apiHandler *api.Handler
+	geoDir := filepath.Join(*dataDir, "geo")
+	geoMgr := geoip.NewManager(geoDir, cfg.GeoBlock.BaseURL)
+	geoMgr.SetASNBaseURL(cfg.GeoBlock.ASNBaseURL)
+	// refreshGroupASN loads the ip2asn dataset pruned to the union of every
+	// enabled client group's ASN list and publishes it for router rebuilds.
+	// nil when no group matches by ASN; a load failure keeps the previous
+	// table (like the country-data fallback) so a refresh hiccup doesn't
+	// silently drop ASN-matched groups.
+	refreshGroupASN := func(c *config.Config) *geoip.ASNTable {
+		var asns []string
+		for _, g := range c.ClientGroups {
+			if g.Enabled {
+				asns = append(asns, g.ASNs...)
+			}
+		}
+		if len(asns) == 0 {
+			return nil
+		}
+		tbl, _, err := geoMgr.RefreshASN(ctx, asns, nil)
+		if err != nil {
+			slog.Warn("client-group ASN data load failed — ASN-matched groups not applied", "error", err)
+			if apiHandler != nil {
+				return apiHandler.GroupASN.Load()
+			}
+			return nil
+		}
+		return tbl
+	}
+	groupASN := refreshGroupASN(cfg)
 	handler.SetRewriter(dnsserver.BuildRewriter(cfg.Rewrites))
-	handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
+	handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists, groupASN))
 	handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
 	handler.SetNXGuard(dnsserver.BuildNXGuard(cfg.RateLimit.NXGuard))
 	handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
@@ -284,8 +321,14 @@ func main() {
 	handler.SetUpstreamRoutes(routeUps)
 	// Rebuild per-client-group engines whenever blocklist content changes
 	// (auto-refresh ticker, manual "refresh all lists") — they're built from
-	// the same cached content the global engine uses.
-	lists.OnChange = func() { handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists)) }
+	// the same cached content the global engine uses. The ASN table is
+	// unchanged by a list refresh, so the published one is reused.
+	lists.OnChange = func() {
+		if apiHandler == nil {
+			return
+		}
+		handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists, apiHandler.GroupASN.Load()))
+	}
 	dnsMgr := dnsserver.NewManager(handler, tlsConf)
 	// SO_REUSEPORT socket count for the plain UDP and DoQ listeners
 	// (server.udp_sockets: 0 = auto, 1 = exclusive single socket, N =
@@ -352,7 +395,7 @@ func main() {
 		SaveConfig: saveConfig,
 		WebFS:      webFS,
 	}
-	apiHandler := &api.Handler{
+	apiHandler = &api.Handler{
 		Cfg:        cfg,
 		ConfigPath: *configPath,
 		SaveConfig: saveConfig,
@@ -371,6 +414,9 @@ func main() {
 		Warmer:     warmer,
 		DHCP:       dhcpSrv,
 	}
+	// Publish the boot-time client-group ASN table (the router was built
+	// with it above; the API's config-apply path reads it from here).
+	apiHandler.GroupASN.Store(groupASN)
 	apiApp.Handler = apiHandler
 	// authorize/validSession/issueSession snapshot the auth fields under the
 	// same mutex applyPayload uses, so a session-secret rotation can never be
@@ -391,9 +437,8 @@ func main() {
 	// (or clearing the country list) clears those rules again. buildGeo can
 	// run from boot, a manual refresh and the auto-refresh goroutine at the
 	// same time, but the firewall Manager serialises its own Apply/Clear.
-	geoDir := filepath.Join(*dataDir, "geo")
-	geoMgr := geoip.NewManager(geoDir, cfg.GeoBlock.BaseURL)
-	geoMgr.SetASNBaseURL(cfg.GeoBlock.ASNBaseURL)
+	// geoMgr was created earlier (shared with client-group ASN matching);
+	// buildGeo below drives the country-data lifecycle.
 	fwMgr := firewall.New()
 	apiHandler.Geo = geoMgr
 	apiHandler.Firewall = fwMgr
@@ -472,6 +517,18 @@ func main() {
 			if err := buildGeo(g); err != nil {
 				slog.Error("geo background refresh failed", "error", err)
 			}
+		}()
+		return nil
+	}
+	// Client-group ASN matching refreshes the same way on a config save:
+	// the dataset download/parse runs off the request path, and the router
+	// is rebuilt the moment the fresh table lands (until then the previous
+	// table — or no ASN matching — stays in effect).
+	apiHandler.RebuildClientGroups = func(c *config.Config) error {
+		go func() {
+			tbl := refreshGroupASN(c)
+			apiHandler.GroupASN.Store(tbl)
+			handler.SetClientRouter(dnsserver.BuildClientRouter(c, lists, tbl))
 		}()
 		return nil
 	}
@@ -871,7 +928,11 @@ func main() {
 		handler.SetFailureTTL(cfg.Cache.FailureTTL)
 		newCache.SetLookupTimeout(cfg.Cache.LookupTimeout)
 		handler.SetRewriter(dnsserver.BuildRewriter(cfg.Rewrites))
-		handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists))
+		// Reload picks up client-group ASN changes (and the data itself) from
+		// the freshly re-read config, like every other hot knob below.
+		groupASN = refreshGroupASN(cfg)
+		apiHandler.GroupASN.Store(groupASN)
+		handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists, groupASN))
 		handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
 		handler.SetNXGuard(dnsserver.BuildNXGuard(cfg.RateLimit.NXGuard))
 		handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)

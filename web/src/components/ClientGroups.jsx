@@ -35,7 +35,17 @@ export default function ClientGroups() {
   const addGroup = () => {
     setGroups((prev) => [
       ...prev,
-      { id: '', name: '', enabled: true, cidrs: [], blocklists: [], whitelist: [], blacklist: [], upstreams: [] },
+      {
+        id: '',
+        name: '',
+        enabled: true,
+        cidrs: [],
+        asns: [],
+        blocklists: [],
+        whitelist: [],
+        blacklist: [],
+        upstreams: [],
+      },
     ])
     setDirty(true)
   }
@@ -80,10 +90,10 @@ export default function ClientGroups() {
           </div>
         </div>
         <p className="dim small">
-          Apply a different policy to specific devices/subnets — e.g. a kids' device group with stricter blocklists, or
-          an IoT VLAN pinned to specific upstreams. The first matching group wins; clients matching none use the global
-          filtering and upstreams in Settings. Leave "Blocklist IDs" empty to use every enabled global blocklist.
-          Applied live — no restart needed.
+          Apply a different policy to specific devices/subnets or ISPs — e.g. a kids' device group with stricter
+          blocklists, an IoT VLAN pinned to specific upstreams, or a group for every client behind a given ISP (matched
+          by ASN). The first matching group wins; clients matching none use the global filtering and upstreams in
+          Settings. Leave "Blocklist IDs" empty to use every enabled global blocklist. Applied live — no restart needed.
         </p>
       </div>
 
@@ -129,6 +139,11 @@ export default function ClientGroups() {
                 'Client CIDRs / IPs',
                 'one per line, e.g. 192.168.1.50 or 10.0.5.0/24',
                 <LineListField value={g.cidrs} onChange={(v) => setGroup(i, { cidrs: v })} rows={2} />,
+              )}
+              {field(
+                'ISPs (ASNs)',
+                'one per line, e.g. AS13335 — matches every client whose source IP belongs to that ISP (same ip2asn data as geo blocking)',
+                <LineListField value={g.asns} onChange={(v) => setGroup(i, { asns: v })} rows={2} />,
               )}
               {field(
                 'Blocklist IDs',

@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
 
@@ -20,15 +21,26 @@ type ClientPolicy struct {
 	Upstreams []*upstream.Upstream
 }
 
-// GroupCIDRs pairs a policy with the raw CIDR/IP strings that route to it.
+// GroupCIDRs pairs a policy with the raw CIDR/IP strings and the parsed
+// ASN numbers that route clients to it.
 type GroupCIDRs struct {
 	CIDRs  []string
+	ASNs   []uint32
 	Policy *ClientPolicy
 }
 
 type clientEntry struct {
 	nets   []*net.IPNet
+	asns   map[uint32]bool // non-empty only when the group matches by ASN
 	policy *ClientPolicy
+}
+
+// clientEntries is one immutable router snapshot: the groups in evaluation
+// order plus the IP→ASN table backing ASN matching (nil when no group
+// matches by ASN, so the common case pays no lookup at all).
+type clientEntries struct {
+	groups   []clientEntry
+	asnTable *geoip.ASNTable
 }
 
 // maxPolicyCache bounds the per-IP resolution cache. When full it resets —
@@ -51,7 +63,7 @@ const maxPolicyCache = 4096
 // goroutines) rather than a map behind a mutex that every query would
 // contend on.
 type ClientRouter struct {
-	entries atomic.Pointer[[]clientEntry]
+	entries atomic.Pointer[clientEntries]
 	// cache maps client IP string -> resolved policy. A stored (*ClientPolicy)(nil)
 	// is a cached "no group matches" so repeat lookups for unmatched clients
 	// skip the scan too; Load's ok return still distinguishes that from "not
@@ -63,13 +75,16 @@ type ClientRouter struct {
 // NewClientRouter returns a router with no groups (Resolve always misses).
 func NewClientRouter() *ClientRouter {
 	cr := &ClientRouter{}
-	empty := []clientEntry{}
+	empty := clientEntries{}
 	cr.entries.Store(&empty)
 	return cr
 }
 
-// SetPolicies replaces the routing table and clears the per-IP cache.
-func (cr *ClientRouter) SetPolicies(groups []GroupCIDRs) {
+// SetPolicies replaces the routing table (and the ASN lookup table backing
+// it) and clears the per-IP cache. asnTable may be nil — ASN matching is
+// then skipped entirely, so routers for configs without group ASNs pay no
+// lookup on the hot path.
+func (cr *ClientRouter) SetPolicies(groups []GroupCIDRs, asnTable *geoip.ASNTable) {
 	entries := make([]clientEntry, 0, len(groups))
 	for _, g := range groups {
 		if g.Policy == nil {
@@ -90,21 +105,29 @@ func (cr *ClientRouter) SetPolicies(groups []GroupCIDRs) {
 				nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
 			}
 		}
-		if len(nets) == 0 {
+		var asns map[uint32]bool
+		if len(g.ASNs) > 0 {
+			asns = make(map[uint32]bool, len(g.ASNs))
+			for _, a := range g.ASNs {
+				asns[a] = true
+			}
+		}
+		if len(nets) == 0 && len(asns) == 0 {
 			continue
 		}
-		entries = append(entries, clientEntry{nets: nets, policy: g.Policy})
+		entries = append(entries, clientEntry{nets: nets, asns: asns, policy: g.Policy})
 	}
-	cr.entries.Store(&entries)
+	cr.entries.Store(&clientEntries{groups: entries, asnTable: asnTable})
 	cr.cache.Clear()
 	cr.cacheSize.Store(0)
 }
 
-// Resolve returns the policy for the first group whose CIDRs contain client,
-// or nil when no group matches (callers fall back to the global policy).
-// On the DNS hot path, so the cache is checked before ParseIP: a cached hit
-// (the common case — every query from an established client) skips the parse
-// and the CIDR scan entirely, and takes no lock at all.
+// Resolve returns the policy for the first group whose CIDRs contain client
+// or whose ASN list owns the client's ISP, or nil when no group matches
+// (callers fall back to the global policy). On the DNS hot path, so the
+// cache is checked before ParseIP: a cached hit (the common case — every
+// query from an established client) skips the parse and the scans entirely,
+// and takes no lock at all.
 func (cr *ClientRouter) Resolve(client string) *ClientPolicy {
 	if v, ok := cr.cache.Load(client); ok {
 		p, _ := v.(*ClientPolicy)
@@ -119,12 +142,26 @@ func (cr *ClientRouter) Resolve(client string) *ClientPolicy {
 	// than once — cheap and deterministic (same input, same result), so the
 	// duplicate work is a better trade than a lock every cache hit would pay
 	// forever.
+	entries := cr.entries.Load()
 	var p *ClientPolicy
-	for _, e := range *cr.entries.Load() {
-		for _, n := range e.nets {
-			if n.Contains(ip) {
-				p = e.policy
+	for _, e := range entries.groups {
+		if len(e.nets) > 0 {
+			for _, n := range e.nets {
+				if n.Contains(ip) {
+					p = e.policy
+					break
+				}
+			}
+			if p != nil {
 				break
+			}
+		}
+		// ASN matching runs only for groups that ask for it (and only when a
+		// table is installed), so the common no-ASN config stays allocation-
+		// and lookup-free.
+		if p == nil && len(e.asns) > 0 && entries.asnTable != nil {
+			if asn, ok := entries.asnTable.Lookup(ip); ok && e.asns[asn] {
+				p = e.policy
 			}
 		}
 		if p != nil {

@@ -160,29 +160,41 @@ func (b *Banner) asnBlocked(ip net.IP) bool {
 	return b.asnBlock != nil && b.asnBlock.Contains(ip)
 }
 
-// Blocked reports whether clientIP is on the banner's block list.
-// Allowlisted clients are never blocked — by ASN allowlist, the configured
-// IP list, or a persisted honeypot auto-block. A block-listed ASN's client
-// is always blocked, even without an explicit IP entry.
+// Blocked reports whether clientIP is on the banner's block list (see
+// BlockedAs for the blocking source).
 func (b *Banner) Blocked(clientIP string) bool {
+	blocked, _ := b.BlockedAs(clientIP)
+	return blocked
+}
+
+// BlockedAs reports whether clientIP is on the banner's block list and why:
+// "asn" when a block-listed ASN refused the client, "ip" when an explicit
+// IP/CIDR entry or a persisted honeypot auto-block did. Allowlisted clients
+// are never blocked — by ASN allowlist or the configured IP list — and a
+// block-listed ASN's client is always blocked, even without an explicit IP
+// entry.
+func (b *Banner) BlockedAs(clientIP string) (blocked bool, source string) {
 	ip := net.ParseIP(clientIP)
 	if ip == nil {
-		return false
+		return false, ""
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	if b.asnAllowed(ip) {
-		return false
+		return false, ""
 	}
 	if b.allowed(ip) {
-		return false
+		return false, ""
 	}
 	for _, n := range b.nets {
 		if n.Contains(ip) {
-			return true
+			return true, "ip"
 		}
 	}
-	return b.asnBlocked(ip)
+	if b.asnBlocked(ip) {
+		return true, "asn"
+	}
+	return false, ""
 }
 
 // LookupHoneypot reports whether qname (lowercase, no trailing dot) is a

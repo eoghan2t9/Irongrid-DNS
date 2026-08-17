@@ -5,6 +5,7 @@ import (
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
 
@@ -51,7 +52,10 @@ func BuildNXGuard(g config.NXGuardConfig) *NXGuard {
 // blocklist content the global engine uses (lists.GetContent avoids
 // re-fetching anything over the network) restricted to the group's chosen
 // list IDs, plus its own resolved upstream set when one is configured.
-func BuildClientRouter(cfg *config.Config, lists *filter.ListManager) *ClientRouter {
+// asnTable is the pruned IP→ASN table covering every group's ASN list (nil
+// disables ASN matching — callers refresh it from the geoip Manager when the
+// config's client groups use ASNs).
+func BuildClientRouter(cfg *config.Config, lists *filter.ListManager, asnTable *geoip.ASNTable) *ClientRouter {
 	router := NewClientRouter()
 	if len(cfg.ClientGroups) == 0 {
 		return router
@@ -98,6 +102,7 @@ func BuildClientRouter(cfg *config.Config, lists *filter.ListManager) *ClientRou
 
 		groups = append(groups, GroupCIDRs{
 			CIDRs: g.CIDRs,
+			ASNs:  asnNumbers(g.ASNs),
 			Policy: &ClientPolicy{
 				GroupID:   g.ID,
 				GroupName: g.Name,
@@ -106,6 +111,18 @@ func BuildClientRouter(cfg *config.Config, lists *filter.ListManager) *ClientRou
 			},
 		})
 	}
-	router.SetPolicies(groups)
+	router.SetPolicies(groups, asnTable)
 	return router
+}
+
+// asnNumbers converts normalized ASN config entries ("AS13335") into their
+// numbers; entries that somehow failed validation are skipped.
+func asnNumbers(asns []string) []uint32 {
+	out := make([]uint32, 0, len(asns))
+	for _, s := range asns {
+		if n, ok := geoip.ParseASN(s); ok {
+			out = append(out, n)
+		}
+	}
+	return out
 }

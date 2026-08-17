@@ -483,6 +483,28 @@ func TestConfigPayloadGeoBlockRoundTrip(t *testing.T) {
 	}
 }
 
+// TestConfigPayloadClientGroupASNsRoundTrip verifies the client-group asns
+// field survives the payload mapping in both directions — a silently dropped
+// field here would make the Client Groups ASN textarea a no-op on save.
+func TestConfigPayloadClientGroupASNsRoundTrip(t *testing.T) {
+	c := config.Default()
+	c.ClientGroups = []config.ClientGroup{
+		{ID: "cloud", Name: "Cloud egress", Enabled: true, ASNs: []string{"AS13335", "AS15169"}, CIDRs: []string{"10.0.0.0/8"}},
+	}
+	p := payloadFromConfig(c)
+	if !reflect.DeepEqual(p.ClientGroups[0].ASNs, []string{"AS13335", "AS15169"}) {
+		t.Fatalf("payload dropped client-group ASNs: %+v", p.ClientGroups[0])
+	}
+	// Reverse direction, mirroring applyPayload's mapping.
+	g := p.ClientGroups[0]
+	cfg := &config.Config{ClientGroups: []config.ClientGroup{
+		{ID: g.ID, Name: g.Name, Enabled: g.Enabled, CIDRs: g.CIDRs, ASNs: g.ASNs},
+	}}
+	if !reflect.DeepEqual(cfg.ClientGroups, c.ClientGroups) {
+		t.Fatalf("client-group ASN round-trip mismatch:\n got %+v\nwant %+v", cfg.ClientGroups, c.ClientGroups)
+	}
+}
+
 // startDelayedUDPDNS runs a UDP DNS server that sleeps before answering — a
 // controllable-latency probe target for the fastest-upstream benchmark.
 func startDelayedUDPDNS(t *testing.T, delay time.Duration) string {

@@ -395,6 +395,40 @@ func TestValidateGeoBlockASNs(t *testing.T) {
 	}
 }
 
+func TestValidateClientGroupASNs(t *testing.T) {
+	// A group may match purely by ASN (no CIDRs at all).
+	c := validBase()
+	c.ClientGroups = []ClientGroup{
+		{ID: "cloud", Name: "Cloud egress", Enabled: true, ASNs: []string{"as13335", "AS15169"}},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("ASN-only group rejected: %v", err)
+	}
+	if c.ClientGroups[0].ASNs[0] != "AS13335" || c.ClientGroups[0].ASNs[1] != "AS15169" {
+		t.Errorf("group ASNs not normalized: %v", c.ClientGroups[0].ASNs)
+	}
+	// Mixed CIDR + ASN matching is fine too.
+	c = validBase()
+	c.ClientGroups = []ClientGroup{
+		{ID: "kids", Enabled: true, CIDRs: []string{"10.0.0.0/8"}, ASNs: []string{"AS3257"}},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("CIDR+ASN group rejected: %v", err)
+	}
+	// A bad ASN is rejected by name.
+	c = validBase()
+	c.ClientGroups = []ClientGroup{{ID: "x", Enabled: true, ASNs: []string{"AS13X"}}}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "asns[0]") {
+		t.Fatalf("err = %v, want asns[0] error", err)
+	}
+	// Neither CIDRs nor ASNs is still an error.
+	c = validBase()
+	c.ClientGroups = []ClientGroup{{ID: "x", Enabled: true}}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "CIDR or ASN") {
+		t.Fatalf("err = %v, want CIDR-or-ASN error", err)
+	}
+}
+
 func TestValidateGeoBlockIPsAndHoneypots(t *testing.T) {
 	c := validBase()
 	c.GeoBlock = GeoBlockConfig{

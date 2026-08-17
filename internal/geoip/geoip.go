@@ -139,31 +139,41 @@ func (b *Blocker) SetASNs(allow, block *ASNTable) {
 	b.asnAllow, b.asnBlock = allow, block
 }
 
-// Blocked reports whether clientIP is geo-blocked: allowlisted clients are
-// never blocked — by the ASN allowlist (an allow-listed ISP wins over
-// everything, mirroring the CIDR allowlist) or by an explicit CIDR. A
-// block-listed ASN is always blocked, before the combined country ranges.
-// An unparseable IP (e.g. the web dashboard's own connections) is never
-// blocked.
+// Blocked reports whether clientIP is geo-blocked (see BlockedAs for the
+// blocking source).
 func (b *Blocker) Blocked(clientIP string) bool {
+	blocked, _ := b.BlockedAs(clientIP)
+	return blocked
+}
+
+// BlockedAs reports whether clientIP is geo-blocked and why: "asn" when a
+// block-listed ASN refused the client, "country" when the combined country
+// ranges did. Allowlisted clients are never blocked — by the ASN allowlist
+// (an allow-listed ISP wins over everything, mirroring the CIDR allowlist)
+// or by an explicit CIDR. An unparseable IP (e.g. the web dashboard's own
+// connections) is never blocked.
+func (b *Blocker) BlockedAs(clientIP string) (blocked bool, source string) {
 	ip := net.ParseIP(clientIP)
 	if ip == nil {
-		return false
+		return false, ""
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	if b.asnAllow != nil && b.asnAllow.Contains(ip) {
-		return false
+		return false, ""
 	}
 	for _, n := range b.allowlist {
 		if n.Contains(ip) {
-			return false
+			return false, ""
 		}
 	}
 	if b.asnBlock != nil && b.asnBlock.Contains(ip) {
-		return true
+		return true, "asn"
 	}
-	return b.combined.Contains(ip)
+	if b.combined.Contains(ip) {
+		return true, "country"
+	}
+	return false, ""
 }
 
 // Countries returns the enabled country codes in sorted order.

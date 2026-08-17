@@ -616,19 +616,33 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	qname := strings.ToLower(strings.TrimSuffix(q.Name, "."))
 
 	// 0.5 Client blocking: a geo-blocked country (source-IP country in the
-	//    blocked set) or a banner-blocked client (explicit IPs/CIDRs plus
-	//    IPs auto-added by honeypot hits) is REFUSED on every transport — an
-	//    explicit answer, not a silent drop (the user's chosen trade-off).
-	//    The geo allowlist is checked inside the blocker, so whitelisted IPs
-	//    always pass.
+	//    blocked set), a block-listed ASN's client, or a banner-blocked
+	//    client (explicit IPs/CIDRs plus IPs auto-added by honeypot hits) is
+	//    REFUSED on every transport — an explicit answer, not a silent drop
+	//    (the user's chosen trade-off). The geo/ASN allowlists are checked
+	//    inside the blockers, so whitelisted IPs and unblocked ISPs always
+	//    pass. The blocking source is surfaced in the query log so an
+	//    ASN-blocked client reads as "asn-blocked" rather than a country or
+	//    IP block.
 	if client != "" {
-		geoBlocked := geo != nil && geo.Blocked(client)
-		bannerBlocked := ipbanner != nil && ipbanner.Blocked(client)
+		geoBlocked, geoSource := false, ""
+		if geo != nil {
+			geoBlocked, geoSource = geo.BlockedAs(client)
+		}
+		bannerBlocked, bannerSource := false, ""
+		if ipbanner != nil {
+			bannerBlocked, bannerSource = ipbanner.BlockedAs(client)
+		}
 		if geoBlocked || bannerBlocked {
 			h.Stats.Blocked.Add(1)
 			action, reason := "geo-blocked", "country-blocked"
+			blockSource := geoSource
 			if bannerBlocked {
 				action, reason = "ip-blocked", "blocked-client"
+				blockSource = bannerSource
+			}
+			if blockSource == "asn" {
+				reason = "asn-blocked"
 			}
 			refused := getMsg()
 			refused.SetReply(r)

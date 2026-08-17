@@ -455,6 +455,70 @@ function AXFRTool() {
   )
 }
 
+function ASNTool() {
+  const [ip, setIP] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [info, setInfo] = useState(null)
+  const [err, setErr] = useState('')
+
+  const run = async (e) => {
+    e.preventDefault()
+    const trimmed = ip.trim()
+    if (!trimmed) return
+    setBusy(true)
+    setErr('')
+    setInfo(null)
+    try {
+      const res = await api.asnInfo([trimmed])
+      const got = (res.asn || {})[trimmed]
+      setInfo(got || {})
+    } catch (ex) {
+      setErr(ex.message)
+    }
+    setBusy(false)
+  }
+
+  return (
+    <div className="card">
+      <h3>ASN lookup</h3>
+      <p className="dim small">
+        Which ISP owns an IP address? Resolves the BGP origin ASN, holder and prefix via the free RIPEstat API (same
+        source as the query-log labels, server-cached) — handy for checking an address before blocking its ISP by ASN.
+      </p>
+      <form onSubmit={run} className="form-grid">
+        <input
+          className="input"
+          placeholder="8.8.8.8 or 2001:4860:4860::8888"
+          value={ip}
+          onChange={(e) => setIP(e.target.value)}
+        />
+        <button className="btn" type="submit" disabled={busy}>
+          {busy ? 'Looking up…' : 'Look up ASN'}
+        </button>
+      </form>
+      {err && (
+        <div className="error-banner" style={{ marginTop: 10 }}>
+          {err}
+        </div>
+      )}
+      {info &&
+        (info.asn ? (
+          <div className="card" style={{ marginTop: 12, padding: 10 }}>
+            <div className="row" style={{ flexWrap: 'wrap', gap: 8 }}>
+              <span className="chip mono">{info.asn}</span>
+              <span className="strong">{info.holder || info.name || 'unknown network'}</span>
+              {info.prefix && <span className="dim small mono">{info.prefix}</span>}
+            </div>
+          </div>
+        ) : (
+          <div className="dim small" style={{ marginTop: 10 }}>
+            No routing information for this address — it may be reserved or unassigned.
+          </div>
+        ))}
+    </div>
+  )
+}
+
 function SubdomainTool() {
   const toast = useToast()
   const [domain, setDomain] = useState('')
@@ -604,6 +668,7 @@ export default function Tools() {
         <AXFRTool />
         <SubdomainTool />
       </div>
+      <ASNTool />
       <SiteScanner />
     </div>
   )

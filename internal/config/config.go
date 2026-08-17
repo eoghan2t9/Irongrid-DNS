@@ -165,13 +165,19 @@ type RewriteSpec struct {
 }
 
 // ClientGroup applies a different blocking/upstream policy to clients whose
-// source IP falls in one of CIDRs. Groups are evaluated in list order; the
-// first match wins. Clients matching no group use the global Filter/Upstreams.
+// source IP falls in one of CIDRs, or whose ISP's ASN is listed in ASNs.
+// Groups are evaluated in list order; the first match wins. Clients matching
+// no group use the global Filter/Upstreams.
 type ClientGroup struct {
 	ID      string   `yaml:"id"`
 	Name    string   `yaml:"name"`
 	Enabled bool     `yaml:"enabled"`
 	CIDRs   []string `yaml:"cidrs"` // e.g. "192.168.1.50/32", "10.0.5.0/24"
+	// ASNs matches clients by ISP instead of (or in addition to) CIDR — e.g.
+	// "AS13335" to pin every Cloudflare-egressed client to this group. Uses
+	// the same ip2asn dataset as geo_block (iptoasn.com by default), fetched
+	// and cached the same way.
+	ASNs []string `yaml:"asns"`
 	// Blocklists selects a subset of filter.blocklists by ID. Empty means
 	// "every enabled global blocklist" (same as the default policy).
 	Blocklists []string `yaml:"blocklists"`
@@ -941,8 +947,8 @@ func (c *Config) validate() error {
 			return fmt.Errorf("client_groups[%d]: duplicate id %q", i, g.ID)
 		}
 		seenGroup[g.ID] = true
-		if len(g.CIDRs) == 0 {
-			return fmt.Errorf("client_groups[%d] (%s): at least one CIDR is required", i, g.ID)
+		if len(g.CIDRs) == 0 && len(g.ASNs) == 0 {
+			return fmt.Errorf("client_groups[%d] (%s): at least one CIDR or ASN is required", i, g.ID)
 		}
 		for _, cidr := range g.CIDRs {
 			if _, _, err := net.ParseCIDR(cidr); err != nil {
@@ -950,6 +956,13 @@ func (c *Config) validate() error {
 					return fmt.Errorf("client_groups[%d] (%s): invalid CIDR/IP %q", i, g.ID, cidr)
 				}
 			}
+		}
+		for j, a := range g.ASNs {
+			asn, err := parseASN(a)
+			if err != nil {
+				return fmt.Errorf("client_groups[%d] (%s): asns[%d]: %w", i, g.ID, j, err)
+			}
+			c.ClientGroups[i].ASNs[j] = asn
 		}
 		if slices.Contains(g.Upstreams, "") {
 			return fmt.Errorf("client_groups[%d] (%s): empty upstream entry", i, g.ID)

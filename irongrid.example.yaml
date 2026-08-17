@@ -258,6 +258,9 @@ client_groups: []
   #   name: "Kids' devices"
   #   enabled: true
   #   cidrs: ["192.168.1.50", "192.168.1.51"]  # bare IPs or CIDRs
+  #   asns: ["AS13335"]        # match clients by ISP instead of (or in
+  #                             # addition to) CIDR; uses the same ip2asn
+  #                             # dataset as geo_block
   #   blocklists: []           # subset of filter.blocklists IDs; [] = all enabled
   #   whitelist: []            # added to the global whitelist
   #   blacklist: ["*.tiktok.com", "*.reddit.com"]

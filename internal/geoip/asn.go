@@ -29,14 +29,25 @@ const (
 )
 
 // ASNTable is the pruned IP→ASN map for one side of the ASN rules (the
-// allow-listed ASNs or the block-listed ASNs): a sorted, disjoint list of
-// [start,end] ranges. A range hit means the IP belongs to one of the
-// configured ASNs — the tables never store ASNs the operator didn't
-// configure. Unlike the country Table, adjacent ranges are never merged:
-// they belong to different ASNs and must stay distinct.
+// allow-listed ASNs, the block-listed ASNs, or a client group's ASN list):
+// a sorted, disjoint list of [start,end] ranges, each tagged with the ASN
+// that owns it. A range hit means the IP belongs to one of the configured
+// ASNs — the tables never store ASNs the operator didn't configure. Unlike
+// the country Table, adjacent ranges are never merged: they belong to
+// different ASNs and must stay distinct.
 type ASNTable struct {
-	v4 []range4
-	v6 []range6
+	v4 []asnRange4
+	v6 []asnRange6
+}
+
+type asnRange4 struct {
+	start, end uint32
+	asn        uint32
+}
+
+type asnRange6 struct {
+	start, end [16]byte
+	asn        uint32
 }
 
 // LoadASNTables parses the ip2asn v4 and v6 datasets (TSV:
@@ -70,12 +81,12 @@ func LoadASNTables(ipv4, ipv6 []byte, allow, block map[uint32]bool) (allowT, blo
 				if start.Is4() || start.Is4In6() {
 					continue
 				}
-				t.v6 = append(t.v6, range6{start: start.As16(), end: end.As16()})
+				t.v6 = append(t.v6, asnRange6{start: start.As16(), end: end.As16(), asn: asn})
 			} else {
 				if !start.Is4() {
 					continue
 				}
-				t.v4 = append(t.v4, range4{start: addr4(start), end: addr4(end)})
+				t.v4 = append(t.v4, asnRange4{start: addr4(start), end: addr4(end), asn: asn})
 			}
 		}
 	}
@@ -123,15 +134,31 @@ func (t *ASNTable) sort() {
 // Contains reports whether ip falls inside any range of the table — i.e.
 // whether it belongs to one of the ASNs this table was pruned to.
 func (t *ASNTable) Contains(ip net.IP) bool {
+	_, ok := t.Lookup(ip)
+	return ok
+}
+
+// Lookup returns the ASN owning ip and whether the IP falls inside any
+// range of the table — the same membership test as Contains, but reporting
+// *which* ASN so a caller can match it against its own sets (the client
+// router needs the number to pick a group; the blockers only need the
+// boolean).
+func (t *ASNTable) Lookup(ip net.IP) (asn uint32, ok bool) {
 	if v4 := ip.To4(); v4 != nil {
 		x := uint32(v4[0])<<24 | uint32(v4[1])<<16 | uint32(v4[2])<<8 | uint32(v4[3])
 		i := sort.Search(len(t.v4), func(i int) bool { return t.v4[i].end >= x })
-		return i < len(t.v4) && t.v4[i].start <= x
+		if i < len(t.v4) && t.v4[i].start <= x {
+			return t.v4[i].asn, true
+		}
+		return 0, false
 	}
 	var a [16]byte
 	copy(a[:], ip.To16())
 	i := sort.Search(len(t.v6), func(i int) bool { return bytes.Compare(t.v6[i].end[:], a[:]) >= 0 })
-	return i < len(t.v6) && bytes.Compare(t.v6[i].start[:], a[:]) <= 0
+	if i < len(t.v6) && bytes.Compare(t.v6[i].start[:], a[:]) <= 0 {
+		return t.v6[i].asn, true
+	}
+	return 0, false
 }
 
 // CIDRs expands every range of the table into CIDR prefixes, for the host
