@@ -1725,8 +1725,8 @@ func BenchmarkHandlerUpstreamMiss(b *testing.B) {
 	}, nil, "nxdomain", 600, 5*time.Second)
 
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	i := 0
+	for b.Loop() {
 		m := new(dns.Msg)
 		// 1024 distinct names so b.N > 1024 still mostly misses.
 		m.SetQuestion(fmt.Sprintf("bench%d.example.com.", i%1024), dns.TypeA)
@@ -1735,6 +1735,7 @@ func BenchmarkHandlerUpstreamMiss(b *testing.B) {
 		if fw.msg == nil {
 			b.Fatal("no response")
 		}
+		i++
 	}
 }
 
@@ -1759,8 +1760,7 @@ func BenchmarkHandlerCacheHit(b *testing.B) {
 	if c.Lookup(m.Question[0]).Msg() == nil {
 		b.Fatal("cache not warmed")
 	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		fw := &fakeWriter{}
 		h.ServeDNS(fw, m)
 		if fw.msg == nil {

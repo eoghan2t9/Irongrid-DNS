@@ -154,8 +154,7 @@ func BenchmarkL1Get(b *testing.B) {
 	c := l1onlyCache(time.Hour, time.Minute)
 	q := aQuestion()
 	c.Set(context.Background(), q, aResponse("1.2.3.4", 3600), 0)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		c.Get(context.Background(), q)
 	}
 }
@@ -168,8 +167,7 @@ func BenchmarkLookupL1Hit(b *testing.B) {
 	c := l1onlyCache(time.Hour, time.Minute)
 	q := aQuestion()
 	c.Set(context.Background(), q, aResponse("1.2.3.4", 3600), 0)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		c.Lookup(q)
 	}
 }

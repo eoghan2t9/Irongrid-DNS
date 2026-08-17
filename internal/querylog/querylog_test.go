@@ -626,10 +626,8 @@ func TestDisabledMode(t *testing.T) {
 // rate the DNS hot path can log at without ever blocking on a round trip.
 func BenchmarkRecord(b *testing.B) {
 	l := NewDisabled(30)
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		l.Record(entry("bench.example.com.", "allowed"))
 	}
-	b.StopTimer()
 	_ = l.Close()
 }
