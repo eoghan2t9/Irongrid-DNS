@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/go-redis/v9"
 )
 
 func entry(domain, action string) Entry {
@@ -158,28 +157,31 @@ func TestWalkStreamStrictBound(t *testing.T) {
 	waitFor(t, l, 30)
 
 	// Bound of 10 with a page of 1000: the single page holds all 30
-	// messages, yet the callback must see exactly 10.
+	// messages, yet the loop must see exactly 10.
 	count := 0
-	if err := l.walkStream(t.Context(), true, "+", "-", 10, 1000, func(m redis.XMessage) bool {
+	for _, err := range l.walkStream(t.Context(), true, "+", "-", 10, 1000) {
+		if err != nil {
+			t.Fatalf("walkStream: %v", err)
+		}
 		count++
-		return true
-	}); err != nil {
-		t.Fatalf("walkStream: %v", err)
 	}
 	if count != 10 {
-		t.Fatalf("walkStream handed %d messages to the callback, want 10 (strict bound)", count)
+		t.Fatalf("walkStream handed %d messages to the loop, want 10 (strict bound)", count)
 	}
 
-	// The callback's false return also stops the walk early.
+	// Breaking out of the loop also stops the walk early.
 	stopped := 0
-	if err := l.walkStream(t.Context(), true, "+", "-", 1000, 1000, func(m redis.XMessage) bool {
+	for _, err := range l.walkStream(t.Context(), true, "+", "-", 1000, 1000) {
+		if err != nil {
+			t.Fatalf("walkStream early-exit: %v", err)
+		}
 		stopped++
-		return stopped < 3
-	}); err != nil {
-		t.Fatalf("walkStream early-exit: %v", err)
+		if stopped >= 3 {
+			break
+		}
 	}
 	if stopped != 3 {
-		t.Fatalf("walkStream callback saw %d messages, want 3 (early exit)", stopped)
+		t.Fatalf("walkStream loop saw %d messages, want 3 (early exit)", stopped)
 	}
 }
 

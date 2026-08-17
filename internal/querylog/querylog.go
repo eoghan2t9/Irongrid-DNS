@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"iter"
 	"log"
 	"sort"
 	"strconv"
@@ -328,56 +329,64 @@ func entryFromMessage(e *Entry, m redis.XMessage) bool {
 	return true
 }
 
-// walkStream pages through the stream from start towards stop (reverse for a
-// newest-first walk, forward otherwise), calling fn for every message in
-// range. It returns when fn returns false (the caller found what it needed),
-// the stream is exhausted, or max messages have been scanned — the bound is
+// walkStream returns an iterator that pages through the stream from start
+// towards stop (reverse for a newest-first walk, forward otherwise), yielding
+// every message in range. Range-over-func stops the walk when the loop body
+// breaks (the caller found what it needed), the stream is exhausted, max
+// messages have been scanned, or a Redis error is yielded — the scan bound is
 // strict, enforced inside the page so a single oversized page can't overshoot
 // by up to page entries. The boundary message shared between consecutive
 // pages is skipped (each page asks for page+1 messages so a short page proves
 // exhaustion). Every walk in this file shares this one paging shape; they
-// differ only in direction, bounds and what fn does per message. Callers on
-// a disabled log (nil client) never reach here — the public methods guard
-// first — but the guard is kept so the helper itself can't nil-deref.
-func (l *Log) walkStream(ctx context.Context, reverse bool, start, stop string, max, page int, fn func(m redis.XMessage) bool) error {
-	if l.client == nil {
-		return nil
-	}
-	first := true
-	scanned := 0
-	for scanned < max {
-		var (
-			msgs []redis.XMessage
-			err  error
-		)
-		if reverse {
-			msgs, err = l.client.XRevRangeN(ctx, streamKey, start, stop, int64(page+1)).Result()
-		} else {
-			msgs, err = l.client.XRangeN(ctx, streamKey, start, stop, int64(page+1)).Result()
+// differ only in direction, bounds and what the caller does per message.
+// Callers on a disabled log (nil client) never reach here — the public
+// methods guard first — but the guard is kept so the helper itself can't
+// nil-deref. A yielded error is always the last value the iterator produces;
+// callers must check it before using the message.
+func (l *Log) walkStream(ctx context.Context, reverse bool, start, stop string, max, page int) iter.Seq2[redis.XMessage, error] {
+	return func(yield func(redis.XMessage, error) bool) {
+		if l.client == nil {
+			return
 		}
-		if err != nil {
-			return err
-		}
-		begin := 0
-		if !first && len(msgs) > 0 && msgs[0].ID == start {
-			begin = 1
-		}
-		if len(msgs) <= begin {
-			return nil
-		}
-		first = false
-		for _, m := range msgs[begin:] {
-			scanned++
-			if !fn(m) || scanned >= max {
-				return nil
+		first := true
+		scanned := 0
+		for scanned < max {
+			var (
+				msgs []redis.XMessage
+				err  error
+			)
+			if reverse {
+				msgs, err = l.client.XRevRangeN(ctx, streamKey, start, stop, int64(page+1)).Result()
+			} else {
+				msgs, err = l.client.XRangeN(ctx, streamKey, start, stop, int64(page+1)).Result()
 			}
+			if err != nil {
+				yield(redis.XMessage{}, err)
+				return
+			}
+			begin := 0
+			if !first && len(msgs) > 0 && msgs[0].ID == start {
+				begin = 1
+			}
+			if len(msgs) <= begin {
+				return
+			}
+			first = false
+			for _, m := range msgs[begin:] {
+				scanned++
+				if !yield(m, nil) {
+					return
+				}
+				if scanned >= max {
+					return
+				}
+			}
+			if len(msgs) <= page { // fewer than a full page: the stream is exhausted
+				return
+			}
+			start = msgs[len(msgs)-1].ID
 		}
-		if len(msgs) <= page { // fewer than a full page: the stream is exhausted
-			return nil
-		}
-		start = msgs[len(msgs)-1].ID
 	}
-	return nil
 }
 
 // matchesFilter applies the query log filters (empty values are wildcards).
@@ -429,20 +438,20 @@ func (l *Log) Query(ctx context.Context, limit, offset int, action, domain, qtyp
 	// Walk newest-first, stopping as soon as the wanted page is full — the
 	// old loop kept decoding the rest of the page it had already fetched, so
 	// a default 100-row view decoded up to 1000 entries every request.
-	if err := l.walkStream(ctx, true, "+", "-", maxQueryScan, queryPage, func(m redis.XMessage) bool {
+	for m, err := range l.walkStream(ctx, true, "+", "-", maxQueryScan, queryPage) {
+		if err != nil {
+			return nil, err
+		}
 		var e Entry
 		if !entryFromMessage(&e, m) {
-			return true
+			continue
 		}
 		if matchesFilter(e, action, domainLower, qtype, client) {
 			matches = append(matches, e)
 			if len(matches) >= want {
-				return false // page full: no point scanning further
+				break // page full: no point scanning further
 			}
 		}
-		return true
-	}); err != nil {
-		return nil, err
 	}
 	if len(matches) <= offset {
 		return []Entry{}, nil
@@ -508,10 +517,13 @@ func (l *Log) Stats(ctx context.Context, since time.Time) (map[string]any, error
 	blockedCnt := map[string]int64{}
 	clientCnt := map[string]int64{}
 	start := strconv.FormatInt(since.UnixMilli(), 10) + "-0"
-	if err := l.walkStream(ctx, false, start, "+", maxStatsScan, aggPage, func(m redis.XMessage) bool {
+	for m, err := range l.walkStream(ctx, false, start, "+", maxStatsScan, aggPage) {
+		if err != nil {
+			return nil, err
+		}
 		var e Entry
 		if !entryFromMessage(&e, m) {
-			return true
+			continue
 		}
 		total++
 		rtSum += float64(e.ResponseTimeMS)
@@ -525,9 +537,6 @@ func (l *Log) Stats(ctx context.Context, since time.Time) (map[string]any, error
 			cached++
 		}
 		clientCnt[e.Client]++
-		return true
-	}); err != nil {
-		return nil, err
 	}
 	if total > 0 {
 		stats["avg_rt_ms"] = rtSum / float64(total)
@@ -573,22 +582,22 @@ func (l *Log) Hourly(ctx context.Context, since time.Time) ([]HourBucket, error)
 	// Newest-first walk from "+" down to the since ID (inclusive), so the
 	// current hour's bar is always complete even if the scan is bounded.
 	min := strconv.FormatInt(since.UnixMilli(), 10) + "-0"
-	if err := l.walkStream(ctx, true, "+", min, maxStatsScan, aggPage, func(m redis.XMessage) bool {
+	for m, err := range l.walkStream(ctx, true, "+", min, maxStatsScan, aggPage) {
+		if err != nil {
+			return nil, err
+		}
 		var e Entry
 		if !entryFromMessage(&e, m) {
-			return true
+			continue
 		}
 		idx := int(e.Time.Truncate(time.Hour).Sub(startSlot) / time.Hour)
 		if idx < 0 || idx >= 24 {
-			return true
+			continue
 		}
 		total[idx]++
 		if e.Action == "blocked" {
 			blocked[idx]++
 		}
-		return true
-	}); err != nil {
-		return nil, err
 	}
 	for i := range 24 {
 		out = append(out, HourBucket{
@@ -651,10 +660,13 @@ func (l *Log) StatsBundle(ctx context.Context, since, today time.Time) (*StatsBu
 	// Newest-first walk from "+" down to the 24h bound (inclusive), same
 	// shape as Hourly: a scan bound can only miss the oldest entries.
 	min := strconv.FormatInt(since.UnixMilli(), 10) + "-0"
-	if err := l.walkStream(ctx, true, "+", min, maxStatsScan, aggPage, func(m redis.XMessage) bool {
+	for m, err := range l.walkStream(ctx, true, "+", min, maxStatsScan, aggPage) {
+		if err != nil {
+			return nil, err
+		}
 		var e Entry
 		if !entryFromMessage(&e, m) {
-			return true
+			continue
 		}
 		total24++
 		rtSum24 += float64(e.ResponseTimeMS)
@@ -689,9 +701,6 @@ func (l *Log) StatsBundle(ctx context.Context, since, today time.Time) (*StatsBu
 				blocked[idx]++
 			}
 		}
-		return true
-	}); err != nil {
-		return nil, err
 	}
 
 	stats := emptyStats()
@@ -741,21 +750,21 @@ func (l *Log) ActiveDomains(ctx context.Context, since time.Time, limit int) ([]
 	}
 	counts := map[string]int64{}
 	start := strconv.FormatInt(since.UnixMilli(), 10) + "-0"
-	if err := l.walkStream(ctx, false, start, "+", maxWarmScan, aggPage, func(m redis.XMessage) bool {
+	for m, err := range l.walkStream(ctx, false, start, "+", maxWarmScan, aggPage) {
+		if err != nil {
+			return nil, err
+		}
 		var e Entry
 		if !entryFromMessage(&e, m) {
-			return true
+			continue
 		}
 		if e.Domain == "" {
-			return true
+			continue
 		}
 		switch e.Action {
 		case "allowed", "cached":
 			counts[e.Domain]++
 		}
-		return true
-	}); err != nil {
-		return nil, err
 	}
 	if len(counts) == 0 {
 		return []TopDomain{}, nil
