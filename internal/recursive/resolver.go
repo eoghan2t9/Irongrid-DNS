@@ -513,13 +513,11 @@ func (r *Resolver) resolveNameservers(ctx context.Context, ns []nsInfo, nsDepth 
 	addrs := make([]string, len(glueless))
 	var wg sync.WaitGroup
 	for i, host := range glueless {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if addr, ok := r.resolveNSAddr(ctx, host, nsDepth+1); ok {
 				addrs[i] = addr
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	for _, a := range addrs {

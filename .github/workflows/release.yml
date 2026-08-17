@@ -80,10 +80,10 @@ jobs:
 
       - name: Scan for known vulnerabilities (govulncheck)
         run: |
-          # Pinned version so the tool itself is deterministic and the
-          # downloaded module reuses the Go module cache instead of
+          # Pinned via the go.mod tool directive so the tool itself is
+          # deterministic and reuses the Go module cache instead of
           # re-resolving @latest on every run.
-          go run golang.org/x/vuln/cmd/govulncheck@v1.6.0 ./...
+          go tool govulncheck ./...
 
       - name: Verify tests (race detector, incl. PTY-driven installer E2E)
         run: |

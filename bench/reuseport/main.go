@@ -71,9 +71,7 @@ func main() {
 
 	var wg sync.WaitGroup
 	for _, pc := range all {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			buf := make([]byte, 1500)
 			for {
 				n, _, err := pc.ReadFrom(buf)
@@ -84,7 +82,7 @@ func main() {
 					received.Add(1)
 				}
 			}
-		}()
+		})
 	}
 
 	// Senders: each opens its own source socket (so every flow has a unique

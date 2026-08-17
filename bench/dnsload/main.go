@@ -104,9 +104,7 @@ func main() {
 
 	var wg sync.WaitGroup
 	for i := 0; i < *workers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			rnd := rand.New(rand.NewPCG(uint64(time.Now().UnixNano())+uint64(i), 0))
 			for {
 				select {
@@ -128,7 +126,7 @@ func main() {
 				}
 				record(time.Since(start), err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 

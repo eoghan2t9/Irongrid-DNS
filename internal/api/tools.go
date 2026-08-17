@@ -193,9 +193,7 @@ func (h *Handler) toolsFastest(ctx context.Context, w http.ResponseWriter, r *ht
 	sem := make(chan struct{}, fastestMaxConcurrent)
 	var wg sync.WaitGroup
 	for i, cand := range fastestResolvers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
@@ -258,7 +256,7 @@ func (h *Handler) toolsFastest(ctx context.Context, w http.ResponseWriter, r *ht
 				res.Error = lastErr.Error()
 			}
 			out[i] = res
-		}()
+		})
 	}
 	wg.Wait()
 

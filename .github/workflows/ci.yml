@@ -1,0 +1,54 @@
+name: ci
+
+# PR-gating checks: golangci-lint, govulncheck, vet and the race tests — the
+# same "checks" job release.yml runs on a tag push, but gating every PR and
+# every push to main instead of waiting for a release. Kept as a separate
+# workflow rather than folded into release.yml so it can gate merges without
+# entangling with the release job's tag-only triggers.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          # Pinned patch: govulncheck flags the stdlib vulns (GO-2026-6088,
+          # GO-2026-5972, GO-2026-5026, …) fixed in go1.26.6 as present in
+          # earlier 1.26.x — keep the toolchain on the fixed build. Keep in
+          # sync with release.yml.
+          go-version: '1.26.6'
+          # Cache the Go module + build caches so every job doesn't compile
+          # the world from scratch.
+          cache: true
+
+      - name: Lint (golangci-lint)
+        uses: golangci/golangci-lint-action@v9
+        with:
+          version: v2.12.2
+
+      - name: Scan for known vulnerabilities (govulncheck)
+        run: |
+          # Pinned via the go.mod tool directive so the tool itself is
+          # deterministic and reuses the Go module cache instead of
+          # re-resolving @latest on every run.
+          go tool govulncheck ./...
+
+      - name: Verify tests (race detector, incl. PTY-driven installer E2E)
+        run: |
+          go vet ./...
+          go test -race ./...

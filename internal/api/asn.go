@@ -110,9 +110,7 @@ func (h *Handler) logASN(w http.ResponseWriter, r *http.Request) {
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, asnWorkers)
 	for _, ip := range ips {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			info := h.resolveASN(ctx, ip)
@@ -122,7 +120,7 @@ func (h *Handler) logASN(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
 			out[ip] = info
 			mu.Unlock()
-		}()
+		})
 	}
 	wg.Wait()
 	writeJSON(w, http.StatusOK, map[string]any{"asn": out})

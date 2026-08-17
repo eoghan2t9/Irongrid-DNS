@@ -123,9 +123,7 @@ func run(sockets int, dur time.Duration, workers int) result {
 	client := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
 	var wg sync.WaitGroup
 	for i := range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			rnd := rand.New(rand.NewPCG(uint64(time.Now().UnixNano())+uint64(i), 0))
 			for {
 				select {
@@ -145,7 +143,7 @@ func run(sockets int, dur time.Duration, workers int) result {
 				lats = append(lats, time.Since(start))
 				latMu.Unlock()
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
