@@ -1,3 +1,5 @@
+import { XIcon } from '../ui'
+
 // NetworkTab is the "Network" sub page of Settings: the cloudflared tunnel
 // boot settings and the built-in DHCP server (live leases are on the
 // dedicated DHCP page).
@@ -80,7 +82,7 @@ export default function NetworkTab({ f }) {
               onChange={(e) => f.setStaticLease(i, 'hostname', e.target.value)}
             />
             <button className="btn small danger" type="button" onClick={() => f.removeStaticLease(i)}>
-              ✕
+              <XIcon size={12} />
             </button>
           </div>
         ))}

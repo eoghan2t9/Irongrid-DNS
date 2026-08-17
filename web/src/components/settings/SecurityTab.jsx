@@ -1,3 +1,5 @@
+import { AlertIcon } from '../ui'
+
 // SecurityTab is the "Security" sub page of Settings: rate limiting (with
 // the currently auto-blocked clients), geo blocking (with honeypot-blocked
 // clients and country-data status) and abuse reporting. The blocked-client
@@ -139,23 +141,41 @@ export default function SecurityTab({ f }) {
           (deepGet('geo_block.countries', []) || []).length === 0 &&
           (deepGet('geo_block.ips', []) || []).length === 0 &&
           (deepGet('geo_block.honeypots', []) || []).length === 0 && (
-            <p className="dim small" style={{ marginTop: 8, color: 'var(--amber)' }}>
-              ⚠ Geo blocking is on but nothing is configured — add countries, blocked IPs, or honeypot domains above,
-              save, then refresh.
+            <p
+              className="dim small"
+              style={{ marginTop: 8, color: 'var(--amber)', display: 'flex', gap: 6, alignItems: 'flex-start' }}
+            >
+              <AlertIcon size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+              <span>
+                Geo blocking is on but nothing is configured — add countries, blocked IPs, or honeypot domains above,
+                save, then refresh.
+              </span>
             </p>
           )}
         {!deepGet('geo_block.enabled', false) &&
           ((deepGet('geo_block.honeypots', []) || []).length > 0 ||
             (deepGet('geo_block.ips', []) || []).length > 0) && (
-            <p className="dim small" style={{ marginTop: 8, color: 'var(--amber)' }}>
-              ⚠ Honeypot domains / blocked IPs are configured but <strong>Enable geo blocking</strong> is off — nothing
-              is enforced until you turn it on and save.
+            <p
+              className="dim small"
+              style={{ marginTop: 8, color: 'var(--amber)', display: 'flex', gap: 6, alignItems: 'flex-start' }}
+            >
+              <AlertIcon size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+              <span>
+                Honeypot domains / blocked IPs are configured but <strong>Enable geo blocking</strong> is off —
+                nothing is enforced until you turn it on and save.
+              </span>
             </p>
           )}
         {deepGet('geo_block.trust_udp', false) && (
-          <p className="dim small" style={{ marginTop: 8, color: 'var(--amber)' }}>
-            ⚠ UDP sources can be spoofed — with this on, a spoofed honeypot packet can permanently block an innocent
-            victim. Only enable on a trusted network where client addresses are genuine.
+          <p
+            className="dim small"
+            style={{ marginTop: 8, color: 'var(--amber)', display: 'flex', gap: 6, alignItems: 'flex-start' }}
+          >
+            <AlertIcon size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+            <span>
+              UDP sources can be spoofed — with this on, a spoofed honeypot packet can permanently block an innocent
+              victim. Only enable on a trusted network where client addresses are genuine.
+            </span>
           </p>
         )}
         <h4 style={{ margin: '16px 0 10px' }}>Honeypot-blocked clients</h4>

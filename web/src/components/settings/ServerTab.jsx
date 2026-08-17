@@ -1,4 +1,4 @@
-import { LineListField } from '../ui'
+import { LineListField, AlertIcon, XIcon } from '../ui'
 
 // ServerTab is the "Server" sub page of Settings: the DNS listeners, the
 // upstream list (with conditional routes and the latency benchmark), DNSSEC
@@ -137,7 +137,7 @@ export default function ServerTab({ f }) {
               style={{ flex: 1, minHeight: 44 }}
             />
             <button className="btn small danger" type="button" onClick={() => f.removeRoute(i)}>
-              ✕
+              <XIcon size={12} />
             </button>
           </div>
         ))}
@@ -155,10 +155,16 @@ export default function ServerTab({ f }) {
           them — the fastest for your location win. One click adds them to the list above; save to apply.
         </p>
         {f.pendingBenchmarkAdds > 0 && (
-          <div className="info-banner" style={{ marginTop: 8 }}>
-            ⚠ {f.pendingBenchmarkAdds} upstream{f.pendingBenchmarkAdds === 1 ? ' was' : 's were'} added from the
-            benchmark but not saved yet — click <strong>Save &amp; apply</strong> at the top of this page to make it
-            live.
+          <div
+            className="info-banner"
+            style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'flex-start' }}
+          >
+            <AlertIcon size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+            <span>
+              {f.pendingBenchmarkAdds} upstream{f.pendingBenchmarkAdds === 1 ? ' was' : 's were'} added from the
+              benchmark but not saved yet — click <strong>Save &amp; apply</strong> at the top of this page to make
+              it live.
+            </span>
           </div>
         )}
         {f.fastestErr && (
