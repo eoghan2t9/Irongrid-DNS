@@ -146,14 +146,15 @@ func TestAbuseExportCSV(t *testing.T) {
 }
 
 // withRIPEstatMocks points the lookup endpoints at httptest servers that
-// serve canned network-info and AS-overview payloads.
+// serve canned network-info and AS-overview payloads in the REAL RIPEstat
+// shape ("data.asns" as an array — there is no "data.asn" field).
 func withRIPEstatMocks(t *testing.T) {
 	t.Helper()
 	ni := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"data":{"asn":"AS15169","prefix":"8.8.8.0/24","name":"GOOGLE","country":"US"}}`))
+		_, _ = w.Write([]byte(`{"data":{"asns":["15169"],"prefix":"8.8.8.0/24"}}`))
 	}))
 	ao := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_, _ = w.Write([]byte(`{"data":{"asn":"15169","holder":"Google LLC"}}`))
+		_, _ = w.Write([]byte(`{"data":{"holder":"Google LLC"}}`))
 	}))
 	t.Cleanup(ni.Close)
 	t.Cleanup(ao.Close)
@@ -170,7 +171,7 @@ func TestLookupASN(t *testing.T) {
 	if err != nil {
 		t.Fatalf("lookupASN: %v", err)
 	}
-	if info.ASN != "AS15169" || info.Prefix != "8.8.8.0/24" || info.Name != "GOOGLE" {
+	if info.ASN != "AS15169" || info.Prefix != "8.8.8.0/24" {
 		t.Fatalf("info = %+v", info)
 	}
 	if info.Holder != "Google LLC" {
@@ -198,5 +199,40 @@ func TestAbuseASNHandler(t *testing.T) {
 	h.abuseASN(rr2, req2)
 	if rr2.Code != http.StatusBadRequest {
 		t.Fatalf("bad-IP status = %d, want 400", rr2.Code)
+	}
+}
+
+// TestAbuseASNHandlerNoRouting verifies that a definitive "no routing
+// information" answer (an address that isn't announced — reserved,
+// unassigned or unadvertised) is reported as an empty 200 result, not as a
+// 502 error: the dashboard must show "no routing information" instead of an
+// "ASN lookup failed" banner, exactly like the query-log label path.
+func TestAbuseASNHandlerNoRouting(t *testing.T) {
+	// Point network-info at a server whose answer carries no ASN (the shape
+	// RIPEstat returns for non-routed space), so lookupASN reports the
+	// definitive negative.
+	ni := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	ao := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{}}`))
+	}))
+	t.Cleanup(ni.Close)
+	t.Cleanup(ao.Close)
+	oldNI, oldAO := ripestatNetworkInfo, ripestatASOverview
+	ripestatNetworkInfo, ripestatASOverview = ni.URL, ao.URL
+	t.Cleanup(func() {
+		ripestatNetworkInfo, ripestatASOverview = oldNI, oldAO
+	})
+
+	h := &Handler{}
+	rr := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/abuse/asn", bytes.NewBufferString(`{"ip":"104.243.35.153"}`))
+	h.abuseASN(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body %s — want 200 (definitive negative, not an error)", rr.Code, rr.Body.String())
+	}
+	if strings.Contains(rr.Body.String(), `"error"`) {
+		t.Fatalf("body carries an error for a definitive negative: %s", rr.Body.String())
 	}
 }

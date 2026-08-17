@@ -100,7 +100,7 @@ func TestResolveASNCoalescesConcurrentLookups(t *testing.T) {
 	ni := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		niHits.Add(1)
 		time.Sleep(300 * time.Millisecond) // keep the lookups overlapping
-		_, _ = w.Write([]byte(`{"data":{"asn":"AS15169","prefix":"8.8.8.0/24","name":"GOOGLE","country":"US"}}`))
+		_, _ = w.Write([]byte(`{"data":{"asns":["15169"],"prefix":"8.8.8.0/24"}}`))
 	}))
 	defer ni.Close()
 	ao := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -143,7 +143,8 @@ func TestResolveASNNoRoutingNegativelyCached(t *testing.T) {
 	var hits atomic.Int64
 	empty := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		_, _ = w.Write([]byte(`{"data":{"asn":"","prefix":"","name":"","country":""}}`))
+		// The real RIPEstat shape for non-routed space: an empty asns array.
+		_, _ = w.Write([]byte(`{"data":{"asns":[],"prefix":""}}`))
 	}))
 	defer empty.Close()
 	oldNI, oldAO := ripestatNetworkInfo, ripestatASOverview
@@ -178,7 +179,7 @@ func TestResolveASNNoRoutingNegativelyCached(t *testing.T) {
 	hits.Store(0)
 	goodNI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
-		_, _ = w.Write([]byte(`{"data":{"asn":"AS64500","prefix":"10.0.0.0/24","name":"TEST","country":"ZZ"}}`))
+		_, _ = w.Write([]byte(`{"data":{"asns":["64500"],"prefix":"10.0.0.0/24"}}`))
 	}))
 	defer goodNI.Close()
 	goodAO := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

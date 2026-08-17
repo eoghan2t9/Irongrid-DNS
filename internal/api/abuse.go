@@ -155,6 +155,17 @@ func (h *Handler) abuseASN(w http.ResponseWriter, r *http.Request) {
 	}
 	info, err := lookupASN(r.Context(), net.ParseIP(strings.TrimSpace(p.IP)).String())
 	if err != nil {
+		// A definitive "no routing information" answer is not a failure —
+		// the address simply isn't announced (reserved / unassigned / not
+		// routed), so it is reported as an empty result (HTTP 200) and the
+		// dashboard shows "no routing information" instead of an error
+		// banner, exactly like the query-log label path (logASN). Only
+		// transient failures (RIPEstat down, unparseable response) surface
+		// as 502.
+		if strings.Contains(err.Error(), "no routing information") {
+			writeJSON(w, http.StatusOK, asnInfo{})
+			return
+		}
 		writeJSON(w, http.StatusBadGateway, map[string]string{"error": err.Error()})
 		return
 	}
@@ -179,21 +190,28 @@ func lookupASN(ctx context.Context, ip string) (asnInfo, error) {
 		return info, fmt.Errorf("RIPEstat network-info: %w", err)
 	}
 	defer resp.Body.Close()
+	// The real network-info payload carries the origin ASN(s) as the
+	// asns ARRAY ("data.asns": ["15169"]) — there is no "data.asn" field.
+	// Decoding the singular form always left ASN empty and made every
+	// lookup report "no routing information" even for routed addresses.
 	var body struct {
 		Data struct {
-			ASN     string `json:"asn"`
-			Prefix  string `json:"prefix"`
-			Name    string `json:"name"`
-			Country string `json:"country"`
+			ASNs    []string `json:"asns"`
+			Prefix  string   `json:"prefix"`
+			Name    string   `json:"name"`
+			Country string   `json:"country"`
 		} `json:"data"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		return info, fmt.Errorf("RIPEstat network-info: unparseable response (HTTP %d)", resp.StatusCode)
 	}
-	info.ASN, info.Prefix, info.Name, info.Country = body.Data.ASN, body.Data.Prefix, body.Data.Name, body.Data.Country
-	if info.ASN == "" {
+	if len(body.Data.ASNs) == 0 {
 		return info, fmt.Errorf("no routing information available for %s", ip)
 	}
+	// RIPEstat returns bare numbers ("15169"); normalize to the "AS15169"
+	// form the dashboard renders and the as-overview call below expects.
+	info.ASN = "AS" + strings.TrimPrefix(body.Data.ASNs[0], "AS")
+	info.Prefix, info.Name, info.Country = body.Data.Prefix, body.Data.Name, body.Data.Country
 
 	//nolint:gosec // G704 SSRF: the ASN string comes from RIPEstat's own
 	// network-info response, not from user input.

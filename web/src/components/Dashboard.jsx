@@ -1047,11 +1047,13 @@ function BlockedClientsCard() {
           'Looking up ASN…'
         ) : info.error ? (
           `ASN lookup failed: ${info.error}`
-        ) : (
+        ) : info.asn ? (
           <>
-            {info.asn || 'n/a'} · {info.holder || info.name || 'unknown network'} · {info.prefix || ''}
+            {info.asn} · {info.holder || info.name || 'unknown network'} · {info.prefix || ''}
             {info.country ? ` · ${info.country}` : ''}
           </>
+        ) : (
+          'No routing information for this address — it may be reserved or unassigned.'
         )}
       </div>
     )
