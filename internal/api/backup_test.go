@@ -3,6 +3,7 @@ package api
 import (
 	"archive/zip"
 	"bytes"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -113,7 +114,7 @@ func TestBackupRestoreEncryptedRoundTrip(t *testing.T) {
 	}
 
 	// A wrong passphrase must never reach restoreFromZip with garbage bytes.
-	if _, err := decryptBackup(encData, "wrong"); err != ErrBackupBadPassphrase {
+	if _, err := decryptBackup(encData, "wrong"); !errors.Is(err, ErrBackupBadPassphrase) {
 		t.Fatalf("err = %v, want ErrBackupBadPassphrase", err)
 	}
 }

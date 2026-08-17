@@ -10,6 +10,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -202,7 +203,7 @@ func extractDragonflyBinary(r io.Reader, arch string) ([]byte, error) {
 	want := "dragonfly-" + arch
 	for {
 		hdr, err := tr.Next()
-		if err == io.EOF {
+		if errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("binary %s not found in tarball", want)
 		}
 		if err != nil {

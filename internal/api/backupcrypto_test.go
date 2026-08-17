@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"errors"
 	"testing"
 )
 
@@ -35,7 +36,7 @@ func TestBackupCryptoWrongPassphrase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := decryptBackup(enc, "wrong passphrase"); err != ErrBackupBadPassphrase {
+	if _, err := decryptBackup(enc, "wrong passphrase"); !errors.Is(err, ErrBackupBadPassphrase) {
 		t.Fatalf("err = %v, want ErrBackupBadPassphrase", err)
 	}
 }
@@ -49,7 +50,7 @@ func TestBackupCryptoTamperDetected(t *testing.T) {
 	}
 	tampered := append([]byte(nil), enc...)
 	tampered[len(tampered)-1] ^= 0xFF
-	if _, err := decryptBackup(tampered, "a passphrase"); err != ErrBackupBadPassphrase {
+	if _, err := decryptBackup(tampered, "a passphrase"); !errors.Is(err, ErrBackupBadPassphrase) {
 		t.Fatalf("err = %v, want ErrBackupBadPassphrase", err)
 	}
 }
@@ -86,7 +87,7 @@ func TestDecryptBackupRejectsPlainZip(t *testing.T) {
 // panicking on a slice out-of-range.
 func TestDecryptBackupRejectsTruncated(t *testing.T) {
 	truncated := append(append([]byte(nil), backupMagic...), []byte("short")...)
-	if _, err := decryptBackup(truncated, "pw"); err != ErrBackupBadPassphrase {
+	if _, err := decryptBackup(truncated, "pw"); !errors.Is(err, ErrBackupBadPassphrase) {
 		t.Fatalf("err = %v, want ErrBackupBadPassphrase", err)
 	}
 }
