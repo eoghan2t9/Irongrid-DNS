@@ -111,7 +111,7 @@ func (h *Handler) logASN(w http.ResponseWriter, r *http.Request) {
 	sem := make(chan struct{}, asnWorkers)
 	for _, ip := range ips {
 		wg.Add(1)
-		go func(ip string) {
+		go func() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -122,7 +122,7 @@ func (h *Handler) logASN(w http.ResponseWriter, r *http.Request) {
 			mu.Lock()
 			out[ip] = info
 			mu.Unlock()
-		}(ip)
+		}()
 	}
 	wg.Wait()
 	writeJSON(w, http.StatusOK, map[string]any{"asn": out})

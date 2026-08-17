@@ -174,7 +174,7 @@ func (m *Manager) startDoH3(addr, path string) error {
 		m.http3Pcs = append(m.http3Pcs, pc)
 		m.http3Srvs = append(m.http3Srvs, srv)
 		m.mu.Unlock()
-		go func(pc net.PacketConn) {
+		go func() {
 			// The close errors from a deliberate shutdown are not listener
 			// failures — reporting them would spam the reload log.
 			if err := srv.Serve(pc); err != nil &&
@@ -182,7 +182,7 @@ func (m *Manager) startDoH3(addr, path string) error {
 				log.Printf("[dns] DoH3 listener on %s stopped: %v", addr, err)
 				m.results <- Listener{Proto: "doh3", Addr: addr, Err: err}
 			}
-		}(pc)
+		}()
 	}
 	return nil
 }

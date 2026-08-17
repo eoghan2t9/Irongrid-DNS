@@ -194,7 +194,7 @@ func (h *Handler) toolsFastest(ctx context.Context, w http.ResponseWriter, r *ht
 	var wg sync.WaitGroup
 	for i, cand := range fastestResolvers {
 		wg.Add(1)
-		go func(i int, cand fastestResolver) {
+		go func() {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -258,7 +258,7 @@ func (h *Handler) toolsFastest(ctx context.Context, w http.ResponseWriter, r *ht
 				res.Error = lastErr.Error()
 			}
 			out[i] = res
-		}(i, cand)
+		}()
 	}
 	wg.Wait()
 

@@ -291,7 +291,7 @@ func (r *Resolver) queryServers(ctx context.Context, servers []string, q dns.Que
 	}
 	ch := make(chan result, len(servers))
 	for _, addr := range servers {
-		go func(addr string) {
+		go func() {
 			// Copy the query per server: miekg/dns's transport overwrites
 			// msg.Id while sending, so the same message cannot be handed to
 			// several servers concurrently (the rule raceUpstreams follows).
@@ -308,7 +308,7 @@ func (r *Resolver) queryServers(ctx context.Context, servers []string, q dns.Que
 				}
 			}
 			ch <- result{resp: resp, err: err}
-		}(addr)
+		}()
 	}
 	var lastErr error
 	for range len(servers) {
@@ -514,12 +514,12 @@ func (r *Resolver) resolveNameservers(ctx context.Context, ns []nsInfo, nsDepth 
 	var wg sync.WaitGroup
 	for i, host := range glueless {
 		wg.Add(1)
-		go func(i int, host string) {
+		go func() {
 			defer wg.Done()
 			if addr, ok := r.resolveNSAddr(ctx, host, nsDepth+1); ok {
 				addrs[i] = addr
 			}
-		}(i, host)
+		}()
 	}
 	wg.Wait()
 	for _, a := range addrs {

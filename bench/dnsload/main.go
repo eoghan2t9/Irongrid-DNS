@@ -105,9 +105,9 @@ func main() {
 	var wg sync.WaitGroup
 	for i := 0; i < *workers; i++ {
 		wg.Add(1)
-		go func(seed int64) {
+		go func() {
 			defer wg.Done()
-			rnd := rand.New(rand.NewPCG(uint64(time.Now().UnixNano())+uint64(seed), 0))
+			rnd := rand.New(rand.NewPCG(uint64(time.Now().UnixNano())+uint64(i), 0))
 			for {
 				select {
 				case <-ctx.Done():
@@ -128,7 +128,7 @@ func main() {
 				}
 				record(time.Since(start), err)
 			}
-		}(int64(i))
+		}()
 	}
 	wg.Wait()
 

@@ -66,7 +66,7 @@ func (m *Manager) startDoQ(addr string) error {
 	}
 	log.Printf("[dns] DoQ listener on %s (%d %s)", addr, len(lns), noun)
 	for _, ln := range lns {
-		go func(ln *quic.Listener) {
+		go func() {
 			for {
 				conn, err := ln.Accept(context.Background())
 				if err != nil {
@@ -76,7 +76,7 @@ func (m *Manager) startDoQ(addr string) error {
 				}
 				go m.handleDoQConn(conn)
 			}
-		}(ln)
+		}()
 	}
 	return nil
 }

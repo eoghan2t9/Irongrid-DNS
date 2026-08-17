@@ -1643,7 +1643,7 @@ func raceUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*
 	}
 	ch := make(chan result, len(ups))
 	for _, up := range ups {
-		go func(u *upstream.Upstream) {
+		go func() {
 			// The collector loop below always waits for exactly len(ups)
 			// sends, so a panicked goroutine must still send a result (a
 			// synthetic error) or the loop blocks forever — recovering
@@ -1651,8 +1651,8 @@ func raceUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*
 			// query hang instead.
 			defer func() {
 				if rec := recover(); rec != nil {
-					log.Printf("[dns] recovered panic querying upstream %s: %v\n%s", u.Name(), rec, debug.Stack())
-					ch <- result{err: fmt.Errorf("panic querying upstream %s: %v", u.Name(), rec)}
+					log.Printf("[dns] recovered panic querying upstream %s: %v\n%s", up.Name(), rec, debug.Stack())
+					ch <- result{err: fmt.Errorf("panic querying upstream %s: %v", up.Name(), rec)}
 				}
 			}()
 			// Copy the query per upstream: each concurrent send must own the
@@ -1661,9 +1661,9 @@ func raceUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*
 			// transport rewrites), so a shared *dns.Msg would race, and each
 			// reply must match the query its own conn sent. Sequential mode
 			// reuses one message instead (see sequentialUpstreams).
-			resp, err := u.Query(qctx, r.Copy())
-			ch <- result{resp: resp, up: u.Name(), err: err}
-		}(up)
+			resp, err := up.Query(qctx, r.Copy())
+			ch <- result{resp: resp, up: up.Name(), err: err}
+		}()
 	}
 	var lastErr error
 	for range len(ups) {

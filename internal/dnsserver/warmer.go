@@ -252,7 +252,7 @@ func (w *Warmer) run(ctx context.Context) {
 			}
 		}
 		wg.Add(1)
-		go func(name string) {
+		go func() {
 			defer recoverPanic("cache warmer domain")
 			defer wg.Done()
 			sem <- struct{}{}
@@ -264,7 +264,7 @@ func (w *Warmer) run(ctx context.Context) {
 			}
 			warmed.Add(wn)
 			skipped.Add(sn)
-		}(name)
+		}()
 	}
 	wg.Wait()
 

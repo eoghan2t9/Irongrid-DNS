@@ -133,7 +133,7 @@ func (s *Server) nextFree4(key leaseKey) net.IP {
 	if total < 0 {
 		return nil
 	}
-	for i := 0; i <= total; i++ {
+	for i := range total + 1 {
 		idx := (int(s.cursor4) + i) % (total + 1)
 		cand := poolAt(sb, idx)
 		if !s.inUseLocked(cand, key) {
