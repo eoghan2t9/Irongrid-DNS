@@ -249,7 +249,19 @@ export default function QueryLog() {
                     )}
                   </td>
                   <td className="dim small">
-                    {asns[e.client]?.asn ? (
+                    {/* Prefer the server's own attribution (entry.asn, from the local ip2asn
+                        tables — instant, offline, and the same number the X-Irongrid-Client-ASN
+                        header and asn-blocked reasons use), enriching it with the RIPEstat holder
+                        name when one is available. Fall back to the RIPEstat lookup otherwise. */}
+                    {e.asn ? (
+                      <span
+                        className="client-host"
+                        title={`local IP→ASN: AS${e.asn}${asns[e.client]?.holder ? ` · ${asns[e.client].holder}` : ''}`}
+                      >
+                        AS{e.asn}
+                        {asns[e.client]?.holder ? ` · ${asns[e.client].holder}` : ''}
+                      </span>
+                    ) : asns[e.client]?.asn ? (
                       <span
                         className="client-host"
                         title={`${asns[e.client].asn} · ${asns[e.client].holder || asns[e.client].name || ''}${asns[e.client].prefix ? ` · ${asns[e.client].prefix}` : ''}`}

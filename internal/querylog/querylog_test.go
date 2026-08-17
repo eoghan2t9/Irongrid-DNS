@@ -49,6 +49,25 @@ func waitFor(t *testing.T, l *Log, n int) []Entry {
 	}
 }
 
+// TestEntryASNField verifies the per-entry ASN field (the server's own
+// IP→ASN attribution) survives the JSON round-trip through the stream, and
+// that entries recorded without one read back as 0.
+func TestEntryASNField(t *testing.T) {
+	l, _ := newTestLog(t, 7)
+	e := entry("asn-test.example", "allowed")
+	e.ASN = 13335
+	l.Record(e)
+	if got := waitFor(t, l, 1); got[0].ASN != 13335 {
+		t.Fatalf("ASN = %d, want 13335", got[0].ASN)
+	}
+	l.Record(entry("no-asn.example", "allowed"))
+	for _, g := range waitFor(t, l, 2) {
+		if g.Domain == "no-asn.example" && g.ASN != 0 {
+			t.Fatalf("entry without ASN read back as %d, want 0", g.ASN)
+		}
+	}
+}
+
 // TestRecordFlushesOnClose verifies entries enqueued before Close are flushed
 // to the stream — the final partial batch must not be lost at shutdown — and
 // that a reopened log over the same server sees them.

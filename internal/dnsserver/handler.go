@@ -63,6 +63,11 @@ type Stats struct {
 	// merged - flights; the two are equal whenever every flight was shared.
 	Flights atomic.Int64
 	Merged  atomic.Int64
+	// ASNHeader counts DoH requests whose response carried the
+	// X-Irongrid-Client-ASN header (server.doh_asn_header on AND the
+	// client's ISP resolved in a configured ASN list) — the dashboard's
+	// "ASN headers" row.
+	ASNHeader atomic.Int64
 }
 
 func newStats() *Stats {
@@ -376,6 +381,29 @@ func (h *Handler) SetClientRouter(cr *ClientRouter) {
 	ns := *h.settings.Load()
 	ns.ClientRouter = cr
 	h.swapSettings(&ns, nil)
+}
+
+// ClientASN returns the ASN the server attributes to clientIP for the DoH
+// X-Irongrid-Client-ASN response header: the client router's table (a group
+// matched by ASN) first, then the geo blocker's allow/block ASN tables. ok
+// is false when the server holds no ASN data covering the client — no ASN
+// rules are configured, or the client's ISP is in none of the configured
+// lists — and the header is then omitted.
+func (h *Handler) ClientASN(clientIP string) (uint32, bool) {
+	ns := h.settings.Load()
+	if cr := ns.ClientRouter; cr != nil {
+		if asn, ok := cr.ASNOf(clientIP); ok {
+			return asn, true
+		}
+	}
+	if g := ns.Geo; g != nil {
+		if ip := net.ParseIP(clientIP); ip != nil {
+			if asn, ok := g.ASNOf(ip); ok {
+				return asn, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // SetRateLimiter hot-swaps the rate limiter; nil disables rate limiting.
@@ -1126,6 +1154,12 @@ func (h *Handler) recordEntry(client, qname string, q dns.Question, action, reas
 	if h.Log == nil {
 		return
 	}
+	// The client's ASN, attributed from the same pruned ip2asn tables the
+	// X-Irongrid-Client-ASN DoH header uses. 0 when the ISP is in none of
+	// the configured lists — the dashboard then falls back to its external
+	// RIPEstat lookup. Resolved per logged query; a config without ASN data
+	// resolves instantly (nil tables), one with it pays a binary search.
+	asn, _ := h.ClientASN(client)
 	h.Log.Record(querylog.Entry{
 		Time:           start,
 		Client:         client,
@@ -1137,6 +1171,7 @@ func (h *Handler) recordEntry(client, qname string, q dns.Question, action, reas
 		ResponseTimeMS: time.Since(start).Milliseconds(),
 		Rcode:          rcode,
 		Answers:        answers,
+		ASN:            asn,
 	})
 }
 

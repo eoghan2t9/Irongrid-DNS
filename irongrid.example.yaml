@@ -49,6 +49,25 @@ server:
                                  # contents and a CPU/trace profile costs real
                                  # cycles for its duration — turn on only while
                                  # actively chasing a performance problem.
+  # Reverse proxies in front of the DoH endpoint whose X-Forwarded-For
+  # header is honored, in addition to loopback/private peers (local nginx /
+  # Caddy, the baked-in cloudflared tunnel — always trusted). Without this,
+  # DoH behind a public reverse proxy (CDN, edge box) sees only the proxy's
+  # own address, so geo/ASN blocking, rate limiting and per-client policy
+  # apply to the proxy instead of the end client. The direct peer must itself
+  # be trusted (loopback/private or listed here) before XFF is read at all.
+  # trusted_proxies:
+  #   - "203.0.113.0/24"         # your CDN's egress range
+  # xff_hop_limit: 1            # trusted proxy hops in the X-Forwarded-For
+                                 # chain: the client IP is the hop_limit-th
+                                 # entry from the right, so 1 (the default)
+                                 # is the direct peer only, 2 is client →
+                                 # CDN → nginx → Irongrid, etc.
+  # doh_asn_header: true         # add X-Irongrid-Client-ASN to DoH responses:
+                                 # the ASN the server attributes to the client's
+                                 # IP (only when it matches a configured ASN
+                                 # list — geo_block or a client group) — handy
+                                 # for verifying which ISP a client resolves as
 
 # Upstream DNS servers to forward to (udp, tcp, tls, https, quic supported).
 upstreams:

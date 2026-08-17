@@ -340,6 +340,20 @@ func main() {
 	// Per-IP concurrent-connection caps (server.max_tcp_conns_per_ip /
 	// server.max_http_conns_per_ip; 0 = unlimited). Same lifecycle.
 	dnsMgr.SetConnLimits(cfg.Server.MaxTCPConnsPerIP, cfg.Server.MaxHTTPConnsPerIP)
+	// DoH client identification (server.trusted_proxies / xff_hop_limit):
+	// which reverse-proxy peers may stamp X-Forwarded-For beyond
+	// loopback/private ones, and how many trusted hops the chain may
+	// contain — the client IP those rules produce drives geo/ASN blocking,
+	// rate limiting and per-client policy, so a public reverse proxy in
+	// front of DoH must be listed here or only the proxy's own address is
+	// ever seen. Plus the per-response ASN header (server.doh_asn_header).
+	// Both are re-applied on every reload below; the DoH handler reads them
+	// per request, so no listener restart is needed.
+	if err := dnsMgr.SetProxyConfig(cfg.Server.TrustedProxies, cfg.Server.XFFHopLimit); err != nil {
+		slog.Error("invalid server.trusted_proxies", "error", err)
+		os.Exit(1)
+	}
+	dnsMgr.SetDoHASNHeader(cfg.Server.DoHASNHeader)
 	// webSharesDoH reports whether the dashboard and DoH share one HTTPS port
 	// (server.web_listen == server.listen_doh with web_tls on). In that case
 	// the web server also serves /dns-query and no standalone DoH listener is
@@ -908,6 +922,14 @@ func main() {
 		dnsMgr.SetUDPSockets(cfg.Server.UDPSockets)
 		dnsMgr.SetUDPWorkers(cfg.Server.UDPWorkers)
 		dnsMgr.SetConnLimits(cfg.Server.MaxTCPConnsPerIP, cfg.Server.MaxHTTPConnsPerIP)
+		// Proxy trust and the DoH ASN header are read per request, so they
+		// are re-applied without a listener restart (the reload has already
+		// validated them via the config check below, so a failure here is
+		// unreachable — logged defensively only).
+		if err := dnsMgr.SetProxyConfig(cfg.Server.TrustedProxies, cfg.Server.XFFHopLimit); err != nil {
+			slog.Error("invalid server.trusted_proxies on reload", "error", err)
+		}
+		dnsMgr.SetDoHASNHeader(cfg.Server.DoHASNHeader)
 		if err := dnsMgr.Restart(
 			cfg.Server.ListenUDP, cfg.Server.ListenTCP,
 			cfg.Server.ListenDoT, dohAddr(), cfg.Server.ListenDoH3, cfg.Server.ListenDoQ,

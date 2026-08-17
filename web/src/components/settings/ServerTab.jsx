@@ -67,6 +67,25 @@ export default function ServerTab({ f }) {
           {toggle('Pad encrypted responses (RFC 7830)', 'server.padding')}
           {toggle('DNS cookies (RFC 7873)', 'server.cookies')}
         </div>
+        <h4 className="field-group">DoH client identification</h4>
+        <p className="dim small" style={{ marginTop: -6 }}>
+          The client IP behind DoH drives geo/ASN blocking, rate limiting and per-client policy. When DoH sits behind a{' '}
+          <strong>public reverse proxy</strong> (CDN, edge box), only the proxy&apos;s address is seen unless you list
+          it here — loopback/private peers (local nginx, the baked-in cloudflared tunnel) are always trusted.
+        </p>
+        <div className="form-grid">
+          {textarea(
+            'Trusted proxies (IPs/CIDRs)',
+            'server.trusted_proxies',
+            'reverse proxies whose X-Forwarded-For is honored, one per line — e.g. your CDN egress range',
+          )}
+          {number(
+            'X-Forwarded-For hop limit',
+            'server.xff_hop_limit',
+            'trusted proxy hops in the chain; the client IP is the Nth entry from the right. 1 (default) = direct peer only, 2 = client behind a CDN + nginx, etc. 0 = default (1).',
+          )}
+          {toggle('Add X-Irongrid-Client-ASN to DoH responses', 'server.doh_asn_header')}
+        </div>
         <h4 className="field-group">Connection limits (flood protection)</h4>
         <div className="form-grid">
           {number(
@@ -155,15 +174,12 @@ export default function ServerTab({ f }) {
           them — the fastest for your location win. One click adds them to the list above; save to apply.
         </p>
         {f.pendingBenchmarkAdds > 0 && (
-          <div
-            className="info-banner"
-            style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'flex-start' }}
-          >
+          <div className="info-banner" style={{ marginTop: 8, display: 'flex', gap: 8, alignItems: 'flex-start' }}>
             <AlertIcon size={14} style={{ flexShrink: 0, marginTop: 2 }} />
             <span>
               {f.pendingBenchmarkAdds} upstream{f.pendingBenchmarkAdds === 1 ? ' was' : 's were'} added from the
-              benchmark but not saved yet — click <strong>Save &amp; apply</strong> at the top of this page to make
-              it live.
+              benchmark but not saved yet — click <strong>Save &amp; apply</strong> at the top of this page to make it
+              live.
             </span>
           </div>
         )}

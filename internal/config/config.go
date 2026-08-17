@@ -385,6 +385,33 @@ type ServerConfig struct {
 	// listener when they share a port); 0 = unlimited, the default. Same
 	// rationale as max_tcp_conns_per_ip for the HTTP transports.
 	MaxHTTPConnsPerIP int `yaml:"max_http_conns_per_ip"`
+	// TrustedProxies lists reverse proxies (IPs or CIDRs) in front of the
+	// DoH endpoint whose X-Forwarded-For header is honored, in addition to
+	// loopback/private peers (a local nginx/Caddy or the baked-in
+	// cloudflared tunnel, both always trusted). Without this, a DoH
+	// listener fronted by a public reverse proxy sees only the proxy's own
+	// address, so geo/ASN blocking, rate limiting and per-client policy
+	// apply to the proxy instead of the end client. The direct peer must
+	// itself be trusted before XFF is read at all — entries only widen the
+	// set of peers allowed to stamp it, they never bypass that gate.
+	TrustedProxies []string `yaml:"trusted_proxies"`
+	// XFFHopLimit is how many trusted proxy hops the X-Forwarded-For chain
+	// may contain: the client IP is the hop_limit-th entry from the right,
+	// so 1 (the default, and what 0 selects) uses the rightmost entry —
+	// the address the trusted peer itself saw, which cannot be spoofed —
+	// and N skips that many trusted hops to reach the real client. Set it
+	// to the number of proxies in front of the direct peer (e.g. 2 for
+	// client → CDN → nginx → Irongrid).
+	XFFHopLimit int `yaml:"xff_hop_limit"`
+	// DoHASNHeader, when enabled, adds an X-Irongrid-Client-ASN header to
+	// DoH responses (RFC 8484 GET and POST, on the DoH/DoH3/shared
+	// listeners) carrying the ASN the server attributes to the client's IP
+	// — handy for verifying which ISP a client resolves as without digging
+	// through the query log. The header is only added when the client's ISP
+	// matches one of the configured ASN lists (geo_block allow/block ASNs
+	// or a client group's asns); clients the server has no ASN data on get
+	// no header.
+	DoHASNHeader bool `yaml:"doh_asn_header"`
 }
 
 // CacheConfig points at the Dragonfly instance that is the authoritative
@@ -845,6 +872,23 @@ func (c *Config) validate() error {
 	}
 	if c.Server.MaxHTTPConnsPerIP < 0 {
 		return fmt.Errorf("server.max_http_conns_per_ip must be >= 0 (0 = unlimited)")
+	}
+	for i, e := range c.Server.TrustedProxies {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			return fmt.Errorf("server.trusted_proxies[%d]: empty entry", i)
+		}
+		if net.ParseIP(e) == nil {
+			if _, _, err := net.ParseCIDR(e); err != nil {
+				return fmt.Errorf("server.trusted_proxies[%d] %q: not a valid IP or CIDR", i, e)
+			}
+		}
+	}
+	if c.Server.XFFHopLimit < 0 {
+		return fmt.Errorf("server.xff_hop_limit must be >= 0 (0 = trust the direct peer only)")
+	}
+	if c.Server.XFFHopLimit == 0 {
+		c.Server.XFFHopLimit = 1
 	}
 	// DoH3 and DoQ are both QUIC over UDP on the address they bind. Two
 	// QUIC listeners on one UDP address would each accept the other's

@@ -202,6 +202,40 @@ func TestValidateWebRedirectPortCollision(t *testing.T) {
 	}
 }
 
+func TestValidateTrustedProxies(t *testing.T) {
+	c := validBase()
+	c.Server.TrustedProxies = []string{"203.0.113.7", "198.51.100.0/24", " 2001:db8::1 "}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid trusted_proxies rejected: %v", err)
+	}
+	c.Server.TrustedProxies = []string{"203.0.113.7", "not-an-ip-or-cidr"}
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "trusted_proxies[1]") {
+		t.Fatalf("err = %v, want trusted_proxies[1] invalid-entry error", err)
+	}
+	c.Server.TrustedProxies = []string{" "}
+	err = c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "empty entry") {
+		t.Fatalf("err = %v, want empty trusted_proxies entry error", err)
+	}
+}
+
+func TestValidateXFFHopLimit(t *testing.T) {
+	c := validBase()
+	c.Server.XFFHopLimit = 0 // 0 selects the default
+	if err := c.Validate(); err != nil {
+		t.Fatalf("xff_hop_limit 0 rejected: %v", err)
+	}
+	if c.Server.XFFHopLimit != 1 {
+		t.Errorf("xff_hop_limit = %d after validation, want normalized 1", c.Server.XFFHopLimit)
+	}
+	c.Server.XFFHopLimit = -1
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "xff_hop_limit") {
+		t.Fatalf("err = %v, want negative xff_hop_limit error", err)
+	}
+}
+
 func TestValidateDNS01Cloudflare(t *testing.T) {
 	c := validBase()
 	c.TLS.ACME = ACMEConfig{

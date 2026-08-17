@@ -139,6 +139,23 @@ func (b *Blocker) SetASNs(allow, block *ASNTable) {
 	b.asnAllow, b.asnBlock = allow, block
 }
 
+// ASNOf returns the ASN attributed to ip by the allow or block ASN tables,
+// when the client's ISP is in one of the configured ASN lists (used by the
+// DoH X-Irongrid-Client-ASN response header).
+func (b *Blocker) ASNOf(ip net.IP) (uint32, bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if b.asnAllow != nil {
+		if asn, ok := b.asnAllow.Lookup(ip); ok {
+			return asn, true
+		}
+	}
+	if b.asnBlock != nil {
+		return b.asnBlock.Lookup(ip)
+	}
+	return 0, false
+}
+
 // Blocked reports whether clientIP is geo-blocked (see BlockedAs for the
 // blocking source).
 func (b *Blocker) Blocked(clientIP string) bool {

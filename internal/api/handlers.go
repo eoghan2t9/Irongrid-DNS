@@ -378,12 +378,13 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"query": bundle.Stats,
 		"counters": map[string]int64{
-			"total":    h.DNS.Stats.Total.Load(),
-			"blocked":  h.DNS.Stats.Blocked.Load(),
-			"allowed":  h.DNS.Stats.Allowed.Load(),
-			"cached":   h.DNS.Stats.Cached.Load(),
-			"errors":   h.DNS.Stats.Errors.Load(),
-			"honeypot": h.DNS.Stats.Honeypot.Load(),
+			"total":      h.DNS.Stats.Total.Load(),
+			"blocked":    h.DNS.Stats.Blocked.Load(),
+			"allowed":    h.DNS.Stats.Allowed.Load(),
+			"cached":     h.DNS.Stats.Cached.Load(),
+			"errors":     h.DNS.Stats.Errors.Load(),
+			"honeypot":   h.DNS.Stats.Honeypot.Load(),
+			"asn_header": h.DNS.Stats.ASNHeader.Load(),
 		},
 		"protocol":     proto,
 		"filter":       h.Engine.Stats(),
@@ -985,6 +986,15 @@ type serverPayload struct {
 	// MaxHTTPConnsPerIP caps concurrent connections per client IP on the
 	// DoH/shared-HTTP listener (0 = unlimited).
 	MaxHTTPConnsPerIP int `json:"max_http_conns_per_ip"`
+	// TrustedProxies lists reverse proxies (IPs or CIDRs) whose
+	// X-Forwarded-For header the DoH endpoint honors, in addition to
+	// loopback/private peers.
+	TrustedProxies []string `json:"trusted_proxies"`
+	// XFFHopLimit is how many trusted proxy hops the X-Forwarded-For chain
+	// may contain (0 = the default, 1).
+	XFFHopLimit int `json:"xff_hop_limit"`
+	// DoHASNHeader adds X-Irongrid-Client-ASN to DoH responses when on.
+	DoHASNHeader bool `json:"doh_asn_header"`
 }
 
 type cachePayload struct {
@@ -1116,6 +1126,9 @@ func payloadFromConfig(c *config.Config) configPayload {
 			DebugPprof:        c.Server.DebugPprof,
 			MaxTCPConnsPerIP:  c.Server.MaxTCPConnsPerIP,
 			MaxHTTPConnsPerIP: c.Server.MaxHTTPConnsPerIP,
+			TrustedProxies:    c.Server.TrustedProxies,
+			XFFHopLimit:       c.Server.XFFHopLimit,
+			DoHASNHeader:      c.Server.DoHASNHeader,
 		},
 		Upstreams:    c.Upstreams,
 		UpstreamMode: c.UpstreamMode,
@@ -1373,6 +1386,9 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			DebugPprof:        p.Server.DebugPprof,
 			MaxTCPConnsPerIP:  p.Server.MaxTCPConnsPerIP,
 			MaxHTTPConnsPerIP: p.Server.MaxHTTPConnsPerIP,
+			TrustedProxies:    p.Server.TrustedProxies,
+			XFFHopLimit:       p.Server.XFFHopLimit,
+			DoHASNHeader:      p.Server.DoHASNHeader,
 		},
 		Upstreams:    p.Upstreams,
 		UpstreamMode: p.UpstreamMode,

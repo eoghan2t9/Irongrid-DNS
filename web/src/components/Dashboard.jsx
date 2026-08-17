@@ -108,8 +108,8 @@ export default function Dashboard({ onNavigate }) {
         >
           <AlertIcon size={14} style={{ flexShrink: 0, marginTop: 2 }} />
           <span>
-            The TLS certificate has <strong>expired</strong> — DoT/DoH/DoQ clients will fail. Generate a new one,
-            upload a CA cert, or renew via Let's Encrypt on the <strong>SSL / TLS</strong> page.
+            The TLS certificate has <strong>expired</strong> — DoT/DoH/DoQ clients will fail. Generate a new one, upload
+            a CA cert, or renew via Let's Encrypt on the <strong>SSL / TLS</strong> page.
           </span>
         </div>
       )}
@@ -472,6 +472,13 @@ function PerformanceCard({ latency, counters, avg24, coalesce }) {
               queries shared {fmt(coalesce?.flights)} upstream flight{coalesce?.flights === 1 ? '' : 's'} ·{' '}
               {fmt(coalesce?.saved || 0)} round trips saved
             </span>
+          </span>
+        </div>
+        <div className="kv-row">
+          <span className="kv-label">ASN headers</span>
+          <span className="kv-value">
+            {fmt(counters?.asn_header || 0)}{' '}
+            <span className="dim small">DoH responses carrying X-Irongrid-Client-ASN</span>
           </span>
         </div>
       </div>

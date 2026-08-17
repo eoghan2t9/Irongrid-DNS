@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cert"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
 )
 
 func TestClientIPFromRequest(t *testing.T) {
@@ -28,34 +30,72 @@ func TestClientIPFromRequest(t *testing.T) {
 		return r
 	}
 	// No header: the direct remote address wins.
-	if got := clientIPFromRequest(newReq("93.0.0.1:53000", "")); got != "93.0.0.1" {
+	if got := clientIPFromRequest(newReq("93.0.0.1:53000", ""), nil, 1); got != "93.0.0.1" {
 		t.Errorf("no XFF: got %q, want 93.0.0.1", got)
 	}
 	// XFF from a loopback peer (cloudflared / nginx on the same box) is
 	// honored — this is what makes geo blocking work behind the tunnel.
-	if got := clientIPFromRequest(newReq("127.0.0.1:53000", "185.220.101.34")); got != "185.220.101.34" {
+	if got := clientIPFromRequest(newReq("127.0.0.1:53000", "185.220.101.34"), nil, 1); got != "185.220.101.34" {
 		t.Errorf("loopback proxy XFF: got %q, want 185.220.101.34", got)
 	}
 	// XFF from a private-LAN proxy is honored.
-	if got := clientIPFromRequest(newReq("10.0.0.5:443", "185.220.101.34")); got != "185.220.101.34" {
+	if got := clientIPFromRequest(newReq("10.0.0.5:443", "185.220.101.34"), nil, 1); got != "185.220.101.34" {
 		t.Errorf("private proxy XFF: got %q, want 185.220.101.34", got)
 	}
 	// XFF from a PUBLIC peer must be ignored (spoofing protection): the
 	// header claiming 8.8.8.8 must not mask the real 185.220.101.34.
-	if got := clientIPFromRequest(newReq("185.220.101.34:53000", "8.8.8.8")); got != "185.220.101.34" {
+	if got := clientIPFromRequest(newReq("185.220.101.34:53000", "8.8.8.8"), nil, 1); got != "185.220.101.34" {
 		t.Errorf("public peer XFF must be ignored: got %q, want 185.220.101.34", got)
 	}
 	// Malformed XFF is ignored.
-	if got := clientIPFromRequest(newReq("127.0.0.1:53000", "not-an-ip")); got != "127.0.0.1" {
+	if got := clientIPFromRequest(newReq("127.0.0.1:53000", "not-an-ip"), nil, 1); got != "127.0.0.1" {
 		t.Errorf("malformed XFF: got %q, want 127.0.0.1", got)
 	}
-	// The first hop of a proxy chain is used.
-	if got := clientIPFromRequest(newReq("127.0.0.1:53000", "185.220.101.34, 10.1.1.1")); got != "185.220.101.34" {
-		t.Errorf("proxy chain: got %q, want 185.220.101.34", got)
+	// With the default hop limit of 1 the rightmost entry is used — the
+	// address the trusted peer itself saw, which cannot be spoofed by an
+	// upstream hop claiming a different client.
+	if got := clientIPFromRequest(newReq("127.0.0.1:53000", "185.220.101.34, 10.1.1.1"), nil, 1); got != "10.1.1.1" {
+		t.Errorf("proxy chain hop_limit 1: got %q, want 10.1.1.1", got)
+	}
+	// Hop limit 2 trusts two hops: the client is the 2nd entry from the
+	// right, and spoofed entries further left are discarded.
+	if got := clientIPFromRequest(newReq("127.0.0.1:53000", "6.6.6.6, 185.220.101.34, 10.1.1.1"), nil, 2); got != "185.220.101.34" {
+		t.Errorf("proxy chain hop_limit 2: got %q, want 185.220.101.34", got)
+	}
+	// A chain shorter than the hop limit clamps to the leftmost entry.
+	if got := clientIPFromRequest(newReq("127.0.0.1:53000", "185.220.101.34"), nil, 3); got != "185.220.101.34" {
+		t.Errorf("chain shorter than hop limit: got %q, want 185.220.101.34", got)
 	}
 	// A loopback remote address with no XFF resolves to the remote host.
-	if got := clientIPFromRequest(newReq("[::1]:443", "")); got != "::1" {
+	if got := clientIPFromRequest(newReq("[::1]:443", ""), nil, 1); got != "::1" {
 		t.Errorf("v6 remote: got %q, want ::1", got)
+	}
+}
+
+func TestClientIPFromRequestTrustedProxies(t *testing.T) {
+	// A public reverse proxy listed in server.trusted_proxies may stamp XFF
+	// — that is the whole point of the knob (e.g. a CDN in front of DoH).
+	_, cdn, err := net.ParseCIDR("203.0.113.0/24")
+	if err != nil {
+		t.Fatalf("parse cidr: %v", err)
+	}
+	trusted := []*net.IPNet{cdn}
+	newReq := func(remote, xff string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/dns-query?dns=AA", nil)
+		r.RemoteAddr = remote
+		if xff != "" {
+			r.Header.Set("X-Forwarded-For", xff)
+		}
+		return r
+	}
+	// Peer inside the trusted CDN range: XFF honored.
+	if got := clientIPFromRequest(newReq("203.0.113.7:443", "198.51.100.9"), trusted, 1); got != "198.51.100.9" {
+		t.Errorf("trusted CDN peer XFF: got %q, want 198.51.100.9", got)
+	}
+	// A public peer NOT in the list is still untrusted: spoofing stays
+	// impossible unless the operator explicitly listed the proxy.
+	if got := clientIPFromRequest(newReq("198.51.100.9:443", "8.8.8.8"), trusted, 1); got != "198.51.100.9" {
+		t.Errorf("unlisted public peer XFF must be ignored: got %q, want 198.51.100.9", got)
 	}
 }
 
@@ -69,15 +109,84 @@ func TestIsTrustedProxy(t *testing.T) {
 		{"127.0.0.1", true},           // bare IP without port
 		{"10.0.0.5:443", true},        // private LAN proxy
 		{"192.168.1.10:443", true},    // private LAN proxy
-		{"185.220.101.34:443", false}, // public peer — never trusted
+		{"185.220.101.34:443", false}, // public peer — never trusted by default
 		{"proxy.local:443", false},    // hostname peer
 		{"", false},                   // empty RemoteAddr
 		{"not-an-address", false},     // unparseable
 	}
 	for _, c := range cases {
-		if got := isTrustedProxy(c.remote); got != c.want {
+		if got := isTrustedProxy(c.remote, nil); got != c.want {
 			t.Errorf("isTrustedProxy(%q) = %v, want %v", c.remote, got, c.want)
 		}
+	}
+	// A public peer inside an extra trusted net becomes trusted; one
+	// outside it stays untrusted.
+	_, cdn, err := net.ParseCIDR("203.0.113.0/24")
+	if err != nil {
+		t.Fatalf("parse cidr: %v", err)
+	}
+	if !isTrustedProxy("203.0.113.7:443", []*net.IPNet{cdn}) {
+		t.Error("public peer inside trusted net must be trusted")
+	}
+	if isTrustedProxy("198.51.100.9:443", []*net.IPNet{cdn}) {
+		t.Error("public peer outside trusted net must stay untrusted")
+	}
+}
+
+// TestDoHASNHeader verifies the X-Irongrid-Client-ASN response header: it is
+// emitted — with the ASN the server attributes to the client — only when
+// server.doh_asn_header is on AND the client's ISP is in a configured ASN
+// list (a client group's table here); clients with no ASN data, or with the
+// toggle off, get no header.
+func TestDoHASNHeader(t *testing.T) {
+	h := NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, 5*time.Second)
+	// A client router carrying an ASN table covering 1.1.1.0/24 -> AS13335.
+	allow, _, err := geoip.LoadASNTables(
+		[]byte("1.1.1.0\t1.1.1.255\t13335\tUS\tCloudflare\n"), nil,
+		map[uint32]bool{13335: true}, nil)
+	if err != nil {
+		t.Fatalf("asn table: %v", err)
+	}
+	router := NewClientRouter()
+	router.SetPolicies(nil, allow)
+	h.SetClientRouter(router)
+
+	mgr := NewManager(h, nil)
+	mgr.SetDoHASNHeader(true)
+
+	doH := func(remote string) *httptest.ResponseRecorder {
+		m := new(dns.Msg)
+		m.SetQuestion("example.com.", dns.TypeA)
+		raw, err := m.Pack()
+		if err != nil {
+			t.Fatalf("pack: %v", err)
+		}
+		r := httptest.NewRequest(http.MethodGet, "/dns-query?dns="+base64.RawURLEncoding.EncodeToString(raw), nil)
+		r.RemoteAddr = remote
+		w := httptest.NewRecorder()
+		mgr.handleDoH(w, r, "doh")
+		return w
+	}
+
+	// Client inside the table's range: the header carries AS13335 and the
+	// stats counter ticks.
+	if w := doH("1.1.1.1:53000"); w.Header().Get(asnResponseHeader) != "13335" {
+		t.Errorf("ASN header = %q, want 13335", w.Header().Get(asnResponseHeader))
+	}
+	if got := h.Stats.ASNHeader.Load(); got != 1 {
+		t.Errorf("ASNHeader counter = %d, want 1", got)
+	}
+	// Client with no ASN data: no header, no counter tick.
+	if w := doH("9.9.9.9:53000"); w.Header().Get(asnResponseHeader) != "" {
+		t.Errorf("ASN header for unknown client = %q, want absent", w.Header().Get(asnResponseHeader))
+	}
+	// Toggle off: no header even for a known client, and the counter stays.
+	mgr.SetDoHASNHeader(false)
+	if w := doH("1.1.1.1:53000"); w.Header().Get(asnResponseHeader) != "" {
+		t.Errorf("ASN header with toggle off = %q, want absent", w.Header().Get(asnResponseHeader))
+	}
+	if got := h.Stats.ASNHeader.Load(); got != 1 {
+		t.Errorf("ASNHeader counter = %d after toggle-off request, want 1", got)
 	}
 }
 

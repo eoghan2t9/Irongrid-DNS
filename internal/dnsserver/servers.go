@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -89,7 +90,20 @@ type Manager struct {
 	httpSrv interface {
 		Shutdown(ctx context.Context) error
 	}
-	doqLns []*quic.Listener
+	// trustedProxies are reverse-proxy peers beyond loopback/private whose
+	// X-Forwarded-For header the DoH endpoint honors (server.trusted_proxies;
+	// nil = loopback/private only). Read per request under m.mu.
+	trustedProxies []*net.IPNet
+	// xffHops is how many trusted proxy hops the X-Forwarded-For chain may
+	// contain (server.xff_hop_limit): the client IP is the hop_limit-th
+	// entry from the right of the chain, so 1 (the default) means the
+	// direct peer is the only trusted hop. 0 is normalized to 1 by
+	// SetProxyConfig.
+	xffHops int
+	// asnHeader adds X-Irongrid-Client-ASN to DoH responses
+	// (server.doh_asn_header).
+	asnHeader bool
+	doqLns    []*quic.Listener
 	// http3Srvs and http3Pcs are the DoH3 (HTTP/3) servers and their packet
 	// conns. Unlike a quic.Listener (which owns its socket), http3.Server's
 	// Serve does not close the connection it is given, so the sockets are
@@ -150,6 +164,53 @@ func (m *Manager) SetConnLimits(maxTCP, maxHTTP int) {
 	} else {
 		m.httpLim = nil
 	}
+	m.mu.Unlock()
+}
+
+// SetProxyConfig configures reverse-proxy trust for DoH client
+// identification (server.trusted_proxies / server.xff_hop_limit): which
+// peers — in addition to loopback/private ones — may stamp X-Forwarded-For,
+// and how many trusted hops the chain may contain. Entries are IPs or
+// CIDRs; an invalid entry returns an error. Applied at boot and on every
+// reload; the DoH handler reads the values per request, so no listener
+// restart is needed.
+func (m *Manager) SetProxyConfig(trusted []string, hopLimit int) error {
+	var nets []*net.IPNet
+	for _, e := range trusted {
+		e = strings.TrimSpace(e)
+		if e == "" {
+			continue
+		}
+		if ip := net.ParseIP(e); ip != nil {
+			bits := 32
+			if ip.To4() == nil {
+				bits = 128
+			}
+			nets = append(nets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		_, n, err := net.ParseCIDR(e)
+		if err != nil {
+			return fmt.Errorf("trusted proxy %q: %w", e, err)
+		}
+		nets = append(nets, n)
+	}
+	if hopLimit < 1 {
+		hopLimit = 1
+	}
+	m.mu.Lock()
+	m.trustedProxies = nets
+	m.xffHops = hopLimit
+	m.mu.Unlock()
+	return nil
+}
+
+// SetDoHASNHeader toggles the X-Irongrid-Client-ASN response header on the
+// DoH endpoint (server.doh_asn_header). Applied at boot and on every
+// reload; read per request, so no listener restart is needed.
+func (m *Manager) SetDoHASNHeader(on bool) {
+	m.mu.Lock()
+	m.asnHeader = on
 	m.mu.Unlock()
 }
 

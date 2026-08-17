@@ -175,3 +175,19 @@ func (cr *ClientRouter) Resolve(client string) *ClientPolicy {
 	cr.cache.Store(client, p)
 	return p
 }
+
+// ASNOf returns the ASN the router's table attributes to client, if any.
+// The table is only installed when at least one group matches by ASN (nil
+// otherwise), so for a config without group ASNs this never resolves — the
+// DoH ASN response header falls back to the geo blocker's tables instead.
+func (cr *ClientRouter) ASNOf(client string) (uint32, bool) {
+	ip := net.ParseIP(client)
+	if ip == nil {
+		return 0, false
+	}
+	entries := cr.entries.Load()
+	if entries.asnTable == nil {
+		return 0, false
+	}
+	return entries.asnTable.Lookup(ip)
+}

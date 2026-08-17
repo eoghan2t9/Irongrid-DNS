@@ -96,6 +96,15 @@ type Entry struct {
 	ResponseTimeMS int64  `json:"response_time_ms"`
 	Rcode          int    `json:"rcode"`
 	Answers        int    `json:"answers"`
+	// ASN is the ASN the server attributed to the client at record time —
+	// resolved locally from the configured ip2asn tables (geo_block
+	// allow/block ASNs or a client group's asns), so it is the same
+	// attribution the X-Irongrid-Client-ASN DoH header and the
+	// asn-blocked/asn-allowed reasons use. 0 = the client's ISP is in none
+	// of the configured ASN lists (the dashboard then falls back to its
+	// external RIPEstat lookup). Omitted from JSON when unknown, so old
+	// stored entries stay compatible.
+	ASN uint32 `json:"asn,omitempty"`
 }
 
 // Log is a concurrency-safe query logger backed by a Dragonfly stream.

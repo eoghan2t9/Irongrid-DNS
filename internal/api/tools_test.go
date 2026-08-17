@@ -410,10 +410,16 @@ func TestConfigPayloadServerRoundTrip(t *testing.T) {
 		Padding:         true,
 		Cookies:         true,
 		DebugPprof:      true,
+		TrustedProxies:  []string{"203.0.113.7", "198.51.100.0/24"},
+		XFFHopLimit:     2,
+		DoHASNHeader:    true,
 	}
 	p := payloadFromConfig(c)
 	if p.Server.ListenDoH3 != "0.0.0.0:443" || p.Server.UDPWorkers != 32 || !p.Server.Padding || !p.Server.Cookies || !p.Server.DebugPprof {
 		t.Fatalf("payload dropped server fields: %+v", p.Server)
+	}
+	if len(p.Server.TrustedProxies) != 2 || p.Server.XFFHopLimit != 2 || !p.Server.DoHASNHeader {
+		t.Fatalf("payload dropped DoH client-identification fields: %+v", p.Server)
 	}
 
 	// Reverse direction: the applyPayload copy. Build the payload back into
@@ -436,6 +442,9 @@ func TestConfigPayloadServerRoundTrip(t *testing.T) {
 		Padding:         p.Server.Padding,
 		Cookies:         p.Server.Cookies,
 		DebugPprof:      p.Server.DebugPprof,
+		TrustedProxies:  p.Server.TrustedProxies,
+		XFFHopLimit:     p.Server.XFFHopLimit,
+		DoHASNHeader:    p.Server.DoHASNHeader,
 	}}
 	if !reflect.DeepEqual(c.Server, cfg.Server) {
 		t.Fatalf("server round-trip mismatch:\n got %+v\nwant %+v", cfg.Server, c.Server)

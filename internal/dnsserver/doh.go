@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -239,27 +240,54 @@ func (m *Manager) handleDoH(w http.ResponseWriter, r *http.Request, proto string
 		return
 	}
 
-	clientIP := clientIPFromRequest(r)
+	// The proxy-trust config (server.trusted_proxies / xff_hop_limit) and
+	// the ASN-header toggle (server.doh_asn_header) are read per request
+	// under the manager mutex, so a config reload applies them without a
+	// listener restart. The client IP then drives everything downstream —
+	// geo/ASN blocking, rate limiting and per-client policy — so getting it
+	// right (or wrong) is the whole game here.
+	m.mu.Lock()
+	trusted, hops, asnHeader := m.trustedProxies, m.xffHops, m.asnHeader
+	m.mu.Unlock()
+	clientIP := clientIPFromRequest(r, trusted, hops)
 	// Replies are written back through this writer as the DNS response bytes.
 	// proto tags the transport ("doh" or "doh3") for stats and policy.
 	httpWriter := &dohResponseWriter{httpW: w, clientIP: clientIP}
+	if asnHeader {
+		if asn, ok := m.handler.ClientASN(clientIP); ok {
+			httpWriter.asn = asn
+			// Count every response that actually carries the header, for the
+			// dashboard's "ASN headers" row.
+			m.handler.Stats.ASNHeader.Add(1)
+		}
+	}
 	m.handler.ServeDNSFromContext(httpWriter, msg, clientIP, proto)
 }
 
-func clientIPFromRequest(r *http.Request) string {
-	// Trust X-Forwarded-For only when the DIRECT peer is a loopback or
-	// private address — a local reverse proxy (nginx/Caddy on the same box
-	// or LAN) or the baked-in cloudflared tunnel, both of which stamp the
-	// real client IP. A publicly reachable DoH listener must never honor a
-	// client-supplied header: sending `X-Forwarded-For: 8.8.8.8` would
-	// bypass geo-blocking, rate limiting and per-client policy in one
-	// request. Without this guard, trusting XFF from the open internet is
-	// an open door for exactly the blocked-country traffic geo blocking is
-	// supposed to refuse.
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" && isTrustedProxy(r.RemoteAddr) {
-		first := strings.TrimSpace(strings.Split(xff, ",")[0])
-		if ip := net.ParseIP(first); ip != nil {
-			return first
+func clientIPFromRequest(r *http.Request, trusted []*net.IPNet, hopLimit int) string {
+	// Trust X-Forwarded-For only when the DIRECT peer is trusted — a
+	// loopback/private address (a local reverse proxy, the baked-in
+	// cloudflared tunnel) or an entry of server.trusted_proxies. A publicly
+	// reachable DoH listener must never honor a client-supplied header:
+	// sending `X-Forwarded-For: 8.8.8.8` would bypass geo-blocking, rate
+	// limiting and per-client policy in one request. Without this guard,
+	// trusting XFF from the open internet is an open door for exactly the
+	// blocked-country traffic geo blocking is supposed to refuse.
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" && isTrustedProxy(r.RemoteAddr, trusted) {
+		if hopLimit < 1 {
+			hopLimit = 1
+		}
+		entries := strings.Split(xff, ",")
+		// The client is the hop_limit-th entry from the right: 1 (the
+		// default) is the rightmost entry — the address the trusted peer
+		// itself saw, which cannot be spoofed — and N skips that many
+		// trusted hops to reach the real client behind a proxy chain. A
+		// chain shorter than the limit clamps to the leftmost entry.
+		// A chain shorter than the limit clamps to the leftmost entry.
+		idx := max(len(entries)-hopLimit, 0)
+		ip := net.ParseIP(strings.TrimSpace(entries[idx]))
+		if ip != nil {
+			return ip.String()
 		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
@@ -269,27 +297,53 @@ func clientIPFromRequest(r *http.Request) string {
 	return host
 }
 
-// isTrustedProxy reports whether an HTTP connection's direct peer is a
-// loopback or private address — the only peers whose X-Forwarded-For header
-// is accepted (a proxy on the same host or LAN). Remote peers on public IPs
-// are never trusted, so the header cannot be spoofed from the internet.
-// Link-local (169.254/16, fe80::/10) and CGNAT (100.64/10) peers are
-// deliberately not trusted — a local proxy there is vanishingly rare, and
-// erring closed is the point.
-func isTrustedProxy(remote string) bool {
+// isTrustedProxy reports whether an HTTP connection's direct peer may stamp
+// X-Forwarded-For: a loopback or private address (a proxy on the same host
+// or LAN, or the cloudflared tunnel) or an entry of server.trusted_proxies
+// (a known public reverse proxy the operator added). Remote peers on other
+// public IPs are never trusted, so the header cannot be spoofed from the
+// internet. Link-local (169.254/16, fe80::/10) and CGNAT (100.64/10) peers
+// are deliberately not trusted — a local proxy there is vanishingly rare,
+// and erring closed is the point.
+func isTrustedProxy(remote string, extra []*net.IPNet) bool {
 	host, _, err := net.SplitHostPort(remote)
 	if err != nil {
 		host = remote
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && (ip.IsLoopback() || ip.IsPrivate())
+	if ip == nil {
+		return false
+	}
+	if ip.IsLoopback() || ip.IsPrivate() {
+		return true
+	}
+	for _, n := range extra {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // dohResponseWriter adapts the dns.ResponseWriter interface to an HTTP
-// response.
+// response. asn, when non-zero, is emitted as the X-Irongrid-Client-ASN
+// response header (server.doh_asn_header) so a client can see which ASN the
+// server attributed to it.
 type dohResponseWriter struct {
 	httpW    http.ResponseWriter
 	clientIP string
+	asn      uint32
+}
+
+const asnResponseHeader = "X-Irongrid-Client-ASN"
+
+func (w *dohResponseWriter) writeHeaders() {
+	h := w.httpW.Header()
+	h.Set("Content-Type", dnsMessageContentType)
+	h.Set("Cache-Control", "no-store")
+	if w.asn != 0 {
+		h.Set(asnResponseHeader, strconv.FormatUint(uint64(w.asn), 10))
+	}
 }
 
 func (w *dohResponseWriter) WriteMsg(m *dns.Msg) error {
@@ -299,8 +353,7 @@ func (w *dohResponseWriter) WriteMsg(m *dns.Msg) error {
 		putPackBuf(buf)
 		return err
 	}
-	w.httpW.Header().Set("Content-Type", dnsMessageContentType)
-	w.httpW.Header().Set("Cache-Control", "no-store")
+	w.writeHeaders()
 	w.httpW.WriteHeader(http.StatusOK)
 	// http.ResponseWriter.Write copies/sends packed synchronously before
 	// returning, so it's safe to recycle right after regardless of error.
@@ -310,8 +363,7 @@ func (w *dohResponseWriter) WriteMsg(m *dns.Msg) error {
 }
 
 func (w *dohResponseWriter) Write(b []byte) (int, error) {
-	w.httpW.Header().Set("Content-Type", dnsMessageContentType)
-	w.httpW.Header().Set("Cache-Control", "no-store")
+	w.writeHeaders()
 	return w.httpW.Write(b)
 }
 
