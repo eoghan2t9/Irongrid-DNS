@@ -1,77 +1,82 @@
 /* ==========================================================================
    Irongrid DNS — dashboard design system
    --------------------------------------------------------------------------
-   One token-driven system shared by every page. Surfaces are layered (bg →
-   surface → raised), borders are hairline, depth comes from very subtle
-   shadows, and the four signal colors (cyan/emerald/rose/amber) are the only
-   hues in the UI. Every interactive element has a :focus-visible ring and a
-   press state; motion is short and purposeful (≤160ms).
+   One token-driven system shared by every page. The world is sharp and
+   precise: flat ink/paper surfaces, crisp hairline borders, 8–10px radii,
+   and depth that comes from structure rather than glow. The four signal
+   colors (cyan/emerald/rose/amber) are the only hues in the UI; every
+   interactive element has a :focus-visible ring and a press state; motion
+   is short and purposeful (≤160ms). Layout is dense: tighter rhythm,
+   smaller type, more information per viewport.
    ========================================================================== */
 
 :root {
-  /* Layered neutral surfaces — cool-warm black, not blue-tinted SaaS. */
-  --bg: #0b0b0d;
-  --bg2: #111114;
-  --surface: #16161a;
-  --surface2: #1c1c22;
+  /* Layered neutral surfaces — cool-warm ink, not blue-tinted SaaS. */
+  --bg: #0a0a0c;
+  --bg2: #101013;
+  --surface: #15151a;
+  --surface2: #1b1b21;
   --surface3: #24242c;
-  --border: #232329;
-  --border-strong: #33333d;
-  --text: #eaeae8;
-  --dim: #9d9da5;
-  --dim2: #6c6c76;
+  --border: #26262e;
+  --border-strong: #3a3a46;
+  --text: #ececf1;
+  --dim: #9e9eaa;
+  --dim2: #6a6a77;
 
-  /* Signal colors (CVD-safe set; every usage carries a text label too).
-     Slightly brighter than before so they read on the new surfaces. */
+  /* Signal colors (CVD-safe set; every usage carries a text label too). */
   --cyan: #5b8def;
   --emerald: #35b26c;
   --rose: #e05651;
   --amber: #e0a12e;
   /* Retired hue: same value as --dim so legacy accent-violet usages stay
      neutral (cached is a mechanism note, not an outcome). */
-  --violet: #9d9da5;
+  --violet: #9e9eaa;
 
-  /* Surfaces built from more than one color (gradients, translucent
-     overlays) that the light theme must restate as a whole — a flat token
-     can't express them. */
-  --bg-deep: #0e0e11; /* sidebar gradient end */
-  --topbar-bg: linear-gradient(180deg, rgba(17, 17, 20, 0.8), rgba(17, 17, 20, 0.4));
-  --topbar-solid: rgba(11, 11, 13, 0.94); /* mobile topbar */
-  --card-bg-end: rgba(22, 22, 26, 0.94); /* card / login-card gradient end */
-  --row-hover: rgba(28, 28, 34, 0.7); /* table row hover */
-  --shimmer: rgba(255, 255, 255, 0.05); /* skeleton sweep */
+  /* Ink placed on top of a filled signal button (dark theme uses near-black
+     on the bright cyan; the light theme flips to white on the deeper blue). */
+  --on-accent: #081018;
 
-  /* Radii: 4px felt like a utility tool; 8px reads as a product. */
+  /* Composite surfaces that the light theme must restate as a whole. */
+  --topbar-bg: #0f0f12; /* solid topbar (no blur — flat world) */
+  --topbar-solid: #0c0c0f;
+  --row-hover: rgba(27, 27, 33, 0.75);
+  --shimmer: rgba(255, 255, 255, 0.06); /* skeleton sweep */
+
+  /* Radii: crisp and contained — 8px base, 10px for large surfaces. */
   --radius: 8px;
   --radius-sm: 6px;
-  --radius-lg: 12px;
+  --radius-lg: 10px;
 
-  /* Elevation: hairline borders plus faint shadows — depth without noise. */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.35);
-  --shadow-md: 0 4px 14px rgba(0, 0, 0, 0.35);
-  --shadow-lg: 0 14px 44px rgba(0, 0, 0, 0.55);
+  /* Elevation: hairline borders carry the structure; shadows are reserved
+     for overlays (modals, palette, toasts) so they still read as lifted. */
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 3px 10px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 10px 34px rgba(0, 0, 0, 0.6);
+
+  /* Faint instrument grid behind everything — graph paper, not glow. */
+  --dot: rgba(255, 255, 255, 0.035);
 
   --font-mono: ui-monospace, 'JetBrains Mono', SFMono-Regular, Menlo, Consolas, monospace;
-  font-size: 15px;
+  font-size: 14.5px;
   color-scheme: dark;
 }
 
 /* ---------- light theme ---------- */
 /* The whole UI is token-driven, so the light theme is a single override of
-   the custom properties in :root — surfaces flip, signal colors darken to
-   clear the contrast bar on white, shadows soften, and the composite
-   surfaces (topbar blur, card gradient, shimmer) restate themselves. */
+   the custom properties in :root — surfaces flip to paper, signal colors
+   darken to clear the contrast bar on white, and the composite surfaces
+   restate themselves. */
 [data-theme='light'] {
-  --bg: #f5f5f7;
+  --bg: #f6f6f8;
   --bg2: #ffffff;
   --surface: #ffffff;
-  --surface2: #f0f0f3;
-  --surface3: #e6e6eb;
-  --border: #e3e3e9;
-  --border-strong: #cbcbd6;
-  --text: #1b1b22;
-  --dim: #5c5c68;
-  --dim2: #8b8b97;
+  --surface2: #f1f1f4;
+  --surface3: #e8e8ee;
+  --border: #e4e4ea;
+  --border-strong: #d0d0da;
+  --text: #191920;
+  --dim: #55555f;
+  --dim2: #888892;
 
   /* Darker signal colors so text/badges keep readable contrast on white.
      Same hues, deeper values — the CVD-safe set is unchanged. */
@@ -79,20 +84,20 @@
   --emerald: #178a4f;
   --rose: #c2332d;
   --amber: #a97a08;
-  --violet: #5c5c68;
+  --violet: #55555f;
+  --on-accent: #ffffff;
 
   color-scheme: light;
 
-  --shadow-sm: 0 1px 2px rgba(24, 24, 34, 0.08);
-  --shadow-md: 0 4px 14px rgba(24, 24, 34, 0.1);
-  --shadow-lg: 0 14px 44px rgba(24, 24, 34, 0.16);
+  --shadow-sm: 0 1px 2px rgba(24, 24, 34, 0.07);
+  --shadow-md: 0 3px 10px rgba(24, 24, 34, 0.1);
+  --shadow-lg: 0 10px 34px rgba(24, 24, 34, 0.16);
 
-  --bg-deep: #eef0f4;
-  --topbar-bg: linear-gradient(180deg, rgba(255, 255, 255, 0.85), rgba(255, 255, 255, 0.55));
-  --topbar-solid: rgba(245, 245, 247, 0.94);
-  --card-bg-end: rgba(255, 255, 255, 0.94);
-  --row-hover: rgba(28, 28, 34, 0.045);
-  --shimmer: rgba(0, 0, 0, 0.05);
+  --topbar-bg: rgba(255, 255, 255, 0.9);
+  --topbar-solid: rgba(246, 246, 248, 0.96);
+  --row-hover: rgba(24, 24, 34, 0.05);
+  --shimmer: rgba(0, 0, 0, 0.06);
+  --dot: rgba(24, 24, 34, 0.05);
 }
 
 * {
@@ -117,7 +122,11 @@ body {
     'Helvetica Neue',
     Arial,
     sans-serif;
-  background: radial-gradient(1200px 500px at 85% -10%, rgba(91, 141, 239, 0.05), transparent 60%), var(--bg);
+  background-color: var(--bg);
+  /* A faint fixed dot grid — the "instrument" texture. Static, precise,
+     and quiet enough to disappear behind content. */
+  background-image: radial-gradient(var(--dot) 1px, transparent 1px);
+  background-size: 22px 22px;
   background-attachment: fixed;
   color: var(--text);
   -webkit-font-smoothing: antialiased;
@@ -222,14 +231,14 @@ body {
 }
 
 .sidebar {
-  width: 224px;
+  width: 216px;
   flex-shrink: 0;
-  background: linear-gradient(180deg, var(--bg2), var(--bg-deep));
+  background: var(--bg2);
   border-right: 1px solid var(--border);
-  padding: 18px 12px;
+  padding: 14px 10px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
   position: sticky;
   top: 0;
   height: 100vh;
@@ -239,36 +248,35 @@ body {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 0 6px 14px;
+  padding: 0 6px 12px;
   border-bottom: 1px solid var(--border);
 }
 .brand-mark {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
-  background: linear-gradient(135deg, rgba(91, 141, 239, 0.22), rgba(91, 141, 239, 0.06));
-  border: 1px solid rgba(91, 141, 239, 0.35);
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: rgba(91, 141, 239, 0.12);
+  border: 1px solid rgba(91, 141, 239, 0.4);
   display: grid;
   place-items: center;
   color: var(--cyan); /* the Logo svg inside inherits this */
-  box-shadow: var(--shadow-sm);
 }
 .brand-name {
   font-weight: 700;
-  font-size: 14px;
+  font-size: 13px;
   letter-spacing: 0.3px;
   font-family: var(--font-mono);
   text-transform: uppercase;
 }
 .brand-sub {
-  font-size: 11px;
+  font-size: 10.5px;
   color: var(--dim);
 }
 
 .nav {
   display: flex;
   flex-direction: column;
-  gap: 8px; /* breathing room between section groups (was 1px) */
+  gap: 8px; /* breathing room between section groups */
   flex: 1;
   min-height: 0;
   overflow-y: auto;
@@ -280,13 +288,13 @@ body {
   gap: 2px;
 }
 .nav-section {
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 1px;
   text-transform: uppercase;
   color: var(--dim2);
-  padding: 12px 10px 8px;
-  min-height: 36px;
+  padding: 10px 10px 6px;
+  min-height: 32px;
   /* The section header doubles as a collapse toggle: advanced users can
      condense the sidebar to a handful of headers, newcomers keep the full
      list. The active view's section is force-expanded (see App.jsx). */
@@ -319,27 +327,25 @@ body {
   transform: rotate(-90deg);
 }
 .nav-group:first-child .nav-section {
-  padding-top: 2px;
+  padding-top: 0;
 }
 .nav-item {
   display: flex;
   align-items: center;
   gap: 10px;
   background: transparent;
-  border: none;
-  border-left: 2px solid transparent;
+  border: 1px solid transparent;
   cursor: pointer;
   color: var(--dim);
-  font-size: 13.5px;
+  font-size: 13px;
   font-weight: 500;
-  padding: 10px 10px;
-  min-height: 38px; /* comfortable tap target on touch screens */
+  padding: 7px 10px;
+  min-height: 34px; /* comfortable tap target on touch screens */
   border-radius: var(--radius-sm);
   transition:
     background 0.12s ease,
     color 0.12s ease,
-    border-color 0.12s ease,
-    transform 0.08s ease;
+    border-color 0.12s ease;
   text-align: left;
   width: 100%;
   margin-bottom: 1px;
@@ -347,16 +353,19 @@ body {
 .nav-item:hover {
   background: var(--surface);
   color: var(--text);
-  border-left-color: var(--border-strong);
+  border-color: var(--border);
+}
+.nav-item.active {
+  background: var(--surface2);
+  border-color: var(--border-strong);
+  color: var(--text);
+  font-weight: 600;
+}
+.nav-item.active .nav-icon {
+  color: var(--cyan);
 }
 .nav-item:active {
   transform: translateY(0.5px);
-}
-.nav-item.active {
-  background: linear-gradient(90deg, rgba(91, 141, 239, 0.12), rgba(91, 141, 239, 0.02));
-  color: var(--cyan);
-  border-left-color: var(--cyan);
-  font-weight: 600;
 }
 .nav-icon {
   width: 18px;
@@ -372,11 +381,11 @@ body {
 
 .sidebar-foot {
   border-top: 1px solid var(--border);
-  padding: 12px 6px 2px;
+  padding: 10px 6px 2px;
   display: flex;
   flex-direction: column;
   gap: 6px;
-  font-size: 12px;
+  font-size: 11.5px;
   font-family: var(--font-mono);
 }
 .status-row {
@@ -386,7 +395,7 @@ body {
   color: var(--dim);
 }
 .status-row.subtle {
-  font-size: 10.5px;
+  font-size: 10px;
   opacity: 0.75;
 }
 .dot {
@@ -394,15 +403,15 @@ body {
   height: 7px;
   border-radius: 50%;
   flex-shrink: 0;
-  box-shadow: 0 0 0 2px transparent;
+  border: 1px solid transparent;
 }
 .dot.ok {
   background: var(--emerald);
-  box-shadow: 0 0 0 3px rgba(53, 178, 108, 0.15);
+  border-color: rgba(53, 178, 108, 0.4);
 }
 .dot.bad {
   background: var(--rose);
-  box-shadow: 0 0 0 3px rgba(224, 86, 81, 0.15);
+  border-color: rgba(224, 86, 81, 0.4);
 }
 .dot.idle {
   background: var(--dim2);
@@ -417,11 +426,9 @@ body {
 .topbar {
   display: flex;
   flex-direction: column;
-  padding: 16px 26px 14px;
+  padding: 12px 24px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--topbar-bg);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
   position: sticky;
   top: 0;
   z-index: 50;
@@ -433,14 +440,14 @@ body {
   min-width: 0;
 }
 .topbar-title {
-  font-size: 17px;
+  font-size: 16px;
   font-weight: 700;
   letter-spacing: 0.2px;
 }
 .topbar-sub {
-  font-size: 12px;
+  font-size: 11.5px;
   color: var(--dim);
-  margin-top: 3px;
+  margin-top: 2px;
   max-width: 640px;
 }
 .topbar-actions {
@@ -448,9 +455,9 @@ body {
   align-items: center;
   justify-content: flex-end;
   flex-wrap: wrap;
-  gap: 10px;
-  margin-top: 12px;
-  padding-top: 12px;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 10px;
   border-top: 1px solid var(--border);
 }
 .topbar-actions .btn {
@@ -458,8 +465,8 @@ body {
   align-items: center;
 }
 .topbar-actions .btn.small {
-  height: 36px;
-  padding: 0 14px;
+  height: 34px;
+  padding: 0 13px;
   font-size: 12.5px;
   gap: 7px;
   white-space: nowrap;
@@ -470,8 +477,8 @@ body {
   color: var(--text);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
-  width: 36px;
-  height: 36px;
+  width: 34px;
+  height: 34px;
   font-size: 16px;
   line-height: 1;
   cursor: pointer;
@@ -515,7 +522,6 @@ body {
   height: 7px;
   border-radius: 50%;
   background: var(--amber);
-  box-shadow: 0 0 0 3px rgba(224, 161, 46, 0.2);
   animation: updater-pulse 1.6s ease-in-out infinite;
 }
 @keyframes updater-pulse {
@@ -533,9 +539,7 @@ body {
   position: fixed;
   inset: 0;
   z-index: 100;
-  background: rgba(5, 5, 7, 0.78);
-  backdrop-filter: blur(3px);
-  -webkit-backdrop-filter: blur(3px);
+  background: rgba(5, 5, 7, 0.72);
   display: grid;
   place-items: center;
   padding: 24px;
@@ -563,7 +567,7 @@ body {
 @keyframes modal-pop {
   from {
     opacity: 0;
-    transform: translateY(8px) scale(0.98);
+    transform: translateY(6px) scale(0.985);
   }
   to {
     opacity: 1;
@@ -575,11 +579,11 @@ body {
   align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
-  padding: 20px 22px 14px;
+  padding: 16px 20px 12px;
   border-bottom: 1px solid var(--border);
 }
 .modal-title {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
 }
 .modal-sub {
@@ -590,7 +594,7 @@ body {
   flex-wrap: wrap;
 }
 .chip-new {
-  background: rgba(91, 141, 239, 0.14);
+  background: rgba(91, 141, 239, 0.12);
   border-color: rgba(91, 141, 239, 0.45);
   color: var(--cyan);
   font-weight: 700;
@@ -607,8 +611,8 @@ body {
   border: 1px solid transparent;
   color: var(--dim);
   cursor: pointer;
-  width: 30px;
-  height: 30px;
+  width: 28px;
+  height: 28px;
   border-radius: var(--radius-sm);
   font-size: 14px;
   transition: all 0.12s ease;
@@ -619,7 +623,7 @@ body {
   background: rgba(224, 86, 81, 0.08);
 }
 .modal-body {
-  padding: 14px 22px;
+  padding: 12px 20px;
   overflow-y: auto;
 }
 .changelog h4 {
@@ -665,10 +669,10 @@ body {
   font-size: 13.5px;
 }
 .install-note {
-  padding: 0 22px 4px;
+  padding: 0 20px 4px;
 }
 .modal-install {
-  padding: 12px 22px;
+  padding: 12px 20px;
   border-top: 1px dashed var(--border);
   display: flex;
   flex-direction: column;
@@ -691,14 +695,14 @@ body {
   align-items: center;
   gap: 10px;
   flex-wrap: wrap;
-  padding: 16px 22px 18px;
+  padding: 14px 20px 16px;
   border-top: 1px solid var(--border);
 }
 .modal-spacer {
   flex: 1;
 }
 .content {
-  padding: 24px 26px 56px;
+  padding: 20px 24px 56px;
   max-width: 1280px;
   width: 100%;
 }
@@ -707,7 +711,7 @@ body {
 .stack {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 14px;
 }
 .row {
   display: flex;
@@ -723,13 +727,13 @@ body {
 }
 .cards {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(185px, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
   gap: 12px;
 }
 .grid-2 {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
+  gap: 14px;
 }
 .grid-2 > * {
   min-width: 0;
@@ -737,18 +741,15 @@ body {
 
 /* ---------- cards ---------- */
 .card {
-  background: linear-gradient(180deg, var(--surface), var(--card-bg-end));
+  background: var(--surface);
   border: 1px solid var(--border);
   border-radius: var(--radius-lg);
-  padding: 18px 20px;
-  box-shadow: var(--shadow-sm);
-  transition:
-    border-color 0.15s ease,
-    box-shadow 0.15s ease;
+  padding: 15px 17px;
+  transition: border-color 0.15s ease;
 }
 .card h3 {
-  margin: 0 0 12px;
-  font-size: 12px;
+  margin: 0 0 10px;
+  font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.6px;
   text-transform: uppercase;
@@ -775,85 +776,45 @@ body {
 
 /* ---------- stat cards ---------- */
 .stat-card {
-  padding: 16px 18px;
+  padding: 14px 16px;
   position: relative;
-  overflow: hidden;
-}
-.stat-card::after {
-  /* a faint accent wash in the corner gives each stat its own identity */
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: radial-gradient(240px 120px at 110% -20%, var(--accent-glow), transparent 70%);
-  pointer-events: none;
-  opacity: 0.5;
-  transition: opacity 0.2s ease;
-}
-.stat-card::before {
-  /* a diagonal light sweep that plays across the card on hover */
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 55%;
-  height: 100%;
-  background: linear-gradient(105deg, transparent, rgba(255, 255, 255, 0.1) 50%, transparent);
-  transform: translateX(-200%) skewX(-18deg);
-  pointer-events: none;
 }
 .stat-card:hover {
   border-color: var(--accent);
-  box-shadow:
-    0 10px 28px -10px var(--accent-glow),
-    var(--shadow-md);
-  transform: translateY(-2px);
-}
-.stat-card:hover::before {
-  animation: sheen-sweep 0.7s ease;
-}
-.stat-card:hover::after {
-  opacity: 0.9;
+  background: var(--surface2);
 }
 .stat-value {
-  font-size: 25px;
+  font-size: 21px;
   font-weight: 700;
-  letter-spacing: -0.4px;
+  letter-spacing: -0.3px;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
-  position: relative;
 }
 .stat-label {
   color: var(--dim);
-  font-size: 12px;
-  margin-top: 4px;
+  font-size: 11px;
+  margin-top: 3px;
   text-transform: uppercase;
   letter-spacing: 0.4px;
-  position: relative;
 }
 .stat-sub {
-  font-size: 11.5px;
+  font-size: 11px;
   color: var(--dim2);
   margin-top: 5px;
-  position: relative;
 }
 .accent-cyan {
-  --accent-glow: rgba(91, 141, 239, 0.5);
   --accent: var(--cyan);
 }
 .accent-rose {
-  --accent-glow: rgba(224, 86, 81, 0.45);
   --accent: var(--rose);
 }
 .accent-emerald {
-  --accent-glow: rgba(53, 178, 108, 0.45);
   --accent: var(--emerald);
 }
 .accent-violet {
-  --accent-glow: rgba(157, 157, 165, 0.35);
-  --accent: #9d9da5;
+  --accent: var(--violet);
 }
 .accent-amber {
-  --accent-glow: rgba(224, 161, 46, 0.4);
   --accent: var(--amber);
 }
 .accent-cyan .stat-value {
@@ -886,15 +847,14 @@ body {
   color: var(--text);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
-  padding: 9px 16px;
-  font-size: 13.5px;
+  padding: 7px 14px;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
   transition:
     background 0.12s ease,
     border-color 0.12s ease,
     color 0.12s ease,
-    box-shadow 0.12s ease,
     transform 0.06s ease;
   display: inline-flex;
   align-items: center;
@@ -903,26 +863,10 @@ body {
   gap: 6px;
   white-space: nowrap;
   position: relative;
-  overflow: hidden;
-}
-.btn::before {
-  /* a soft diagonal gloss that sweeps across the button on hover */
-  content: '';
-  position: absolute;
-  top: 0;
-  left: 0;
-  width: 45%;
-  height: 100%;
-  background: linear-gradient(105deg, transparent, rgba(255, 255, 255, 0.13) 50%, transparent);
-  transform: translateX(-200%) skewX(-18deg);
-  pointer-events: none;
 }
 .btn:hover {
-  border-color: var(--cyan);
-  color: var(--cyan);
-}
-.btn:hover::before {
-  animation: sheen-sweep 0.6s ease;
+  background: var(--surface3);
+  border-color: var(--border-strong);
 }
 .btn:active {
   transform: translateY(1px) scale(0.985);
@@ -933,20 +877,18 @@ body {
   transform: none;
 }
 .btn.primary {
-  background: linear-gradient(180deg, #6b9af1, #4a7fe8);
-  border-color: rgba(91, 141, 239, 0.6);
-  color: #071120;
-  box-shadow:
-    0 1px 0 rgba(255, 255, 255, 0.12) inset,
-    0 2px 8px rgba(74, 127, 232, 0.25);
+  background: var(--cyan);
+  border-color: var(--cyan);
+  color: var(--on-accent);
+  font-weight: 700;
 }
 .btn.primary:hover {
-  background: linear-gradient(180deg, #7aa7f4, #5689ec);
-  border-color: #7aa7f4;
-  color: #071120;
+  background: var(--cyan);
+  border-color: var(--cyan);
+  filter: brightness(1.08);
 }
 .btn.primary:active {
-  box-shadow: none;
+  filter: brightness(0.95);
 }
 .btn.danger {
   border-color: rgba(224, 86, 81, 0.55);
@@ -954,21 +896,24 @@ body {
   background: transparent;
 }
 .btn.danger:hover {
-  background: rgba(224, 86, 81, 0.12);
+  background: rgba(224, 86, 81, 0.1);
   border-color: var(--rose);
   color: var(--rose);
 }
 .btn.ghost {
   background: transparent;
 }
+.btn.ghost:hover {
+  background: var(--surface2);
+}
 .btn.small {
-  padding: 5px 11px;
+  padding: 4px 10px;
   font-size: 12px;
-  min-height: 30px;
+  min-height: 28px;
   border-radius: var(--radius-sm);
 }
 .btn.tiny {
-  padding: 3px 9px;
+  padding: 3px 8px;
   font-size: 11px;
 }
 .btn.block {
@@ -980,8 +925,8 @@ body {
   color: var(--text);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-sm);
-  padding: 9px 13px;
-  font-size: 13.5px;
+  padding: 7px 12px;
+  font-size: 13px;
   outline: none;
   transition:
     border-color 0.12s ease,
@@ -990,7 +935,7 @@ body {
 }
 .input:focus {
   border-color: var(--cyan);
-  box-shadow: 0 0 0 3px rgba(91, 141, 239, 0.18);
+  box-shadow: 0 0 0 2px rgba(91, 141, 239, 0.22);
 }
 .input::placeholder {
   color: var(--dim2);
@@ -1024,7 +969,7 @@ select.input {
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--dim);
-  margin: 20px 0 10px;
+  margin: 18px 0 9px;
   padding-bottom: 4px;
   border-bottom: 1px solid var(--border);
 }
@@ -1042,7 +987,7 @@ textarea.input {
 
 /* ---------- tables ---------- */
 .table-card {
-  padding: 6px 10px 10px;
+  padding: 4px 8px 8px;
   overflow-x: auto;
 }
 /* Table scroll wrapper: a table with wide columns (long IPs, several action
@@ -1055,20 +1000,20 @@ textarea.input {
 .table {
   width: 100%;
   border-collapse: collapse;
-  font-size: 13px;
+  font-size: 12.5px;
 }
 .table th {
   text-align: left;
   color: var(--dim);
   font-weight: 700;
-  font-size: 10.5px;
+  font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
-  padding: 12px 10px;
+  padding: 9px 10px;
   border-bottom: 1px solid var(--border-strong);
 }
 .table td {
-  padding: 10px 10px;
+  padding: 7px 10px;
   border-bottom: 1px solid var(--border);
   vertical-align: middle;
 }
@@ -1083,7 +1028,7 @@ textarea.input {
 }
 .mono {
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 .dim {
   color: var(--dim);
@@ -1100,7 +1045,7 @@ textarea.input {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 
 .num-col {
@@ -1108,7 +1053,7 @@ textarea.input {
 }
 .entry-cell {
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 12px;
   overflow-wrap: anywhere;
 }
 .action-col {
@@ -1126,7 +1071,7 @@ textarea.input {
 .badge {
   display: inline-block;
   padding: 2px 9px;
-  border-radius: 999px;
+  border-radius: 6px;
   font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.3px;
@@ -1189,7 +1134,7 @@ textarea.input {
   background: var(--bg2);
   border: 1px solid var(--border-strong);
   padding: 2px 9px;
-  border-radius: 999px;
+  border-radius: 6px;
   font-size: 11.5px;
   font-family: var(--font-mono);
 }
@@ -1204,7 +1149,7 @@ textarea.input {
   gap: 12px;
 }
 .changelog-entry {
-  padding: 18px 22px;
+  padding: 16px 20px;
 }
 .changelog-entry-head {
   border-bottom: 1px solid var(--border);
@@ -1240,7 +1185,7 @@ textarea.input {
 .proto-bars {
   display: flex;
   flex-direction: column;
-  gap: 9px;
+  gap: 8px;
 }
 .proto-row {
   display: flex;
@@ -1262,14 +1207,14 @@ textarea.input {
   min-width: 0;
   height: 7px;
   background: var(--bg2);
-  border-radius: 4px;
+  border-radius: 3px;
   overflow: hidden;
   border: 1px solid var(--border);
 }
 .proto-fill {
   height: 100%;
-  background: linear-gradient(90deg, #4a7fe8, #7aa7f4);
-  border-radius: 4px;
+  background: var(--cyan);
+  border-radius: 3px;
   transition: width 0.35s ease;
 }
 .proto-count {
@@ -1299,7 +1244,7 @@ textarea.input {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 7px 0;
+  padding: 6px 0;
   border-bottom: 1px solid var(--border);
   font-size: 13px;
   min-width: 0;
@@ -1321,7 +1266,7 @@ textarea.input {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-family: var(--font-mono);
-  font-size: 12.5px;
+  font-size: 12px;
 }
 .top-count {
   flex-shrink: 0;
@@ -1333,16 +1278,15 @@ textarea.input {
 
 .top-row-click {
   cursor: pointer;
-  border-radius: 8px;
-  padding: 7px 8px;
+  border-radius: 6px;
+  padding: 6px 7px;
   transition:
     background 0.15s ease,
-    padding-left 0.15s ease,
-    transform 0.08s ease;
+    padding-left 0.15s ease;
 }
 .top-row-click:hover {
   background: rgba(91, 141, 239, 0.09);
-  padding-left: 10px;
+  padding-left: 9px;
 }
 .top-row-click:focus-visible {
   outline: 2px solid var(--cyan);
@@ -1374,19 +1318,14 @@ textarea.input {
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 12px 14px;
-  transition:
-    border-color 0.12s ease,
-    transform 0.12s ease,
-    box-shadow 0.12s ease;
+  padding: 11px 13px;
+  transition: border-color 0.12s ease;
 }
 .latency-cell:hover {
   border-color: var(--border-strong);
-  transform: translateY(-1px);
-  box-shadow: var(--shadow-sm);
 }
 .latency-value {
-  font-size: 19px;
+  font-size: 18px;
   font-weight: 700;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
@@ -1394,7 +1333,7 @@ textarea.input {
 }
 .latency-label {
   margin-top: 4px;
-  font-size: 10.5px;
+  font-size: 10px;
   color: var(--dim);
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -1487,8 +1426,8 @@ textarea.input {
 
 /* ---------- setup checklist (first-run card) ---------- */
 .setup-card {
-  border-color: rgba(91, 141, 239, 0.35);
-  background: radial-gradient(400px 140px at 100% 0%, rgba(91, 141, 239, 0.07), transparent 70%), var(--surface);
+  border-color: rgba(91, 141, 239, 0.4);
+  background: var(--surface);
 }
 .setup-list {
   display: flex;
@@ -1499,14 +1438,12 @@ textarea.input {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 11px 13px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg2);
   margin-bottom: 8px;
-  transition:
-    border-color 0.12s ease,
-    transform 0.08s ease;
+  transition: border-color 0.12s ease;
 }
 .setup-row:last-child {
   margin-bottom: 0;
@@ -1519,9 +1456,9 @@ textarea.input {
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
-  width: 30px;
-  height: 30px;
-  border-radius: 50%;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
   background: var(--surface2);
   border: 1px solid var(--border-strong);
   color: var(--dim2);
@@ -1626,7 +1563,7 @@ textarea.input {
   background: var(--bg2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 12px 14px;
+  padding: 11px 13px;
   margin-bottom: 10px;
   transition: border-color 0.12s ease;
 }
@@ -1673,8 +1610,8 @@ textarea.input {
   gap: 8px;
   background: var(--bg2);
   border: 1px solid var(--border-strong);
-  border-radius: 999px;
-  padding: 5px 8px 5px 13px;
+  border-radius: 6px;
+  padding: 5px 8px 5px 12px;
   font-size: 12.5px;
   font-family: var(--font-mono);
 }
@@ -1713,8 +1650,8 @@ textarea.input {
 .switch {
   position: relative;
   display: inline-block;
-  width: 38px;
-  height: 22px;
+  width: 36px;
+  height: 21px;
   flex-shrink: 0;
 }
 .switch input {
@@ -1728,27 +1665,27 @@ textarea.input {
   cursor: pointer;
   background: var(--bg2);
   border: 1px solid var(--border-strong);
-  border-radius: 999px;
+  border-radius: 6px;
   transition: 0.15s ease;
 }
 .slider::before {
   content: '';
   position: absolute;
-  height: 16px;
-  width: 16px;
+  height: 15px;
+  width: 15px;
   left: 2px;
   top: 2px;
   background: var(--dim);
-  border-radius: 50%;
+  border-radius: 4px;
   transition: 0.15s ease;
 }
 .switch input:checked + .slider {
-  background: rgba(53, 178, 108, 0.2);
+  background: var(--emerald);
   border-color: var(--emerald);
 }
 .switch input:checked + .slider::before {
-  transform: translateX(16px);
-  background: var(--emerald);
+  transform: translateX(15px);
+  background: #ffffff;
 }
 .switch input:focus-visible + .slider {
   outline: 2px solid var(--cyan);
@@ -1911,7 +1848,7 @@ textarea.input {
   align-items: center;
   justify-content: space-between;
   gap: 14px;
-  padding: 11px 13px;
+  padding: 10px 12px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--bg2);
@@ -2033,16 +1970,16 @@ code {
   min-height: 100vh;
   display: grid;
   place-items: center;
-  background:
-    radial-gradient(800px 400px at 50% -10%, rgba(91, 141, 239, 0.12), transparent 65%),
-    radial-gradient(600px 300px at 90% 110%, rgba(53, 178, 108, 0.05), transparent 60%), var(--bg);
+  background-color: var(--bg);
+  background-image: radial-gradient(var(--dot) 1px, transparent 1px);
+  background-size: 22px 22px;
   padding: 24px;
 }
 .login-card {
   width: 380px;
-  padding: 40px 34px;
+  padding: 36px 32px;
   text-align: center;
-  background: linear-gradient(180deg, var(--surface), var(--card-bg-end));
+  background: var(--surface);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
   box-shadow: var(--shadow-lg);
@@ -2053,20 +1990,19 @@ code {
 }
 .login-logo {
   position: relative;
-  width: 56px;
-  height: 56px;
+  width: 52px;
+  height: 52px;
   margin: 0 auto;
-  border-radius: 14px;
-  background: linear-gradient(135deg, rgba(91, 141, 239, 0.22), rgba(91, 141, 239, 0.06));
-  border: 1px solid rgba(91, 141, 239, 0.35);
+  border-radius: 12px;
+  background: rgba(91, 141, 239, 0.12);
+  border: 1px solid rgba(91, 141, 239, 0.4);
   display: grid;
   place-items: center;
   color: var(--cyan);
-  box-shadow: var(--shadow-sm);
 }
 .login-card h1 {
   margin: 0;
-  font-size: 17px;
+  font-size: 16px;
   font-family: var(--font-mono);
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -2084,7 +2020,7 @@ code {
 .splash-logo .splash-ring {
   position: absolute;
   inset: -7px;
-  border-radius: 18px;
+  border-radius: 16px;
   border: 2px solid var(--border);
   border-top-color: var(--cyan);
   animation: logo-spin 0.9s linear infinite;
@@ -2166,9 +2102,7 @@ code {
   position: fixed;
   inset: 0;
   z-index: 200;
-  background: rgba(5, 5, 7, 0.62);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
+  background: rgba(5, 5, 7, 0.66);
   display: flex;
   justify-content: center;
   align-items: flex-start;
@@ -2191,7 +2125,7 @@ code {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 14px 16px;
+  padding: 12px 14px;
   border-bottom: 1px solid var(--border);
 }
 .palette-input-wrap > svg {
@@ -2205,7 +2139,7 @@ code {
   border: none;
   outline: none;
   color: var(--text);
-  font-size: 14.5px;
+  font-size: 14px;
   font-family: inherit;
 }
 .palette-input::placeholder {
@@ -2216,7 +2150,7 @@ code {
 }
 .palette-list {
   overflow-y: auto;
-  padding: 8px;
+  padding: 6px;
 }
 .palette-group-title {
   font-size: 10px;
@@ -2224,19 +2158,19 @@ code {
   letter-spacing: 1px;
   text-transform: uppercase;
   color: var(--dim2);
-  padding: 8px 10px 4px;
+  padding: 7px 10px 4px;
 }
 .palette-row {
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
-  padding: 9px 10px;
+  padding: 8px 10px;
   border: none;
   border-radius: var(--radius-sm);
   background: transparent;
   color: var(--text);
-  font-size: 13.5px;
+  font-size: 13px;
   font-family: inherit;
   cursor: pointer;
   text-align: left;
@@ -2263,7 +2197,8 @@ code {
   font-size: 10.5px;
 }
 .palette-row.active {
-  background: rgba(91, 141, 239, 0.13);
+  background: rgba(91, 141, 239, 0.12);
+  color: var(--text);
 }
 .palette-row.active .palette-icon {
   color: var(--cyan);
@@ -2278,7 +2213,7 @@ code {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 10px 16px;
+  padding: 9px 14px;
   border-top: 1px solid var(--border);
   color: var(--dim2);
   font-size: 10.5px;
@@ -2330,7 +2265,7 @@ code {
 
 /* ---------- view transitions ---------- */
 .view-transition {
-  animation: view-in 0.22s ease;
+  animation: view-in 0.2s ease;
 }
 @keyframes view-in {
   from {
@@ -2411,13 +2346,13 @@ code {
   margin-top: 14px;
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 3px;
   overflow: hidden;
 }
 .setup-progress-fill {
   height: 100%;
-  border-radius: 999px;
-  background: linear-gradient(90deg, #4a7fe8, #6b9af1);
+  border-radius: 3px;
+  background: var(--cyan);
   transition: width 0.45s cubic-bezier(0.2, 0.9, 0.3, 1.1);
 }
 .setup-done {
@@ -2438,7 +2373,6 @@ code {
   background: rgba(53, 178, 108, 0.16);
   color: var(--emerald);
   cursor: default;
-  box-shadow: 0 0 0 3px rgba(53, 178, 108, 0.12);
 }
 
 @media (max-width: 640px) {
@@ -2488,17 +2422,14 @@ code {
     inset: 0;
     z-index: 150;
     background: rgba(5, 5, 7, 0.6);
-    backdrop-filter: blur(2px);
-    -webkit-backdrop-filter: blur(2px);
     animation: fade-in 0.15s ease;
   }
   .topbar {
-    padding: calc(12px + env(safe-area-inset-top)) 16px 10px;
+    padding: calc(12px + env(safe-area-inset-top)) 14px 8px;
     position: sticky;
     top: 0;
     z-index: 50;
     background: var(--topbar-solid);
-    backdrop-filter: none;
   }
   /* The drawer is full-height on phones — clear the notch and home
      indicator so the brand and last nav item aren't overlapped. */
@@ -2511,16 +2442,16 @@ code {
     padding-top: 8px;
   }
   .content {
-    padding: 16px 14px 44px;
+    padding: 14px 12px 44px;
   }
   .card {
-    padding: 14px;
-  }
-  .stat-card {
     padding: 13px;
   }
+  .stat-card {
+    padding: 12px;
+  }
   .stat-value {
-    font-size: 22px;
+    font-size: 19px;
   }
   .kv-grid {
     grid-template-columns: 1fr;
@@ -2546,13 +2477,13 @@ code {
     white-space: nowrap;
   }
   .table-card {
-    padding: 6px 8px 10px;
+    padding: 4px 6px 8px;
   }
   .topbar-title {
     font-size: 15px;
   }
   .btn {
-    padding: 10px 15px;
+    padding: 9px 14px;
     min-height: 40px;
   }
   .btn.small {
@@ -2561,8 +2492,8 @@ code {
     font-size: 12.5px;
   }
   .setup-check {
-    width: 36px;
-    height: 36px;
+    width: 34px;
+    height: 34px;
   }
   .input,
   select.input {
@@ -2582,14 +2513,14 @@ code {
   }
 
   .modal-head {
-    padding: 16px 14px 10px;
+    padding: 14px 12px 10px;
   }
   .modal-body {
     padding: 12px 14px;
   }
   .modal-x {
-    width: 36px;
-    height: 36px;
+    width: 34px;
+    height: 34px;
     font-size: 16px;
   }
   .modal-foot {
@@ -2665,13 +2596,6 @@ code {
   to {
     transform: rotate(0deg) scale(1);
     opacity: 1;
-  }
-}
-
-/* shared hover sheen sweep (stat cards + buttons) */
-@keyframes sheen-sweep {
-  to {
-    transform: translateX(300%) skewX(-18deg);
   }
 }
 
