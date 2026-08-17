@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast-context'
-import { EmptyState } from './ui'
+import { EmptyState, CheckIcon, XIcon } from './ui'
 
 const PRESETS = [
   { name: 'OISD Big (comprehensive)', url: 'https://big.oisd.nl/', enabled: true },
@@ -232,7 +232,13 @@ export default function Blocklists() {
                         {p.description && <div className="preset-desc">{p.description}</div>}
                       </div>
                       <button className="btn small" disabled={added} onClick={() => addPreset({ ...p, id })}>
-                        {added ? '✓ Added' : '+ Add'}
+                        {added ? (
+                          <>
+                            <CheckIcon size={12} /> Added
+                          </>
+                        ) : (
+                          '+ Add'
+                        )}
                       </button>
                     </div>
                   )
@@ -321,7 +327,7 @@ export default function Blocklists() {
                           onClick={() => remove(s.id)}
                           aria-label={`Remove ${s.name || s.id}`}
                         >
-                          ✕
+                          <XIcon size={12} />
                         </button>
                       </div>
                     </td>

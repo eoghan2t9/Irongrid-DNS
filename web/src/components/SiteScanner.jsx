@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast-context'
+import { CheckIcon } from './ui'
 
 // SiteScanner scans a page's HTML for every domain it references and flags the
 // ones the current blocklists are blocking, so a broken site can be fixed by
@@ -181,7 +182,7 @@ export default function SiteScanner({ onAllowed }) {
                         )}
                         {x.blocked && already && (
                           <button className="btn small" disabled>
-                            ✓ Allowed
+                            <CheckIcon size={12} /> Allowed
                           </button>
                         )}
                       </td>

@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast-context'
-import { LineListField } from './ui'
+import { LineListField, XIcon } from './ui'
 import ServerTab from './settings/ServerTab'
 import SecurityTab from './settings/SecurityTab'
 import FilteringTab from './settings/FilteringTab'
@@ -674,7 +674,7 @@ export default function Settings({ onSessionInvalidated }) {
             onClick={() => removeList(path, i)}
             aria-label={`Remove ${item || 'this entry'}`}
           >
-            ✕
+            <XIcon size={12} />
           </button>
         </div>
       ))}

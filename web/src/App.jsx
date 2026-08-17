@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef, lazy, Suspense } from 'react'
 import { api, setAuthHandler, setCredentials, restoreCredentials, hasCredentials, clearCredentials } from './api'
-import { Kbd, Logo } from './components/ui'
+import { Kbd, Logo, MenuIcon, XIcon } from './components/ui'
 // Dashboard and UpdateChecker stay in the initial bundle: Dashboard is the
 // landing view (the first paint needs it eagerly) and UpdateChecker is tiny
 // and rendered in the topbar on every view. Every other view lazy-loads its
@@ -582,7 +582,7 @@ export default function App() {
               the action buttons for space. */}
           <div className="topbar-main">
             <button className="menu-btn" onClick={() => setNavOpen(true)} aria-label="Open navigation">
-              ☰
+              <MenuIcon size={18} />
             </button>
             {/* The brand mark next to the hamburger, mobile only: the sidebar
                 (and its brand) is off-canvas on narrow screens, so the logo
@@ -975,7 +975,7 @@ function ShortcutsHelp({ open, onClose }) {
             </div>
           </div>
           <button className="modal-x" onClick={onClose} aria-label="Close">
-            ✕
+            <XIcon size={13} />
           </button>
         </div>
         <div className="modal-body">

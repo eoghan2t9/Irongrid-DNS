@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast-context'
-import { EmptyState } from './ui'
+import { EmptyState, CheckIcon, XIcon } from './ui'
 import SiteScanner from './SiteScanner'
 
 const PAGE_SIZE = 50
@@ -63,7 +63,7 @@ function ListCard({ k, items, onRemove }) {
                       title="Remove"
                       aria-label={`Remove ${it}`}
                     >
-                      ✕
+                      <XIcon size={12} />
                     </button>
                   </td>
                 </tr>
@@ -223,7 +223,13 @@ export default function Lists() {
                         {p.description && <div className="preset-desc">{p.description}</div>}
                       </div>
                       <button className="btn small" disabled={allAdded} onClick={() => addPreset(p)}>
-                        {allAdded ? '✓ Added' : '+ Add'}
+                        {allAdded ? (
+                          <>
+                            <CheckIcon size={12} /> Added
+                          </>
+                        ) : (
+                          '+ Add'
+                        )}
                       </button>
                     </div>
                   )

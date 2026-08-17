@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { api } from '../api'
 import { renderMarkdown } from '../markdown'
+import { XIcon } from './ui'
 
 const DISMISS_KEY = 'irongrid_dismissed_update'
 const INSTALL_CMD = 'curl -fsSL https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.sh | bash'
@@ -160,7 +161,7 @@ export default function UpdateChecker({ onNavigate }) {
           <div className="modal updater-modal" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
             <div className="modal-head">
               <div>
-                <div className="modal-title">New version available ✨</div>
+                <div className="modal-title">New version available</div>
                 <div className="modal-sub">
                   <span className="chip">{info.current_version}</span>
                   <span className="modal-arrow">→</span>
@@ -171,7 +172,7 @@ export default function UpdateChecker({ onNavigate }) {
                 </div>
               </div>
               <button className="modal-x" onClick={() => setShow(false)} aria-label="Close">
-                ✕
+                <XIcon size={13} />
               </button>
             </div>
 

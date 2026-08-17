@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api'
-import { EmptyState } from './ui'
+import { EmptyState, CheckIcon, AlertIcon } from './ui'
 
 const fmt = (n) => (n ?? 0).toLocaleString()
 
@@ -104,10 +104,13 @@ export default function Dashboard({ onNavigate }) {
           tabIndex={0}
           onClick={() => onNavigate('tls')}
           onKeyDown={(e) => e.key === 'Enter' && onNavigate('tls')}
-          style={{ cursor: 'pointer' }}
+          style={{ cursor: 'pointer', display: 'flex', gap: 8, alignItems: 'flex-start' }}
         >
-          ⚠ The TLS certificate has <strong>expired</strong> — DoT/DoH/DoQ clients will fail. Generate a new one, upload
-          a CA cert, or renew via Let's Encrypt on the <strong>SSL / TLS</strong> page.
+          <AlertIcon size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+          <span>
+            The TLS certificate has <strong>expired</strong> — DoT/DoH/DoQ clients will fail. Generate a new one,
+            upload a CA cert, or renew via Let's Encrypt on the <strong>SSL / TLS</strong> page.
+          </span>
         </div>
       )}
       {certExpiring && !certExpired && (
@@ -117,10 +120,13 @@ export default function Dashboard({ onNavigate }) {
           tabIndex={0}
           onClick={() => onNavigate('tls')}
           onKeyDown={(e) => e.key === 'Enter' && onNavigate('tls')}
-          style={{ cursor: 'pointer' }}
+          style={{ cursor: 'pointer', display: 'flex', gap: 8, alignItems: 'flex-start' }}
         >
-          ⚠ The TLS certificate expires in <strong>{cert.expires_in_days} days</strong> (
-          {new Date(cert.not_after).toLocaleDateString()}). Renew it on the <strong>SSL / TLS</strong> page.
+          <AlertIcon size={14} style={{ flexShrink: 0, marginTop: 2 }} />
+          <span>
+            The TLS certificate expires in <strong>{cert.expires_in_days} days</strong> (
+            {new Date(cert.not_after).toLocaleDateString()}). Renew it on the <strong>SSL / TLS</strong> page.
+          </span>
         </div>
       )}
 
@@ -362,7 +368,7 @@ function SetupChecklist({ items, onNavigate }) {
                   title="Mark as done"
                   aria-label={`Mark "${i.q}" as done`}
                 >
-                  ✓
+                  <CheckIcon size={13} />
                 </button>
                 <div className="setup-info">
                   <div className="setup-q">{i.q}</div>
@@ -379,7 +385,7 @@ function SetupChecklist({ items, onNavigate }) {
       {finished && (
         <div className="setup-complete">
           <span className="setup-check done" aria-hidden="true">
-            ✓
+            <CheckIcon size={13} />
           </span>
           <div>
             <div className="setup-q">All set</div>
@@ -702,8 +708,9 @@ function WarmerCard({ warmer, onWarmed }) {
         </div>
       </div>
       {warmer.last_error && (
-        <div className="error-text small" style={{ marginTop: 8 }}>
-          ⚠ {warmer.last_error}
+        <div className="error-text small" style={{ marginTop: 8, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+          <AlertIcon size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>{warmer.last_error}</span>
         </div>
       )}
       <div className="card-hint">
@@ -1192,8 +1199,14 @@ function RootHintsCard({ status }) {
       <div className="kv-grid" style={{ marginTop: 8 }}>
         <div className="kv-row">
           <span className="kv-label">Signature</span>
-          <span className="kv-value">
-            {rh.verified ? '✓ PGP-verified (Verisign)' : 'not verified — using trusted fallback'}
+          <span className="kv-value" style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+            {rh.verified ? (
+              <>
+                <CheckIcon size={12} /> PGP-verified (Verisign)
+              </>
+            ) : (
+              'not verified — using trusted fallback'
+            )}
           </span>
         </div>
         <div className="kv-row">
@@ -1210,8 +1223,9 @@ function RootHintsCard({ status }) {
         </div>
       </div>
       {rh.last_error && (
-        <div className="error-text small" style={{ marginTop: 8 }}>
-          ⚠ {rh.last_error}
+        <div className="error-text small" style={{ marginTop: 8, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+          <AlertIcon size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>{rh.last_error}</span>
         </div>
       )}
     </div>
@@ -1396,8 +1410,9 @@ function AcmeCard({ acme, onNavigate, onRenewed }) {
         </div>
       </div>
       {acme.last_error && (
-        <div className="error-text small" style={{ marginTop: 8 }}>
-          ⚠ {acme.last_error} — click to fix on the SSL / TLS page.
+        <div className="error-text small" style={{ marginTop: 8, display: 'flex', gap: 6, alignItems: 'flex-start' }}>
+          <AlertIcon size={13} style={{ flexShrink: 0, marginTop: 1 }} />
+          <span>{acme.last_error} — click to fix on the SSL / TLS page.</span>
         </div>
       )}
       <div className="row-between" style={{ marginTop: 12 }}>

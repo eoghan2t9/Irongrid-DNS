@@ -54,6 +54,65 @@ export function Logo({ size = 20 }) {
   )
 }
 
+// Small stroke-only icon set, matching Logo/navSvg's grammar (24x24 view,
+// currentColor stroke, weight 2, round caps/joins) so every icon in the app
+// shares one hand — including the close/check/warning marks that used to be
+// plain Unicode glyphs, which render as colorful platform emoji on some
+// devices and don't share a weight with the rest of the icon system.
+function iconShell(size, style, children) {
+  return (
+    <svg
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      style={style}
+    >
+      {children}
+    </svg>
+  )
+}
+export function CheckIcon({ size = 14, style }) {
+  return iconShell(size, style, <polyline points="20 6 9 17 4 12" />)
+}
+export function XIcon({ size = 14, style }) {
+  return iconShell(
+    size,
+    style,
+    <>
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </>
+  )
+}
+export function AlertIcon({ size = 14, style }) {
+  return iconShell(
+    size,
+    style,
+    <>
+      <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+      <line x1="12" y1="9" x2="12" y2="13" />
+      <line x1="12" y1="17" x2="12.01" y2="17" />
+    </>
+  )
+}
+export function MenuIcon({ size = 18, style }) {
+  return iconShell(
+    size,
+    style,
+    <>
+      <line x1="3" y1="6" x2="21" y2="6" />
+      <line x1="3" y1="12" x2="21" y2="12" />
+      <line x1="3" y1="18" x2="21" y2="18" />
+    </>
+  )
+}
+
 // LineListField edits a string array as a one-entry-per-line textarea (the
 // pattern behind Settings' honeypot/allowlist/blacklist fields and Client
 // Groups' CIDR/upstream fields). It keeps a local draft while typing and

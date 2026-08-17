@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast-context'
+import { XIcon } from './ui'
 
 const fmtDate = (iso) => {
   if (!iso) return '—'
@@ -473,7 +474,7 @@ export default function Tls() {
                 </div>
               </div>
               <button className="modal-x" onClick={() => setShowTrust(false)} aria-label="Close">
-                ✕
+                <XIcon size={13} />
               </button>
             </div>
             <div className="modal-body changelog">

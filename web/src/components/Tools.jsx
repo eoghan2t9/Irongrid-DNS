@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast-context'
 import SiteScanner from './SiteScanner'
+import { CheckIcon } from './ui'
 
 const QTYPES = ['A', 'AAAA', 'CNAME', 'MX', 'NS', 'TXT', 'SOA', 'SRV', 'PTR', 'CAA', 'TLSA', 'ANY']
 const SOURCES = [
@@ -572,7 +573,7 @@ function SubdomainTool() {
                         )}
                         {x.blocked && already && (
                           <button className="btn small" disabled>
-                            ✓ Allowed
+                            <CheckIcon size={12} /> Allowed
                           </button>
                         )}
                       </td>

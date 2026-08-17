@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast-context'
-import { LineListField } from './ui'
+import { LineListField, XIcon } from './ui'
 
 // ClientGroups is a dedicated page for per-client policy — split out of the
 // Settings mega-form for the same reason as Rewrites. Round-trips the whole
@@ -121,7 +121,7 @@ export default function ClientGroups() {
                 onClick={() => removeGroup(i)}
                 aria-label={`Remove group ${g.name || g.id || i + 1}`}
               >
-                ✕
+                <XIcon size={12} />
               </button>
             </div>
             <div className="form-grid">

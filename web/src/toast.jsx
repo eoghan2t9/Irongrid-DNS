@@ -1,5 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import { ToastContext } from './toast-context'
+import { AlertIcon, CheckIcon } from './components/ui'
 
 // ToastProvider renders a fixed-position, auto-dismissing stack of status
 // messages. Mounted once at the app root so any page can report a
@@ -42,7 +43,12 @@ export function ToastProvider({ children }) {
             aria-label="Dismiss notification"
             onKeyDown={(e) => e.key === 'Enter' && dismiss(t.id)}
           >
-            {t.message}
+            {t.type === 'error' ? (
+              <AlertIcon size={15} style={{ flexShrink: 0, marginTop: 1, color: 'var(--rose)' }} />
+            ) : (
+              <CheckIcon size={15} style={{ flexShrink: 0, marginTop: 1, color: 'var(--emerald)' }} />
+            )}
+            <span>{t.message}</span>
           </div>
         ))}
       </div>

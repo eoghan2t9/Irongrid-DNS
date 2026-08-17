@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast-context'
+import { XIcon } from './ui'
 
 // Rewrites is a dedicated page for local DNS records — split out of the
 // Settings mega-form since it's a full list-editing UI in its own right.
@@ -118,7 +119,7 @@ export default function Rewrites() {
                 onClick={() => removeRewrite(i)}
                 aria-label={`Remove ${rw.domain || 'this record'}`}
               >
-                ✕
+                <XIcon size={12} />
               </button>
             </div>
           </div>
