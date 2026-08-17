@@ -112,7 +112,7 @@ func TestAbuseExportCSV(t *testing.T) {
 	// Trip a rate-limit auto-block so the export covers both sources.
 	rl := dnsserver.NewRateLimiter(1, 1)
 	rl.SetAutoBlock(3, time.Hour)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		rl.Allow("198.51.100.7")
 	}
 	dnsH.SetRateLimiter(rl)

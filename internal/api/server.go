@@ -191,7 +191,7 @@ func (a *App) issueSessionWith(w http.ResponseWriter, user, secret string, secur
 		return
 	}
 	exp := time.Now().Add(sessionLifetime).Unix()
-	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%s.%d", user, exp)))
+	payload := base64.RawURLEncoding.EncodeToString(fmt.Appendf(nil, "%s.%d", user, exp))
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(payload))
 	val := payload + "." + hex.EncodeToString(mac.Sum(nil))

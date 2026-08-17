@@ -327,10 +327,7 @@ func (m *Manager) applyNft(v4, v6, a4, a6 []string) error {
 		elts []string
 	}{{"geo_v4", v4}, {"geo_v6", v6}, {"geo_allow_v4", a4}, {"geo_allow_v6", a6}} {
 		for start := 0; start < len(set.elts); start += 500 {
-			end := start + 500
-			if end > len(set.elts) {
-				end = len(set.elts)
-			}
+			end := min(start+500, len(set.elts))
 			payload := strings.Join(set.elts[start:end], ", ")
 			if err := m.runner.Run("nft", "add", "element", nftTable, set.name, "{ "+payload+" }"); err != nil {
 				return err
@@ -409,10 +406,7 @@ func (m *Manager) applyIptables(v4, v6, a4, a6 []string) error {
 // cheaper than one add command per CIDR.
 func (m *Manager) restoreIpset(set string, elts []string) error {
 	for start := 0; start < len(elts); start += 1000 {
-		end := start + 1000
-		if end > len(elts) {
-			end = len(elts)
-		}
+		end := min(start+1000, len(elts))
 		var buf strings.Builder
 		for _, e := range elts[start:end] {
 			buf.WriteString("add " + set + " " + e + "\n")
@@ -463,7 +457,7 @@ func loadCountryCIDRs(dir string, countries []string) (v4, v6 []string) {
 // ipverse/rir-ip aggregates use.
 func parseCIDRs(s string) []string {
 	var out []string
-	for _, line := range strings.Split(s, "\n") {
+	for line := range strings.SplitSeq(s, "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, ";") {
 			continue

@@ -2,6 +2,7 @@ package dhcp
 
 import (
 	"net"
+	"slices"
 	"strings"
 	"time"
 )
@@ -170,7 +171,7 @@ func (s *Server) nextFree6(key leaseKey) net.IP {
 }
 
 func incr(ip net.IP) {
-	for i := len(ip) - 1; i >= 0; i-- {
+	for i := range slices.Backward(ip) {
 		ip[i]++
 		if ip[i] != 0 {
 			return

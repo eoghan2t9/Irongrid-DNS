@@ -69,8 +69,8 @@ func (rw *Rewriter) Set(specs []RewriteSpec) {
 			ttl = 300
 		}
 		rule := RewriteRule{Type: qtype, Value: s.Value, TTL: ttl}
-		if strings.HasPrefix(domain, "*.") {
-			suffix := strings.TrimPrefix(domain, "*.")
+		if after, ok := strings.CutPrefix(domain, "*."); ok {
+			suffix := after
 			wildcard[suffix] = append(wildcard[suffix], rule)
 		} else {
 			exact[domain] = append(exact[domain], rule)

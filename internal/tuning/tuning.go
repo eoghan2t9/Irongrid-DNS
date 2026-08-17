@@ -265,10 +265,7 @@ func apply() result {
 		if quota, ok := detectCPUQuota(); ok {
 			r.cpuDetected = true
 			r.cpuQuota = quota
-			procs := int(math.Floor(quota))
-			if procs < 1 {
-				procs = 1
-			}
+			procs := max(int(math.Floor(quota)), 1)
 			if n := runtime.NumCPU(); procs > n {
 				procs = n
 			}

@@ -10,6 +10,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -691,10 +692,8 @@ func (c *Config) validate() error {
 		if len(rt.Upstreams) == 0 {
 			return fmt.Errorf("upstream_routes[%d] (%s): at least one upstream is required", i, dom)
 		}
-		for _, spec := range rt.Upstreams {
-			if spec == "" {
-				return fmt.Errorf("upstream_routes[%d] (%s): empty upstream entry", i, dom)
-			}
+		if slices.Contains(rt.Upstreams, "") {
+			return fmt.Errorf("upstream_routes[%d] (%s): empty upstream entry", i, dom)
 		}
 	}
 	if c.Cache.Addr == "" {
@@ -936,10 +935,8 @@ func (c *Config) validate() error {
 				}
 			}
 		}
-		for _, spec := range g.Upstreams {
-			if spec == "" {
-				return fmt.Errorf("client_groups[%d] (%s): empty upstream entry", i, g.ID)
-			}
+		if slices.Contains(g.Upstreams, "") {
+			return fmt.Errorf("client_groups[%d] (%s): empty upstream entry", i, g.ID)
 		}
 	}
 	// auto_block is a layer on top of the token bucket — without the limiter

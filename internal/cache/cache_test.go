@@ -446,16 +446,16 @@ func TestNegativePrefetch(t *testing.T) {
 func TestDecodeMGetResult(t *testing.T) {
 	cases := []struct {
 		name    string
-		vals    []interface{}
+		vals    []any
 		wantPos []byte
 		wantNeg []byte
 		wantOK  bool
 	}{
-		{"both missing", []interface{}{nil, nil}, nil, nil, false},
-		{"positive present", []interface{}{"pos-bytes", nil}, []byte("pos-bytes"), nil, true},
-		{"negative present", []interface{}{nil, "neg-bytes"}, nil, []byte("neg-bytes"), true},
-		{"both present positive wins", []interface{}{"pos-bytes", "neg-bytes"}, []byte("pos-bytes"), nil, true},
-		{"wrong length", []interface{}{"only-one"}, nil, nil, false},
+		{"both missing", []any{nil, nil}, nil, nil, false},
+		{"positive present", []any{"pos-bytes", nil}, []byte("pos-bytes"), nil, true},
+		{"negative present", []any{nil, "neg-bytes"}, nil, []byte("neg-bytes"), true},
+		{"both present positive wins", []any{"pos-bytes", "neg-bytes"}, []byte("pos-bytes"), nil, true},
+		{"wrong length", []any{"only-one"}, nil, nil, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -527,7 +527,7 @@ func TestLookupRawMultiAnswerTTLOffsets(t *testing.T) {
 	m := new(dns.Msg)
 	m.SetQuestion("example.com.", dns.TypeTXT)
 	m.Response = true
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		m.Answer = append(m.Answer, &dns.TXT{
 			Hdr: dns.RR_Header{Name: fmt.Sprintf("txt%d.example.com.", i), Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60},
 			// RFC 1035 caps each TXT character-string at 255 bytes, so split

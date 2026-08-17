@@ -172,9 +172,9 @@ func (m *ListManager) FetchOne(ctx context.Context, id string) error {
 
 	var content []byte
 	var err error
-	if strings.HasPrefix(spec.URL, "file://") {
+	if after, ok0 := strings.CutPrefix(spec.URL, "file://"); ok0 {
 		// Local reads are instant; no need to coalesce.
-		content, err = os.ReadFile(strings.TrimPrefix(spec.URL, "file://"))
+		content, err = os.ReadFile(after)
 	} else if spec.URL == "" {
 		// A list with no URL holds only manual entries; nothing to fetch.
 		return nil

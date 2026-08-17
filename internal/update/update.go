@@ -495,8 +495,8 @@ func UnitName() string {
 // into two different-length strings and panicked with a slice-bounds error
 // on every real systemd cgroup path.
 func unitFromCgroupData(data string) (string, bool) {
-	for _, line := range strings.Split(data, "\n") {
-		for _, part := range strings.Split(line, ":") {
+	for line := range strings.SplitSeq(data, "\n") {
+		for part := range strings.SplitSeq(line, ":") {
 			p := strings.TrimSpace(part)
 			unit := p[strings.LastIndex(p, "/")+1:]
 			if i := strings.Index(unit, ".service"); i >= 0 {
@@ -554,8 +554,8 @@ func parseSemver(s string) (semver, error) {
 		s = s[:i]
 	}
 	core, pre := s, ""
-	if i := strings.Index(s, "-"); i >= 0 {
-		core, pre = s[:i], s[i+1:]
+	if before, after, ok := strings.Cut(s, "-"); ok {
+		core, pre = before, after
 	}
 	parts := strings.Split(core, ".")
 	if len(parts) != 3 {

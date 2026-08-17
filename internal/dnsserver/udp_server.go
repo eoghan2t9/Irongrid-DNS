@@ -92,13 +92,7 @@ func newUDPServer(pc net.PacketConn, handler dns.Handler, workers int) *udpServe
 // pre-spawned stacks (each worker's stack grows only as deep as one query
 // actually needs).
 func udpWorkersPerSocket() int {
-	n := runtime.GOMAXPROCS(0)
-	if n < 4 {
-		n = 4
-	}
-	if n > 64 {
-		n = 64
-	}
+	n := min(max(runtime.GOMAXPROCS(0), 4), 64)
 	return 4 * n
 }
 

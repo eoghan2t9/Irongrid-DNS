@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -118,13 +119,7 @@ func main() {
 	// disk, then to the bundled hints, so boot never depends on network
 	// access. SetDefaultRootHints also covers per-client-group upstreams and
 	// any created by a later config reload.
-	hasRecursive := false
-	for _, spec := range cfg.Upstreams {
-		if upstream.IsRecursiveSpec(spec) {
-			hasRecursive = true
-			break
-		}
-	}
+	hasRecursive := slices.ContainsFunc(cfg.Upstreams, upstream.IsRecursiveSpec)
 	var hintsMgr *recursive.HintsManager
 	if hasRecursive {
 		// The manager fetches the authoritative named.root at boot, verifies

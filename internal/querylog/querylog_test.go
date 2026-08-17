@@ -60,7 +60,7 @@ func TestRecordFlushesOnClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		l.Record(entry("example.com.", "allowed"))
 	}
 	if err := l.Close(); err != nil {
@@ -92,7 +92,7 @@ func TestRecordFlushesOnClose(t *testing.T) {
 func TestBatchFlush(t *testing.T) {
 	l, _ := newTestLog(t, 30)
 	const n = logBatchSize + 50
-	for i := 0; i < n; i++ {
+	for range n {
 		l.Record(entry("example.com.", "allowed"))
 	}
 	entries := waitFor(t, l, n)
@@ -153,7 +153,7 @@ func TestQueryOrderAndFilters(t *testing.T) {
 // behind Query/Stats/Hourly/StatsBundle must never overshoot by a page.
 func TestWalkStreamStrictBound(t *testing.T) {
 	l, _ := newTestLog(t, 30)
-	for i := 0; i < 30; i++ {
+	for range 30 {
 		l.Record(entry("a.com.", "allowed"))
 	}
 	waitFor(t, l, 30)
@@ -559,7 +559,7 @@ func TestStatsBundleDisabled(t *testing.T) {
 // TestClear verifies the whole stream is deleted.
 func TestClear(t *testing.T) {
 	l, _ := newTestLog(t, 30)
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		l.Record(entry("example.com.", "allowed"))
 	}
 	waitFor(t, l, 5)
@@ -579,7 +579,7 @@ func TestClear(t *testing.T) {
 // and never removes entries younger than the window.
 func TestPruneKeepsFreshEntries(t *testing.T) {
 	l, _ := newTestLog(t, 30)
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		l.Record(entry("example.com.", "allowed"))
 	}
 	waitFor(t, l, 5)

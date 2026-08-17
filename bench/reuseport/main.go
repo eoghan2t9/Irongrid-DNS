@@ -92,9 +92,7 @@ func main() {
 	payload := make([]byte, *size)
 	var sent atomic.Int64
 	for i := 0; i < *senders; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			src, err := net.Dial("udp", addr)
 			if err != nil {
 				return
@@ -111,7 +109,7 @@ func main() {
 				}
 				sent.Add(1)
 			}
-		}()
+		})
 	}
 
 	time.Sleep(*dur)

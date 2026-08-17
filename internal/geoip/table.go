@@ -25,12 +25,12 @@ type range6 struct{ start, end [16]byte }
 // a merged range table. Either argument may be empty.
 func LoadTable(ipv4, ipv6 []byte) (*Table, error) {
 	t := &Table{}
-	for _, line := range strings.Split(string(ipv4), "\n") {
+	for line := range strings.SplitSeq(string(ipv4), "\n") {
 		if p, ok := parsePrefixLine(line); ok && p.Addr().Is4() {
 			t.v4 = append(t.v4, v4Range(p))
 		}
 	}
-	for _, line := range strings.Split(string(ipv6), "\n") {
+	for line := range strings.SplitSeq(string(ipv6), "\n") {
 		if p, ok := parsePrefixLine(line); ok && p.Addr().Is6() && !p.Addr().Is4In6() {
 			t.v6 = append(t.v6, v6Range(p))
 		}
@@ -71,7 +71,7 @@ func v6Range(p netip.Prefix) range6 {
 	a := p.Addr().As16()
 	ones := p.Bits()
 	var r range6
-	for i := 0; i < 16; i++ {
+	for i := range 16 {
 		rem := ones - i*8
 		switch {
 		case rem >= 8:

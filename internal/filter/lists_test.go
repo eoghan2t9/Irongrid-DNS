@@ -27,16 +27,14 @@ func TestFetchOneCoalescesConcurrentDownloads(t *testing.T) {
 
 	const n = 4
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range n {
+		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if err := m.FetchOne(ctx, "test"); err != nil {
 				t.Errorf("FetchOne: %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if got := hits.Load(); got != 1 {

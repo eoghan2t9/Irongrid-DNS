@@ -50,13 +50,13 @@ func splitRule(raw string) (domain string, exactOnly bool, isException bool, ok 
 		return "", false, false, false
 	}
 	// Adblock exceptions.
-	if strings.HasPrefix(line, "@@") {
-		line = strings.TrimPrefix(line, "@@")
+	if after, ok0 := strings.CutPrefix(line, "@@"); ok0 {
+		line = after
 		isException = true
 	}
 	// Adblock domain markers.
-	if strings.HasPrefix(line, "||") {
-		line = strings.TrimPrefix(line, "||")
+	if after, ok0 := strings.CutPrefix(line, "||"); ok0 {
+		line = after
 		// Strip modifiers after ^ or $.
 		if i := strings.IndexAny(line, "^$"); i >= 0 {
 			line = line[:i]
@@ -66,8 +66,8 @@ func splitRule(raw string) (domain string, exactOnly bool, isException bool, ok 
 		return "", false, false, false
 	}
 	// AdGuard exact-only "=" prefix.
-	if strings.HasPrefix(line, "=") {
-		line = strings.TrimPrefix(line, "=")
+	if after, ok0 := strings.CutPrefix(line, "="); ok0 {
+		line = after
 		exactOnly = true
 	}
 	// Strip trailing ^ used by some lists without the || prefix.
@@ -120,17 +120,17 @@ func parseRegexRule(raw string, listID string) *RegexRule {
 	if pattern == "" {
 		return nil
 	}
-	inline := ""
+	var inline strings.Builder
 	for _, f := range line[last+1:] {
 		switch f {
 		case 'i', 's', 'm':
-			inline += string(f)
+			inline.WriteString(string(f))
 		default:
 			return nil
 		}
 	}
-	if inline != "" {
-		pattern = "(?" + inline + ")" + pattern
+	if inline.String() != "" {
+		pattern = "(?" + inline.String() + ")" + pattern
 	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {

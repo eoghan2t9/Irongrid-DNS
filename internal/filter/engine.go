@@ -4,6 +4,7 @@ package filter
 
 import (
 	"fmt"
+	"maps"
 	"net"
 	"sort"
 	"strings"
@@ -201,9 +202,7 @@ func cloneStrSet(m map[string]struct{}) map[string]struct{} {
 
 func cloneStrMap(m map[string]string) map[string]string {
 	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
+	maps.Copy(out, m)
 	return out
 }
 
@@ -354,7 +353,7 @@ func (e *Engine) DecideDomain(qname string) Decision {
 	if _, ok := rs.allowDomains[qname]; ok {
 		return Decision{Action: Allow, Reason: "whitelist:" + qname}
 	}
-	for i := 0; i < lastDot; i++ {
+	for i := range lastDot {
 		if qname[i] != '.' {
 			continue
 		}
@@ -380,7 +379,7 @@ func (e *Engine) DecideDomain(qname string) Decision {
 		return Decision{Action: Block, Reason: "blocklist:" + qname, ListName: rs.listNames[rs.domainList[qname]]}
 	}
 	// Block subtree matches. Walk ancestors for better reasons.
-	for i := 0; i < lastDot; i++ {
+	for i := range lastDot {
 		if qname[i] != '.' {
 			continue
 		}
@@ -456,9 +455,7 @@ func (e *Engine) Stats() map[string]int {
 func (e *Engine) Lists() map[string]string {
 	rs := e.rs.Load()
 	out := make(map[string]string, len(rs.listNames))
-	for k, v := range rs.listNames {
-		out[k] = v
-	}
+	maps.Copy(out, rs.listNames)
 	return out
 }
 

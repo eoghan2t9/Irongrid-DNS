@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -1783,11 +1784,9 @@ func (h *Handler) geoBlockIP(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "geo blocking is disabled — enable it in Settings before adding blocked IPs"})
 		return
 	}
-	for _, e := range h.Cfg.GeoBlock.IPs {
-		if e == entry {
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "already": true, "entry": entry})
-			return
-		}
+	if slices.Contains(h.Cfg.GeoBlock.IPs, entry) {
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "already": true, "entry": entry})
+		return
 	}
 	h.Cfg.GeoBlock.IPs = append(h.Cfg.GeoBlock.IPs, entry)
 	// The client was almost certainly auto-blocked by a honeypot hit; drop
@@ -2407,12 +2406,7 @@ func sessionSecretFor(newPassword, currentSecret string) (string, error) {
 }
 
 func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, s)
 }
 
 func removeStr(list []string, s string) []string {

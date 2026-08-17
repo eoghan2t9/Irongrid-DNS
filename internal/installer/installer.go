@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 
 	"github.com/charmbracelet/huh"
@@ -310,12 +311,7 @@ func (w *wizard) askListeners() error {
 
 // containsStr reports whether a slice contains the given string.
 func containsStr(list []string, want string) bool {
-	for _, s := range list {
-		if s == want {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(list, want)
 }
 
 func (w *wizard) askUpstreams() error {
@@ -532,7 +528,7 @@ func (a *answers) upstreams() []string {
 	}
 	var out []string
 	out = append(out, presets[a.upstreamPreset]...)
-	for _, s := range strings.Split(a.customUpstream, ",") {
+	for s := range strings.SplitSeq(a.customUpstream, ",") {
 		s = strings.TrimSpace(s)
 		if s != "" {
 			out = append(out, s)
@@ -624,7 +620,7 @@ func (a *answers) buildConfig(cat *catalog.Catalog) (*config.Config, error) {
 
 	if a.tlsHosts != "" {
 		var hosts []string
-		for _, h := range strings.Split(a.tlsHosts, ",") {
+		for h := range strings.SplitSeq(a.tlsHosts, ",") {
 			if h = strings.TrimSpace(h); h != "" {
 				hosts = append(hosts, h)
 			}

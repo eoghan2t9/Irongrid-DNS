@@ -78,16 +78,14 @@ func TestResolveHostnameCoalescesConcurrentLookups(t *testing.T) {
 
 	const n = 4
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range n {
+		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			if name := h.resolveHostname(ctx, "1.2.3.4"); name != "host.example.net" {
 				t.Errorf("resolveHostname = %q, want host.example.net", name)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if got := hits.Load(); got != 1 {
@@ -148,7 +146,7 @@ func TestHostCache(t *testing.T) {
 	}
 
 	// Over the cap, the cache resets instead of growing without limit.
-	for i := 0; i < hostCap; i++ {
+	for i := range hostCap {
 		c.put(fmt.Sprintf("k%d", i), "", now)
 	}
 	c.put("trigger", "", now) // this put crosses the cap and resets the cache

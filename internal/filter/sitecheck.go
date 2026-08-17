@@ -63,7 +63,7 @@ func ExtractSitePage(r io.Reader, base *url.URL) (domains []string, title string
 				case "href", "src":
 					add(a.Val)
 				case "srcset":
-					for _, part := range strings.Split(a.Val, ",") {
+					for part := range strings.SplitSeq(a.Val, ",") {
 						if f := strings.Fields(part); len(f) > 0 {
 							add(f[0])
 						}

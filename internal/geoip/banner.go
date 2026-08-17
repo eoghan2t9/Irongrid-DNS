@@ -167,7 +167,7 @@ func (b *Banner) LookupHoneypot(qname string) bool {
 	// before the bare top-level label, mirroring the blocklist engine's
 	// ancestor walk.
 	lastDot := strings.LastIndexByte(qname, '.')
-	for i := 0; i < lastDot; i++ {
+	for i := range lastDot {
 		if qname[i] != '.' {
 			continue
 		}
@@ -302,7 +302,7 @@ func (b *Banner) loadAuto() {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	for _, ln := range strings.Split(string(data), "\n") {
+	for ln := range strings.SplitSeq(string(data), "\n") {
 		ln = strings.TrimSpace(ln)
 		if ln == "" || strings.HasPrefix(ln, "#") {
 			continue

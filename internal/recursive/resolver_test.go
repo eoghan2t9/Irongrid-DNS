@@ -555,17 +555,15 @@ func TestResolveCoalescesNSAddressLookups(t *testing.T) {
 
 	const n = 4
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range n {
+		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			addr, ok := r.resolveNSAddr(ctx, "ns1.dnshost.invalid.", 1)
 			if !ok || addr != "127.0.0.4:"+nsPort {
 				t.Errorf("resolveNSAddr = %q (ok=%v), want 127.0.0.4:%s", addr, ok, nsPort)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if got := nsHits.Load(); got != 1 {
@@ -755,7 +753,7 @@ func TestResolverConnPoolKeyCap(t *testing.T) {
 	r := New([]string{"127.0.0.1:53"})
 	t.Cleanup(r.Close)
 
-	for i := 0; i < nsConnPoolMaxKeys+50; i++ {
+	for i := range nsConnPoolMaxKeys + 50 {
 		c1, c2 := net.Pipe()
 		_ = c2
 		addr := "10.0.0.1:" + strconv.Itoa(i) // port varies so every key is distinct

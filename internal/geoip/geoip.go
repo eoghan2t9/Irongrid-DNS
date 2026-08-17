@@ -284,8 +284,8 @@ func (m *Manager) fetchCountry(ctx context.Context, cc string) ([]byte, []byte, 
 // fetchURL returns url's content, persisting it to cachePath; on a download
 // failure it falls back to the cached copy, failing only when there is none.
 func (m *Manager) fetchURL(ctx context.Context, url, cachePath string) ([]byte, error) {
-	if strings.HasPrefix(url, "file://") {
-		content, err := os.ReadFile(strings.TrimPrefix(url, "file://"))
+	if after, ok := strings.CutPrefix(url, "file://"); ok {
+		content, err := os.ReadFile(after)
 		if err != nil {
 			return nil, err
 		}

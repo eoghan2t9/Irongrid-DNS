@@ -29,7 +29,7 @@ func TestReuseportListeners(t *testing.T) {
 			_ = pc.Close()
 		}
 	}()
-	for i := 0; i < extra; i++ {
+	for i := range extra {
 		pc, err := lc.ListenPacket(context.Background(), "udp", addr)
 		if err != nil {
 			t.Fatalf("reuseport bind %d on %s: %v", i+1, addr, err)

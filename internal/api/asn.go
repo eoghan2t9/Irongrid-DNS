@@ -89,7 +89,7 @@ func (h *Handler) asnCache() *asnCache {
 // invalid entries are ignored.
 func (h *Handler) logASN(w http.ResponseWriter, r *http.Request) {
 	var ips []string
-	for _, p := range strings.Split(r.URL.Query().Get("ips"), ",") {
+	for p := range strings.SplitSeq(r.URL.Query().Get("ips"), ",") {
 		p = strings.TrimSpace(p)
 		if net.ParseIP(p) != nil {
 			ips = append(ips, p)

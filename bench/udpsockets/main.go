@@ -19,7 +19,7 @@ import (
 	"math/rand"
 	"net"
 	"os"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -122,7 +122,7 @@ func run(sockets int, dur time.Duration, workers int) result {
 
 	client := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
 	var wg sync.WaitGroup
-	for i := 0; i < workers; i++ {
+	for i := range workers {
 		wg.Add(1)
 		go func(seed int64) {
 			defer wg.Done()
@@ -150,7 +150,7 @@ func run(sockets int, dur time.Duration, workers int) result {
 	wg.Wait()
 
 	latMu.Lock()
-	sort.Slice(lats, func(i, j int) bool { return lats[i] < lats[j] })
+	slices.Sort(lats)
 	n := len(lats)
 	pct := func(p float64) time.Duration {
 		if n == 0 {
@@ -180,7 +180,7 @@ func main() {
 	flag.Parse()
 
 	var counts []int
-	for _, s := range strings.Split(*socketsFlag, ",") {
+	for s := range strings.SplitSeq(*socketsFlag, ",") {
 		n, err := strconv.Atoi(strings.TrimSpace(s))
 		if err != nil || n < 1 {
 			fmt.Fprintf(os.Stderr, "invalid socket count %q\n", s)

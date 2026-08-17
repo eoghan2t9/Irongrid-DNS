@@ -54,14 +54,12 @@ func TestUDPServerWorkerPool(t *testing.T) {
 	const clients = 32
 	const each = 5
 	var wg sync.WaitGroup
-	for i := 0; i < clients; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < each; j++ {
+	for range clients {
+		wg.Go(func() {
+			for range each {
 				query()
 			}
-		}()
+		})
 	}
 	done := make(chan struct{})
 	go func() { wg.Wait(); close(done) }()

@@ -1768,13 +1768,13 @@ const dhcpHostTTL = 120
 // so a query for a /24 reverse zone or a random name falls through).
 func reverseNameIP(name string) net.IP {
 	n := strings.ToLower(strings.TrimSuffix(name, "."))
-	if strings.HasSuffix(n, ".in-addr.arpa") {
-		octets := strings.Split(strings.TrimSuffix(n, ".in-addr.arpa"), ".")
+	if before, ok := strings.CutSuffix(n, ".in-addr.arpa"); ok {
+		octets := strings.Split(before, ".")
 		if len(octets) != 4 {
 			return nil
 		}
 		var b [4]byte
-		for i := 0; i < 4; i++ {
+		for i := range 4 {
 			v, err := strconv.Atoi(octets[3-i]) // labels are least-significant first
 			if err != nil || v < 0 || v > 255 {
 				return nil
@@ -1783,13 +1783,13 @@ func reverseNameIP(name string) net.IP {
 		}
 		return net.IPv4(b[0], b[1], b[2], b[3])
 	}
-	if strings.HasSuffix(n, ".ip6.arpa") {
-		nibbles := strings.Split(strings.TrimSuffix(n, ".ip6.arpa"), ".")
+	if before, ok := strings.CutSuffix(n, ".ip6.arpa"); ok {
+		nibbles := strings.Split(before, ".")
 		if len(nibbles) != 32 {
 			return nil
 		}
 		var b [16]byte
-		for i := 0; i < 32; i++ {
+		for i := range 32 {
 			v, err := strconv.ParseUint(nibbles[31-i], 16, 4) // nibbles are least-significant first
 			if err != nil {
 				return nil
@@ -1876,7 +1876,7 @@ func (h *latencyHist) pct(p float64) float64 {
 	target := int64(float64(total) * p / 100)
 	var seen int64
 	last := -1 // highest bucket observed so far
-	for i := 0; i < len(h.buckets); i++ {
+	for i := range len(h.buckets) {
 		n := h.buckets[i].Load()
 		seen += n
 		if n > 0 {

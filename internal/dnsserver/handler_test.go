@@ -327,7 +327,7 @@ func TestHandlerCoalescesConcurrentIdenticalQueries(t *testing.T) {
 	const n = 8
 	var wg sync.WaitGroup
 	fws := make([]*fakeWriter, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -403,7 +403,7 @@ func TestHandlerCoalescesMergedFailure(t *testing.T) {
 	const n = 4
 	var wg sync.WaitGroup
 	fws := make([]*fakeWriter, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -460,14 +460,12 @@ func TestHandlerCoalescesBackgroundResolutions(t *testing.T) {
 	const n = 4
 	q := dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range n {
+		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 			defer cancel()
 			h.Refresh(ctx, q)
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -503,7 +501,7 @@ func TestHandlerDoesNotCoalesceDistinctQuestions(t *testing.T) {
 
 	const n = 4
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
+	for i := range n {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
@@ -590,7 +588,7 @@ func TestHandlerTruncatesOversizedUDPResponse(t *testing.T) {
 	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
 		m.SetReply(r)
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			m.Answer = append(m.Answer, &dns.TXT{
 				Hdr: dns.RR_Header{Name: fmt.Sprintf("txt%d.example.com.", i), Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60},
 				// RFC 1035 caps each TXT character-string at 255 bytes, so real
@@ -794,7 +792,7 @@ func TestHandlerAutoBlockedClientDroppedOnUDP(t *testing.T) {
 		return m
 	}
 	// Hammer the same client until the auto-block trips.
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		h.ServeDNS(&fakeWriter{}, q())
 	}
 	if blocked, _ := rl.Blocked("127.0.0.1"); !blocked {
@@ -820,7 +818,7 @@ func TestHandlerAutoBlockedClientRefusedOnTCP(t *testing.T) {
 		m.SetQuestion("example.com.", dns.TypeA)
 		return m
 	}
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		h.ServeDNSWithProto(&fakeWriter{}, q(), "tcp")
 	}
 	if blocked, _ := rl.Blocked("127.0.0.1"); !blocked {
@@ -1398,11 +1396,9 @@ func TestHandlerCacheHitPoolConcurrency(t *testing.T) {
 	const goroutines = 32
 	const perGoroutine = 50
 	var wg sync.WaitGroup
-	for i := 0; i < goroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < perGoroutine; j++ {
+	for range goroutines {
+		wg.Go(func() {
+			for range perGoroutine {
 				m := new(dns.Msg)
 				m.SetQuestion("pool-concurrency.example.com.", dns.TypeA)
 				fw := &fakeWriter{}
@@ -1421,7 +1417,7 @@ func TestHandlerCacheHitPoolConcurrency(t *testing.T) {
 					return
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 }
@@ -1526,7 +1522,7 @@ func TestHandlerFailureNegativelyCached(t *testing.T) {
 	// land promptly (the check interval stays well inside the 100ms TTL).
 	question := fw.msg.Question[0]
 	appeared := false
-	for i := 0; i < 40; i++ {
+	for range 40 {
 		if res := c.Lookup(question); res.Msg() != nil {
 			if !res.Negative {
 				t.Fatalf("expected a negative cache entry, got positive %v", res.Msg())
@@ -1576,7 +1572,7 @@ func TestHandlerSingleUpstreamCooldownFastFail(t *testing.T) {
 		return m
 	}
 	// Trip the circuit: connection-refused on loopback fails fast.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		fw := &fakeWriter{}
 		h.ServeDNS(fw, q())
 		if fw.msg == nil || fw.msg.Rcode != dns.RcodeServerFailure {
@@ -1676,7 +1672,7 @@ func TestHandlerNXGuardBlocksFlood(t *testing.T) {
 	}
 
 	// First two queries get real NXDOMAIN answers and count toward the guard.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if resp := ask(); resp == nil || resp.Rcode != dns.RcodeNameError {
 			t.Fatalf("query %d: want NXDOMAIN, got %v", i+1, resp)
 		}

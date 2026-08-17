@@ -447,10 +447,7 @@ func (l *Log) Query(ctx context.Context, limit, offset int, action, domain, qtyp
 	if len(matches) <= offset {
 		return []Entry{}, nil
 	}
-	end := offset + limit
-	if end > len(matches) {
-		end = len(matches)
-	}
+	end := min(offset+limit, len(matches))
 	return matches[offset:end], nil
 }
 
@@ -593,7 +590,7 @@ func (l *Log) Hourly(ctx context.Context, since time.Time) ([]HourBucket, error)
 	}); err != nil {
 		return nil, err
 	}
-	for i := 0; i < 24; i++ {
+	for i := range 24 {
 		out = append(out, HourBucket{
 			Hour:    startSlot.Add(time.Duration(i) * time.Hour).Format(time.RFC3339),
 			Total:   total[i],
@@ -720,7 +717,7 @@ func (l *Log) StatsBundle(ctx context.Context, since, today time.Time) (*StatsBu
 	todayStats["top_clients"] = topN(todayClientCnt, 10)
 
 	out := &StatsBundle{Stats: stats, Today: todayStats}
-	for i := 0; i < 24; i++ {
+	for i := range 24 {
 		out.Hourly = append(out.Hourly, HourBucket{
 			Hour:    startSlot.Add(time.Duration(i) * time.Hour).Format(time.RFC3339),
 			Total:   total[i],

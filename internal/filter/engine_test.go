@@ -130,7 +130,7 @@ func TestWhitelistLargeSubtree(t *testing.T) {
 		t.Fatal(err)
 	}
 	whitelist := make([]string, 0, 500)
-	for i := 0; i < 500; i++ {
+	for i := range 500 {
 		whitelist = append(whitelist, fmt.Sprintf("allowed-%d.example", i))
 	}
 	whitelist = append(whitelist, "target.example")
@@ -152,7 +152,7 @@ func TestWhitelistLargeSubtree(t *testing.T) {
 func BenchmarkDecideDomainLargeWhitelist(b *testing.B) {
 	e := NewEngine()
 	whitelist := make([]string, 0, 500)
-	for i := 0; i < 500; i++ {
+	for i := range 500 {
 		whitelist = append(whitelist, fmt.Sprintf("allowed-%d.example", i))
 	}
 	e.SetUserLists(nil, whitelist)

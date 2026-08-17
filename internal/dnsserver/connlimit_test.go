@@ -34,7 +34,7 @@ func TestConnLimiterCapsPerIP(t *testing.T) {
 
 func TestConnLimiterDisabled(t *testing.T) {
 	cl := newConnLimiter(0) // unlimited
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		if !cl.acquire("1.2.3.4") {
 			t.Fatalf("unlimited limiter rejected acquisition %d", i)
 		}
@@ -122,7 +122,7 @@ func TestLimitListenerRejectsOverCap(t *testing.T) {
 
 func TestLimitListenerNoCapPassesThrough(t *testing.T) {
 	addr := startLimitedTCPServer(t, 0) // unlimited
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if !queryTCP(t, addr) {
 			t.Fatalf("unlimited listener must answer connection %d", i)
 		}
@@ -143,9 +143,7 @@ func TestLimitListenerConcurrentCapsPerIP(t *testing.T) {
 	var first net.Conn
 	accepted := make(chan net.Conn, 2)
 	var acceptWG sync.WaitGroup
-	acceptWG.Add(1)
-	go func() {
-		defer acceptWG.Done()
+	acceptWG.Go(func() {
 		for {
 			c, err := limited.Accept()
 			if err != nil {
@@ -153,7 +151,7 @@ func TestLimitListenerConcurrentCapsPerIP(t *testing.T) {
 			}
 			accepted <- c
 		}
-	}()
+	})
 	defer func() {
 		if first != nil {
 			_ = first.Close()

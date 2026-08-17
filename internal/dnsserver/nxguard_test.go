@@ -8,7 +8,7 @@ import (
 
 func TestNXGuardAllowsUnderThreshold(t *testing.T) {
 	g := NewNXGuard(5, time.Minute, time.Minute)
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		if !g.Allow("192.168.1.0") {
 			t.Fatalf("Allow before threshold (%d NXDOMAINs) must succeed", i+1)
 		}
@@ -21,7 +21,7 @@ func TestNXGuardAllowsUnderThreshold(t *testing.T) {
 
 func TestNXGuardBlocksAtThreshold(t *testing.T) {
 	g := NewNXGuard(5, time.Minute, time.Minute)
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		g.NoteNX("192.168.1.0")
 	}
 	if g.Allow("192.168.1.0") {
@@ -105,7 +105,7 @@ func TestNXGuardShardCapHolds(t *testing.T) {
 	// past the cap and verify evictNXLocked brings it back under.
 	s := &nxShard{entries: make(map[string]*nxEntry, nxMaxPerShard+1)}
 	now := time.Now()
-	for i := 0; i < nxMaxPerShard+1; i++ {
+	for i := range nxMaxPerShard + 1 {
 		s.entries[uniqueIP4(i)] = &nxEntry{count: 1, firstSeen: now}
 	}
 	evictNXLocked(s, now)
@@ -115,7 +115,7 @@ func TestNXGuardShardCapHolds(t *testing.T) {
 	// Idle entries are reclaimed first: give every entry an old firstSeen and
 	// confirm eviction drops them over live ones.
 	s = &nxShard{entries: make(map[string]*nxEntry, nxMaxPerShard+1)}
-	for i := 0; i < nxMaxPerShard+1; i++ {
+	for i := range nxMaxPerShard + 1 {
 		s.entries[uniqueIP4(i)] = &nxEntry{count: 1, firstSeen: now.Add(-time.Hour)}
 	}
 	evictNXLocked(s, now)

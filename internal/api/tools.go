@@ -551,7 +551,7 @@ func spfIssues(spf string) []string {
 		issues = append(issues, "no -all or ~all term — receivers won't hard-fail forged mail")
 	}
 	lookups := 0
-	for _, mech := range strings.Fields(spf) {
+	for mech := range strings.FieldsSeq(spf) {
 		m := mech
 		if i := strings.IndexAny(m, ":/"); i >= 0 {
 			m = m[:i]
@@ -568,7 +568,7 @@ func spfIssues(spf string) []string {
 }
 
 func dmarcPolicy(record string) string {
-	for _, part := range strings.Split(record, ";") {
+	for part := range strings.SplitSeq(record, ";") {
 		part = strings.TrimSpace(part)
 		if strings.HasPrefix(strings.ToLower(part), "p=") {
 			return strings.TrimSpace(part[2:])

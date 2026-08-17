@@ -9,7 +9,7 @@ import (
 
 func TestLoginGuardLocksOutAfterThreshold(t *testing.T) {
 	g := NewLoginGuard()
-	for i := 0; i < loginMaxFailures-1; i++ {
+	for i := range loginMaxFailures - 1 {
 		g.RecordFailure("1.2.3.4")
 		if locked, _ := g.Locked("1.2.3.4"); locked {
 			t.Fatalf("locked out after only %d failures, want %d", i+1, loginMaxFailures)
@@ -27,7 +27,7 @@ func TestLoginGuardLocksOutAfterThreshold(t *testing.T) {
 
 func TestLoginGuardPerClientIndependent(t *testing.T) {
 	g := NewLoginGuard()
-	for i := 0; i < loginMaxFailures; i++ {
+	for range loginMaxFailures {
 		g.RecordFailure("1.2.3.4")
 	}
 	if locked, _ := g.Locked("1.2.3.4"); !locked {
@@ -40,7 +40,7 @@ func TestLoginGuardPerClientIndependent(t *testing.T) {
 
 func TestLoginGuardSuccessClearsFailures(t *testing.T) {
 	g := NewLoginGuard()
-	for i := 0; i < loginMaxFailures-1; i++ {
+	for range loginMaxFailures - 1 {
 		g.RecordFailure("1.2.3.4")
 	}
 	g.RecordSuccess("1.2.3.4")
@@ -97,7 +97,7 @@ func TestAuthorizeLocksOutAfterFailedAttempts(t *testing.T) {
 	a := testApp(t)
 	const attacker = "203.0.113.50:1111"
 
-	for i := 0; i < loginMaxFailures; i++ {
+	for i := range loginMaxFailures {
 		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 		req.RemoteAddr = attacker
 		req.SetBasicAuth("admin", "wrong-password")
@@ -136,7 +136,7 @@ func TestAuthorizeLocksOutAfterFailedAttempts(t *testing.T) {
 // that actually presented a wrong password should.
 func TestAuthorizeDoesNotCountCredentialFreeRequests(t *testing.T) {
 	a := testApp(t)
-	for i := 0; i < loginMaxFailures*2; i++ {
+	for range loginMaxFailures * 2 {
 		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 		req.RemoteAddr = "203.0.113.60:3333"
 		rr := httptest.NewRecorder()

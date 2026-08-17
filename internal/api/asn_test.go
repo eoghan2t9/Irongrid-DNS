@@ -83,7 +83,7 @@ func TestASNCache(t *testing.T) {
 		t.Fatal("expired positive entry must miss")
 	}
 	// Over the cap the cache resets instead of growing without limit.
-	for i := 0; i < asnCap; i++ {
+	for i := range asnCap {
 		c.put(fmt.Sprintf("k%d", i), asnInfo{ASN: "AS1"}, now)
 	}
 	c.put("trigger", asnInfo{ASN: "AS2"}, now) // crosses the cap and resets
@@ -116,16 +116,14 @@ func TestResolveASNCoalescesConcurrentLookups(t *testing.T) {
 	h := &Handler{}
 	const n = 4
 	var wg sync.WaitGroup
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+	for range n {
+		wg.Go(func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			if info := h.resolveASN(ctx, "8.8.8.8"); info.ASN != "AS15169" || info.Holder != "Google LLC" {
 				t.Errorf("resolveASN = %+v, want AS15169/Google LLC", info)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if got := niHits.Load(); got != 1 {

@@ -102,7 +102,7 @@ func installSystemd(w *wizard, deployDir, dataDir string) {
 	// enough for a slow first start (self-signed cert generation, initial
 	// blocklist download/compile) while still catching a crash loop that
 	// restarts every ~3s — and warn if the unit never comes up.
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		if runPrivileged("systemctl", "is-active", "irongrid") == nil {
 			fmt.Fprintln(w.out, "  ✓ systemd service installed and started (systemctl status irongrid)")
 			return

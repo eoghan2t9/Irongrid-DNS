@@ -96,7 +96,7 @@ func TestPoolAllocV4Exhaustion(t *testing.T) {
 	s := newTestServer(t, cfg, dir)
 
 	var ips []net.IP
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		ip, _ := s.allocV4(net.HardwareAddr{0xaa, byte(i), 0x01}, nil, "")
 		if i < 3 && ip == nil {
 			t.Fatalf("alloc %d failed, want success", i)

@@ -121,7 +121,7 @@ func TestSiteRedirectGuard(t *testing.T) {
 
 	// More than the hop budget is refused.
 	req := httptest.NewRequest(http.MethodGet, "https://example.com/", nil)
-	for i := 0; i < siteMaxRedirs; i++ {
+	for range siteMaxRedirs {
 		via = append(via, req)
 	}
 	if err := c.CheckRedirect(req, via); err == nil {

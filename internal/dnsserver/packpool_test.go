@@ -32,7 +32,7 @@ func TestPackBufPoolGrows(t *testing.T) {
 	// buffer and pulls one item out, so a cleared pool is immediately
 	// restocked and every subsequent Get has a large buffer to find. Any
 	// small buffer drawn is put back, so the pool can only drift toward big.
-	for i := 0; i < 100; i++ {
+	for range 100 {
 		putPackBuf(big)
 		got := getPackBuf()
 		if cap(got) >= udpMaxPacketSize*4 {

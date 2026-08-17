@@ -206,7 +206,7 @@ func TestTCPUpstreamReusesConnection(t *testing.T) {
 	addr, accepted := startTCPTestServer(t)
 	u := NewWithTLS(TCP, addr, "", nil)
 	t.Cleanup(u.Close)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		r, err := u.Query(context.Background(), aQuery())
 		if err != nil {
 			t.Fatalf("query %d: %v", i, err)
@@ -254,7 +254,7 @@ func TestUDPUpstreamReusesSocket(t *testing.T) {
 	}}
 	t.Cleanup(u.Close)
 
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		r, err := u.Query(context.Background(), aQuery())
 		if err != nil {
 			t.Fatalf("query %d: %v", i, err)
@@ -272,7 +272,7 @@ func TestDoTUpstreamReusesConnection(t *testing.T) {
 	addr, clientTLS, accepted := startDoTTestServer(t)
 	u := NewWithTLS(TLS, addr, "localhost", clientTLS)
 	t.Cleanup(u.Close)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		r, err := u.Query(context.Background(), aQuery())
 		if err != nil {
 			t.Fatalf("query %d: %v", i, err)
@@ -290,7 +290,7 @@ func TestDoQUpstreamReusesConnection(t *testing.T) {
 	addr, clientTLS, accepted := startDoQTestServer(t)
 	u := NewWithTLS(QUIC, addr, "localhost", clientTLS)
 	t.Cleanup(u.Close)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		r, err := u.Query(context.Background(), aQuery())
 		if err != nil {
 			t.Fatalf("query %d: %v", i, err)
@@ -517,7 +517,7 @@ func TestUpstreamCloseDrainsPoolAndQUICConn(t *testing.T) {
 // once the cooldown elapses so the next query probes the upstream again.
 func TestCircuitBreaker(t *testing.T) {
 	u := &Upstream{Transport: UDP, Addr: "127.0.0.1:1"}
-	for i := 0; i < circuitOpenFails; i++ {
+	for range circuitOpenFails {
 		u.markResult(context.DeadlineExceeded)
 	}
 	if u.Available() {
@@ -537,7 +537,7 @@ func TestCircuitBreaker(t *testing.T) {
 
 	// Reopen, then let the cooldown elapse: the circuit re-arms and the
 	// upstream becomes tryable again.
-	for i := 0; i < circuitOpenFails; i++ {
+	for range circuitOpenFails {
 		u.markResult(context.DeadlineExceeded)
 	}
 	if u.Available() {

@@ -292,7 +292,7 @@ func (c *Cache) Stats(ctx context.Context) (map[string]string, error) {
 		return nil, err
 	}
 	out := map[string]string{}
-	for _, line := range strings.Split(info, "\n") {
+	for line := range strings.SplitSeq(info, "\n") {
 		line = strings.TrimSpace(line)
 		if i := strings.Index(line, ":"); i > 0 {
 			out[strings.TrimSpace(line[:i])] = strings.TrimSpace(line[i+1:])
@@ -332,7 +332,7 @@ func (c *Cache) L2Stats(ctx context.Context) (L2Stats, error) {
 		"used_memory":     &s.UsedBytes,
 		"maxmemory":       &s.MaxBytes,
 	}
-	for _, line := range strings.Split(info, "\n") {
+	for line := range strings.SplitSeq(info, "\n") {
 		line = strings.TrimSpace(line)
 		if i := strings.Index(line, ":"); i > 0 {
 			if dst, ok := fields[strings.TrimSpace(line[:i])]; ok {
@@ -423,7 +423,7 @@ func ttlOffsets(msg []byte) []uint32 {
 	off := 12
 	// Skip the question section: QNAME (never compressed in a message we
 	// packed, but handle a pointer defensively) + qtype + qclass.
-	for i := 0; i < qd; i++ {
+	for range qd {
 		n, ok := skipPackedName(msg, off)
 		if !ok || n+4 > len(msg) {
 			return nil
@@ -431,7 +431,7 @@ func ttlOffsets(msg []byte) []uint32 {
 		off = n + 4
 	}
 	out := make([]uint32, 0, an)
-	for i := 0; i < an; i++ {
+	for range an {
 		n, ok := skipPackedName(msg, off)
 		// type(2) + class(2) + ttl(4) + rdlength(2) = 10 bytes after the name.
 		if !ok || n+10 > len(msg) {
@@ -555,13 +555,7 @@ func (res LookupResult) Msg() *dns.Msg {
 // a background refresh is scheduled — a fraction of the cache TTL, capped so
 // hour-long TTLs don't spawn refreshes half an hour early.
 func (c *Cache) prefetchLead() time.Duration {
-	lead := c.ttl / 5
-	if lead > 2*time.Minute {
-		lead = 2 * time.Minute
-	}
-	if lead < time.Second {
-		lead = time.Second
-	}
+	lead := max(min(c.ttl/5, 2*time.Minute), time.Second)
 	return lead
 }
 
@@ -614,10 +608,7 @@ func (c *Cache) maybePrefetch(q dns.Question, h uint64, remaining time.Duration,
 // (typically hours-long) positive TTL would be longer than most negative
 // entries' whole lifetime, firing a refresh on every hit.
 func (c *Cache) negPrefetchLead() time.Duration {
-	lead := c.negativeTTL / 5
-	if lead < time.Second {
-		lead = time.Second
-	}
+	lead := max(c.negativeTTL/5, time.Second)
 	return lead
 }
 
@@ -791,7 +782,7 @@ func (c *Cache) Fresh(q dns.Question) bool {
 // against the two keys for one question, as go-redis returns it: a present
 // key comes back as a string, a missing key as nil. ok is false when
 // neither key was present, or the result didn't have the expected shape.
-func decodeMGetResult(vals []interface{}) (posRaw, negRaw []byte, ok bool) {
+func decodeMGetResult(vals []any) (posRaw, negRaw []byte, ok bool) {
 	if len(vals) != 2 {
 		return nil, nil, false
 	}

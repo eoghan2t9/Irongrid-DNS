@@ -134,7 +134,7 @@ func ParseRootHints(data []byte) ([]string, error) {
 	v4 := map[string][]string{} // hostname -> validated IPv4 addresses
 	v6 := map[string][]string{} // hostname -> validated IPv6 addresses
 
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, ";") {
 			continue

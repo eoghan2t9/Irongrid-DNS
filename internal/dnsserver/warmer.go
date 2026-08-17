@@ -164,7 +164,7 @@ func (w *Warmer) Start(ctx context.Context) {
 type WarmerStats struct {
 	Enabled   bool      `json:"enabled"`
 	Runs      int64     `json:"runs"`
-	LastRun   time.Time `json:"last_run,omitempty"`
+	LastRun   time.Time `json:"last_run,omitzero"`
 	Domains   int64     `json:"domains"` // distinct domains considered, cumulative
 	Warmed    int64     `json:"warmed"`  // answers written to the cache, cumulative
 	Skipped   int64     `json:"skipped"` // blocked/rewritten/already-fresh, cumulative

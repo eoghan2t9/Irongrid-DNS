@@ -176,7 +176,7 @@ func (r *Resolver) resolve(ctx context.Context, q dns.Question, cnameDepth, nsDe
 	zone, servers := r.bestDelegation(q.Name)
 	visited := map[string]bool{zone: true}
 
-	for hop := 0; hop < maxHops; hop++ {
+	for range maxHops {
 		resp, err := r.queryServers(ctx, servers, q)
 		if err != nil {
 			return nil, err

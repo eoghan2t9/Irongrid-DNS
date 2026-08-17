@@ -306,8 +306,7 @@ func TestHintsManager(t *testing.T) {
 func TestHintsManagerStart(t *testing.T) {
 	var calls atomic.Int32
 	srv := signedHintsServer(t, testSigningEntity(t))
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 	m := &HintsManager{url: srv.URL, cachePath: "", interval: 30 * time.Millisecond,
 		verify: func(sig, signed []byte) error { calls.Add(1); return nil }}
 	m.Start(ctx)

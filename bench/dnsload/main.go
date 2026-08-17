@@ -21,7 +21,7 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"sort"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -85,10 +85,7 @@ func main() {
 	// sleep and runs flat out. Clamp so qps < workers can't divide by zero.
 	pace := time.Duration(0)
 	if *qps > 0 && *workers > 0 {
-		perWorker := *qps / *workers
-		if perWorker < 1 {
-			perWorker = 1
-		}
+		perWorker := max(*qps / *workers, 1)
 		pace = time.Second / time.Duration(perWorker)
 	}
 
@@ -136,7 +133,7 @@ func main() {
 	wg.Wait()
 
 	latMu.Lock()
-	sort.Slice(lats, func(i, j int) bool { return lats[i] < lats[j] })
+	slices.Sort(lats)
 	n := len(lats)
 	pct := func(p float64) time.Duration {
 		if n == 0 {
@@ -177,7 +174,7 @@ func avg(l []time.Duration) time.Duration {
 
 func splitNames(s string) []string {
 	var out []string
-	for _, n := range bytes.Split([]byte(s), []byte(",")) {
+	for n := range bytes.SplitSeq([]byte(s), []byte(",")) {
 		if v := string(bytes.TrimSpace(n)); v != "" {
 			out = append(out, v)
 		}

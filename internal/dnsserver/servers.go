@@ -405,13 +405,7 @@ func udpSocketCountFor(cfg int) int {
 		}
 		return cfg
 	}
-	n := runtime.GOMAXPROCS(0)
-	if n < 1 {
-		n = 1
-	}
-	if n > maxUDPSockets {
-		n = maxUDPSockets
-	}
+	n := min(max(runtime.GOMAXPROCS(0), 1), maxUDPSockets)
 	return n
 }
 
@@ -443,7 +437,7 @@ func newUDPListeners(addr string, n int) ([]net.PacketConn, error) {
 func reuseportUDPListeners(addr string, n int) ([]net.PacketConn, error) {
 	lc := &net.ListenConfig{Control: tuning.ReuseportControl}
 	pcs := make([]net.PacketConn, 0, n)
-	for i := 0; i < n; i++ {
+	for range n {
 		pc, err := lc.ListenPacket(context.Background(), "udp", addr)
 		if err != nil {
 			for _, p := range pcs {

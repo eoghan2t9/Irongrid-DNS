@@ -11,7 +11,7 @@ func TestRateLimiterAllowsUpToBurst(t *testing.T) {
 	// "immediately denied" assertion below isn't sensitive to ordinary
 	// scheduling jitter between two back-to-back calls.
 	rl := NewRateLimiter(1, 3)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if !rl.Allow("1.2.3.4") {
 			t.Fatalf("request %d should be allowed within burst", i)
 		}
@@ -26,7 +26,7 @@ func TestRateLimiterRefillsOverTime(t *testing.T) {
 	// config.Validate enforces), so burst=qps=5 here rather than a smaller
 	// burst that would silently get clamped up.
 	rl := NewRateLimiter(5, 5) // refills at 5/s (200ms/token)
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		if !rl.Allow("5.6.7.8") {
 			t.Fatalf("request %d should be allowed within the burst of 5", i)
 		}
@@ -54,7 +54,7 @@ func TestRateLimiterPerClientIndependent(t *testing.T) {
 
 func TestRateLimiterEmptyClientAlwaysAllowed(t *testing.T) {
 	rl := NewRateLimiter(1, 1)
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		if !rl.Allow("") {
 			t.Fatal("an empty client key (unidentifiable) must never be throttled")
 		}
@@ -66,7 +66,7 @@ func TestRateLimiterAutoBlockTriggersAndExpires(t *testing.T) {
 	rl.SetAutoBlock(3, 100*time.Millisecond)
 
 	// Hammer past the 3-violation threshold.
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		rl.Allow("1.2.3.4")
 	}
 	if blocked, until := rl.Blocked("1.2.3.4"); !blocked {
@@ -112,7 +112,7 @@ func TestRateLimiterAutoBlockTriggersAndExpires(t *testing.T) {
 func TestRateLimiterAutoBlockIsPerClient(t *testing.T) {
 	rl := NewRateLimiter(1, 1)
 	rl.SetAutoBlock(3, time.Minute)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		rl.Allow("9.9.9.9")
 	}
 	if blocked, _ := rl.Blocked("9.9.9.9"); !blocked {
@@ -126,7 +126,7 @@ func TestRateLimiterAutoBlockIsPerClient(t *testing.T) {
 func TestRateLimiterUnblock(t *testing.T) {
 	rl := NewRateLimiter(1, 1)
 	rl.SetAutoBlock(3, time.Hour)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		rl.Allow("5.5.5.5")
 	}
 	if blocked, _ := rl.Blocked("5.5.5.5"); !blocked {
@@ -168,7 +168,7 @@ func TestRateLimiterSparseViolationsDoNotBlock(t *testing.T) {
 	// while is not a hammerer.
 	rl := NewRateLimiter(1, 1)
 	rl.SetAutoBlock(3, 20*time.Millisecond)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		rl.Allow("7.7.7.7") // consume the burst
 		rl.Allow("7.7.7.7") // violation
 		time.Sleep(25 * time.Millisecond)
@@ -183,7 +183,7 @@ func TestRateLimiterSparseViolationsDoNotBlock(t *testing.T) {
 func sameShard(t *testing.T, rl *RateLimiter) (string, string) {
 	t.Helper()
 	a := "203.0.113.1"
-	for i := 0; i < 10000; i++ {
+	for i := range 10000 {
 		b := fmt.Sprintf("203.0.113.%d", i+2)
 		if rl.shard(b) == rl.shard(a) {
 			return a, b
@@ -200,7 +200,7 @@ func TestRateLimiterShardCapPrefersIdleEviction(t *testing.T) {
 	now := time.Now()
 	s.mu.Lock()
 	s.buckets = make(map[string]*rlBucket, rlMaxPerShard+1)
-	for i := 0; i < rlMaxPerShard; i++ {
+	for i := range rlMaxPerShard {
 		s.buckets[fmt.Sprintf("198.51.100.%d", i)] = &rlBucket{tokens: 1, lastSeen: now}
 	}
 	// One entry went quiet long ago: it must be the one evicted to make
@@ -234,7 +234,7 @@ func TestRateLimiterShardCapHoldsUnderActiveFlood(t *testing.T) {
 	now := time.Now()
 	s.mu.Lock()
 	s.buckets = make(map[string]*rlBucket, rlMaxPerShard+1)
-	for i := 0; i < rlMaxPerShard; i++ {
+	for i := range rlMaxPerShard {
 		s.buckets[fmt.Sprintf("198.51.100.%d", i)] = &rlBucket{tokens: 1, lastSeen: now}
 	}
 	s.mu.Unlock()
