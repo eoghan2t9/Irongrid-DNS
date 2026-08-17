@@ -271,10 +271,11 @@ rate_limit:
   burst: 40                    # short-burst allowance above qps (must be >= qps)
 
 # Country + client-IP blocking. Country data is fetched automatically from
-# ipverse/rir-ip (no account or API key) and cached under the data dir. The
-# same lists are installed into the host firewall (nftables, or iptables +
-# ipset) so new inbound traffic from blocked countries/IPs is dropped at the
-# packet level — run Irongrid as root (or with CAP_NET_ADMIN) for that.
+# ipverse/rir-ip and IP→ASN mapping from iptoasn.com (both free, no account
+# or API key) and cached under the data dir. The same lists are installed
+# into the host firewall (nftables, or iptables + ipset) so new inbound
+# traffic from blocked countries/IPs/ISPs is dropped at the packet level —
+# run Irongrid as root (or with CAP_NET_ADMIN) for that.
 geo_block:
   enabled: false
   countries: []              # ISO 3166-1 alpha-2 codes, e.g. RU, CN, KP
@@ -311,8 +312,22 @@ geo_block:
   allowlist: []              # client IPs/CIDRs that are never blocked — not by
                               # country geo-blocking, the explicit IP list, or
                               # honeypot auto-blocks (put your own servers here)
+  # allow_asns: []           # ISPs (by ASN, e.g. "AS13335" or "13335") whose
+                              # clients are never blocked — same guarantee as
+                              # the allowlist, but for a whole ISP. IP→ASN
+                              # mapping comes from the free ip2asn dataset
+                              # (iptoasn.com), fetched and cached like the
+                              # country lists
+  # block_asns: []           # ISPs whose clients are always refused
+                              # regardless of country (like ips, but covering
+                              # the whole ISP); their ranges also feed the
+                              # host firewall
   # base_url: ""             # override the CIDR data source (default
                               # ipverse/rir-ip; file:// paths supported)
+  # asn_base_url: ""         # override the ip2asn data source (default
+                              # iptoasn.com; file:// paths supported). Like
+                              # base_url it is read at boot — changing it
+                              # requires a restart
   auto_update: 168h          # how often country data re-fetches (0 = never)
 
 # Free threat-intel integrations for reporting the attacker IPs Irongrid

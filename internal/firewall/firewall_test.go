@@ -51,6 +51,59 @@ func writeCountry(t *testing.T, dir, cc, fam, content string) {
 	}
 }
 
+// TestApplyASNRules verifies the pruned ASN CIDR files written by the geoip
+// Manager feed the firewall: block-listed ISPs join the drop sets next to
+// the country CIDRs, allow-listed ISPs join the allow sets.
+func TestApplyASNRules(t *testing.T) {
+	dir := t.TempDir()
+	writeCountry(t, dir, "RU", "ipv4", "93.0.0.0/8\n")
+	if err := os.WriteFile(filepath.Join(dir, "asn-blocked.txt"), []byte("10.0.0.0/24\n2001:db8::/32\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "asn-allowed.txt"), []byte("91.0.0.0/8\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	f := &fakeRunner{available: map[string]bool{"nft": true}}
+	m := NewWithRunner(f)
+	if _, err := m.Apply([]string{"RU"}, nil, nil, dir); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	joined := strings.Join(f.cmds, "\n")
+	// Blocked ASN ranges join the v4 drop set next to the country CIDRs.
+	if !strings.Contains(joined, "93.0.0.0/8, 10.0.0.0/24") {
+		t.Errorf("v4 drop set missing ASN-blocked CIDR:\n%s", joined)
+	}
+	if !strings.Contains(joined, "2001:db8::/32") {
+		t.Errorf("v6 drop set missing ASN-blocked CIDR:\n%s", joined)
+	}
+	// Allowed ASN ranges join the allow set (and its accept rule exists).
+	if !strings.Contains(joined, "nft add rule inet irongrid geo_input ip saddr @geo_allow_v4 accept") ||
+		!strings.Contains(joined, "91.0.0.0/8") {
+		t.Errorf("allow set missing ASN-allowed CIDR:\n%s", joined)
+	}
+}
+
+// TestApplyASNRulesOnly verifies ASN rules alone (no countries) keep the
+// feature alive: the drop sets are populated from the ASN file even when
+// every country is absent, so the earlier "no cached country CIDRs" error
+// must not fire.
+func TestApplyASNRulesOnly(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "asn-blocked.txt"), []byte("10.0.0.0/24\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeRunner{available: map[string]bool{"nft": true}}
+	m := NewWithRunner(f)
+	if _, err := m.Apply([]string{"RU"}, nil, nil, dir); err != nil {
+		t.Fatalf("Apply with only ASN data must not fail: %v", err)
+	}
+	joined := strings.Join(f.cmds, "\n")
+	if !strings.Contains(joined, "10.0.0.0/24") {
+		t.Errorf("drop set missing ASN-blocked CIDR:\n%s", joined)
+	}
+}
+
 func TestApplyNft(t *testing.T) {
 	dir := t.TempDir()
 	writeCountry(t, dir, "RU", "ipv4", "# Country: Russia\n5.45.192.0/24\n93.0.0.0/8\n")

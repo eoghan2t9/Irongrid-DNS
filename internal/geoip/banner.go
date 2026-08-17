@@ -29,6 +29,13 @@ type Banner struct {
 	// auto-blocks or firewall-drops an allowlisted source). This is what
 	// makes the operator's own servers genuinely whitelisted.
 	allow []*net.IPNet
+	// asnAllow/asnBlock are the pruned IP→ASN tables for the configured
+	// allow-listed and block-listed ASNs (nil disables each side). An
+	// allow-listed ISP's client passes every block source exactly like a
+	// CIDR-allowlisted one; a block-listed ISP's client is always blocked.
+	// Set via SetASNs by the caller that also wires the geo Blocker.
+	asnAllow *ASNTable
+	asnBlock *ASNTable
 
 	// OnBlock is invoked (never under the lock) after a honeypot hit
 	// auto-blocks a client, so main can push the IP into the host firewall.
@@ -118,6 +125,19 @@ func (b *Banner) addAllow(e string) {
 	b.allow = append(b.allow, n)
 }
 
+// SetASNs installs the allow/block ASN tables (nil disables each side).
+// It also re-prunes persisted auto-blocks: SetASNs runs after NewBanner
+// (which already loaded the persisted file), so a source that is only now
+// known to be ASN-allowlisted is dropped from the block list the same way
+// the construction-time CIDR-allowlist pruning drops CIDR-allowlisted
+// sources.
+func (b *Banner) SetASNs(allow, block *ASNTable) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.asnAllow, b.asnBlock = allow, block
+	b.pruneAutoLocked()
+}
+
 // allowed reports whether ip is on the allowlist; caller holds the lock.
 func (b *Banner) allowed(ip net.IP) bool {
 	for _, n := range b.allow {
@@ -128,9 +148,22 @@ func (b *Banner) allowed(ip net.IP) bool {
 	return false
 }
 
+// asnAllowed reports whether ip belongs to an allow-listed ASN; caller
+// holds the lock.
+func (b *Banner) asnAllowed(ip net.IP) bool {
+	return b.asnAllow != nil && b.asnAllow.Contains(ip)
+}
+
+// asnBlocked reports whether ip belongs to a block-listed ASN; caller holds
+// the lock.
+func (b *Banner) asnBlocked(ip net.IP) bool {
+	return b.asnBlock != nil && b.asnBlock.Contains(ip)
+}
+
 // Blocked reports whether clientIP is on the banner's block list.
-// Allowlisted clients are never blocked — not by the configured IP list and
-// not by a persisted honeypot auto-block.
+// Allowlisted clients are never blocked — by ASN allowlist, the configured
+// IP list, or a persisted honeypot auto-block. A block-listed ASN's client
+// is always blocked, even without an explicit IP entry.
 func (b *Banner) Blocked(clientIP string) bool {
 	ip := net.ParseIP(clientIP)
 	if ip == nil {
@@ -138,6 +171,9 @@ func (b *Banner) Blocked(clientIP string) bool {
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	if b.asnAllowed(ip) {
+		return false
+	}
 	if b.allowed(ip) {
 		return false
 	}
@@ -146,7 +182,7 @@ func (b *Banner) Blocked(clientIP string) bool {
 			return true
 		}
 	}
-	return false
+	return b.asnBlocked(ip)
 }
 
 // LookupHoneypot reports whether qname (lowercase, no trailing dot) is a
@@ -192,10 +228,11 @@ func (b *Banner) Block(ip string) error {
 	}
 	raw := parsed.String()
 	b.mu.Lock()
-	// An allowlisted source is never auto-blocked: the honeypot query is
-	// refused at the DNS layer but the client (the operator's own server)
-	// must not be dropped from the network.
-	if b.allowed(parsed) {
+	// An allowlisted source — by CIDR or by ASN — is never auto-blocked:
+	// the honeypot query is refused at the DNS layer but the client (the
+	// operator's own server, or an unblocked ISP) must not be dropped from
+	// the network.
+	if b.allowed(parsed) || b.asnAllowed(parsed) {
 		b.mu.Unlock()
 		return nil
 	}
@@ -307,13 +344,46 @@ func (b *Banner) loadAuto() {
 		if ln == "" || strings.HasPrefix(ln, "#") {
 			continue
 		}
-		// Allowlisted entries are skipped: an operator's own server that was
-		// auto-blocked before being allowlisted must not stay on the list
-		// (and thus keep showing as blocked / feeding the firewall).
-		if ip := net.ParseIP(ln); ip != nil && b.allowed(ip) {
-			continue
-		}
 		b.addRaw(ln, true)
+	}
+	b.pruneAutoLocked()
+}
+
+// pruneAutoLocked drops auto-blocked entries whose source is allowlisted
+// (by CIDR or by ASN) and rebuilds the net list. An operator's own server
+// that was auto-blocked before being allowlisted must not stay on the list
+// — it would keep showing as blocked and keep feeding the firewall. The
+// persisted file is left alone; the entry is simply never loaded or kept.
+// Caller holds the lock.
+func (b *Banner) pruneAutoLocked() {
+	changed := false
+	for e := range b.auto {
+		ip := net.ParseIP(e)
+		if ip != nil && (b.allowed(ip) || b.asnAllowed(ip)) {
+			delete(b.auto, e)
+			delete(b.raw, e)
+			changed = true
+		}
+	}
+	if !changed {
+		return
+	}
+	// Rebuild nets from the remaining raw entries (configured IPs included).
+	b.nets = b.nets[:0]
+	for e := range b.raw {
+		_, n, err := net.ParseCIDR(e)
+		if err != nil {
+			if p := net.ParseIP(e); p != nil {
+				bits := 32
+				if p.To4() == nil {
+					bits = 128
+				}
+				n = &net.IPNet{IP: p, Mask: net.CIDRMask(bits, bits)}
+			}
+		}
+		if n != nil {
+			b.nets = append(b.nets, n)
+		}
 	}
 }
 

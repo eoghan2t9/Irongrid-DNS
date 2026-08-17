@@ -919,7 +919,10 @@ type geoBlockPayload struct {
 	Allowlist  []string `json:"allowlist"`
 	IPs        []string `json:"ips"`       // always-blocked client IPs/CIDRs
 	Honeypots  []string `json:"honeypots"` // trap domains: querying clients get blocked
+	AllowASNs  []string `json:"allow_asns"`
+	BlockASNs  []string `json:"block_asns"`
 	BaseURL    string   `json:"base_url"`
+	ASNBaseURL string   `json:"asn_base_url"`
 	AutoUpdate string   `json:"auto_update"` // duration string, "" = never
 	// TrustUDP lets plain-UDP honeypot hits auto-block their source too.
 	// Off by default — spoofed UDP could otherwise be used to block
@@ -1220,7 +1223,10 @@ func payloadFromConfig(c *config.Config) configPayload {
 		Allowlist:        c.GeoBlock.Allowlist,
 		IPs:              c.GeoBlock.IPs,
 		Honeypots:        c.GeoBlock.Honeypots,
+		AllowASNs:        c.GeoBlock.AllowASNs,
+		BlockASNs:        c.GeoBlock.BlockASNs,
 		BaseURL:          c.GeoBlock.BaseURL,
+		ASNBaseURL:       c.GeoBlock.ASNBaseURL,
 		AutoUpdate:       durationOrEmpty(c.GeoBlock.AutoUpdate),
 		TrustUDP:         c.GeoBlock.TrustUDP,
 		HoneypotUDPBlock: durationOrEmpty(c.GeoBlock.HoneypotUDPBlock),
@@ -1453,7 +1459,10 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			Allowlist:        p.GeoBlock.Allowlist,
 			IPs:              p.GeoBlock.IPs,
 			Honeypots:        p.GeoBlock.Honeypots,
+			AllowASNs:        p.GeoBlock.AllowASNs,
+			BlockASNs:        p.GeoBlock.BlockASNs,
 			BaseURL:          p.GeoBlock.BaseURL,
+			ASNBaseURL:       p.GeoBlock.ASNBaseURL,
 			AutoUpdate:       geoAutoUpdate,
 			TrustUDP:         p.GeoBlock.TrustUDP,
 			HoneypotUDPBlock: geoUDPBlock,

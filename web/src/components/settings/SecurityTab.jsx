@@ -84,8 +84,9 @@ export default function SecurityTab({ f }) {
         <h3>Geo blocking</h3>
         <p className="dim small" style={{ marginTop: -6 }}>
           Refuses queries (<strong>REFUSED</strong> on every transport) from client IPs that belong to the selected
-          countries. Country data comes from free per-country CIDR lists (ipverse/rir-ip) fetched automatically and
-          cached locally — no account or API key needed. Allowlisted IPs/CIDRs always pass.
+          countries, IPs, or ISPs. Country data comes from free per-country CIDR lists (ipverse/rir-ip) and IP→ASN
+          mapping from the free ip2asn dataset (iptoasn.com), fetched automatically and cached locally — no account or
+          API key needed. Allowlisted IPs/CIDRs and ISPs always pass.
         </p>
         <div className="form-grid">
           {toggle('Enable geo blocking', 'geo_block.enabled')}
@@ -117,10 +118,25 @@ export default function SecurityTab({ f }) {
             </select>,
           )}
           {textarea('Allowlist (IPs / CIDRs)', 'geo_block.allowlist', 'clients that are never geo-blocked')}
+          {textarea(
+            'Always-allowed ISPs (ASNs)',
+            'geo_block.allow_asns',
+            "one per line, e.g. AS13335 — clients from these ISPs are never blocked, not by country, the IP list, or honeypot auto-blocks (an unblocked ISP's client that queries a honeypot is refused but never blocked)",
+          )}
+          {textarea(
+            'Always-blocked ISPs (ASNs)',
+            'geo_block.block_asns',
+            'one per line, e.g. AS4134 — clients from these ISPs are always refused regardless of country, and their ranges are dropped at the host firewall',
+          )}
           {text(
             'Data source URL (optional)',
             'geo_block.base_url',
             'defaults to ipverse/rir-ip; appends &lt;cc&gt;/ipv4-aggregated.txt and &lt;cc&gt;/ipv6-aggregated.txt (lowercase codes)',
+          )}
+          {text(
+            'ASN data source URL (optional)',
+            'geo_block.asn_base_url',
+            'defaults to iptoasn.com; appends ip2asn-v4.tsv.gz and ip2asn-v6.tsv.gz (takes effect after a restart, like the country data URL)',
           )}
           {field(
             'Auto-refresh country data',
@@ -140,29 +156,33 @@ export default function SecurityTab({ f }) {
         {deepGet('geo_block.enabled', false) &&
           (deepGet('geo_block.countries', []) || []).length === 0 &&
           (deepGet('geo_block.ips', []) || []).length === 0 &&
-          (deepGet('geo_block.honeypots', []) || []).length === 0 && (
+          (deepGet('geo_block.honeypots', []) || []).length === 0 &&
+          (deepGet('geo_block.allow_asns', []) || []).length === 0 &&
+          (deepGet('geo_block.block_asns', []) || []).length === 0 && (
             <p
               className="dim small"
               style={{ marginTop: 8, color: 'var(--amber)', display: 'flex', gap: 6, alignItems: 'flex-start' }}
             >
               <AlertIcon size={13} style={{ flexShrink: 0, marginTop: 1 }} />
               <span>
-                Geo blocking is on but nothing is configured — add countries, blocked IPs, or honeypot domains above,
-                save, then refresh.
+                Geo blocking is on but nothing is configured — add countries, blocked IPs, honeypot domains, or ASNs
+                above, save, then refresh.
               </span>
             </p>
           )}
         {!deepGet('geo_block.enabled', false) &&
           ((deepGet('geo_block.honeypots', []) || []).length > 0 ||
-            (deepGet('geo_block.ips', []) || []).length > 0) && (
+            (deepGet('geo_block.ips', []) || []).length > 0 ||
+            (deepGet('geo_block.allow_asns', []) || []).length > 0 ||
+            (deepGet('geo_block.block_asns', []) || []).length > 0) && (
             <p
               className="dim small"
               style={{ marginTop: 8, color: 'var(--amber)', display: 'flex', gap: 6, alignItems: 'flex-start' }}
             >
               <AlertIcon size={13} style={{ flexShrink: 0, marginTop: 1 }} />
               <span>
-                Honeypot domains / blocked IPs are configured but <strong>Enable geo blocking</strong> is off —
-                nothing is enforced until you turn it on and save.
+                Honeypot domains / blocked IPs / ASN rules are configured but <strong>Enable geo blocking</strong> is
+                off — nothing is enforced until you turn it on and save.
               </span>
             </p>
           )}

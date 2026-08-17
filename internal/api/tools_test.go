@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
-	"reflect"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -439,6 +439,47 @@ func TestConfigPayloadServerRoundTrip(t *testing.T) {
 	}}
 	if !reflect.DeepEqual(c.Server, cfg.Server) {
 		t.Fatalf("server round-trip mismatch:\n got %+v\nwant %+v", cfg.Server, c.Server)
+	}
+}
+
+// TestConfigPayloadGeoBlockRoundTrip verifies the ASN allow/block fields
+// survive the payload mapping in both directions — a silently dropped field
+// here would make the Settings ASN textareas a no-op on every save.
+func TestConfigPayloadGeoBlockRoundTrip(t *testing.T) {
+	c := config.Default()
+	c.GeoBlock = config.GeoBlockConfig{
+		Enabled:    true,
+		Countries:  []string{"RU"},
+		Allowlist:  []string{"10.0.0.5"},
+		IPs:        []string{"203.0.113.9"},
+		Honeypots:  []string{"trap.example.com"},
+		AllowASNs:  []string{"AS13335"},
+		BlockASNs:  []string{"AS3257"},
+		BaseURL:    "https://geo.example.com",
+		ASNBaseURL: "https://asn.example.com",
+	}
+	p := payloadFromConfig(c)
+	if !reflect.DeepEqual(p.GeoBlock.AllowASNs, []string{"AS13335"}) ||
+		!reflect.DeepEqual(p.GeoBlock.BlockASNs, []string{"AS3257"}) ||
+		p.GeoBlock.ASNBaseURL != "https://asn.example.com" {
+		t.Fatalf("payload dropped geo ASN fields: %+v", p.GeoBlock)
+	}
+
+	// Reverse direction: rebuild the config from the payload the same way
+	// applyPayload does.
+	cfg := &config.Config{GeoBlock: config.GeoBlockConfig{
+		Enabled:    p.GeoBlock.Enabled,
+		Countries:  p.GeoBlock.Countries,
+		Allowlist:  p.GeoBlock.Allowlist,
+		IPs:        p.GeoBlock.IPs,
+		Honeypots:  p.GeoBlock.Honeypots,
+		AllowASNs:  p.GeoBlock.AllowASNs,
+		BlockASNs:  p.GeoBlock.BlockASNs,
+		BaseURL:    p.GeoBlock.BaseURL,
+		ASNBaseURL: p.GeoBlock.ASNBaseURL,
+	}}
+	if !reflect.DeepEqual(c.GeoBlock, cfg.GeoBlock) {
+		t.Fatalf("geo block round-trip mismatch:\n got %+v\nwant %+v", cfg.GeoBlock, c.GeoBlock)
 	}
 }
 

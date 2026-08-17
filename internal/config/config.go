@@ -267,6 +267,22 @@ type GeoBlockConfig struct {
 	// "<cc>/ipv4-aggregated.txt" and "<cc>/ipv6-aggregated.txt" (the
 	// ipverse/rir-ip layout). file:// paths are supported for local datasets.
 	BaseURL string `yaml:"base_url"`
+	// AllowASNs are ISPs — by ASN, e.g. "AS13335" or "13335" — whose clients
+	// are never blocked: not by country geo-blocking, not by the explicit IP
+	// list, and not by honeypot auto-blocks (the same guarantee as the CIDR
+	// allowlist, but for a whole ISP). Client IPs are mapped to ASNs with
+	// the free ip2asn dataset (iptoasn.com by default), fetched and cached
+	// like the country lists — no per-query network calls.
+	AllowASNs []string `yaml:"allow_asns"`
+	// BlockASNs are ISPs whose clients are always blocked, like IPs but
+	// covering the whole ISP's ranges (DNS REFUSED plus a host-firewall
+	// drop).
+	BlockASNs []string `yaml:"block_asns"`
+	// ASNBaseURL overrides where the ip2asn dataset is fetched from; the
+	// filenames ip2asn-v4.tsv.gz / ip2asn-v6.tsv.gz are appended. file://
+	// paths are supported for local datasets. Like base_url it is read at
+	// boot, so a change requires a restart.
+	ASNBaseURL string `yaml:"asn_base_url"`
 	// AutoUpdate re-fetches the enabled countries' data every AutoUpdate
 	// (the ipverse/rir-ip aggregates change roughly weekly). 0 disables
 	// automatic refreshes (data is then only refreshed on save/manual
@@ -985,6 +1001,23 @@ func (c *Config) validate() error {
 			}
 		}
 	}
+	for i, e := range c.GeoBlock.AllowASNs {
+		a, err := parseASN(e)
+		if err != nil {
+			return fmt.Errorf("geo_block.allow_asns[%d]: %w", i, err)
+		}
+		c.GeoBlock.AllowASNs[i] = a
+	}
+	for i, e := range c.GeoBlock.BlockASNs {
+		a, err := parseASN(e)
+		if err != nil {
+			return fmt.Errorf("geo_block.block_asns[%d]: %w", i, err)
+		}
+		c.GeoBlock.BlockASNs[i] = a
+	}
+	if u := c.GeoBlock.ASNBaseURL; u != "" && !strings.HasPrefix(u, "http://") && !strings.HasPrefix(u, "https://") && !strings.HasPrefix(u, "file://") {
+		return fmt.Errorf("geo_block.asn_base_url must start with http://, https:// or file://")
+	}
 	for i, e := range c.GeoBlock.IPs {
 		if _, _, err := net.ParseCIDR(e); err != nil {
 			if net.ParseIP(e) == nil {
@@ -1015,6 +1048,28 @@ func (c *Config) validate() error {
 		return fmt.Errorf("geo_block.honeypot_udp_block requires rate_limit.enabled (the bounded UDP honeypot block runs on the rate limiter)")
 	}
 	return nil
+}
+
+// parseASN normalizes an ASN config entry ("AS13335" or "13335") to the
+// canonical "AS<number>" form, validating the 32-bit ASN space
+// (1..4294967295). Rules mirror geoip.ParseASN, which converts the
+// canonical form to the number at refresh time.
+func parseASN(s string) (string, error) {
+	s = strings.ToUpper(strings.TrimSpace(s))
+	s = strings.TrimPrefix(s, "AS")
+	if s == "" {
+		return "", fmt.Errorf("empty ASN (use e.g. AS13335)")
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return "", fmt.Errorf("%q is not a valid ASN (use e.g. AS13335)", s)
+		}
+	}
+	n, err := strconv.ParseUint(s, 10, 32)
+	if err != nil || n == 0 {
+		return "", fmt.Errorf("%q is not a valid ASN (use e.g. AS13335)", s)
+	}
+	return "AS" + strconv.FormatUint(n, 10), nil
 }
 
 // validMAC reports whether s parses as a colon-separated MAC address.

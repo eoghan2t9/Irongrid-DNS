@@ -358,6 +358,43 @@ func TestValidateGeoBlock(t *testing.T) {
 	}
 }
 
+func TestValidateGeoBlockASNs(t *testing.T) {
+	c := validBase()
+	c.GeoBlock = GeoBlockConfig{
+		Enabled:    true,
+		AllowASNs:  []string{"as13335", "4134", " AS4294967295 "},
+		BlockASNs:  []string{"AS3257"},
+		ASNBaseURL: "https://example.com/data",
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid ASN geo_block rejected: %v", err)
+	}
+	if c.GeoBlock.AllowASNs[0] != "AS13335" || c.GeoBlock.AllowASNs[1] != "AS4134" || c.GeoBlock.AllowASNs[2] != "AS4294967295" {
+		t.Errorf("allow_asns not normalized: %v", c.GeoBlock.AllowASNs)
+	}
+	if c.GeoBlock.BlockASNs[0] != "AS3257" {
+		t.Errorf("block_asns not normalized: %v", c.GeoBlock.BlockASNs)
+	}
+
+	c = validBase()
+	c.GeoBlock = GeoBlockConfig{Enabled: true, AllowASNs: []string{"AS13X35"}}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "geo_block.allow_asns") {
+		t.Fatalf("err = %v, want geo_block.allow_asns error", err)
+	}
+
+	c = validBase()
+	c.GeoBlock = GeoBlockConfig{Enabled: true, BlockASNs: []string{"AS0"}}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "geo_block.block_asns") {
+		t.Fatalf("err = %v, want geo_block.block_asns error", err)
+	}
+
+	c = validBase()
+	c.GeoBlock = GeoBlockConfig{Enabled: true, ASNBaseURL: "ftp://example.com/data"}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "asn_base_url") {
+		t.Fatalf("err = %v, want asn_base_url error", err)
+	}
+}
+
 func TestValidateGeoBlockIPsAndHoneypots(t *testing.T) {
 	c := validBase()
 	c.GeoBlock = GeoBlockConfig{

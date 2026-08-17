@@ -129,16 +129,26 @@ func (m *Manager) Apply(countries, allowlist, ipBlocks []string, dir string) (st
 		return "", err
 	}
 	countryV4, countryV6 := loadCountryCIDRs(dir, countries)
+	// ASN rules persist their pruned ranges as CIDR files (asn-blocked.txt /
+	// asn-allowed.txt, written by the geoip Manager): block-listed ISPs join
+	// the drop sets like blocked countries, allow-listed ISPs join the
+	// allowlist so an unblocked ISP's clients pass at the packet level too.
+	asnBlock4, asnBlock6 := loadASNCIDRs(dir, "asn-blocked.txt")
+	asnAllow4, asnAllow6 := loadASNCIDRs(dir, "asn-allowed.txt")
 	// Countries were requested but none of their data is on disk: nothing to
 	// block. This is an error so the operator learns the geo data is missing
-	// — unless explicit ipBlocks carry the feature on their own.
-	if len(countries) > 0 && len(countryV4) == 0 && len(countryV6) == 0 && len(ipBlocks) == 0 {
+	// — unless explicit ipBlocks or ASN rules carry the feature on their own.
+	if len(countries) > 0 && len(countryV4) == 0 && len(countryV6) == 0 && len(ipBlocks) == 0 && len(asnBlock4) == 0 && len(asnBlock6) == 0 {
 		return backend, fmt.Errorf("no cached country CIDRs found in %s — refresh geo data first", dir)
 	}
 	b4, b6 := classifyIPs(ipBlocks)
 	v4 := append(countryV4, b4...)
+	v4 = append(v4, asnBlock4...)
 	v6 := append(countryV6, b6...)
+	v6 = append(v6, asnBlock6...)
 	a4, a6 := classifyIPs(allowlist)
+	a4 = append(a4, asnAllow4...)
+	a6 = append(a6, asnAllow6...)
 	switch backend {
 	case "nft":
 		return backend, m.applyNft(v4, v6, a4, a6)
@@ -450,6 +460,17 @@ func loadCountryCIDRs(dir string, countries []string) (v4, v6 []string) {
 		}
 	}
 	return
+}
+
+// loadASNCIDRs reads a pruned ASN CIDR list file (as persisted by the geoip
+// Manager) and classifies it into v4/v6. A missing file means no ASN rules
+// for that side — an empty result, never an error.
+func loadASNCIDRs(dir, name string) (v4, v6 []string) {
+	d, err := os.ReadFile(filepath.Join(dir, name))
+	if err != nil {
+		return nil, nil
+	}
+	return classifyIPs(parseCIDRs(string(d)))
 }
 
 // parseCIDRs extracts CIDR prefixes from a list file, skipping comment lines

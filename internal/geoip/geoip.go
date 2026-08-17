@@ -7,6 +7,8 @@
 package geoip
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -35,6 +37,14 @@ type Blocker struct {
 	allowlist []*net.IPNet    // parsed allowlist entries
 	tables    map[string]*Table
 	combined  *Table // merged ranges of every enabled country that has data
+	// asnAllow/asnBlock are the pruned IP→ASN tables for the configured
+	// allow-listed and block-listed ASNs (nil disables each side). A hit in
+	// asnAllow means the client's ISP is never blocked — it wins over the
+	// country ranges exactly like the CIDR allowlist. A hit in asnBlock
+	// means the ISP is always blocked, even if its ranges aren't in any
+	// enabled country's list.
+	asnAllow *ASNTable
+	asnBlock *ASNTable
 }
 
 // NewBlocker returns an empty blocker (nothing blocked until SetConfig).
@@ -122,10 +132,19 @@ func (b *Blocker) rebuildCombinedLocked() {
 	b.combined = out
 }
 
+// SetASNs installs the allow/block ASN tables (nil disables each side).
+func (b *Blocker) SetASNs(allow, block *ASNTable) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.asnAllow, b.asnBlock = allow, block
+}
+
 // Blocked reports whether clientIP is geo-blocked: allowlisted clients are
-// never blocked; everyone else is checked against the combined ranges of the
-// enabled countries. An unparseable IP (e.g. the web dashboard's own
-// connections) is never blocked.
+// never blocked — by the ASN allowlist (an allow-listed ISP wins over
+// everything, mirroring the CIDR allowlist) or by an explicit CIDR. A
+// block-listed ASN is always blocked, before the combined country ranges.
+// An unparseable IP (e.g. the web dashboard's own connections) is never
+// blocked.
 func (b *Blocker) Blocked(clientIP string) bool {
 	ip := net.ParseIP(clientIP)
 	if ip == nil {
@@ -133,10 +152,16 @@ func (b *Blocker) Blocked(clientIP string) bool {
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	if b.asnAllow != nil && b.asnAllow.Contains(ip) {
+		return false
+	}
 	for _, n := range b.allowlist {
 		if n.Contains(ip) {
 			return false
 		}
+	}
+	if b.asnBlock != nil && b.asnBlock.Contains(ip) {
+		return true
 	}
 	return b.combined.Contains(ip)
 }
@@ -167,9 +192,10 @@ type CountryStatus struct {
 // downloaded copy on disk, so a restart with no connectivity still enforces
 // the last known data.
 type Manager struct {
-	dir     string
-	baseURL string
-	client  *http.Client
+	dir        string
+	baseURL    string
+	asnBaseURL string
+	client     *http.Client
 
 	mu     sync.Mutex
 	status map[string]CountryStatus
@@ -180,17 +206,30 @@ type Manager struct {
 }
 
 // NewManager returns a manager that caches country data under dir. An empty
-// baseURL selects the ipverse/rir-ip default.
+// baseURL selects the ipverse/rir-ip default; the ASN dataset defaults to
+// iptoasn.com (see SetASNBaseURL).
 func NewManager(dir, baseURL string) *Manager {
 	if baseURL == "" {
 		baseURL = DefaultBaseURL
 	}
 	return &Manager{
-		dir:     dir,
-		baseURL: strings.TrimSuffix(baseURL, "/"),
-		client:  &http.Client{Timeout: 60 * time.Second},
-		status:  map[string]CountryStatus{},
+		dir:        dir,
+		baseURL:    strings.TrimSuffix(baseURL, "/"),
+		asnBaseURL: DefaultASNBaseURL,
+		client:     &http.Client{Timeout: 60 * time.Second},
+		status:     map[string]CountryStatus{},
 	}
+}
+
+// SetASNBaseURL overrides where the ip2asn dataset is fetched from; empty
+// keeps the iptoasn.com default. Like baseURL it is read once at boot —
+// call it before the first Refresh, and changing it at runtime requires a
+// restart.
+func (m *Manager) SetASNBaseURL(u string) {
+	if u == "" {
+		return
+	}
+	m.asnBaseURL = strings.TrimSuffix(u, "/")
 }
 
 // Refresh (re)downloads data for the given countries and returns a Blocker
@@ -330,4 +369,123 @@ func (m *Manager) persist(path string, content []byte) error {
 	//nolint:gosec // G703: path is built only from validated 2-letter country
 	// codes (see fetchCountry), joined under m.dir.
 	return os.WriteFile(path, content, 0o600)
+}
+
+// RefreshASN downloads the IP→ASN dataset (iptoasn.com by default — the
+// same free, no-key, download-and-cache model as the country lists) and
+// returns two tables pruned to exactly the configured ASNs: the ranges of
+// the allow-listed ASNs and of the block-listed ASNs. When neither list is
+// configured both are nil and nothing is fetched. The pruned ranges are
+// also persisted as CIDR lists (asn-allowed.txt / asn-blocked.txt) under
+// the data dir so buildGeo's firewall pass can exempt allowed ISPs and
+// drop blocked ones at the packet level, mirroring the country files. A
+// download failure falls back to the last cached copy, failing only when
+// there is none.
+func (m *Manager) RefreshASN(ctx context.Context, allowASNs, blockASNs []string) (allow, block *ASNTable, err error) {
+	// Serialised like Refresh: boot, the config-save rebuild and the
+	// auto-refresh goroutine can overlap, and concurrent writes to the same
+	// cache files must not interleave.
+	m.refreshMu.Lock()
+	defer m.refreshMu.Unlock()
+	allowSet, blockSet := map[uint32]bool{}, map[uint32]bool{}
+	for _, s := range allowASNs {
+		if n, ok := ParseASN(s); ok {
+			allowSet[n] = true
+		}
+	}
+	for _, s := range blockASNs {
+		if n, ok := ParseASN(s); ok {
+			blockSet[n] = true
+		}
+	}
+	if len(allowSet) == 0 && len(blockSet) == 0 {
+		// Clear any firewall files left over from an earlier configuration
+		// so a removed ASN list stops exempting/blocking at the packet
+		// level, not just at DNS.
+		_ = m.persistASNCIDRs(nil, nil)
+		return nil, nil, nil
+	}
+	v4, err := m.fetchASNFile(ctx, m.asnBaseURL+"/"+asnV4File, filepath.Join(m.dir, asnV4File))
+	if err != nil {
+		return nil, nil, fmt.Errorf("asn v4: %w", err)
+	}
+	v6, err := m.fetchASNFile(ctx, m.asnBaseURL+"/"+asnV6File, filepath.Join(m.dir, asnV6File))
+	if err != nil {
+		return nil, nil, fmt.Errorf("asn v6: %w", err)
+	}
+	allow, block, err = LoadASNTables(v4, v6, allowSet, blockSet)
+	if err != nil {
+		return nil, nil, err
+	}
+	// The firewall files are best-effort, like the country-list persist: a
+	// write failure leaves the DNS-level ASN rules fully enforced, and the
+	// firewall pass simply reads nothing.
+	_ = m.persistASNCIDRs(allow, block)
+	return allow, block, nil
+}
+
+// persistASNCIDRs writes the pruned allow/block ASN ranges as CIDR lists
+// the firewall can consume; a nil table removes its file so a list removed
+// from the config stops being enforced at the packet level.
+func (m *Manager) persistASNCIDRs(allow, block *ASNTable) error {
+	if m.dir == "" {
+		return nil
+	}
+	if err := m.persistASNSide(allow, "asn-allowed.txt"); err != nil {
+		return err
+	}
+	return m.persistASNSide(block, "asn-blocked.txt")
+}
+
+func (m *Manager) persistASNSide(t *ASNTable, name string) error {
+	path := filepath.Join(m.dir, name)
+	if t == nil {
+		_ = os.Remove(path) // stale file from an earlier configuration
+		return nil
+	}
+	return m.persist(path, []byte(strings.Join(t.CIDRs(), "\n")+"\n"))
+}
+
+// fetchASNFile returns url's content — downloading it like the country
+// lists, or falling back to the cached copy on failure — decompressed if it
+// carries the gzip magic (the ip2asn files ship gzipped). The decompressed
+// form is persisted, so a later cache load skips the decompress step.
+// file:// sources are supported like the country lists.
+func (m *Manager) fetchASNFile(ctx context.Context, url, cachePath string) ([]byte, error) {
+	var content []byte
+	var err error
+	if after, ok := strings.CutPrefix(url, "file://"); ok {
+		content, err = os.ReadFile(after)
+	} else {
+		content, err = m.download(ctx, url)
+		if err != nil {
+			if cached, cerr := os.ReadFile(cachePath); cerr == nil {
+				content, err = cached, nil
+			}
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	content, err = gunzipIfNeeded(content)
+	if err != nil {
+		return nil, err
+	}
+	_ = m.persist(cachePath, content)
+	return content, nil
+}
+
+// gunzipIfNeeded returns content unchanged when it is not gzip, otherwise
+// decompresses it.
+func gunzipIfNeeded(content []byte) ([]byte, error) {
+	if len(content) < 2 || content[0] != 0x1f || content[1] != 0x8b {
+		return content, nil
+	}
+	r, err := gzip.NewReader(bytes.NewReader(content))
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	// The uncompressed v4 dataset is ~150 MB; the cap is generous slack.
+	return io.ReadAll(io.LimitReader(r, 512<<20))
 }

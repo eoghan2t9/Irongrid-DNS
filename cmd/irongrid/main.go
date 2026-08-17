@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"flag"
 	"fmt"
 	"io/fs"
@@ -392,17 +393,18 @@ func main() {
 	// same time, but the firewall Manager serialises its own Apply/Clear.
 	geoDir := filepath.Join(*dataDir, "geo")
 	geoMgr := geoip.NewManager(geoDir, cfg.GeoBlock.BaseURL)
+	geoMgr.SetASNBaseURL(cfg.GeoBlock.ASNBaseURL)
 	fwMgr := firewall.New()
 	apiHandler.Geo = geoMgr
 	apiHandler.Firewall = fwMgr
 	buildGeo := func(g config.GeoBlockConfig) error {
-		// A silent no-op here would be confusing: honeypots/IPs are useless
-		// unless the feature is enabled, so say so loudly (boot + every
-		// config save / refresh that hits this branch).
-		if !g.Enabled && (len(g.IPs) > 0 || len(g.Honeypots) > 0) {
-			slog.Warn("honeypot domains / blocked IPs are configured but geo_block.enabled is false — nothing is being enforced")
+		// A silent no-op here would be confusing: honeypots/IPs/ASN rules
+		// are useless unless the feature is enabled, so say so loudly (boot
+		// + every config save / refresh that hits this branch).
+		if !g.Enabled && (len(g.IPs) > 0 || len(g.Honeypots) > 0 || len(g.AllowASNs) > 0 || len(g.BlockASNs) > 0) {
+			slog.Warn("honeypot domains / blocked IPs / ASN rules are configured but geo_block.enabled is false — nothing is being enforced")
 		}
-		if !g.Enabled || (len(g.Countries) == 0 && len(g.IPs) == 0 && len(g.Honeypots) == 0) {
+		if !g.Enabled || (len(g.Countries) == 0 && len(g.IPs) == 0 && len(g.Honeypots) == 0 && len(g.AllowASNs) == 0 && len(g.BlockASNs) == 0) {
 			handler.SetGeo(nil)
 			handler.SetIPBanner(nil)
 			if err := fwMgr.Clear(); err != nil {
@@ -410,11 +412,23 @@ func main() {
 			}
 			return nil
 		}
+		// ASN allow/block tables: the ip2asn dataset (iptoasn.com by
+		// default), pruned to the configured ASNs and cached under the geo
+		// dir. RefreshASN also persists asn-allowed.txt / asn-blocked.txt
+		// so the firewall pass below exempts unblocked ISPs and drops
+		// blocked ones at the packet level. A failure degrades: the ASN
+		// rules are skipped (with a warning) while country/IP blocking
+		// keeps working — same spirit as the country data fallback.
+		allowASN, blockASN, asnErr := geoMgr.RefreshASN(ctx, g.AllowASNs, g.BlockASNs)
+		if asnErr != nil {
+			slog.Warn("ASN data load failed — ASN allow/block rules not enforced", "error", asnErr)
+		}
 		// Client-IP banner: configured block IPs/CIDRs plus honeypot
 		// auto-blocks (loaded from a persisted file so they survive
 		// restarts/reloads). A honeypot hit pushes the client straight into
 		// the host firewall's drop set via OnBlock.
 		banner := geoip.NewBanner(filepath.Join(geoDir, "blocked-ips.txt"), g.Allowlist, g.IPs, g.Honeypots)
+		banner.SetASNs(allowASN, blockASN)
 		handler.SetIPBanner(banner)
 		// Opt-in: let plain-UDP honeypot hits auto-block their source too
 		// (off by default — spoofed UDP must not be able to block victims).
@@ -429,6 +443,7 @@ func main() {
 			}
 		}
 		b, err := geoMgr.Refresh(ctx, g.Countries, g.Allowlist)
+		b.SetASNs(allowASN, blockASN)
 		handler.SetGeo(b)
 		// Packet-level blocking: rebuild the firewall rules from the freshly
 		// persisted CIDR lists plus the banner's full block set (configured
@@ -441,7 +456,9 @@ func main() {
 		} else {
 			slog.Info("dropping inbound traffic from blocked countries", "backend", backend)
 		}
-		return err
+		// Surface the ASN data failure alongside the country one so a
+		// refresh that partially failed is reported as such.
+		return errors.Join(err, asnErr)
 	}
 	if err := buildGeo(cfg.GeoBlock); err != nil {
 		slog.Warn("initial geo load partially failed, using cached data", "error", err)
@@ -478,7 +495,7 @@ func main() {
 			// picked up promptly instead of on the old — possibly never —
 			// cadence.
 			wait := time.Hour
-			if g.Enabled && len(g.Countries) > 0 && g.AutoUpdate > 0 {
+			if g.Enabled && (len(g.Countries) > 0 || len(g.AllowASNs) > 0 || len(g.BlockASNs) > 0) && g.AutoUpdate > 0 {
 				wait = g.AutoUpdate
 			}
 			select {
@@ -494,7 +511,7 @@ func main() {
 			cfgMu.Lock()
 			g = cfg.GeoBlock
 			cfgMu.Unlock()
-			if g.Enabled && len(g.Countries) > 0 && g.AutoUpdate > 0 {
+			if g.Enabled && (len(g.Countries) > 0 || len(g.AllowASNs) > 0 || len(g.BlockASNs) > 0) && g.AutoUpdate > 0 {
 				if err := buildGeo(g); err != nil {
 					slog.Error("geo auto-refresh failed", "error", err)
 				}
