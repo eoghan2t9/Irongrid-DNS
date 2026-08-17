@@ -6,7 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -68,13 +68,24 @@ func main() {
 			DataDir:       *instData,
 			WithDragonfly: *instDfly,
 		}); err != nil {
-			log.Fatalf("install: %v", err)
+			slog.Error("install failed", "error", err)
+			os.Exit(1)
 		}
 		return
 	}
 
-	log.SetFlags(log.LstdFlags | log.LUTC)
-	log.Printf("%s", version.String())
+	// UTC timestamps, matching the previous log.LUTC flag — the box running
+	// this may be in any timezone, but log lines should compare cleanly
+	// across a multi-instance deployment.
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				a.Value = slog.StringValue(a.Value.Time().UTC().Format(time.RFC3339))
+			}
+			return a
+		},
+	})))
+	slog.Info(version.String())
 
 	// ---- runtime auto-tuning: match GOMAXPROCS/GOGC/GOMEMLIMIT to whatever
 	// hardware or container limits this process actually has, and keep
@@ -91,11 +102,12 @@ func main() {
 	// ---- config ----
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		slog.Error("config load failed", "error", err)
+		os.Exit(1)
 	}
 	if cfg.Web.Password == "" {
 		cfg.Web.Password = "irongrid"
-		log.Printf("[web] using default password %q — change it in %s", cfg.Web.Password, *configPath)
+		slog.Warn("using default password — change it", "password", cfg.Web.Password, "config_path", *configPath)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -104,11 +116,12 @@ func main() {
 	// ---- Dragonfly cache (hard requirement) ----
 	dfly, err := cache.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Cache.TTL, cfg.Cache.NegativeTTL, cfg.Cache.ServeStale, resolveL1Entries(cfg.Cache.L1Entries))
 	if err != nil {
-		log.Fatalf("cache: %v\n\nDragonfly is a hard requirement — start it (see docker-compose.yml) and retry.", err)
+		slog.Error("cache init failed — Dragonfly is a hard requirement, start it (see docker-compose.yml) and retry", "error", err)
+		os.Exit(1)
 	}
 	// Note: closes the *current* cache, which reload may have swapped.
 	defer func() { _ = dfly.Close() }()
-	log.Printf("[cache] Dragonfly caching enabled (positive TTL %s, negative TTL %s)", cfg.Cache.TTL, cfg.Cache.NegativeTTL)
+	slog.Info("Dragonfly caching enabled", "positive_ttl", cfg.Cache.TTL, "negative_ttl", cfg.Cache.NegativeTTL)
 
 	// ---- authoritative root hints for recursive upstreams ----
 	// recursive:// upstreams walk referrals from the root servers; seed them
@@ -136,7 +149,7 @@ func main() {
 		if st.LastError != "" {
 			detail = " — " + st.LastError
 		}
-		log.Printf("[recursive] root hints: %s, %d addresses, PGP-verified %v%s", st.Source, st.Addresses, st.Verified, detail)
+		slog.Info("root hints loaded", "source", st.Source, "addresses", st.Addresses, "pgp_verified", st.Verified, "detail", detail)
 		hintsMgr.Start(ctx)
 	}
 
@@ -150,10 +163,11 @@ func main() {
 	for _, spec := range cfg.Upstreams {
 		up, err := upstream.Parse(spec)
 		if err != nil {
-			log.Fatalf("upstream %q: %v", spec, err)
+			slog.Error("invalid upstream", "spec", spec, "error", err)
+			os.Exit(1)
 		}
 		upstreams = append(upstreams, up)
-		log.Printf("[upstream] %s -> %s", up.Name(), up.Address())
+		slog.Info("upstream configured", "name", up.Name(), "address", up.Address())
 	}
 
 	// ---- filter engine + blocklists ----
@@ -173,7 +187,7 @@ func main() {
 	lists.StartRefresh(ctx)
 
 	if err := lists.FetchAll(ctx); err != nil {
-		log.Printf("[lists] initial fetch partially failed: %v (using cached content)", err)
+		slog.Warn("initial blocklist fetch partially failed, using cached content", "error", err)
 	} else {
 		lists.ReloadAll()
 	}
@@ -181,7 +195,8 @@ func main() {
 	// ---- query log (Dragonfly stream, same tier as the DNS cache) ----
 	ql, err := querylog.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Log.RetentionDays, cfg.Log.BatchSize)
 	if err != nil {
-		log.Fatalf("query log: %v", err)
+		slog.Error("query log init failed", "error", err)
+		os.Exit(1)
 	}
 	defer ql.Close()
 	ql.StartPruner(ctx)
@@ -191,7 +206,8 @@ func main() {
 		cfg.TLS.CertFile, cfg.TLS.KeyFile,
 		cfg.TLS.CertDir, cfg.TLS.SelfSignedHosts)
 	if err != nil {
-		log.Fatalf("tls: %v", err)
+		slog.Error("tls init failed", "error", err)
+		os.Exit(1)
 	}
 
 	// ---- DNS handler + listeners ----
@@ -244,9 +260,9 @@ func main() {
 	dhcpSrv.SetConfig(buildDHCPRuntime(cfg.DHCP))
 	if dhcpSrv.Enabled() {
 		if err := dhcpSrv.Start(); err != nil {
-			log.Printf("[dhcp] failed to start (feature disabled): %v", err)
+			slog.Warn("dhcp failed to start, feature disabled", "error", err)
 		} else {
-			log.Printf("[dhcp] server enabled: %s", dhcpSummary(cfg.DHCP))
+			slog.Info("dhcp server enabled", "summary", dhcpSummary(cfg.DHCP))
 		}
 	}
 	handler.DHCPHosts = dhcpSrv
@@ -261,7 +277,8 @@ func main() {
 	// reload below, so a config change never needs a restart.
 	routeUps, err := dnsserver.ParseRoutes(routeSpecs(cfg.UpstreamRoutes))
 	if err != nil {
-		log.Fatalf("upstream routes: %v", err)
+		slog.Error("invalid upstream routes", "error", err)
+		os.Exit(1)
 	}
 	handler.SetUpstreamRoutes(routeUps)
 	// Rebuild per-client-group engines whenever blocklist content changes
@@ -296,7 +313,7 @@ func main() {
 		return cfg.Server.ListenDoH
 	}
 	if webSharesDoH() {
-		log.Printf("[web] dashboard and DoH share %s — serving /dns-query on the dashboard HTTPS listener", cfg.Server.WebListen)
+		slog.Info("dashboard and DoH sharing listener, serving /dns-query on the dashboard HTTPS listener", "addr", cfg.Server.WebListen)
 	}
 	results, err := dnsMgr.Start(
 		cfg.Server.ListenUDP, cfg.Server.ListenTCP,
@@ -304,13 +321,14 @@ func main() {
 		cfg.Server.DoHPath,
 	)
 	if err != nil {
-		log.Fatalf("dns listeners: %v", err)
+		slog.Error("dns listeners failed to start", "error", err)
+		os.Exit(1)
 	}
 	// Report listener bind errors (e.g. port 53 already in use).
 	go func() {
 		for res := range results {
 			if res.Err != nil {
-				log.Printf("[dns] listener %s on %s failed: %v", res.Proto, res.Addr, res.Err)
+				slog.Error("dns listener failed", "proto", res.Proto, "addr", res.Addr, "error", res.Err)
 			}
 		}
 	}()
@@ -323,7 +341,7 @@ func main() {
 	if web.HasFrontend() {
 		webFS = web.FS()
 	} else {
-		log.Printf("[web] frontend not embedded — run `make web build` for the dashboard")
+		slog.Warn("frontend not embedded — run `make web build` for the dashboard")
 	}
 
 	saveConfig := func() error { return cfg.Save(*configPath) }
@@ -382,13 +400,13 @@ func main() {
 		// unless the feature is enabled, so say so loudly (boot + every
 		// config save / refresh that hits this branch).
 		if !g.Enabled && (len(g.IPs) > 0 || len(g.Honeypots) > 0) {
-			log.Printf("[geo] WARNING: honeypot domains / blocked IPs are configured but geo_block.enabled is false — nothing is being enforced")
+			slog.Warn("honeypot domains / blocked IPs are configured but geo_block.enabled is false — nothing is being enforced")
 		}
 		if !g.Enabled || (len(g.Countries) == 0 && len(g.IPs) == 0 && len(g.Honeypots) == 0) {
 			handler.SetGeo(nil)
 			handler.SetIPBanner(nil)
 			if err := fwMgr.Clear(); err != nil {
-				log.Printf("[firewall] clear: %v", err)
+				slog.Error("firewall clear failed", "error", err)
 			}
 			return nil
 		}
@@ -407,7 +425,7 @@ func main() {
 		handler.SetHoneypotUDPBlock(g.HoneypotUDPBlock)
 		banner.OnBlock = func(ip string) {
 			if err := fwMgr.AddIP(ip); err != nil {
-				log.Printf("[firewall] add blocked client %s: %v", ip, err)
+				slog.Error("firewall add blocked client failed", "ip", ip, "error", err)
 			}
 		}
 		b, err := geoMgr.Refresh(ctx, g.Countries, g.Allowlist)
@@ -419,14 +437,14 @@ func main() {
 		// blocking in effect — buildGeo's own error (data fetch) is what
 		// the caller surfaces.
 		if backend, ferr := fwMgr.Apply(g.Countries, g.Allowlist, banner.List(), geoDir); ferr != nil {
-			log.Printf("[firewall] country rules not applied (%s): %v", backend, ferr)
+			slog.Error("firewall country rules not applied", "backend", backend, "error", ferr)
 		} else {
-			log.Printf("[firewall] dropping inbound traffic from blocked countries via %s", backend)
+			slog.Info("dropping inbound traffic from blocked countries", "backend", backend)
 		}
 		return err
 	}
 	if err := buildGeo(cfg.GeoBlock); err != nil {
-		log.Printf("[geo] initial load partially failed (using cached data): %v", err)
+		slog.Warn("initial geo load partially failed, using cached data", "error", err)
 	}
 	// The config-save and refresh-button paths must never stall on a
 	// country-data download (multi-country fetches can take seconds), so
@@ -435,7 +453,7 @@ func main() {
 	apiHandler.RebuildGeo = func(g config.GeoBlockConfig) error {
 		go func() {
 			if err := buildGeo(g); err != nil {
-				log.Printf("[geo] background refresh: %v", err)
+				slog.Error("geo background refresh failed", "error", err)
 			}
 		}()
 		return nil
@@ -478,7 +496,7 @@ func main() {
 			cfgMu.Unlock()
 			if g.Enabled && len(g.Countries) > 0 && g.AutoUpdate > 0 {
 				if err := buildGeo(g); err != nil {
-					log.Printf("[geo] auto-refresh: %v", err)
+					slog.Error("geo auto-refresh failed", "error", err)
 				}
 			}
 		}
@@ -519,7 +537,7 @@ func main() {
 			time.Duration(cfg.TLS.ACME.DNS01.PropagationWait)*time.Second,
 		)
 		if err != nil {
-			log.Printf("[acme] disabled: %v", err)
+			slog.Warn("acme disabled", "error", err)
 			return
 		}
 		// When web_redirect listens on the same port as the http-01 challenge,
@@ -590,7 +608,7 @@ func main() {
 			// secures DoT/DoH/DoQ.
 			wtls, err := cert.LoadOrGenerate(cfg.TLS.CertFile, cfg.TLS.KeyFile, cfg.TLS.CertDir, cfg.TLS.SelfSignedHosts)
 			if err != nil {
-				log.Printf("[web] cannot enable HTTPS: %v (falling back to plain HTTP)", err)
+				slog.Error("cannot enable HTTPS, falling back to plain HTTP", "error", err)
 				go func() { _ = srv.ListenAndServe() }()
 				return
 			}
@@ -600,7 +618,7 @@ func main() {
 				wtls = wtls.Clone()
 				wtls.NextProtos = []string{"h2", "http/1.1"}
 				if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
-					log.Printf("[web] http2 setup: %v", err)
+					slog.Error("http2 setup failed", "error", err)
 				}
 			}
 			go func() {
@@ -609,20 +627,20 @@ func main() {
 				// listeners (accepted connections inherit the settings).
 				ln, err := tuning.ListenConfig().Listen(context.Background(), "tcp", srv.Addr)
 				if err != nil {
-					log.Printf("[web] server error: %v", err)
+					slog.Error("web server error", "error", err)
 					return
 				}
-				log.Printf("[web] dashboard + API on https://%s (HTTPS)", srv.Addr)
+				slog.Info("dashboard + API listening", "addr", srv.Addr, "scheme", "https")
 				if err := srv.Serve(tls.NewListener(ln, wtls)); err != nil && err != http.ErrServerClosed {
-					log.Printf("[web] server error: %v", err)
+					slog.Error("web server error", "error", err)
 				}
 			}()
 			return
 		}
 		go func() {
-			log.Printf("[web] dashboard + API on http://%s", srv.Addr)
+			slog.Info("dashboard + API listening", "addr", srv.Addr, "scheme", "http")
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("[web] server error: %v", err)
+				slog.Error("web server error", "error", err)
 			}
 		}()
 	}
@@ -673,9 +691,9 @@ func main() {
 		redirectSrv = ns
 		go func() {
 			time.Sleep(200 * time.Millisecond) // let an old listener release the port
-			log.Printf("[web] plain HTTP on %s redirecting to https://%s", addr, host)
+			slog.Info("plain HTTP redirect listening", "addr", addr, "redirect_host", host)
 			if err := ns.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("[web] redirect listener on %s stopped: %v", addr, err)
+				slog.Error("redirect listener stopped", "addr", addr, "error", err)
 			}
 		}()
 	}
@@ -696,7 +714,7 @@ func main() {
 		); err != nil {
 			return fmt.Errorf("dns listeners: %w", err)
 		}
-		log.Printf("[tls] certificate reloaded and listeners rebound")
+		slog.Info("certificate reloaded and listeners rebound")
 		return nil
 	}
 
@@ -740,7 +758,7 @@ func main() {
 	if m := acmeMgr.Load(); m != nil {
 		m.OnIssued = func() {
 			if err := apiHandler.ReloadTLS(); err != nil {
-				log.Printf("[acme] reload after issuance: %v", err)
+				slog.Error("acme reload after issuance failed", "error", err)
 			}
 		}
 	}
@@ -805,7 +823,7 @@ func main() {
 				hintsMgr.Start(ctx)
 				apiHandler.Hints = hintsMgr
 				st := hintsMgr.Status()
-				log.Printf("[recursive] root hints manager started on config reload (%s, %d addresses, PGP-verified %v)", st.Source, st.Addresses, st.Verified)
+				slog.Info("root hints manager started on config reload", "source", st.Source, "addresses", st.Addresses, "pgp_verified", st.Verified)
 			}
 		}
 
@@ -866,7 +884,7 @@ func main() {
 					err = dhcpSrv.Start()
 				}
 				if err != nil {
-					log.Printf("[dhcp] listener start failed: %v", err)
+					slog.Error("dhcp listener start failed", "error", err)
 				}
 			} else {
 				dhcpSrv.Stop()
@@ -934,7 +952,7 @@ func main() {
 			if m := acmeMgr.Load(); m != nil && m.OnIssued == nil {
 				m.OnIssued = func() {
 					if err := apiHandler.ReloadTLS(); err != nil {
-						log.Printf("[acme] reload after issuance: %v", err)
+						slog.Error("acme reload after issuance failed", "error", err)
 					}
 				}
 			}
@@ -944,7 +962,7 @@ func main() {
 		// Re-evaluate the HTTP->HTTPS redirect listener on every reload: it
 		// starts/stops/keeps itself based on the new web_tls/web_redirect config.
 		startRedirect()
-		log.Printf("[config] reload applied: listeners, cache, TLS, upstreams")
+		slog.Info("config reload applied: listeners, cache, TLS, upstreams")
 		return nil
 	}
 
@@ -957,15 +975,15 @@ func main() {
 			mode = tunnel.ModeQuick
 		}
 		if err := tunnelMgr.Start(mode, cfg.Tunnel.Token, cfg.Tunnel.ConfigFile, cfg.Tunnel.QuickTunnelURL, cfg.Tunnel.Hostname); err != nil {
-			log.Printf("[tunnel] failed to start: %v", err)
+			slog.Error("tunnel failed to start", "error", err)
 		} else {
-			log.Printf("[tunnel] started in %s mode", mode)
+			slog.Info("tunnel started", "mode", mode)
 		}
 	}
 
 	// ---- wait for shutdown ----
 	<-ctx.Done()
-	log.Printf("shutting down...")
+	slog.Info("shutting down...")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	dnsMgr.Shutdown(shutdownCtx)
@@ -975,7 +993,7 @@ func main() {
 	webMu.Unlock()
 	_ = currentWeb.Shutdown(shutdownCtx)
 	ql.Close()
-	log.Printf("bye")
+	slog.Info("bye")
 }
 
 // httpsRedirect returns a handler that 301s a plain-HTTP request to the same
@@ -1115,7 +1133,7 @@ func hostLANAddresses(subnet, ipv6net *net.IPNet, iface string) (v4, v6 net.IP, 
 	if iface != "" {
 		i, err := net.InterfaceByName(iface)
 		if err != nil {
-			log.Printf("[dhcp] interface %q not found: %v", iface, err)
+			slog.Error("dhcp interface not found", "interface", iface, "error", err)
 			return nil, nil, nil
 		}
 		ifaces = append(ifaces, *i)

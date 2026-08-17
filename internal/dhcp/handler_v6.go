@@ -1,7 +1,7 @@
 package dhcp
 
 import (
-	"log"
+	"log/slog"
 	"net"
 	"strings"
 	"time"
@@ -92,7 +92,7 @@ func (s *Server) v6Request(conn net.PacketConn, peer net.Addr, m *dhcpv6.Message
 		s.mu.RUnlock()
 	}
 	if requested == nil || !s.addrInPool(requested, true) || s.inUse(requested, key) {
-		log.Printf("[dhcp] v6 %s request for unavailable %s", clientHex, requested)
+		slog.Warn("dhcp v6 request for unavailable address", "client", clientHex, "requested", requested)
 		s.v6NoAddrs(conn, peer, m, clientHex)
 		return
 	}
@@ -121,7 +121,7 @@ func (s *Server) v6Release(m *dhcpv6.Message, clientHex string) {
 		ip = addrs[0].IPv6Addr
 	}
 	if s.releaseLease(key, ip) {
-		log.Printf("[dhcp] v6 %s released %s", clientHex, ip)
+		slog.Info("dhcp v6 lease released", "client", clientHex, "ip", ip)
 	}
 }
 
@@ -149,7 +149,7 @@ func (s *Server) v6Confirm(conn net.PacketConn, peer net.Addr, m *dhcpv6.Message
 func (s *Server) v6Decline(m *dhcpv6.Message, clientHex string) {
 	for _, a := range iaAddrs6(m) {
 		s.declineLease(a.IPv6Addr)
-		log.Printf("[dhcp] v6 %s declined %s — withholding the address", clientHex, a.IPv6Addr)
+		slog.Warn("dhcp v6 address declined, withholding it", "client", clientHex, "ip", a.IPv6Addr)
 	}
 }
 
@@ -268,7 +268,7 @@ func (s *Server) sendV6(conn net.PacketConn, peer net.Addr, data []byte) {
 		dst = &net.UDPAddr{IP: ip, Port: 547}
 	}
 	if _, err := conn.WriteTo(data, dst); err != nil {
-		log.Printf("[dhcp] v6 reply to %s: %v", dst, err)
+		slog.Error("dhcp v6 reply failed", "dst", dst, "error", err)
 	}
 }
 

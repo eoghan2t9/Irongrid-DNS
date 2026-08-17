@@ -3,7 +3,7 @@
 package tuning
 
 import (
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -59,11 +59,11 @@ func applySysctls() {
 		// /proc/sys file, which the kernel never reads.
 		if err := os.WriteFile(path, []byte(strconv.FormatUint(t.value, 10)), 0o600); err != nil {
 			recordSysctl(SysctlState{Key: t.key, Value: cur, Target: t.value, Note: "not applied — needs root / CAP_NET_ADMIN (or set it via docker --sysctl / compose sysctls)"})
-			log.Printf("[tune] sysctl %s: %v (running unprivileged? set it with docker --sysctl / compose sysctls, or as root)", t.key, err)
+			slog.Warn("sysctl not applied — running unprivileged? set it with docker --sysctl / compose sysctls, or as root", "key", t.key, "error", err)
 			continue
 		}
 		recordSysctl(SysctlState{Key: t.key, Value: t.value, Target: t.value, Note: "raised at boot"})
-		log.Printf("[tune] sysctl %s raised: %d -> %d", t.key, cur, t.value)
+		slog.Info("sysctl raised", "key", t.key, "from", cur, "to", t.value)
 	}
 }
 

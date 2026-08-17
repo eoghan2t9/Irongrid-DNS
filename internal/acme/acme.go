@@ -14,7 +14,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -170,7 +170,7 @@ func (m *Manager) Serve() error {
 	}
 	go func() {
 		if err := m.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			log.Printf("[acme] challenge server on %s stopped: %v", addr, err)
+			slog.Error("acme challenge server stopped", "addr", addr, "error", err)
 		}
 	}()
 	m.Status.Running = true
@@ -315,7 +315,7 @@ func (m *Manager) Issue(ctx context.Context) error {
 			}
 			defer func() {
 				if err := m.dns.CleanUp(ctx, domain, val); err != nil {
-					log.Printf("[acme] cleanup of %s TXT record: %v", domain, err)
+					slog.Error("acme TXT record cleanup failed", "domain", domain, "error", err)
 				}
 			}()
 			if _, err := client.Accept(ctx, chal); err != nil {
@@ -385,7 +385,7 @@ func (m *Manager) Issue(ctx context.Context) error {
 	next := issued.Add(m.renewIn)
 	m.Status.NextRenewal = &next
 	m.mu.Unlock()
-	log.Printf("[acme] certificate issued for %v -> %s", m.domains, m.dir)
+	slog.Info("acme certificate issued", "domains", m.domains, "dir", m.dir)
 	return nil
 }
 
@@ -447,9 +447,9 @@ func (m *Manager) RunLoop(ctx context.Context) {
 		if !m.NeedsRenewal() {
 			return
 		}
-		log.Printf("[acme] certificate missing or expiring soon — issuing")
+		slog.Info("acme certificate missing or expiring soon — issuing")
 		if err := m.Issue(ctx); err != nil {
-			log.Printf("[acme] initial issuance failed: %v", err)
+			slog.Error("acme initial issuance failed", "error", err)
 			return
 		}
 		// Don't fire OnIssued if the manager was stopped while the issuance was
@@ -475,7 +475,7 @@ func (m *Manager) RunLoop(ctx context.Context) {
 				continue
 			}
 			if err := m.Issue(ctx); err != nil {
-				log.Printf("[acme] renewal failed: %v", err)
+				slog.Error("acme renewal failed", "error", err)
 				continue
 			}
 			// Don't fire OnIssued if the manager was stopped while the issuance

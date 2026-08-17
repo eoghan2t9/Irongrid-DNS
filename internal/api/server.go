@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
+	"log/slog"
 	"mime"
 	"net/http"
 	"net/http/pprof"
@@ -267,7 +267,7 @@ func logRequests(next http.Handler) http.Handler {
 			// r.URL.Path is decoded, so a request to /api/%0A… would inject a
 			// newline into the log — strip control characters first (G706).
 			//nolint:gosec // G706: the path is sanitized by sanitizeLogString.
-			log.Printf("[api] %s %s (%s)", r.Method, sanitizeLogString(r.URL.Path), time.Since(start).Round(time.Millisecond))
+			slog.Info("api request", "method", r.Method, "path", sanitizeLogString(r.URL.Path), "duration", time.Since(start).Round(time.Millisecond))
 		}
 	})
 }
@@ -419,6 +419,6 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("[api] encode error: %v", err)
+		slog.Error("api json encode failed", "error", err)
 	}
 }

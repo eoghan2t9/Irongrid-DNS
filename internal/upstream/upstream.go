@@ -9,7 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -232,7 +232,7 @@ func Parse(spec string) (*Upstream, error) {
 		// here), and DoH over HTTP/1.1 works fine — so log and continue
 		// instead of failing the upstream over a non-fatal limitation.
 		if cErr := http2.ConfigureTransport(transport); cErr != nil {
-			log.Printf("[upstream] %s: HTTP/2 unavailable (%v) — using HTTP/1.1", u.Host, cErr)
+			slog.Warn("upstream HTTP/2 unavailable, using HTTP/1.1", "host", u.Host, "error", cErr)
 		}
 		u.client = &http.Client{Transport: transport, Timeout: 10 * time.Second}
 	}

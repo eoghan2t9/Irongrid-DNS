@@ -1,7 +1,7 @@
 package dhcp
 
 import (
-	"log"
+	"log/slog"
 	"net"
 	"strings"
 	"time"
@@ -84,12 +84,12 @@ func (s *Server) v4Discover(conn net.PacketConn, m *dhcpv4.DHCPv4) {
 	hostname := clientHostname4(m)
 	ip, _ := s.allocV4(m.ClientHWAddr, m.RequestedIPAddress(), hostname)
 	if ip == nil {
-		log.Printf("[dhcp] v4 pool exhausted for %s", m.ClientHWAddr)
+		slog.Warn("dhcp v4 pool exhausted", "mac", m.ClientHWAddr)
 		return
 	}
 	reply, err := s.v4Reply(m, dhcpv4.MessageTypeOffer, ip)
 	if err != nil {
-		log.Printf("[dhcp] v4 offer build: %v", err)
+		slog.Error("dhcp v4 offer build failed", "error", err)
 		return
 	}
 	s.sendV4(conn, m, reply.ToBytes())
@@ -138,7 +138,7 @@ func (s *Server) v4Request(conn net.PacketConn, m *dhcpv4.DHCPv4) {
 
 	reply, err := s.v4Reply(m, dhcpv4.MessageTypeAck, requested)
 	if err != nil {
-		log.Printf("[dhcp] v4 ack build: %v", err)
+		slog.Error("dhcp v4 ack build failed", "error", err)
 		return
 	}
 	s.sendV4(conn, m, reply.ToBytes())
@@ -161,7 +161,7 @@ func (s *Server) v4Release(m *dhcpv4.DHCPv4) {
 		return
 	}
 	if s.releaseLease(v4Key(m.ClientHWAddr), ip) {
-		log.Printf("[dhcp] v4 %s released %s", m.ClientHWAddr, ip)
+		slog.Info("dhcp v4 lease released", "mac", m.ClientHWAddr, "ip", ip)
 	}
 }
 
@@ -171,7 +171,7 @@ func (s *Server) v4Decline(m *dhcpv4.DHCPv4) {
 		ip = m.ClientIPAddr
 	}
 	s.declineLease(ip)
-	log.Printf("[dhcp] v4 %s declined %s — withholding the address", m.ClientHWAddr, ip)
+	slog.Warn("dhcp v4 address declined, withholding it", "mac", m.ClientHWAddr, "ip", ip)
 }
 
 func (s *Server) v4Inform(conn net.PacketConn, m *dhcpv4.DHCPv4) {
@@ -197,7 +197,7 @@ func (s *Server) sendV4(conn net.PacketConn, m *dhcpv4.DHCPv4, data []byte) {
 		dst, port = net.IPv4bcast, 68
 	}
 	if _, err := conn.WriteTo(data, &net.UDPAddr{IP: dst, Port: port}); err != nil {
-		log.Printf("[dhcp] v4 reply to %s: %v", dst, err)
+		slog.Error("dhcp v4 reply failed", "dst", dst, "error", err)
 	}
 }
 

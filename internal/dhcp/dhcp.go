@@ -11,7 +11,7 @@ package dhcp
 import (
 	"encoding/hex"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"path/filepath"
@@ -252,7 +252,7 @@ func (s *Server) Start() error {
 	if cfg.Subnet != nil {
 		v4srv, err := server4.NewServer(cfg.Interface, &net.UDPAddr{Port: 67}, s.handleV4)
 		if err != nil {
-			log.Printf("[dhcp] v4 listen on %q:67 failed: %v", cfg.Interface, err)
+			slog.Error("dhcp v4 listen failed", "interface", cfg.Interface, "port", 67, "error", err)
 			return err
 		}
 		s.mu.Lock()
@@ -260,16 +260,16 @@ func (s *Server) Start() error {
 		s.mu.Unlock()
 		go func() {
 			if err := v4srv.Serve(); err != nil {
-				log.Printf("[dhcp] v4 server stopped: %v", err)
+				slog.Error("dhcp v4 server stopped", "error", err)
 			}
 		}()
-		log.Printf("[dhcp] DHCPv4 on %q:67 serving %s (pool %s-%s)", cfg.Interface, cfg.Subnet, cfg.RangeStart, cfg.RangeEnd)
+		slog.Info("dhcp v4 serving", "interface", cfg.Interface, "port", 67, "subnet", cfg.Subnet, "range_start", cfg.RangeStart, "range_end", cfg.RangeEnd)
 	}
 
 	if cfg.IPv6 && cfg.IPv6Prefix != nil {
 		v6srv, err := server6.NewServer(cfg.Interface, &net.UDPAddr{Port: 547}, s.handleV6)
 		if err != nil {
-			log.Printf("[dhcp] v6 listen on %q:547 failed: %v", cfg.Interface, err)
+			slog.Error("dhcp v6 listen failed", "interface", cfg.Interface, "port", 547, "error", err)
 			return err
 		}
 		s.mu.Lock()
@@ -277,11 +277,11 @@ func (s *Server) Start() error {
 		s.mu.Unlock()
 		go func() {
 			if err := v6srv.Serve(); err != nil {
-				log.Printf("[dhcp] v6 server stopped: %v", err)
+				slog.Error("dhcp v6 server stopped", "error", err)
 			}
 		}()
 		_ = duid
-		log.Printf("[dhcp] DHCPv6 on %q:547 serving %s (pool %s-%s, DUID %s)", cfg.Interface, cfg.IPv6Prefix, cfg.IPv6Start, cfg.IPv6End, duid.String())
+		slog.Info("dhcp v6 serving", "interface", cfg.Interface, "port", 547, "prefix", cfg.IPv6Prefix, "range_start", cfg.IPv6Start, "range_end", cfg.IPv6End, "duid", duid.String())
 	}
 	return nil
 }
@@ -371,21 +371,21 @@ func (s *Server) persistNow() {
 	s.mu.Unlock()
 
 	if err := os.MkdirAll(s.persistDir, 0o755); err != nil {
-		log.Printf("[dhcp] lease persist mkdir: %v", err)
+		slog.Error("dhcp lease persist mkdir failed", "error", err)
 		return
 	}
 	data, err := json.Marshal(leases)
 	if err != nil {
-		log.Printf("[dhcp] lease persist encode: %v", err)
+		slog.Error("dhcp lease persist encode failed", "error", err)
 		return
 	}
 	tmp := filepath.Join(s.persistDir, "leases.json.tmp")
 	if err := os.WriteFile(tmp, data, 0o600); err != nil {
-		log.Printf("[dhcp] lease persist write: %v", err)
+		slog.Error("dhcp lease persist write failed", "error", err)
 		return
 	}
 	if err := os.Rename(tmp, filepath.Join(s.persistDir, "leases.json")); err != nil {
-		log.Printf("[dhcp] lease persist rename: %v", err)
+		slog.Error("dhcp lease persist rename failed", "error", err)
 	}
 }
 
@@ -398,7 +398,7 @@ func (s *Server) loadLocked() {
 	}
 	var saved []Lease
 	if err := json.Unmarshal(data, &saved); err != nil {
-		log.Printf("[dhcp] lease load: %v", err)
+		slog.Error("dhcp lease load failed", "error", err)
 		return
 	}
 	now := time.Now()
@@ -417,7 +417,7 @@ func (s *Server) loadLocked() {
 			s.byIP[l.IP] = &l
 		}
 	}
-	log.Printf("[dhcp] loaded %d lease(s) from disk", len(s.leases))
+	slog.Info("dhcp leases loaded from disk", "count", len(s.leases))
 }
 
 // staticForLocked reports whether a persisted static lease still matches a

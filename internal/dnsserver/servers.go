@@ -4,7 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"runtime"
 	"sync"
@@ -189,7 +189,7 @@ func NewManager(h *Handler, tlsConf *tls.Config) *Manager {
 // a hard failure; other listener types are logged).
 func (m *Manager) Start(udpAddr, tcpAddr, dotAddr, dohAddr, doh3Addr, doqAddr, dohPath string) (<-chan Listener, error) {
 	if m.tlsConf == nil {
-		log.Printf("[dns] warning: no TLS config; DoT/DoH/DoH3/DoQ listeners disabled")
+		slog.Warn("no TLS config; DoT/DoH/DoH3/DoQ listeners disabled")
 		dotAddr, dohAddr, doh3Addr, doqAddr = "", "", "", ""
 	}
 
@@ -251,7 +251,7 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 		if len(pcs) == 1 {
 			noun = "socket"
 		}
-		log.Printf("[dns] %s listener on %s (%d %s)", proto, addr, len(pcs), noun)
+		slog.Info("dns listener started", "proto", proto, "addr", addr, "sockets", len(pcs), "socket_noun", noun)
 		for _, pc := range pcs {
 			srv := newUDPServer(pc, handler, m.udpWorkerCount())
 			m.mu.Lock()
@@ -259,7 +259,7 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 			m.mu.Unlock()
 			go func() {
 				if err := srv.Serve(); err != nil {
-					log.Printf("[dns] %s listener on %s stopped: %v", proto, addr, err)
+					slog.Error("dns listener stopped", "proto", proto, "addr", addr, "error", err)
 					m.results <- Listener{Proto: proto, Addr: addr, Err: err}
 				}
 			}()
@@ -287,9 +287,9 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 	}
 	m.servers = append(m.servers, srv)
 	go func() {
-		log.Printf("[dns] %s listener on %s", proto, addr)
+		slog.Info("dns listener started", "proto", proto, "addr", addr)
 		if err := srv.ActivateAndServe(); err != nil {
-			log.Printf("[dns] %s listener on %s stopped: %v", proto, addr, err)
+			slog.Error("dns listener stopped", "proto", proto, "addr", addr, "error", err)
 			m.results <- Listener{Proto: proto, Addr: addr, Err: err}
 		}
 	}()
@@ -317,9 +317,9 @@ func (m *Manager) startDoT(addr string) {
 	}
 	m.servers = append(m.servers, srv)
 	go func() {
-		log.Printf("[dns] DoT listener on %s", addr)
+		slog.Info("DoT listener started", "addr", addr)
 		if err := srv.ActivateAndServe(); err != nil {
-			log.Printf("[dns] DoT listener on %s stopped: %v", addr, err)
+			slog.Error("DoT listener stopped", "addr", addr, "error", err)
 			m.results <- Listener{Proto: "dot", Addr: addr, Err: err}
 		}
 	}()
@@ -400,7 +400,7 @@ const maxExplicitUDPSockets = 64
 func udpSocketCountFor(cfg int) int {
 	if cfg > 0 {
 		if cfg > maxExplicitUDPSockets {
-			log.Printf("[dns] udp_sockets=%d exceeds the %d maximum — using %d sockets", cfg, maxExplicitUDPSockets, maxExplicitUDPSockets)
+			slog.Warn("udp_sockets exceeds maximum, clamping", "configured", cfg, "max", maxExplicitUDPSockets)
 			cfg = maxExplicitUDPSockets
 		}
 		return cfg
@@ -420,7 +420,7 @@ func newUDPListeners(addr string, n int) ([]net.PacketConn, error) {
 		if err == nil {
 			return pcs, nil
 		}
-		log.Printf("[dns] reuseport UDP unavailable on %s (%v) — using a single socket", addr, err)
+		slog.Warn("reuseport UDP unavailable, using a single socket", "addr", addr, "error", err)
 	}
 	pc, err := net.ListenPacket("udp", addr)
 	if err != nil {

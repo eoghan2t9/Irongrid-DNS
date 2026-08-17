@@ -11,7 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"iter"
-	"log"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -306,7 +306,7 @@ func (l *Log) writeBatch(entries []Entry) {
 		last := l.lastFlushErr.Load()
 		if last == 0 || now-last > int64(time.Minute) {
 			l.lastFlushErr.Store(now)
-			log.Printf("[querylog] stream flush failed: %v", err)
+			slog.Error("querylog stream flush failed", "error", err)
 		}
 	}
 }
@@ -797,7 +797,7 @@ func (l *Log) Prune(ctx context.Context) {
 	}
 	cutoff := fmt.Sprintf("%d-0", time.Now().Add(-l.retention).UnixMilli())
 	if err := l.client.XTrimMinID(ctx, streamKey, cutoff).Err(); err != nil {
-		log.Printf("[querylog] prune failed: %v", err)
+		slog.Error("querylog prune failed", "error", err)
 	}
 }
 

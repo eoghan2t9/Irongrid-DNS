@@ -1,7 +1,7 @@
 package dnsserver
 
 import (
-	"log"
+	"log/slog"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
@@ -80,7 +80,7 @@ func BuildClientRouter(cfg *config.Config, lists *filter.ListManager) *ClientRou
 				continue
 			}
 			if _, err := engine.LoadList(id, listNames[id], content); err != nil {
-				log.Printf("[clients] group %s: list %s: %v", g.ID, id, err)
+				slog.Error("client group list load failed", "group", g.ID, "list", id, "error", err)
 			}
 		}
 		engine.SetUserLists(g.Blacklist, g.Whitelist)
@@ -90,7 +90,7 @@ func BuildClientRouter(cfg *config.Config, lists *filter.ListManager) *ClientRou
 		for _, spec := range g.Upstreams {
 			up, err := upstream.Parse(spec)
 			if err != nil {
-				log.Printf("[clients] group %s: upstream %q: %v", g.ID, spec, err)
+				slog.Error("client group upstream invalid", "group", g.ID, "spec", spec, "error", err)
 				continue
 			}
 			groupUps = append(groupUps, up)

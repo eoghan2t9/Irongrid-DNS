@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/binary"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"time"
 
@@ -64,13 +64,13 @@ func (m *Manager) startDoQ(addr string) error {
 	if len(lns) == 1 {
 		noun = "socket"
 	}
-	log.Printf("[dns] DoQ listener on %s (%d %s)", addr, len(lns), noun)
+	slog.Info("DoQ listener started", "addr", addr, "sockets", len(lns), "socket_noun", noun)
 	for _, ln := range lns {
 		go func() {
 			for {
 				conn, err := ln.Accept(context.Background())
 				if err != nil {
-					log.Printf("[dns] DoQ listener on %s stopped: %v", addr, err)
+					slog.Error("DoQ listener stopped", "addr", addr, "error", err)
 					m.results <- Listener{Proto: "doq", Addr: addr, Err: err}
 					return
 				}

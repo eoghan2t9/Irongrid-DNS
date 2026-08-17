@@ -1,7 +1,7 @@
 package dnsserver
 
 import (
-	"log"
+	"log/slog"
 	"net"
 	"runtime"
 	"sync"
@@ -109,7 +109,7 @@ func udpWorkersFor(cfg int) int {
 		return udpWorkersPerSocket()
 	}
 	if cfg > maxExplicitUDPWorkers {
-		log.Printf("[dns] udp_workers=%d exceeds the %d maximum — using %d workers", cfg, maxExplicitUDPWorkers, maxExplicitUDPWorkers)
+		slog.Warn("udp_workers exceeds maximum, clamping", "configured", cfg, "max", maxExplicitUDPWorkers)
 		cfg = maxExplicitUDPWorkers
 	}
 	return cfg

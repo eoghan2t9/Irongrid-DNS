@@ -3,7 +3,7 @@
 package tuning
 
 import (
-	"log"
+	"log/slog"
 	"syscall"
 
 	"golang.org/x/sys/unix"
@@ -38,7 +38,7 @@ func ReuseportControl(network, address string, c syscall.RawConn) error {
 		return cerr
 	}
 	if err != nil {
-		log.Printf("[tune] SO_REUSEPORT for %s %s: %v", network, address, err)
+		slog.Warn("SO_REUSEPORT failed", "network", network, "address", address, "error", err)
 	}
 	return err
 }

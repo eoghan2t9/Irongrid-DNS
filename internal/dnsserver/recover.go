@@ -1,7 +1,7 @@
 package dnsserver
 
 import (
-	"log"
+	"log/slog"
 	"runtime/debug"
 )
 
@@ -16,6 +16,6 @@ import (
 // only catches panics on its own goroutine, not ones it spawns).
 func recoverPanic(where string) {
 	if r := recover(); r != nil {
-		log.Printf("[dns] recovered panic in %s: %v\n%s", where, r, debug.Stack())
+		slog.Error("recovered panic", "where", where, "panic", r, "stack", string(debug.Stack()))
 	}
 }

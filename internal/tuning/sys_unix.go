@@ -3,7 +3,7 @@
 package tuning
 
 import (
-	"log"
+	"log/slog"
 
 	"golang.org/x/sys/unix"
 )
@@ -45,7 +45,7 @@ func softLimitCandidates(hard uint64) []uint64 {
 func raiseFileLimit() {
 	var rl unix.Rlimit
 	if err := unix.Getrlimit(unix.RLIMIT_NOFILE, &rl); err != nil {
-		log.Printf("[tune] nofile: getrlimit: %v", err)
+		slog.Warn("nofile getrlimit failed", "error", err)
 		return
 	}
 	old := rl.Cur
@@ -64,7 +64,7 @@ func raiseFileLimit() {
 			continue
 		}
 		recordFDRaised(old)
-		log.Printf("[tune] file-descriptor soft limit raised: %d -> %d", old, target)
+		slog.Info("file-descriptor soft limit raised", "from", old, "to", target)
 		return
 	}
 }

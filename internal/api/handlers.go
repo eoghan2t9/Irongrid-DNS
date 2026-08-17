@@ -5,7 +5,7 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -748,7 +748,7 @@ func (h *Handler) tunnelStart(w http.ResponseWriter, r *http.Request) {
 		// start already succeeded ("tunnel already running") must not clobber
 		// that tunnel's enabled flag.
 		if perr := h.persistTunnelSettings(mode, p, h.Tunnel.Status().Running); perr != nil {
-			log.Printf("[tunnel] settings not saved after failed start: %v", perr)
+			slog.Error("tunnel settings not saved after failed start", "error", perr)
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
@@ -2302,7 +2302,7 @@ func (h *Handler) installUpdate(ctx context.Context, w http.ResponseWriter) {
 	if restartable {
 		cmd := exec.Command("systemd-run", "--unit=irongrid-update", "--collect", "--on-active=1", "systemctl", "restart", unit)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			log.Printf("[update] schedule restart failed: %v: %s", err, out)
+			slog.Error("update schedule restart failed", "error", err, "output", string(out))
 			payload["restarting"] = false
 			payload["note"] = "Binary updated, but scheduling the restart failed. Restart Irongrid manually to run the new version."
 		} else {

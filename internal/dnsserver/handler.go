@@ -11,7 +11,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/bits"
 	"net"
 	"runtime/debug"
@@ -198,7 +198,7 @@ func NewHandler(engine *filter.Engine, c *cache.Cache, ups []*upstream.Upstream,
 	// on a pathological system rather than silently disabling them.
 	h.cookieSecret = make([]byte, 32)
 	if _, err := rand.Read(h.cookieSecret); err != nil {
-		log.Printf("[dns] warning: crypto/rand failed (%v); DNS cookie key falls back to time-derived", err)
+		slog.Warn("crypto/rand failed; DNS cookie key falls back to time-derived", "error", err)
 		sum := sha256.Sum256([]byte(time.Now().UTC().String()))
 		h.cookieSecret = sum[:]
 	}
@@ -483,7 +483,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	defer func() {
 		if rec := recover(); rec != nil {
 			//nolint:gosec // G706: client is a socket-derived IP, no control chars
-			log.Printf("[dns] recovered panic serving query (client=%s proto=%s): %v\n%s", client, proto, rec, debug.Stack())
+			slog.Error("recovered panic serving query", "client", client, "proto", proto, "panic", rec, "stack", string(debug.Stack()))
 			h.Stats.Errors.Add(1)
 			if r != nil && len(r.Question) > 0 {
 				m := new(dns.Msg)
@@ -670,7 +670,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 				// operator's explicit opt-in for trusted networks.
 				if err := ipbanner.Block(client); err != nil {
 					//nolint:gosec // G706: client is a socket-derived IP, no control chars
-					log.Printf("[geo] honeypot: blocking client %s: %v", client, err)
+					slog.Error("honeypot blocking client failed", "client", client, "error", err)
 				}
 			case honeypotUDPBlock > 0 && rateLimiter != nil:
 				// Bounded block: the source is dropped at the DNS layer
@@ -1559,7 +1559,7 @@ func queryUpstreams(ctx context.Context, upstreams []*upstream.Upstream, mode st
 		}
 		resp, err := u.Query(ctx, r)
 		if err != nil {
-			log.Printf("[dns] upstream %s failed: %v", u.Name(), err)
+			slog.Error("upstream failed", "upstream", u.Name(), "error", err)
 			return nil, "", err
 		}
 		return resp, u.Name(), nil
@@ -1624,7 +1624,7 @@ func sequentialUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.M
 	if lastErr == nil {
 		lastErr = fmt.Errorf("no upstream returned a response")
 	}
-	log.Printf("[dns] all upstreams failed: %v", lastErr)
+	slog.Error("all upstreams failed", "error", lastErr)
 	return nil, "", lastErr
 }
 
@@ -1651,7 +1651,7 @@ func raceUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*
 			// query hang instead.
 			defer func() {
 				if rec := recover(); rec != nil {
-					log.Printf("[dns] recovered panic querying upstream %s: %v\n%s", up.Name(), rec, debug.Stack())
+					slog.Error("recovered panic querying upstream", "upstream", up.Name(), "panic", rec, "stack", string(debug.Stack()))
 					ch <- result{err: fmt.Errorf("panic querying upstream %s: %v", up.Name(), rec)}
 				}
 			}()
@@ -1684,7 +1684,7 @@ func raceUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*
 	// those per query turns a single degraded upstream into log spam. Each
 	// upstream's health stays visible through the circuit breaker on the
 	// dashboard's Upstreams card.
-	log.Printf("[dns] all upstreams failed: %v", lastErr)
+	slog.Error("all upstreams failed", "error", lastErr)
 	return nil, "", lastErr
 }
 

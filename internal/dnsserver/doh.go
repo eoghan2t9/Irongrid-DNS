@@ -6,7 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"strings"
@@ -124,10 +124,10 @@ func (m *Manager) startDoH(addr, path string) error {
 		return err
 	}
 	ln := tls.NewListener(rawLn, dohTLS)
-	log.Printf("[dns] DoH listener on %s (path %s, HTTP/2 enabled)", addr, path)
+	slog.Info("DoH listener started", "addr", addr, "path", path, "http2", true)
 	go func() {
 		if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Printf("[dns] DoH listener on %s stopped: %v", addr, err)
+			slog.Error("DoH listener stopped", "addr", addr, "error", err)
 			m.results <- Listener{Proto: "doh", Addr: addr, Err: err}
 		}
 	}()
@@ -163,7 +163,7 @@ func (m *Manager) startDoH3(addr, path string) error {
 	if len(pcs) > 1 {
 		noun = "sockets"
 	}
-	log.Printf("[dns] DoH3 listener on %s (%d %s, path %s)", addr, len(pcs), noun, path)
+	slog.Info("DoH3 listener started", "addr", addr, "sockets", len(pcs), "socket_noun", noun, "path", path)
 	for _, pc := range pcs {
 		srv := &http3.Server{
 			TLSConfig:  tlsConf,
@@ -179,7 +179,7 @@ func (m *Manager) startDoH3(addr, path string) error {
 			// failures — reporting them would spam the reload log.
 			if err := srv.Serve(pc); err != nil &&
 				!errors.Is(err, net.ErrClosed) && !errors.Is(err, quic.ErrServerClosed) {
-				log.Printf("[dns] DoH3 listener on %s stopped: %v", addr, err)
+				slog.Error("DoH3 listener stopped", "addr", addr, "error", err)
 				m.results <- Listener{Proto: "doh3", Addr: addr, Err: err}
 			}
 		}()

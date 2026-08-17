@@ -7,7 +7,7 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 	"sync"
@@ -137,7 +137,7 @@ func New(addr, password string, db int, ttl, negativeTTL, serveStale time.Durati
 	if err != nil {
 		return nil, fmt.Errorf("dragonfly cache info failed: %w", err)
 	}
-	log.Printf("[cache] connected: %s", summarizeServerInfo(info))
+	slog.Info("cache connected", "server", summarizeServerInfo(info))
 
 	var l1 *l1Cache
 	if l1Entries > 0 {
@@ -249,7 +249,7 @@ func (c *Cache) writeBatchL2(batch []l2Write) {
 		last := c.lastWriteErr.Load()
 		if last == 0 || now-last > int64(time.Minute) {
 			c.lastWriteErr.Store(now)
-			log.Printf("[cache] L2 batch write failed (%d entries): %v", len(batch), err)
+			slog.Error("cache L2 batch write failed", "entries", len(batch), "error", err)
 		}
 	}
 }

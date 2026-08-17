@@ -8,7 +8,7 @@ package tuning
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"math"
 	"net"
 	"os"
@@ -83,10 +83,10 @@ func SetPacketBuffers(pc net.PacketConn) {
 		return
 	}
 	if err := uc.SetReadBuffer(SocketBufferSize); err != nil {
-		log.Printf("[tune] SO_RCVBUF: %v", err)
+		slog.Warn("SO_RCVBUF failed", "error", err)
 	}
 	if err := uc.SetWriteBuffer(SocketBufferSize); err != nil {
-		log.Printf("[tune] SO_SNDBUF: %v", err)
+		slog.Warn("SO_SNDBUF failed", "error", err)
 	}
 }
 
@@ -98,11 +98,11 @@ func SetPacketBuffers(pc net.PacketConn) {
 func SocketControl(network, address string, c syscall.RawConn) error {
 	var err error
 	if cerr := c.Control(func(fd uintptr) { err = setSocketBufferSizes(fd) }); cerr != nil {
-		log.Printf("[tune] socket buffers for %s %s: %v", network, address, cerr)
+		slog.Warn("socket buffers failed", "network", network, "address", address, "error", cerr)
 		return nil
 	}
 	if err != nil {
-		log.Printf("[tune] socket buffers for %s %s: %v", network, address, err)
+		slog.Warn("socket buffers failed", "network", network, "address", address, "error", err)
 	}
 	return nil
 }
@@ -341,8 +341,7 @@ func logResult(r result, suffix string) {
 	if r.gogcSet > 0 {
 		gogcDesc = fmt.Sprintf("%d", r.gogcSet)
 	}
-	log.Printf("[tune] cpus=%s GOMAXPROCS=%d memlimit=%s GOGC=%s%s",
-		cpuDesc, r.gomaxprocs, memDesc, gogcDesc, suffix)
+	slog.Info("runtime tuning applied", "cpus", cpuDesc, "gomaxprocs", r.gomaxprocs, "memlimit", memDesc, "gogc", gogcDesc, "note", suffix)
 }
 
 func formatBytes(b uint64) string {

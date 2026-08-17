@@ -11,7 +11,7 @@ package dnsserver
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -281,8 +281,7 @@ func (w *Warmer) run(ctx context.Context) {
 		w.lastError = ""
 	}
 	w.mu.Unlock()
-	log.Printf("[warmer] pass done: %d domain(s), %d warmed, %d skipped, %d failed",
-		len(domains), warmed.Load(), skipped.Load(), failed.Load())
+	slog.Info("warmer pass done", "domains", len(domains), "warmed", warmed.Load(), "skipped", skipped.Load(), "failed", failed.Load())
 }
 
 // warmDomain refreshes A and AAAA for name, skipping any question the cache
@@ -311,5 +310,5 @@ func (w *Warmer) setLastError(s string) {
 	w.mu.Lock()
 	w.lastError = s
 	w.mu.Unlock()
-	log.Printf("[warmer] pass failed: %s", s)
+	slog.Error("warmer pass failed", "error", s)
 }
