@@ -19,6 +19,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -117,7 +118,7 @@ func New(o Options) *Manager {
 	renewIn := time.Duration(o.RenewBeforeDays) * 24 * time.Hour
 	m := &Manager{
 		email:          o.Email,
-		domains:        append([]string(nil), o.Domains...),
+		domains:        slices.Clone(o.Domains),
 		dir:            o.CertDir,
 		staging:        o.Staging,
 		httpPort:       o.HTTP01Port,

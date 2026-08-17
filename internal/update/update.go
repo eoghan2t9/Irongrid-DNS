@@ -4,6 +4,7 @@ package update
 
 import (
 	"bufio"
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -137,14 +138,8 @@ func (c *Client) Check(ctx context.Context) Info {
 // changelog page. Prereleases are filtered out; drafts are never returned by
 // the API.
 func (c *Client) List(ctx context.Context) ([]Release, error) {
-	repo := c.Repo
-	if repo == "" {
-		repo = DefaultRepo
-	}
-	url := fmt.Sprintf(ChangelogAPIURL, repo, changelogLimit)
-	if c.listURL != "" {
-		url = c.listURL
-	}
+	repo := cmp.Or(c.Repo, DefaultRepo)
+	url := cmp.Or(c.listURL, fmt.Sprintf(ChangelogAPIURL, repo, changelogLimit))
 	var rels []Release
 	if err := c.getJSON(ctx, url, &rels); err != nil {
 		return nil, err
@@ -160,14 +155,8 @@ func (c *Client) List(ctx context.Context) ([]Release, error) {
 }
 
 func (c *Client) latest(ctx context.Context) (*release, error) {
-	repo := c.Repo
-	if repo == "" {
-		repo = DefaultRepo
-	}
-	url := fmt.Sprintf(DefaultAPIURL, repo)
-	if c.latestURL != "" {
-		url = c.latestURL
-	}
+	repo := cmp.Or(c.Repo, DefaultRepo)
+	url := cmp.Or(c.latestURL, fmt.Sprintf(DefaultAPIURL, repo))
 	var rel release
 	if err := c.getJSON(ctx, url, &rel); err != nil {
 		return nil, err

@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -107,7 +108,7 @@ var axfrPort = "53"
 // who from" helper used by the mail, RBL and AXFR tools.
 func (h *Handler) resolveAny(ctx context.Context, name string, qtype uint16) (*dns.Msg, error) {
 	h.cfgMu.Lock()
-	ups := append([]*upstream.Upstream(nil), h.Upstreams...)
+	ups := slices.Clone(h.Upstreams)
 	h.cfgMu.Unlock()
 
 	m := new(dns.Msg)
@@ -321,7 +322,7 @@ func (h *Handler) toolsResolve(ctx context.Context, w http.ResponseWriter, r *ht
 	defer cancel()
 
 	h.cfgMu.Lock()
-	local := append([]*upstream.Upstream(nil), h.Upstreams...)
+	local := slices.Clone(h.Upstreams)
 	h.cfgMu.Unlock()
 
 	out := make([]resolveResult, 0, len(p.Sources))

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -80,7 +81,7 @@ func (m *mockCloudflare) handle(w http.ResponseWriter, r *http.Request) {
 		id := r.URL.Path[strings.LastIndex(r.URL.Path, "/")+1:]
 		for i, rec := range m.records {
 			if rec.ID == id {
-				m.records = append(m.records[:i], m.records[i+1:]...)
+				m.records = slices.Delete(m.records, i, i+1)
 				break
 			}
 		}

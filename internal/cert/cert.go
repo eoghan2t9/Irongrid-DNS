@@ -19,6 +19,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -267,7 +268,7 @@ func inspectPair(certPath, keyPath, source string) (*Info, error) {
 		KeyPath:           keyPath,
 		SubjectCN:         leaf.Subject.CommonName,
 		IssuerCN:          leaf.Issuer.CommonName,
-		SANs:              append(append([]string{}, leaf.DNSNames...), ipStrings(leaf.IPAddresses)...),
+		SANs:              slices.Concat(leaf.DNSNames, ipStrings(leaf.IPAddresses)),
 		NotBefore:         leaf.NotBefore,
 		NotAfter:          leaf.NotAfter,
 		ExpiresInDays:     int(time.Until(leaf.NotAfter).Hours() / 24),

@@ -2334,7 +2334,7 @@ func (h *Handler) diagDNS(ctx context.Context, w http.ResponseWriter, r *http.Re
 	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	h.cfgMu.Lock()
-	ups := append([]*upstream.Upstream(nil), h.Upstreams...)
+	ups := slices.Clone(h.Upstreams)
 	h.cfgMu.Unlock()
 	var lastErr error
 	for _, up := range ups {

@@ -10,6 +10,7 @@ import (
 	neturl "net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -431,7 +432,7 @@ func SetDefaultRootHints(hints []string) {
 	}
 	// Copy: the process-wide default outlives the caller, so a later
 	// mutation of its slice must not silently change every future resolver.
-	hints = append([]string(nil), hints...)
+	hints = slices.Clone(hints)
 	defaultHintsMu.Lock()
 	activeDefaultHints = hints
 	defaultHintsMu.Unlock()

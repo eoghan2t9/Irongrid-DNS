@@ -3,6 +3,7 @@ package tunnel
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -16,15 +17,6 @@ import (
 // subcommand, so urfave/cli failed with
 // "flag provided but not defined: -no-autoupdate". The construction here
 // mirrors Manager.Start: global flags first, subcommand last.
-func index(args []string, want string) int {
-	for i, a := range args {
-		if a == want {
-			return i
-		}
-	}
-	return -1
-}
-
 func TestStartFlagOrdering(t *testing.T) {
 	os.Setenv("QUIC_GO_DISABLE_ECN", "1")
 	registerBuildInfo()
@@ -42,7 +34,7 @@ func TestStartFlagOrdering(t *testing.T) {
 
 	// The whole point: --no-autoupdate / --logfile must precede the
 	// subcommand, or cloudflared rejects them as undefined subcommand flags.
-	if i, j := index(args, "tunnel"), index(args, "--no-autoupdate"); j > i {
+	if i, j := slices.Index(args, "tunnel"), slices.Index(args, "--no-autoupdate"); j > i {
 		t.Fatalf("--no-autoupdate must precede the tunnel subcommand: %v", args)
 	}
 

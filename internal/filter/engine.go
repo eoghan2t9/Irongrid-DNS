@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -175,35 +176,21 @@ func (e *Engine) Reset() {
 // that later mutation.
 func (e *Engine) publishLocked() {
 	e.rs.Store(&ruleSet{
-		blockDomains:        cloneStrSet(e.blockDomains),
-		blockExact:          cloneStrSet(e.blockExact),
-		blockIPs:            cloneStrSet(e.blockIPs),
-		allowDomains:        cloneStrSet(e.allowDomains),
-		allowExact:          cloneStrSet(e.allowExact),
-		allowIPs:            cloneStrSet(e.allowIPs),
+		blockDomains:        maps.Clone(e.blockDomains),
+		blockExact:          maps.Clone(e.blockExact),
+		blockIPs:            maps.Clone(e.blockIPs),
+		allowDomains:        maps.Clone(e.allowDomains),
+		allowExact:          maps.Clone(e.allowExact),
+		allowIPs:            maps.Clone(e.allowIPs),
 		blockRegex:          e.blockRegex,
 		allowRegex:          e.allowRegex,
-		domainList:          cloneStrMap(e.domainList),
-		listNames:           cloneStrMap(e.listNames),
+		domainList:          maps.Clone(e.domainList),
+		listNames:           maps.Clone(e.listNames),
 		totalBlockedDomains: e.totalBlockedDomains,
 		totalIPRules:        e.totalIPRules,
 		userWhitelistLen:    len(e.userWhitelist),
 		userBlacklistLen:    len(e.userBlacklist),
 	})
-}
-
-func cloneStrSet(m map[string]struct{}) map[string]struct{} {
-	out := make(map[string]struct{}, len(m))
-	for k := range m {
-		out[k] = struct{}{}
-	}
-	return out
-}
-
-func cloneStrMap(m map[string]string) map[string]string {
-	out := make(map[string]string, len(m))
-	maps.Copy(out, m)
-	return out
 }
 
 // syncIPFlag recomputes the hasIPRules gate from the current IP rule sets.
@@ -288,8 +275,8 @@ func (e *Engine) Compile() {
 	// Compile (without an intervening Reset) doesn't duplicate rules — the
 	// domain sets below are maps and dedupe naturally, the regex slices are
 	// not.
-	e.blockRegex = append(append([]RegexRule(nil), e.listBlockRegex...), e.userBlockRegex...)
-	e.allowRegex = append(append([]RegexRule(nil), e.listAllowRegex...), e.userAllowRegex...)
+	e.blockRegex = slices.Concat(e.listBlockRegex, e.userBlockRegex)
+	e.allowRegex = slices.Concat(e.listAllowRegex, e.userAllowRegex)
 	// User whitelist wins: remove matching block entries. Regex entries in
 	// the user lists are handled by parseUserRegexes; splitRule rejects the
 	// '/' lines so they fall through here untouched.
