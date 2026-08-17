@@ -21,25 +21,37 @@ var (
 	procMeminfoPath         = "/proc/meminfo"
 )
 
-// detectMemoryLimitBytes returns the effective memory ceiling for this
-// process: the cgroup limit if one is set and it's tighter than the host's
-// total RAM, otherwise the host's total RAM.
-func detectMemoryLimitBytes() (uint64, bool) {
+// detectMemoryLimit returns the effective memory ceiling for this process
+// and whether it came from a cgroup limit rather than the host's total RAM:
+// the cgroup limit when one is set and it's tighter than the host's total
+// RAM, otherwise the host's total RAM. The fromCgroup flag lets the runtime
+// tuner pick a different GOMEMLIMIT fraction for a container (where the
+// cgroup limit is the process's own budget) vs bare metal (where the host's
+// RAM is shared with every other process on the box).
+func detectMemoryLimit() (bytes uint64, fromCgroup bool, ok bool) {
 	sys, sysOK := systemMemoryTotal()
 
 	if limit, ok := cgroupV2MemoryMax(); ok {
 		if sysOK && limit > sys {
-			return sys, true
+			return sys, false, true
 		}
-		return limit, true
+		return limit, true, true
 	}
 	if limit, ok := cgroupV1MemoryLimit(); ok {
 		if sysOK && limit > sys {
-			return sys, true
+			return sys, false, true
 		}
-		return limit, true
+		return limit, true, true
 	}
-	return sys, sysOK
+	return sys, false, sysOK
+}
+
+// detectMemoryLimitBytes returns the effective memory ceiling for this
+// process: the cgroup limit if one is set and it's tighter than the host's
+// total RAM, otherwise the host's total RAM.
+func detectMemoryLimitBytes() (uint64, bool) {
+	b, _, ok := detectMemoryLimit()
+	return b, ok
 }
 
 func cgroupV2MemoryMax() (uint64, bool) {

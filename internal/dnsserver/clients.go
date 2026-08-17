@@ -185,6 +185,14 @@ func (cr *ClientRouter) ASNOf(client string) (uint32, bool) {
 	if ip == nil {
 		return 0, false
 	}
+	return cr.ASNOfIP(ip)
+}
+
+// ASNOfIP is the no-parse form of ASNOf for callers that already hold the
+// parsed IP — the handler's ClientASN parses once and shares the net.IP
+// between this lookup and the geo blocker's, so the hot path doesn't pay
+// two ParseIP calls per client.
+func (cr *ClientRouter) ASNOfIP(ip net.IP) (uint32, bool) {
 	entries := cr.entries.Load()
 	if entries.asnTable == nil {
 		return 0, false

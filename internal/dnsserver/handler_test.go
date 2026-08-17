@@ -1965,3 +1965,30 @@ func TestHandlerANYQueryMinimized(t *testing.T) {
 		t.Fatalf("unexpected answer: %v", fw.msg.Answer[0])
 	}
 }
+
+// stringAddr is a bare "host:port" net.Addr used to exercise clientIPOf's
+// generic fallback (the fast path is the UDP/TCP address types).
+type stringAddr string
+
+func (s stringAddr) Network() string { return "test" }
+func (s stringAddr) String() string  { return string(s) }
+
+func TestClientIPOf(t *testing.T) {
+	cases := []struct {
+		name string
+		addr net.Addr
+		want string
+	}{
+		{"udp v4", &net.UDPAddr{IP: net.ParseIP("192.168.1.50"), Port: 5353}, "192.168.1.50"},
+		{"udp v6", &net.UDPAddr{IP: net.ParseIP("2001:db8::1"), Port: 53}, "2001:db8::1"},
+		{"tcp", &net.TCPAddr{IP: net.ParseIP("10.0.0.1"), Port: 53}, "10.0.0.1"},
+		{"hostport fallback", stringAddr("1.2.3.4:53"), "1.2.3.4"},
+		{"unparseable fallback", stringAddr("not-an-addr"), "not-an-addr"},
+		{"nil", nil, ""},
+	}
+	for _, c := range cases {
+		if got := clientIPOf(c.addr); got != c.want {
+			t.Errorf("%s: clientIPOf(%v) = %q, want %q", c.name, c.addr, got, c.want)
+		}
+	}
+}

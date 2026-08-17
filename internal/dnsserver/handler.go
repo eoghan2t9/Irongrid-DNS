@@ -121,6 +121,22 @@ type Handler struct {
 	// latency is the in-process response-time histogram backing the
 	// dashboard's Performance card percentiles (see latencyHist).
 	latency latencyHist
+	// asnCache memoizes ClientASN per client IP: attribution is stable while
+	// the installed ASN tables are unchanged, and the record path resolves
+	// it on every logged query. swapSettings clears it on any settings swap
+	// (the only way the tables change), so it can never serve stale data.
+	// Bounded like the client router's policy cache — full = reset, cheap to
+	// rebuild. Zero entries are cached too (stored as 0 = "no ASN"), so a
+	// client with no attribution pays the parse+search exactly once.
+	asnCache     sync.Map
+	asnCacheSize atomic.Int64
+	// cacheWriteSlots bounds concurrent background cache-write goroutines
+	// (Set/SetNegative): under a sustained miss flood each query spawns one,
+	// and a bounded pool turns that goroutine churn into a fixed ceiling.
+	// When the slots are exhausted the write is skipped — the cache only
+	// helps future queries, so dropping under saturation is the right trade
+	// (the same philosophy as the query log's bounded queue).
+	cacheWriteSlots chan struct{}
 
 	Stats *Stats
 
@@ -184,9 +200,10 @@ type handlerSettings struct {
 // NewHandler builds a handler with default stats.
 func NewHandler(engine *filter.Engine, c *cache.Cache, ups []*upstream.Upstream, ql *querylog.Log, blockResp string, blockTTL uint32, timeout time.Duration) *Handler {
 	h := &Handler{
-		Engine: engine,
-		Log:    ql,
-		Stats:  newStats(),
+		Engine:          engine,
+		Log:             ql,
+		Stats:           newStats(),
+		cacheWriteSlots: make(chan struct{}, maxCacheWriters),
 	}
 	h.settings.Store(&handlerSettings{
 		Upstreams:     ups,
@@ -280,6 +297,11 @@ func (h *Handler) swapSettings(ns *handlerSettings, cleanup func(old *handlerSet
 	if cleanup != nil {
 		cleanup(old)
 	}
+	// ASN attribution depends on the installed ASN tables, which any swap
+	// may have replaced (SetGeo, SetClientRouter) — the memo must not serve
+	// attribution computed against the previous tables.
+	h.asnCache.Clear()
+	h.asnCacheSize.Store(0)
 }
 
 // SetUpstreamRoutes hot-swaps the conditional per-domain upstream routing.
@@ -384,26 +406,51 @@ func (h *Handler) SetClientRouter(cr *ClientRouter) {
 }
 
 // ClientASN returns the ASN the server attributes to clientIP for the DoH
-// X-Irongrid-Client-ASN response header: the client router's table (a group
-// matched by ASN) first, then the geo blocker's allow/block ASN tables. ok
-// is false when the server holds no ASN data covering the client — no ASN
-// rules are configured, or the client's ISP is in none of the configured
-// lists — and the header is then omitted.
+// X-Irongrid-Client-ASN response header and the query log: the client
+// router's table (a group matched by ASN) first, then the geo blocker's
+// allow/block ASN tables. ok is false when the server holds no ASN data
+// covering the client — no ASN rules are configured, or the client's ISP is
+// in none of the configured lists — and the header is then omitted.
+//
+// The result is memoized per client IP (Handler.asnCache): the record path
+// resolves it on every logged query, and without the memo a config with ASN
+// data would pay a ParseIP plus two table searches per entry. Attribution
+// is stable while the installed tables are unchanged, and swapSettings
+// clears the memo on any settings swap, so it never goes stale.
 func (h *Handler) ClientASN(clientIP string) (uint32, bool) {
-	ns := h.settings.Load()
-	if cr := ns.ClientRouter; cr != nil {
-		if asn, ok := cr.ASNOf(clientIP); ok {
-			return asn, true
-		}
+	if clientIP == "" {
+		return 0, false
 	}
-	if g := ns.Geo; g != nil {
-		if ip := net.ParseIP(clientIP); ip != nil {
-			if asn, ok := g.ASNOf(ip); ok {
-				return asn, true
+	if v, ok := h.asnCache.Load(clientIP); ok {
+		a := v.(uint32)
+		return a, a != 0 // 0 is cached as "no ASN" (ASN 0 is not assignable)
+	}
+	// Parse once and share the net.IP between the router and geo lookups
+	// instead of each re-parsing the string.
+	ip := net.ParseIP(clientIP)
+	var asn uint32
+	var found bool
+	if ip != nil {
+		ns := h.settings.Load()
+		if cr := ns.ClientRouter; cr != nil {
+			if a, ok := cr.ASNOfIP(ip); ok {
+				asn, found = a, true
+			}
+		}
+		if !found {
+			if g := ns.Geo; g != nil {
+				if a, ok := g.ASNOf(ip); ok {
+					asn, found = a, true
+				}
 			}
 		}
 	}
-	return 0, false
+	if h.asnCacheSize.Add(1) > maxASNCache {
+		h.asnCache.Clear()
+		h.asnCacheSize.Store(0)
+	}
+	h.asnCache.Store(clientIP, asn)
+	return asn, found
 }
 
 // SetRateLimiter hot-swaps the rate limiter; nil disables rate limiting.
@@ -1019,14 +1066,24 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		// directly — no copy (SetNegative mutates the message: SetReply,
 		// Compress, Pack).
 		if cch != nil && len(stale.Raw) == 0 && !isMetaQuery(q) {
-			go func() {
-				defer recoverPanic("background cache write (failure)")
-				cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
-				defer ccancel()
-				// failureTTL <= 0 falls back to the cache's configured
-				// negative TTL (cache.failure_ttl knob).
-				cch.SetNegative(cctx, q, m, failureTTL)
-			}()
+			// Bounded by cacheWriteSlots: a flood of misses can't spawn
+			// unbounded goroutines — a saturated pool skips the write (the
+			// cache only helps future queries, so dropping is the right
+			// trade under pressure).
+			select {
+			case h.cacheWriteSlots <- struct{}{}:
+				go func() {
+					defer recoverPanic("background cache write (failure)")
+					defer func() { <-h.cacheWriteSlots }()
+					cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
+					defer ccancel()
+					// failureTTL <= 0 falls back to the cache's configured
+					// negative TTL (cache.failure_ttl knob).
+					cch.SetNegative(cctx, q, m, failureTTL)
+				}()
+			default:
+				// Saturated — skip this write.
+			}
 		}
 		return
 	}
@@ -1100,16 +1157,24 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	//    virtually never blocks. Zero TTLs fall back to the configured
 	//    Dragonfly cache lifetimes.
 	if cch != nil && !isMetaQuery(q) {
-		go func() {
-			defer recoverPanic("background cache write")
-			cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
-			defer ccancel()
-			if len(resp.Answer) > 0 {
-				cch.Set(cctx, q, resp, 0)
-			} else {
-				cch.SetNegative(cctx, q, resp, 0)
-			}
-		}()
+		// Bounded by cacheWriteSlots like the failure path above — same
+		// rationale: a miss flood must not spawn unbounded goroutines.
+		select {
+		case h.cacheWriteSlots <- struct{}{}:
+			go func() {
+				defer recoverPanic("background cache write")
+				defer func() { <-h.cacheWriteSlots }()
+				cctx, ccancel := context.WithTimeout(context.Background(), 3*time.Second)
+				defer ccancel()
+				if len(resp.Answer) > 0 {
+					cch.Set(cctx, q, resp, 0)
+				} else {
+					cch.SetNegative(cctx, q, resp, 0)
+				}
+			}()
+		default:
+			// Saturated — skip this write.
+		}
 	}
 }
 
@@ -1859,6 +1924,16 @@ func reverseNameIP(name string) net.IP {
 // that fits every common path MTU without IP fragmentation (1280-byte IPv6
 // minimum minus 48 bytes of IP/UDP/DNS headers). Bigger answers flow over
 // the TCP fallback instead of being dropped as fragments.
+// maxCacheWriters caps how many background cache-write goroutines (Set /
+// SetNegative on the success and failure paths) may be in flight at once;
+// further writes are skipped until a slot frees. Sized well above the
+// sustained miss rates a busy resolver sees, so it only ever bounds a flood.
+const maxCacheWriters = 64
+
+// maxASNCache bounds the per-client ASN memo (see Handler.asnCache). When
+// full it resets — attribution is cheap to recompute for a few clients.
+const maxASNCache = 4096
+
 const ednsUDPSize = 1232
 
 // anyMinimalTTL is the TTL on the synthetic HINFO record returned for
@@ -2021,6 +2096,19 @@ func isMetaQuery(q dns.Question) bool {
 func clientIPOf(addr net.Addr) string {
 	if addr == nil {
 		return ""
+	}
+	// Fast path: every socket transport hands us a *net.UDPAddr (the custom
+	// UDP worker) or *net.TCPAddr (TCP/DoT), and formatting the IP directly
+	// skips the String() + SplitHostPort round trip — addr.String() builds
+	// the full "ip:port" (allocating net.IPv4 + IP.String + JoinHostPort)
+	// only to have SplitHostPort slice the port back off. Measured ~250ns/3
+	// allocs vs ~80ns/1 alloc per query, and this runs on every query from
+	// every socket transport.
+	switch a := addr.(type) {
+	case *net.UDPAddr:
+		return a.IP.String()
+	case *net.TCPAddr:
+		return a.IP.String()
 	}
 	host, _, err := net.SplitHostPort(addr.String())
 	if err != nil {

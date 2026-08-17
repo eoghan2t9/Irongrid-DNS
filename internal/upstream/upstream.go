@@ -214,6 +214,10 @@ func Parse(spec string) (*Upstream, error) {
 		transport := &http.Transport{
 			TLSClientConfig: u.tlsConf,
 			MaxIdleConns:    32,
+			// MaxIdleConnsPerHost defaults to 2, which silently dominates over
+			// MaxIdleConns with one host per upstream — a busy DoH forwarder
+			// would churn connections instead of reusing the idle pool.
+			MaxIdleConnsPerHost: 32,
 			// Keep idle connections only briefly: DoH servers close them
 			// on their own schedule (often ~30-60s), and a conn the server
 			// already closed would fail the next POST with "unexpected

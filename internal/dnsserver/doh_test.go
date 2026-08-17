@@ -285,3 +285,52 @@ func TestDoHHandlerShared(t *testing.T) {
 		t.Fatalf("GET /dns-query without dns param: status = %d, want 400", resp.StatusCode)
 	}
 }
+
+// TestClientASNMemoized verifies ClientASN's per-client memo: repeat calls
+// for the same client are served from the cache, a client with no
+// attribution is cached as not-found, and swapping the client router (which
+// replaces the ASN table) clears the memo so it never serves attribution
+// computed against the previous tables.
+func TestClientASNMemoized(t *testing.T) {
+	h := NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, 5*time.Second)
+	table, _, err := geoip.LoadASNTables(
+		[]byte("1.1.1.0\t1.1.1.255\t13335\tUS\tCloudflare\n"), nil,
+		map[uint32]bool{13335: true}, nil)
+	if err != nil {
+		t.Fatalf("asn table: %v", err)
+	}
+	router := NewClientRouter()
+	router.SetPolicies(nil, table)
+	h.SetClientRouter(router)
+
+	if asn, ok := h.ClientASN("1.1.1.1"); !ok || asn != 13335 {
+		t.Fatalf("ClientASN(1.1.1.1) = %d,%v want 13335,true", asn, ok)
+	}
+	// Memoized hit: same result without touching the tables.
+	if asn, ok := h.ClientASN("1.1.1.1"); !ok || asn != 13335 {
+		t.Fatalf("memoized ClientASN(1.1.1.1) = %d,%v want 13335,true", asn, ok)
+	}
+	// A client with no attribution is cached as not-found and stays that way.
+	if _, ok := h.ClientASN("9.9.9.9"); ok {
+		t.Fatal("ClientASN(9.9.9.9) = found, want not found")
+	}
+	if _, ok := h.ClientASN("9.9.9.9"); ok {
+		t.Fatal("memoized ClientASN(9.9.9.9) = found, want not found")
+	}
+
+	// Swapping the router swaps the table — the memo must not serve the old
+	// attribution (1.1.1.1 now belongs to a different ISP).
+	table2, _, err := geoip.LoadASNTables(
+		[]byte("1.1.1.0\t1.1.1.255\t15169\tUS\tGoogle\n"), nil,
+		map[uint32]bool{15169: true}, nil)
+	if err != nil {
+		t.Fatalf("asn table 2: %v", err)
+	}
+	router2 := NewClientRouter()
+	router2.SetPolicies(nil, table2)
+	h.SetClientRouter(router2)
+
+	if asn, ok := h.ClientASN("1.1.1.1"); !ok || asn != 15169 {
+		t.Fatalf("after swap ClientASN(1.1.1.1) = %d,%v want 15169,true", asn, ok)
+	}
+}

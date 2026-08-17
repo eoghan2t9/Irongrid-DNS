@@ -22,6 +22,32 @@ func TestGogcForScalesWithMemory(t *testing.T) {
 	}
 }
 
+func TestMemLimitFor(t *testing.T) {
+	const host = 16 << 30 // 16 GiB
+	wantHost := uint64(float64(host) * memoryFraction)
+	if got := memLimitFor(host, false); got != wantHost {
+		t.Errorf("memLimitFor(host) = %d, want %d (%.0f%% of ceiling)", got, wantHost, memoryFraction*100)
+	}
+	// A var (not a const) so the float product isn't constant-folded into a
+	// non-integer constant, which Go rejects on conversion to uint64.
+	cgroup := uint64(4 << 30) // 4 GiB container limit
+	wantCgroup := uint64(float64(cgroup) * containerFraction)
+	if got := memLimitFor(cgroup, true); got != wantCgroup {
+		t.Errorf("memLimitFor(cgroup) = %d, want %d (%.0f%% of ceiling)", got, wantCgroup, containerFraction*100)
+	}
+	// The container *fraction* must be larger than the host fraction: an
+	// explicit cgroup limit is the process's own budget, so the heap gets a
+	// bigger share of it. (Absolute limits differ because the ceilings
+	// differ — the share is the point.)
+	if containerFraction <= memoryFraction {
+		t.Errorf("container fraction %.2f not above host fraction %.2f", containerFraction, memoryFraction)
+	}
+	// Sanity: the share of a 4 GiB container stays within the cgroup limit.
+	if wantCgroup >= cgroup {
+		t.Errorf("container limit %d not below ceiling %d", wantCgroup, cgroup)
+	}
+}
+
 func TestFormatBytes(t *testing.T) {
 	cases := []struct {
 		b    uint64

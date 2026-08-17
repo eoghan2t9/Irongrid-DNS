@@ -21,12 +21,17 @@ import (
 )
 
 const (
-	// memoryFraction is the share of the detected memory ceiling the Go heap
-	// is allowed to grow into before GOMEMLIMIT-triggered GC kicks in. The
-	// rest is headroom for the OS page cache, SQLite's query log, network
-	// buffers and — outside a container, where the "ceiling" is the whole
-	// machine's RAM — every other process on the box.
+	// memoryFraction is the share of the host's total RAM the Go heap is
+	// allowed to grow into before GOMEMLIMIT-triggered GC kicks in, when
+	// the ceiling is the whole machine (bare metal, or a container with no
+	// memory limit). The rest is headroom for the OS page cache, network
+	// buffers and every other process on the box.
 	memoryFraction = 0.75
+	// containerFraction is the same share when the ceiling is an explicit
+	// cgroup limit: the container is the process's own budget (per the
+	// Go team's 80-90% guidance for GOMEMLIMIT in a container), so the heap
+	// can safely use more of it than of a shared host.
+	containerFraction = 0.85
 
 	// recheckInterval controls how often limits are re-read.
 	recheckInterval = 5 * time.Minute
@@ -248,10 +253,11 @@ type result struct {
 	cpuQuota    float64
 	gomaxprocs  int
 
-	memDetected bool
-	memBytes    uint64
-	memLimitSet uint64 // 0 when GOMEMLIMIT was left to the operator/default
-	gogcSet     int    // 0 when GOGC was left to the operator/default
+	memDetected   bool
+	memBytes      uint64
+	memFromCgroup bool   // ceiling came from a cgroup limit (container)
+	memLimitSet   uint64 // 0 when GOMEMLIMIT was left to the operator/default
+	gogcSet       int    // 0 when GOGC was left to the operator/default
 }
 
 func (r result) changedFrom(prev result) bool {
@@ -281,11 +287,12 @@ func apply() result {
 	memPinned := os.Getenv("GOMEMLIMIT") != ""
 	gcPinned := os.Getenv("GOGC") != ""
 	if !memPinned || !gcPinned {
-		if mem, ok := detectMemoryLimitBytes(); ok {
+		if mem, fromCgroup, ok := detectMemoryLimit(); ok {
 			r.memDetected = true
 			r.memBytes = mem
+			r.memFromCgroup = fromCgroup
 			if !memPinned {
-				limit := uint64(float64(mem) * memoryFraction)
+				limit := memLimitFor(mem, fromCgroup)
 				debug.SetMemoryLimit(int64(limit))
 				r.memLimitSet = limit
 			}
@@ -297,6 +304,19 @@ func apply() result {
 		}
 	}
 	return r
+}
+
+// memLimitFor is the GOMEMLIMIT target for a detected ceiling: a higher
+// share when the ceiling is an explicit cgroup limit (the container is the
+// process's own budget) than when it is the host's total RAM (shared with
+// every other process). Extracted from apply() so the split is unit-testable
+// without mutating the global runtime.
+func memLimitFor(memBytes uint64, fromCgroup bool) uint64 {
+	f := memoryFraction
+	if fromCgroup {
+		f = containerFraction
+	}
+	return uint64(float64(memBytes) * f)
 }
 
 // gogcFor scales GOGC to how much memory is actually available. GOMEMLIMIT
@@ -333,7 +353,11 @@ func logResult(r result, suffix string) {
 	}
 	memDesc := "default (no GOMEMLIMIT set)"
 	if r.memLimitSet > 0 {
-		memDesc = fmt.Sprintf("%s of %s detected", formatBytes(r.memLimitSet), formatBytes(r.memBytes))
+		src := "host"
+		if r.memFromCgroup {
+			src = "container cgroup"
+		}
+		memDesc = fmt.Sprintf("%s of %s detected (%s)", formatBytes(r.memLimitSet), formatBytes(r.memBytes), src)
 	} else if r.memDetected {
 		memDesc = fmt.Sprintf("%s detected, GOMEMLIMIT pinned by operator", formatBytes(r.memBytes))
 	}

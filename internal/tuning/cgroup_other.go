@@ -9,6 +9,8 @@ import "runtime"
 // cgroup to read and no cheap dependency-free way to get total system RAM,
 // so auto-tuning leaves GOMEMLIMIT/GOGC at Go's defaults and only reports
 // the CPU count Go already uses by default.
+func detectMemoryLimit() (uint64, bool, bool) { return 0, false, false }
+
 func detectMemoryLimitBytes() (uint64, bool) { return 0, false }
 
 func detectCPUQuota() (float64, bool) { return float64(runtime.NumCPU()), false }
