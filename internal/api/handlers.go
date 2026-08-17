@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -669,6 +670,13 @@ func (h *Handler) checkFilter(w http.ResponseWriter, r *http.Request) {
 // ---- cache ----
 
 func (h *Handler) flushCache(ctx context.Context, w http.ResponseWriter) {
+	if h.Cache == nil {
+		// Mirrors warmCache's guard: every production wiring sets Cache (it
+		// is a hard boot requirement), but a nil cache must return a clean
+		// error rather than panic.
+		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "cache not configured"})
+		return
+	}
 	n, err := h.Cache.FlushAll(ctx)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
@@ -2394,6 +2402,12 @@ func (h *Handler) diagDNS(ctx context.Context, w http.ResponseWriter, r *http.Re
 			return
 		}
 		lastErr = err
+	}
+	// No upstreams configured (or all failed): report cleanly. The config
+	// validator requires at least one upstream, so this is unreachable in a
+	// normal boot — but a nil deref on lastErr is never acceptable.
+	if lastErr == nil {
+		lastErr = errors.New("no upstreams configured")
 	}
 	writeJSON(w, http.StatusInternalServerError, map[string]any{"error": lastErr.Error()})
 }
