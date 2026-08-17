@@ -1,7 +1,6 @@
 package dnsserver
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -30,7 +29,7 @@ func waitLogEntries(t *testing.T, ql *querylog.Log, n int) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		entries, err := ql.Query(context.Background(), n+10, 0, "", "", "", "")
+		entries, err := ql.Query(t.Context(), n+10, 0, "", "", "", "")
 		if err != nil {
 			t.Fatalf("query log read: %v", err)
 		}
@@ -76,7 +75,7 @@ func TestWarmerWarmsActiveDomains(t *testing.T) {
 	ql.Record(warmLogEntry("blocked.com", "allowed"))
 	waitLogEntries(t, ql, 3)
 
-	w.run(context.Background())
+	w.run(t.Context())
 
 	// warm.com was resolved and cached for both A and AAAA. The cache lives
 	// in the handler's hot-swappable settings snapshot (the Handler.Cache
@@ -84,12 +83,12 @@ func TestWarmerWarmsActiveDomains(t *testing.T) {
 	cache := h.settings.Load().Cache
 	for _, qt := range []uint16{dns.TypeA, dns.TypeAAAA} {
 		q := dns.Question{Name: "warm.com.", Qtype: qt, Qclass: dns.ClassINET}
-		if got := cache.Get(context.Background(), q); got == nil || len(got.Answer) == 0 {
+		if got := cache.Get(t.Context(), q); got == nil || len(got.Answer) == 0 {
 			t.Fatalf("warm.com %s not cached after warming: %v", dns.TypeToString[qt], got)
 		}
 	}
 	// The blacklisted domain must never have been resolved/warmed.
-	if got := cache.Get(context.Background(), dns.Question{Name: "blocked.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}); got != nil {
+	if got := cache.Get(t.Context(), dns.Question{Name: "blocked.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}); got != nil {
 		t.Fatalf("blacklisted domain was warmed: %v", got)
 	}
 
@@ -116,14 +115,14 @@ func TestWarmerSkipsFreshEntries(t *testing.T) {
 	ql.Record(warmLogEntry("warm.com", "allowed"))
 	waitLogEntries(t, ql, 1)
 
-	w.run(context.Background())
+	w.run(t.Context())
 	if s := w.Snapshot(); s.Warmed != 2 || s.Skipped != 0 {
 		t.Fatalf("first pass: warmed=%d skipped=%d, want 2/0", s.Warmed, s.Skipped)
 	}
 
 	// Second pass: both questions are now fresh in the cache, so nothing is
 	// re-resolved — the skip counters absorb them.
-	w.run(context.Background())
+	w.run(t.Context())
 	s := w.Snapshot()
 	if s.Runs != 2 {
 		t.Fatalf("runs = %d, want 2", s.Runs)
@@ -147,7 +146,7 @@ func TestWarmerDisabledLogIsNoOp(t *testing.T) {
 	h := NewHandler(filter.NewEngine(), c, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
 	w := NewWarmer(h, querylog.NewDisabled(30))
 	w.SetConfig(config.WarmerConfig{Enabled: true, Interval: time.Hour, Lookback: 24 * time.Hour, MaxDomains: 100, Concurrency: 4})
-	w.run(context.Background())
+	w.run(t.Context())
 	s := w.Snapshot()
 	if s.Runs != 1 || s.Domains != 0 || s.Warmed != 0 || s.Failed != 0 {
 		t.Fatalf("disabled-log pass stats = %+v, want runs=1 and zeros", s)

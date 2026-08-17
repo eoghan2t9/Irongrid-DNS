@@ -1,7 +1,6 @@
 package acme
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -109,7 +108,7 @@ func TestCloudflarePresentAndCleanup(t *testing.T) {
 	mock := &mockCloudflare{}
 	p := newMockCFProvider(t, mock)
 
-	ctx := context.Background()
+	ctx := t.Context()
 	if err := p.Present(ctx, "dns.example.com", "abc123"); err != nil {
 		t.Fatalf("Present: %v", err)
 	}
@@ -143,7 +142,7 @@ func TestCloudflareWildcardChallengeName(t *testing.T) {
 	if got := challengeRecordName("*.example.com"); got != "_acme-challenge.example.com" {
 		t.Errorf("wildcard name = %q", got)
 	}
-	if err := p.Present(context.Background(), "example.com", "v"); err != nil {
+	if err := p.Present(t.Context(), "example.com", "v"); err != nil {
 		t.Fatalf("Present: %v", err)
 	}
 	if mock.records[0].Name != "_acme-challenge.example.com" {
@@ -155,7 +154,7 @@ func TestCloudflareZoneSearchWalksUp(t *testing.T) {
 	mock := &mockCloudflare{}
 	// Present a domain that isn't directly a zone: sub.example.com lives in
 	// zone example.com, so the provider must walk up labels.
-	if err := newMockCFProvider(t, mock).Present(context.Background(), "deep.sub.example.com", "v"); err != nil {
+	if err := newMockCFProvider(t, mock).Present(t.Context(), "deep.sub.example.com", "v"); err != nil {
 		t.Fatalf("Present: %v", err)
 	}
 	if len(mock.records) != 1 {
@@ -169,7 +168,7 @@ func TestCloudflareZoneSearchWalksUp(t *testing.T) {
 func TestCloudflareNoZoneFound(t *testing.T) {
 	mock := &mockCloudflare{}
 	p := newMockCFProvider(t, mock)
-	err := p.Present(context.Background(), "other.org", "v")
+	err := p.Present(t.Context(), "other.org", "v")
 	if err == nil || !strings.Contains(err.Error(), "no active zone") {
 		t.Fatalf("err = %v, want no-active-zone error", err)
 	}
@@ -184,7 +183,7 @@ func TestCloudflareUnauthorized(t *testing.T) {
 	cfAPI = srv.URL
 	defer func() { cfAPI = old }()
 
-	err := p.Present(context.Background(), "dns.example.com", "v")
+	err := p.Present(t.Context(), "dns.example.com", "v")
 	if err == nil || !strings.Contains(err.Error(), "401") {
 		t.Fatalf("err = %v, want 401 error", err)
 	}

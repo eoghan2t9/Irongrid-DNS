@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -41,7 +40,7 @@ func TestSiteCheck(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/filter/site",
 		strings.NewReader(`{"url": "`+srv.URL+`/page"}`))
 	rr := httptest.NewRecorder()
-	h.siteCheck(context.Background(), rr, req)
+	h.siteCheck(t.Context(), rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, body: %s", rr.Code, rr.Body.String())
@@ -82,7 +81,7 @@ func TestSiteCheckBadInput(t *testing.T) {
 	for _, body := range []string{`{}`, `{"url": ""}`, `{"url": "ftp://example.com"}`, `{"url": "file:///etc/passwd"}`} {
 		req := httptest.NewRequest(http.MethodPost, "/api/filter/site", strings.NewReader(body))
 		rr := httptest.NewRecorder()
-		h.siteCheck(context.Background(), rr, req)
+		h.siteCheck(t.Context(), rr, req)
 		if rr.Code != http.StatusBadRequest {
 			t.Errorf("body %s: status = %d, want 400", body, rr.Code)
 		}
@@ -90,7 +89,7 @@ func TestSiteCheckBadInput(t *testing.T) {
 }
 
 func TestResolvePublicIP(t *testing.T) {
-	ctx := context.Background()
+	ctx := t.Context()
 	// Addresses a site scan must never reach (loopback, private, CGNAT,
 	// link-local, unspecified — both IP literals and a resolving hostname).
 	for _, host := range []string{
@@ -153,7 +152,7 @@ func TestSiteCheckTruncatesBigPages(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/filter/site",
 		strings.NewReader(`{"url": "`+srv.URL+`/big"}`))
 	rr := httptest.NewRecorder()
-	h.siteCheck(context.Background(), rr, req)
+	h.siteCheck(t.Context(), rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, body: %s", rr.Code, rr.Body.String())
@@ -184,7 +183,7 @@ func TestSiteCheckNonHTML(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/filter/site",
 		strings.NewReader(`{"url": "`+srv.URL+`/img.png"}`))
 	rr := httptest.NewRecorder()
-	h.siteCheck(context.Background(), rr, req)
+	h.siteCheck(t.Context(), rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("status = %d, body: %s", rr.Code, rr.Body.String())

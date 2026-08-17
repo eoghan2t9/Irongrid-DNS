@@ -2,7 +2,6 @@ package api
 
 import (
 	"bytes"
-	"context"
 	"encoding/csv"
 	"net/http"
 	"net/http/httptest"
@@ -49,7 +48,7 @@ func withAbuseIPDBMock(t *testing.T, wantKey string, status int, body string) *h
 
 func TestReportAbuseIPDB(t *testing.T) {
 	withAbuseIPDBMock(t, "test-key", http.StatusOK, `{"data":{"ipAddress":"203.0.113.9","abuseConfidenceScore":88}}`)
-	score, err := reportAbuseIPDB(context.Background(), "test-key", "203.0.113.9", abuseIPDBCategoryDDoS, "DNS flood")
+	score, err := reportAbuseIPDB(t.Context(), "test-key", "203.0.113.9", abuseIPDBCategoryDDoS, "DNS flood")
 	if err != nil {
 		t.Fatalf("reportAbuseIPDB: %v", err)
 	}
@@ -60,7 +59,7 @@ func TestReportAbuseIPDB(t *testing.T) {
 
 func TestReportAbuseIPDBError(t *testing.T) {
 	withAbuseIPDBMock(t, "test-key", http.StatusTooManyRequests, `{"errors":[{"detail":"rate limited: one report per IP per 15 minutes"}]}`)
-	_, err := reportAbuseIPDB(context.Background(), "test-key", "203.0.113.9", "4", "comment")
+	_, err := reportAbuseIPDB(t.Context(), "test-key", "203.0.113.9", "4", "comment")
 	if err == nil || !strings.Contains(err.Error(), "rate limited") {
 		t.Fatalf("err = %v, want a rate-limit error", err)
 	}
@@ -167,7 +166,7 @@ func withRIPEstatMocks(t *testing.T) {
 
 func TestLookupASN(t *testing.T) {
 	withRIPEstatMocks(t)
-	info, err := lookupASN(context.Background(), "8.8.8.8")
+	info, err := lookupASN(t.Context(), "8.8.8.8")
 	if err != nil {
 		t.Fatalf("lookupASN: %v", err)
 	}

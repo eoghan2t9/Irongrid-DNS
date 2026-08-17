@@ -2,7 +2,6 @@ package recursive
 
 import (
 	"bytes"
-	"context"
 	"errors"
 	"fmt"
 	"net/http"
@@ -158,7 +157,7 @@ func TestLoadRootHints(t *testing.T) {
 	cachePath := filepath.Join(dir, "root-hints.txt")
 
 	// Live fetch (signature accepted) wins and persists the cache.
-	hints, source, verified, _ := loadRootHints(context.Background(), srv.URL, cachePath, acceptAll)
+	hints, source, verified, _ := loadRootHints(t.Context(), srv.URL, cachePath, acceptAll)
 	if source != "live" {
 		t.Fatalf("source = %q, want live", source)
 	}
@@ -178,7 +177,7 @@ func TestLoadRootHints(t *testing.T) {
 
 	// Signature rejected -> the fetched content is NOT trusted; the
 	// last-known-good cache is used instead.
-	_, source, verified, _ = loadRootHints(context.Background(), srv.URL, cachePath,
+	_, source, verified, _ = loadRootHints(t.Context(), srv.URL, cachePath,
 		func(sig, signed []byte) error { return errors.New("bad signature") })
 	if source != "cached" {
 		t.Fatalf("source = %q, want cached", source)
@@ -189,7 +188,7 @@ func TestLoadRootHints(t *testing.T) {
 
 	// Fetch dead and no cache -> bundled fallback.
 	srv.Close()
-	hints, source, verified, _ = loadRootHints(context.Background(), srv.URL, filepath.Join(dir, "missing.txt"), acceptAll)
+	hints, source, verified, _ = loadRootHints(t.Context(), srv.URL, filepath.Join(dir, "missing.txt"), acceptAll)
 	if source != "bundled" {
 		t.Fatalf("source = %q, want bundled", source)
 	}
@@ -211,7 +210,7 @@ func TestVerifyRootHintsFlow(t *testing.T) {
 
 	srv := signedHintsServer(t, entity)
 	dir := t.TempDir()
-	hints, source, verified, _ := loadRootHints(context.Background(), srv.URL, filepath.Join(dir, "rh.txt"), verify)
+	hints, source, verified, _ := loadRootHints(t.Context(), srv.URL, filepath.Join(dir, "rh.txt"), verify)
 	if source != "live" || !verified || len(hints) != 26 {
 		t.Fatalf("expected live + verified, got source=%s verified=%v hints=%d", source, verified, len(hints))
 	}
@@ -227,7 +226,7 @@ func TestVerifyRootHintsFlow(t *testing.T) {
 		_, _ = w.Write([]byte("; tampered\n. 3600000 NS A.ROOT-SERVERS.NET.\n"))
 	}))
 	defer bad.Close()
-	_, source, verified, _ = loadRootHints(context.Background(), bad.URL, filepath.Join(t.TempDir(), "none.txt"), verify)
+	_, source, verified, _ = loadRootHints(t.Context(), bad.URL, filepath.Join(t.TempDir(), "none.txt"), verify)
 	if source != "bundled" || verified {
 		t.Fatalf("tampered fetch must not be trusted: source=%s verified=%v", source, verified)
 	}
@@ -276,7 +275,7 @@ func TestHintsManager(t *testing.T) {
 		return err
 	}
 	m := &HintsManager{url: srv.URL, cachePath: cachePath, interval: time.Hour, verify: verify}
-	m.Refresh(context.Background())
+	m.Refresh(t.Context())
 	st := m.Status()
 	if st.Source != "live" || !st.Verified || st.Addresses != 26 || st.LastFetch == nil || st.LastError != "" {
 		t.Fatalf("live status wrong: %+v", st)
@@ -296,7 +295,7 @@ func TestHintsManager(t *testing.T) {
 	// A manager whose signature check fails falls back to the cache.
 	m2 := &HintsManager{url: srv.URL, cachePath: cachePath, interval: time.Hour,
 		verify: func(sig, signed []byte) error { return errors.New("rejected") }}
-	m2.Refresh(context.Background())
+	m2.Refresh(t.Context())
 	st2 := m2.Status()
 	if st2.Source != "cached" || st2.Verified || st2.LastError == "" {
 		t.Fatalf("cached status wrong: %+v", st2)

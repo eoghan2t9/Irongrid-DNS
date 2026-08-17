@@ -1,7 +1,6 @@
 package acme
 
 import (
-	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -68,7 +67,7 @@ func TestDigitalOceanPresentAndCleanup(t *testing.T) {
 	defer func() { doAPI = old }()
 
 	p := &digitalOceanProvider{token: "do-token", hc: srv.Client()}
-	ctx := context.Background()
+	ctx := t.Context()
 	if err := p.Present(ctx, "dns.example.com", "val123"); err != nil {
 		t.Fatalf("Present: %v", err)
 	}
@@ -123,7 +122,7 @@ func TestHetznerPresentAndCleanup(t *testing.T) {
 	defer func() { hetznerAPI = old }()
 
 	p := &hetznerProvider{token: "hz-token", hc: srv.Client()}
-	ctx := context.Background()
+	ctx := t.Context()
 	if err := p.Present(ctx, "dns.example.com", "val123"); err != nil {
 		t.Fatalf("Present: %v", err)
 	}
@@ -176,7 +175,7 @@ func TestGoDaddyPresentAndCleanup(t *testing.T) {
 	defer func() { godaddyAPI = old }()
 
 	p := &goDaddyProvider{key: "gk", secret: "gs", hc: srv.Client()}
-	ctx := context.Background()
+	ctx := t.Context()
 	if err := p.Present(ctx, "example.com", "val123"); err != nil {
 		t.Fatalf("Present: %v", err)
 	}
@@ -238,7 +237,7 @@ func TestRoute53PresentAndCleanup(t *testing.T) {
 	defer func() { route53API = old }()
 
 	p := &route53Provider{accessKey: "AKIA", secretKey: "secret", hc: srv.Client()}
-	ctx := context.Background()
+	ctx := t.Context()
 	if err := p.Present(ctx, "dns.example.com", "val123"); err != nil {
 		t.Fatalf("Present: %v", err)
 	}

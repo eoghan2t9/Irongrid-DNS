@@ -80,7 +80,7 @@ func TestResolveHostnameCoalescesConcurrentLookups(t *testing.T) {
 	var wg sync.WaitGroup
 	for range n {
 		wg.Go(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 			defer cancel()
 			if name := h.resolveHostname(ctx, "1.2.3.4"); name != "host.example.net" {
 				t.Errorf("resolveHostname = %q, want host.example.net", name)

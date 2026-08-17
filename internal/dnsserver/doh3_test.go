@@ -41,7 +41,7 @@ func TestDoH3RoundTrip(t *testing.T) {
 	if _, err := mgr.Start("", "", "", "", "127.0.0.1:0", "", "/dns-query"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	defer mgr.Shutdown(context.Background())
+	defer mgr.Shutdown(t.Context())
 
 	addr := mgr.DoH3Addr()
 	if addr == "" {
@@ -78,7 +78,7 @@ func TestDoH3RoundTrip(t *testing.T) {
 			t.Fatalf("pack query: %v", err)
 		}
 		url := "https://" + addr + "/dns-query?dns=" + base64.RawURLEncoding.EncodeToString(packed)
-		req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, url, nil)
+		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
 		if err != nil {
 			t.Fatalf("request: %v", err)
 		}

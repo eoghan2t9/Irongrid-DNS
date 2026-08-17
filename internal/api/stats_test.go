@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
@@ -29,7 +28,7 @@ func TestGetStatsShape(t *testing.T) {
 		Cache:  cache.NewLocalOnly(time.Hour, time.Minute, 512, 0),
 	}
 	rr := httptest.NewRecorder()
-	h.getStats(context.Background(), rr)
+	h.getStats(t.Context(), rr)
 	if rr.Code != 200 {
 		t.Fatalf("getStats status = %d, body %s", rr.Code, rr.Body.String())
 	}

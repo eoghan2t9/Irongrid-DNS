@@ -2,7 +2,6 @@ package dnsserver
 
 import (
 	"bytes"
-	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
@@ -176,5 +175,4 @@ func TestDoHHandlerShared(t *testing.T) {
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Fatalf("GET /dns-query without dns param: status = %d, want 400", resp.StatusCode)
 	}
-	_ = context.Background()
 }

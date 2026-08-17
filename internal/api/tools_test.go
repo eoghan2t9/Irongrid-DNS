@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net"
 	"net/http"
@@ -68,17 +67,17 @@ func postTools(t *testing.T, h *Handler, path, body string) (int, []byte) {
 	rr := httptest.NewRecorder()
 	switch path {
 	case "/api/tools/resolve":
-		h.toolsResolve(context.Background(), rr, req)
+		h.toolsResolve(t.Context(), rr, req)
 	case "/api/tools/mail":
-		h.toolsMail(context.Background(), rr, req)
+		h.toolsMail(t.Context(), rr, req)
 	case "/api/tools/rbl":
-		h.toolsRBL(context.Background(), rr, req)
+		h.toolsRBL(t.Context(), rr, req)
 	case "/api/tools/axfr":
-		h.toolsAXFR(context.Background(), rr, req)
+		h.toolsAXFR(t.Context(), rr, req)
 	case "/api/tools/subdomains":
-		h.toolsSubdomains(context.Background(), rr, req)
+		h.toolsSubdomains(t.Context(), rr, req)
 	case "/api/tools/fastest":
-		h.toolsFastest(context.Background(), rr, req)
+		h.toolsFastest(t.Context(), rr, req)
 	}
 	return rr.Code, rr.Body.Bytes()
 }

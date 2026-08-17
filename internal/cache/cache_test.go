@@ -42,7 +42,7 @@ func emptyResponse() *dns.Msg {
 
 func TestL1GetSet(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
-	ctx := context.Background()
+	ctx := t.Context()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
 	got := c.Get(ctx, aQuestion())
 	if got == nil {
@@ -60,7 +60,7 @@ func TestL1GetSet(t *testing.T) {
 // read (the same rebasing the L2 path applies).
 func TestL1TTLRebase(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
-	ctx := context.Background()
+	ctx := t.Context()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
 	time.Sleep(1 * time.Second)
 	got := c.Get(ctx, aQuestion())
@@ -80,7 +80,7 @@ func TestL1TTLRebase(t *testing.T) {
 // when the underlying record TTL is much larger.
 func TestL1CapExpiry(t *testing.T) {
 	c := l1onlyCache(300*time.Millisecond, time.Minute)
-	ctx := context.Background()
+	ctx := t.Context()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
 	time.Sleep(400 * time.Millisecond)
 	if got := c.Get(ctx, aQuestion()); got != nil {
@@ -90,7 +90,7 @@ func TestL1CapExpiry(t *testing.T) {
 
 func TestL1Negative(t *testing.T) {
 	c := l1onlyCache(time.Hour, 50*time.Millisecond)
-	ctx := context.Background()
+	ctx := t.Context()
 	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
 	if got := c.GetNegative(ctx, aQuestion()); got == nil {
 		t.Fatal("expected a negative hit")
@@ -103,7 +103,7 @@ func TestL1Negative(t *testing.T) {
 
 func TestL1Flush(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
-	ctx := context.Background()
+	ctx := t.Context()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
 	if _, err := c.FlushAll(ctx); err != nil {
 		t.Fatalf("FlushAll: %v", err)
@@ -118,7 +118,7 @@ func TestL1Flush(t *testing.T) {
 // logical query even though Lookup probes two keys.
 func TestL1Counters(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// A clean miss counts one miss.
 	if res := c.Lookup(aQuestion()); res.Msg() != nil {
@@ -176,7 +176,7 @@ func BenchmarkLookupL1Hit(b *testing.B) {
 
 func TestLookupL1Positive(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
-	ctx := context.Background()
+	ctx := t.Context()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
 	res := c.Lookup(aQuestion())
 	if res.Msg() == nil {
@@ -192,7 +192,7 @@ func TestLookupL1Positive(t *testing.T) {
 
 func TestLookupL1Negative(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
-	ctx := context.Background()
+	ctx := t.Context()
 	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
 	res := c.Lookup(aQuestion())
 	if res.Msg() == nil {
@@ -221,7 +221,7 @@ func TestLookupMissWithNilClient(t *testing.T) {
 func TestLookupStale(t *testing.T) {
 	c := l1onlyCache(300*time.Millisecond, time.Minute)
 	c.l1.staleTTL = 2 * time.Second
-	ctx := context.Background()
+	ctx := t.Context()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
 
 	time.Sleep(400 * time.Millisecond)
@@ -250,7 +250,7 @@ func TestLookupStale(t *testing.T) {
 // stay untouched by probes.
 func TestFresh(t *testing.T) {
 	c := l1onlyCache(300*time.Millisecond, 50*time.Millisecond)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	// Empty cache: not fresh, and the probe must not count as a miss.
 	if c.Fresh(aQuestion()) {
@@ -286,7 +286,7 @@ func TestFresh(t *testing.T) {
 // entry with plenty of life left does not trigger one.
 func TestPrefetchNearExpiry(t *testing.T) {
 	c := l1onlyCache(5*time.Second, time.Minute) // lead = 1s
-	ctx := context.Background()
+	ctx := t.Context()
 
 	prefetched := make(chan dns.Question, 1)
 	c.EnablePrefetch(func(cctx context.Context, q dns.Question) {
@@ -388,7 +388,7 @@ func servfailResponse() *dns.Msg {
 func TestNegativePrefetch(t *testing.T) {
 	negTTL := 2 * time.Second // negPrefetchLead = max(2s/5, 1s) = 1s
 	c := l1onlyCache(5*time.Second, negTTL)
-	ctx := context.Background()
+	ctx := t.Context()
 
 	prefetched := make(chan dns.Question, 2)
 	c.EnablePrefetch(func(cctx context.Context, q dns.Question) {
@@ -479,7 +479,7 @@ func TestDecodeMGetResult(t *testing.T) {
 // correctly-TTL'd dns.Msg for the fallback paths.
 func TestLookupRawPositive(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
-	ctx := context.Background()
+	ctx := t.Context()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
 
 	res := c.Lookup(aQuestion())
@@ -508,7 +508,7 @@ func TestLookupRawPositive(t *testing.T) {
 // Negative and without TTL offsets (negative TTLs are never rebased).
 func TestLookupRawNegative(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
-	ctx := context.Background()
+	ctx := t.Context()
 	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
 
 	res := c.Lookup(aQuestion())
@@ -558,7 +558,7 @@ func TestLookupRawMultiAnswerTTLOffsets(t *testing.T) {
 // TTLs to the remaining lifetime, exactly like the pre-raw Lookup did.
 func TestLookupRawMsgRebasesTTL(t *testing.T) {
 	c := l1onlyCache(time.Hour, time.Minute)
-	ctx := context.Background()
+	ctx := t.Context()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
 	time.Sleep(1100 * time.Millisecond)
 
@@ -582,7 +582,7 @@ func TestLookupRawMsgRebasesTTL(t *testing.T) {
 func TestLookupRawStaleKeepsRaw(t *testing.T) {
 	c := l1onlyCache(300*time.Millisecond, time.Minute)
 	c.l1.staleTTL = 2 * time.Second
-	ctx := context.Background()
+	ctx := t.Context()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
 	time.Sleep(500 * time.Millisecond)
 

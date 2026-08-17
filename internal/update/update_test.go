@@ -2,7 +2,6 @@ package update
 
 import (
 	"bytes"
-	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -155,7 +154,7 @@ func TestCheckFindsUpdate(t *testing.T) {
 	defer srv.Close()
 	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL}
 
-	info := c.Check(context.Background())
+	info := c.Check(t.Context())
 	if info.Error != "" {
 		t.Fatalf("unexpected error: %s", info.Error)
 	}
@@ -198,7 +197,7 @@ func TestCheckPrefersV3AssetWhenSupported(t *testing.T) {
 
 	withSupportsGOAMD64V3(t, true)
 	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL}
-	info := c.Check(context.Background())
+	info := c.Check(t.Context())
 	want := v3AssetName(runtime.GOOS, runtime.GOARCH)
 	if info.AssetName != want {
 		t.Errorf("AssetName = %q, want %q (v3 preferred)", info.AssetName, want)
@@ -214,7 +213,7 @@ func TestCheckUsesBaselineWhenCPUDoesNotSupportV3(t *testing.T) {
 
 	withSupportsGOAMD64V3(t, false)
 	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL}
-	info := c.Check(context.Background())
+	info := c.Check(t.Context())
 	want := assetName(runtime.GOOS, runtime.GOARCH)
 	if info.AssetName != want {
 		t.Errorf("AssetName = %q, want %q (baseline — CPU lacks v3)", info.AssetName, want)
@@ -230,7 +229,7 @@ func TestCheckFallsBackWhenReleaseHasNoV3Asset(t *testing.T) {
 
 	withSupportsGOAMD64V3(t, true) // CPU supports v3, but this release has no v3 asset
 	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL}
-	info := c.Check(context.Background())
+	info := c.Check(t.Context())
 	want := assetName(runtime.GOOS, runtime.GOARCH)
 	if info.AssetName != want {
 		t.Errorf("AssetName = %q, want %q (fall back to baseline, no error)", info.AssetName, want)
@@ -245,7 +244,7 @@ func TestCheckUpToDate(t *testing.T) {
 	defer srv.Close()
 	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.1", latestURL: srv.URL}
 
-	info := c.Check(context.Background())
+	info := c.Check(t.Context())
 	if info.Available {
 		t.Fatal("expected no update when current == latest")
 	}
@@ -262,7 +261,7 @@ func TestListFiltersPrereleases(t *testing.T) {
 	defer srv.Close()
 	c := &Client{HTTPClient: srv.Client(), listURL: srv.URL}
 
-	rels, err := c.List(context.Background())
+	rels, err := c.List(t.Context())
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
@@ -281,7 +280,7 @@ func TestListHTTPError(t *testing.T) {
 	srv := fakeRelease(t, `{"message":"rate limited"}`, http.StatusForbidden)
 	defer srv.Close()
 	c := &Client{HTTPClient: srv.Client(), listURL: srv.URL}
-	if _, err := c.List(context.Background()); err == nil {
+	if _, err := c.List(t.Context()); err == nil {
 		t.Fatal("expected error on non-200 response")
 	}
 }
@@ -291,7 +290,7 @@ func TestCheckHTTPError(t *testing.T) {
 	defer srv.Close()
 	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL}
 
-	info := c.Check(context.Background())
+	info := c.Check(t.Context())
 	if info.Error == "" {
 		t.Fatal("expected an error to be reported")
 	}
@@ -345,7 +344,7 @@ func TestInstall(t *testing.T) {
 	}
 
 	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL + "/release"}
-	res, err := c.Install(context.Background(), execPath)
+	res, err := c.Install(t.Context(), execPath)
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -429,7 +428,7 @@ func TestInstallPrefersV3Asset(t *testing.T) {
 
 	withSupportsGOAMD64V3(t, true)
 	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL + "/release"}
-	res, err := c.Install(context.Background(), execPath)
+	res, err := c.Install(t.Context(), execPath)
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
@@ -476,7 +475,7 @@ func TestInstallRefusesReleaseWithoutChecksums(t *testing.T) {
 	}
 
 	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL + "/release"}
-	if _, err := c.Install(context.Background(), execPath); err == nil || !strings.Contains(err.Error(), "SHA256SUMS.txt") {
+	if _, err := c.Install(t.Context(), execPath); err == nil || !strings.Contains(err.Error(), "SHA256SUMS.txt") {
 		t.Fatalf("expected refusal for release without checksums, got %v", err)
 	}
 	// The old binary must be untouched.
@@ -535,7 +534,7 @@ func TestInstallChecksumMismatch(t *testing.T) {
 	}
 
 	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL + "/release"}
-	if _, err := c.Install(context.Background(), execPath); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+	if _, err := c.Install(t.Context(), execPath); err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
 		t.Fatalf("expected checksum mismatch, got %v", err)
 	}
 	// The old binary must be untouched.
@@ -549,7 +548,7 @@ func TestInstallUpToDate(t *testing.T) {
 	bin := []byte("new binary")
 	srv := installTestServer(t, bin, true)
 	c := &Client{HTTPClient: srv.Client(), Current: "v9.9.9", latestURL: srv.URL + "/release"}
-	if _, err := c.Install(context.Background(), filepath.Join(t.TempDir(), "irongrid")); err == nil {
+	if _, err := c.Install(t.Context(), filepath.Join(t.TempDir(), "irongrid")); err == nil {
 		t.Fatal("expected an error when already up to date")
 	}
 }

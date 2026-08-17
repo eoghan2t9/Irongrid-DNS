@@ -118,7 +118,7 @@ func TestResolveASNCoalescesConcurrentLookups(t *testing.T) {
 	var wg sync.WaitGroup
 	for range n {
 		wg.Go(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			if info := h.resolveASN(ctx, "8.8.8.8"); info.ASN != "AS15169" || info.Holder != "Google LLC" {
 				t.Errorf("resolveASN = %+v, want AS15169/Google LLC", info)
@@ -151,7 +151,7 @@ func TestResolveASNNoRoutingNegativelyCached(t *testing.T) {
 	defer func() { ripestatNetworkInfo = oldNI }()
 
 	h := &Handler{}
-	ctx := context.Background()
+	ctx := t.Context()
 	if info := h.resolveASN(ctx, "1.2.3.4"); info.ASN != "" {
 		t.Fatal("expected no ASN for the empty mock")
 	}

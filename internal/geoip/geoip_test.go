@@ -1,7 +1,6 @@
 package geoip
 
 import (
-	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -89,7 +88,7 @@ func TestManagerRefreshFromSource(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(ruDir, "ipv6-aggregated.txt"), []byte("2001:db8::/32\n"), 0o644)
 
 	m := NewManager(dir, "file://"+src)
-	b, err := m.Refresh(context.Background(), []string{"RU"}, nil)
+	b, err := m.Refresh(t.Context(), []string{"RU"}, nil)
 	if err != nil {
 		t.Fatalf("Refresh: %v", err)
 	}
@@ -130,7 +129,7 @@ func TestManagerHTTPFallbackToCache(t *testing.T) {
 	defer srv.Close()
 
 	m := NewManager(dir, srv.URL)
-	b, err := m.Refresh(context.Background(), []string{"CN"}, nil)
+	b, err := m.Refresh(t.Context(), []string{"CN"}, nil)
 	if err != nil {
 		t.Fatalf("Refresh should fall back to the cached copy: %v", err)
 	}
@@ -144,7 +143,7 @@ func TestManagerHTTPFallbackToCache(t *testing.T) {
 
 	// With no cache either, the country is skipped and an error is recorded.
 	m2 := NewManager(t.TempDir(), srv.URL)
-	if _, err := m2.Refresh(context.Background(), []string{"CN"}, nil); err == nil {
+	if _, err := m2.Refresh(t.Context(), []string{"CN"}, nil); err == nil {
 		t.Fatal("expected an error when the source is dead and there is no cache")
 	}
 	if st := m2.Status(); len(st) != 1 || st[0].Error == "" {

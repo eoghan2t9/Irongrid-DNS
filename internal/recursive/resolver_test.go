@@ -185,7 +185,7 @@ func TestResolveWalksRootToAuthoritative(t *testing.T) {
 
 	m := new(dns.Msg)
 	m.SetQuestion("example.com.", dns.TypeA)
-	resp, err := r.Resolve(context.Background(), m)
+	resp, err := r.Resolve(t.Context(), m)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -213,7 +213,7 @@ func TestResolveCachesDelegation(t *testing.T) {
 
 	m1 := new(dns.Msg)
 	m1.SetQuestion("example.com.", dns.TypeA)
-	if _, err := r.Resolve(context.Background(), m1); err != nil {
+	if _, err := r.Resolve(t.Context(), m1); err != nil {
 		t.Fatalf("first Resolve: %v", err)
 	}
 
@@ -232,7 +232,7 @@ func TestResolveChasesCNAME(t *testing.T) {
 
 	m := new(dns.Msg)
 	m.SetQuestion("www.example.com.", dns.TypeA)
-	resp, err := r.Resolve(context.Background(), m)
+	resp, err := r.Resolve(t.Context(), m)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -256,7 +256,7 @@ func TestResolveNXDOMAIN(t *testing.T) {
 
 	m := new(dns.Msg)
 	m.SetQuestion("nowhere.example.com.", dns.TypeA)
-	resp, err := r.Resolve(context.Background(), m)
+	resp, err := r.Resolve(t.Context(), m)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -317,7 +317,7 @@ func TestResolveRacesNameservers(t *testing.T) {
 	m.SetQuestion("example.com.", dns.TypeA)
 
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	resp, err := r.Resolve(ctx, m)
 	if err != nil {
@@ -373,7 +373,7 @@ func TestResolveAllRootsUnreachable(t *testing.T) {
 	m.SetQuestion("example.com.", dns.TypeA)
 
 	start := time.Now()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	if _, err := r.Resolve(ctx, m); err == nil {
 		t.Fatal("expected an error when every root hint is unreachable")
@@ -404,7 +404,7 @@ func TestReferralParsing(t *testing.T) {
 		t.Fatalf("ttl = %v", ttl)
 	}
 
-	servers := New(nil).resolveNameservers(context.Background(), records, 0)
+	servers := New(nil).resolveNameservers(t.Context(), records, 0)
 	if len(servers) != 1 || servers[0] != "10.0.0.1:53" {
 		t.Fatalf("servers = %v", servers)
 	}
@@ -490,7 +490,7 @@ func TestResolveGluelessOutOfBailiwickNS(t *testing.T) {
 	r := newTestResolver(rootAddr, nsPort)
 	m := new(dns.Msg)
 	m.SetQuestion("example.com.", dns.TypeA)
-	resp, err := r.Resolve(context.Background(), m)
+	resp, err := r.Resolve(t.Context(), m)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -557,7 +557,7 @@ func TestResolveCoalescesNSAddressLookups(t *testing.T) {
 	var wg sync.WaitGroup
 	for range n {
 		wg.Go(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 			defer cancel()
 			addr, ok := r.resolveNSAddr(ctx, "ns1.dnshost.invalid.", 1)
 			if !ok || addr != "127.0.0.4:"+nsPort {
@@ -629,7 +629,7 @@ func TestResolveCachesNSAddress(t *testing.T) {
 
 	m1 := new(dns.Msg)
 	m1.SetQuestion("example.com.", dns.TypeA)
-	if _, err := r.Resolve(context.Background(), m1); err != nil {
+	if _, err := r.Resolve(t.Context(), m1); err != nil {
 		t.Fatalf("first Resolve: %v", err)
 	}
 	if addr, ok := r.cachedNSAddr("ns1.dnshost.invalid."); !ok || addr != "127.0.0.4:"+nsPort {
@@ -647,7 +647,7 @@ func TestResolveCachesNSAddress(t *testing.T) {
 	stopInvalid()
 	m2 := new(dns.Msg)
 	m2.SetQuestion("other.com.", dns.TypeA)
-	resp, err := r.Resolve(context.Background(), m2)
+	resp, err := r.Resolve(t.Context(), m2)
 	if err != nil {
 		t.Fatalf("second Resolve with cached NS address: %v", err)
 	}
@@ -692,7 +692,7 @@ func TestResolverAdvertisesEDNS1232(t *testing.T) {
 	r := New([]string{pc.LocalAddr().String()})
 	m := new(dns.Msg)
 	m.SetQuestion("example.com.", dns.TypeA)
-	resp, err := r.Resolve(context.Background(), m)
+	resp, err := r.Resolve(t.Context(), m)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
@@ -726,7 +726,7 @@ func TestResolverConnPoolReuse(t *testing.T) {
 
 	m := new(dns.Msg)
 	m.SetQuestion("example.com.", dns.TypeA)
-	if _, err := r.exchange(context.Background(), addr, m.Copy(), "udp", time.Second); err != nil {
+	if _, err := r.exchange(t.Context(), addr, m.Copy(), "udp", time.Second); err != nil {
 		t.Fatalf("first exchange: %v", err)
 	}
 	if got := r.poolKeyCount.Load(); got != 1 {

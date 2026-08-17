@@ -1,7 +1,6 @@
 package querylog
 
 import (
-	"context"
 	"testing"
 	"time"
 
@@ -37,7 +36,7 @@ func waitFor(t *testing.T, l *Log, n int) []Entry {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		entries, err := l.Query(context.Background(), n+10, 0, "", "", "", "")
+		entries, err := l.Query(t.Context(), n+10, 0, "", "", "", "")
 		if err != nil {
 			t.Fatalf("Query: %v", err)
 		}
@@ -73,7 +72,7 @@ func TestRecordFlushesOnClose(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer r.Close()
-	entries, err := r.Query(context.Background(), 100, 0, "", "", "", "")
+	entries, err := r.Query(t.Context(), 100, 0, "", "", "", "")
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -117,7 +116,7 @@ func TestQueryOrderAndFilters(t *testing.T) {
 			entries[0].Domain, entries[3].Domain)
 	}
 
-	blocked, err := l.Query(context.Background(), 100, 0, "blocked", "", "", "")
+	blocked, err := l.Query(t.Context(), 100, 0, "blocked", "", "", "")
 	if err != nil {
 		t.Fatalf("Query blocked: %v", err)
 	}
@@ -125,7 +124,7 @@ func TestQueryOrderAndFilters(t *testing.T) {
 		t.Fatalf("blocked filter matched %d, want 2", len(blocked))
 	}
 
-	byDomain, err := l.Query(context.Background(), 100, 0, "", "bbb", "", "")
+	byDomain, err := l.Query(t.Context(), 100, 0, "", "bbb", "", "")
 	if err != nil {
 		t.Fatalf("Query domain: %v", err)
 	}
@@ -134,7 +133,7 @@ func TestQueryOrderAndFilters(t *testing.T) {
 	}
 
 	// Pagination: offset 1, limit 2 over 4 entries -> the middle two.
-	page, err := l.Query(context.Background(), 2, 1, "", "", "", "")
+	page, err := l.Query(t.Context(), 2, 1, "", "", "", "")
 	if err != nil {
 		t.Fatalf("Query page: %v", err)
 	}
@@ -161,7 +160,7 @@ func TestWalkStreamStrictBound(t *testing.T) {
 	// Bound of 10 with a page of 1000: the single page holds all 30
 	// messages, yet the callback must see exactly 10.
 	count := 0
-	if err := l.walkStream(context.Background(), true, "+", "-", 10, 1000, func(m redis.XMessage) bool {
+	if err := l.walkStream(t.Context(), true, "+", "-", 10, 1000, func(m redis.XMessage) bool {
 		count++
 		return true
 	}); err != nil {
@@ -173,7 +172,7 @@ func TestWalkStreamStrictBound(t *testing.T) {
 
 	// The callback's false return also stops the walk early.
 	stopped := 0
-	if err := l.walkStream(context.Background(), true, "+", "-", 1000, 1000, func(m redis.XMessage) bool {
+	if err := l.walkStream(t.Context(), true, "+", "-", 1000, 1000, func(m redis.XMessage) bool {
 		stopped++
 		return stopped < 3
 	}); err != nil {
@@ -190,7 +189,7 @@ func TestQueryNoMatch(t *testing.T) {
 	l, _ := newTestLog(t, 30)
 	l.Record(entry("aaa.com.", "allowed"))
 	waitFor(t, l, 1)
-	got, err := l.Query(context.Background(), 100, 0, "blocked", "", "", "")
+	got, err := l.Query(t.Context(), 100, 0, "blocked", "", "", "")
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -214,7 +213,7 @@ func TestQueryClientFilter(t *testing.T) {
 	l.Record(e3)
 	waitFor(t, l, 3)
 
-	got, err := l.Query(context.Background(), 100, 0, "", "", "", "203.0.113.9")
+	got, err := l.Query(t.Context(), 100, 0, "", "", "", "203.0.113.9")
 	if err != nil {
 		t.Fatalf("Query client: %v", err)
 	}
@@ -227,7 +226,7 @@ func TestQueryClientFilter(t *testing.T) {
 		}
 	}
 	// Combined with another filter: exact action AND exact client.
-	blocked, err := l.Query(context.Background(), 100, 0, "blocked", "", "", "203.0.113.9")
+	blocked, err := l.Query(t.Context(), 100, 0, "blocked", "", "", "203.0.113.9")
 	if err != nil {
 		t.Fatalf("Query client+action: %v", err)
 	}
@@ -245,7 +244,7 @@ func TestHourly(t *testing.T) {
 	l.Record(entry("ok.com.", "allowed"))
 	waitFor(t, l, 2)
 
-	hours, err := l.Hourly(context.Background(), time.Now().Add(-24*time.Hour))
+	hours, err := l.Hourly(t.Context(), time.Now().Add(-24*time.Hour))
 	if err != nil {
 		t.Fatalf("Hourly: %v", err)
 	}
@@ -287,7 +286,7 @@ func TestStats(t *testing.T) {
 	l.Record(entry("ok.example.com.", "cached"))
 	waitFor(t, l, 4)
 
-	stats, err := l.Stats(context.Background(), before.Add(-time.Minute))
+	stats, err := l.Stats(t.Context(), before.Add(-time.Minute))
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
@@ -310,7 +309,7 @@ func TestStats(t *testing.T) {
 	}
 
 	// A window entirely in the future counts nothing.
-	future, err := l.Stats(context.Background(), time.Now().Add(time.Hour))
+	future, err := l.Stats(t.Context(), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("Stats future: %v", err)
 	}
@@ -334,7 +333,7 @@ func TestActiveDomains(t *testing.T) {
 	l.Record(entry("c.com.", "error"))
 	waitFor(t, l, 5)
 
-	domains, err := l.ActiveDomains(context.Background(), time.Now().Add(-24*time.Hour), 0)
+	domains, err := l.ActiveDomains(t.Context(), time.Now().Add(-24*time.Hour), 0)
 	if err != nil {
 		t.Fatalf("ActiveDomains: %v", err)
 	}
@@ -352,7 +351,7 @@ func TestActiveDomains(t *testing.T) {
 	}
 
 	// The cap keeps only the top-n by count (a.com is the busiest).
-	top1, err := l.ActiveDomains(context.Background(), time.Now().Add(-24*time.Hour), 1)
+	top1, err := l.ActiveDomains(t.Context(), time.Now().Add(-24*time.Hour), 1)
 	if err != nil {
 		t.Fatalf("ActiveDomains capped: %v", err)
 	}
@@ -361,7 +360,7 @@ func TestActiveDomains(t *testing.T) {
 	}
 
 	// A window entirely in the future matches nothing.
-	none, err := l.ActiveDomains(context.Background(), time.Now().Add(time.Hour), 0)
+	none, err := l.ActiveDomains(t.Context(), time.Now().Add(time.Hour), 0)
 	if err != nil {
 		t.Fatalf("ActiveDomains future: %v", err)
 	}
@@ -374,7 +373,7 @@ func TestActiveDomains(t *testing.T) {
 func TestActiveDomainsDisabled(t *testing.T) {
 	l := NewDisabled(30)
 	defer l.Close()
-	domains, err := l.ActiveDomains(context.Background(), time.Now().Add(-time.Hour), 0)
+	domains, err := l.ActiveDomains(t.Context(), time.Now().Add(-time.Hour), 0)
 	if err != nil {
 		t.Fatalf("ActiveDomains: %v", err)
 	}
@@ -394,7 +393,7 @@ func TestStatsCache(t *testing.T) {
 	waitFor(t, l, 1)
 
 	since := time.Now().Add(-24 * time.Hour)
-	first, err := l.Stats(context.Background(), since)
+	first, err := l.Stats(t.Context(), since)
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}
@@ -407,7 +406,7 @@ func TestStatsCache(t *testing.T) {
 	l.Record(entry("b.com.", "blocked"))
 	l.Record(entry("b.com.", "blocked"))
 	waitFor(t, l, 3)
-	second, err := l.Stats(context.Background(), since)
+	second, err := l.Stats(t.Context(), since)
 	if err != nil {
 		t.Fatalf("Stats cached: %v", err)
 	}
@@ -416,7 +415,7 @@ func TestStatsCache(t *testing.T) {
 	}
 
 	// A different window recomputes instead of reusing the cached value.
-	future, err := l.Stats(context.Background(), time.Now().Add(time.Hour))
+	future, err := l.Stats(t.Context(), time.Now().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("Stats future: %v", err)
 	}
@@ -426,10 +425,10 @@ func TestStatsCache(t *testing.T) {
 
 	// Clear must invalidate the cache: the next poll re-scans the empty
 	// stream rather than serving the pre-clear totals.
-	if err := l.Clear(context.Background()); err != nil {
+	if err := l.Clear(t.Context()); err != nil {
 		t.Fatalf("Clear: %v", err)
 	}
-	after, err := l.Stats(context.Background(), since)
+	after, err := l.Stats(t.Context(), since)
 	if err != nil {
 		t.Fatalf("Stats after clear: %v", err)
 	}
@@ -446,7 +445,7 @@ func TestHourlyCache(t *testing.T) {
 	waitFor(t, l, 1)
 
 	since := time.Now().Add(-24 * time.Hour)
-	first, err := l.Hourly(context.Background(), since)
+	first, err := l.Hourly(t.Context(), since)
 	if err != nil {
 		t.Fatalf("Hourly: %v", err)
 	}
@@ -459,7 +458,7 @@ func TestHourlyCache(t *testing.T) {
 	l.Record(entry("b.com.", "blocked"))
 	l.Record(entry("b.com.", "blocked"))
 	waitFor(t, l, 3)
-	second, err := l.Hourly(context.Background(), since)
+	second, err := l.Hourly(t.Context(), since)
 	if err != nil {
 		t.Fatalf("Hourly cached: %v", err)
 	}
@@ -487,7 +486,7 @@ func TestStatsBundle(t *testing.T) {
 	since := now.Add(-24 * time.Hour)
 	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 
-	b, err := l.StatsBundle(context.Background(), since, today)
+	b, err := l.StatsBundle(t.Context(), since, today)
 	if err != nil {
 		t.Fatalf("StatsBundle: %v", err)
 	}
@@ -519,7 +518,7 @@ func TestStatsBundle(t *testing.T) {
 	// serve the pre-existing totals without re-scanning.
 	l.Record(entry("c.example.com.", "allowed"))
 	waitFor(t, l, 3)
-	b2, err := l.StatsBundle(context.Background(), since, today)
+	b2, err := l.StatsBundle(t.Context(), since, today)
 	if err != nil {
 		t.Fatalf("StatsBundle cached: %v", err)
 	}
@@ -528,10 +527,10 @@ func TestStatsBundle(t *testing.T) {
 	}
 
 	// Clear must invalidate the cache so the next poll re-scans the stream.
-	if err := l.Clear(context.Background()); err != nil {
+	if err := l.Clear(t.Context()); err != nil {
 		t.Fatalf("Clear: %v", err)
 	}
-	b3, err := l.StatsBundle(context.Background(), since, today)
+	b3, err := l.StatsBundle(t.Context(), since, today)
 	if err != nil {
 		t.Fatalf("StatsBundle after clear: %v", err)
 	}
@@ -546,7 +545,7 @@ func TestStatsBundleDisabled(t *testing.T) {
 	l := NewDisabled(30)
 	defer l.Close()
 	now := time.Now()
-	b, err := l.StatsBundle(context.Background(), now.Add(-24*time.Hour),
+	b, err := l.StatsBundle(t.Context(), now.Add(-24*time.Hour),
 		time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()))
 	if err != nil {
 		t.Fatalf("StatsBundle: %v", err)
@@ -563,10 +562,10 @@ func TestClear(t *testing.T) {
 		l.Record(entry("example.com.", "allowed"))
 	}
 	waitFor(t, l, 5)
-	if err := l.Clear(context.Background()); err != nil {
+	if err := l.Clear(t.Context()); err != nil {
 		t.Fatalf("Clear: %v", err)
 	}
-	entries, err := l.Query(context.Background(), 100, 0, "", "", "", "")
+	entries, err := l.Query(t.Context(), 100, 0, "", "", "", "")
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -583,8 +582,8 @@ func TestPruneKeepsFreshEntries(t *testing.T) {
 		l.Record(entry("example.com.", "allowed"))
 	}
 	waitFor(t, l, 5)
-	l.Prune(context.Background())
-	entries, err := l.Query(context.Background(), 100, 0, "", "", "", "")
+	l.Prune(t.Context())
+	entries, err := l.Query(t.Context(), 100, 0, "", "", "", "")
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
@@ -607,14 +606,14 @@ func TestDisabledMode(t *testing.T) {
 	l := NewDisabled(30)
 	defer l.Close()
 	l.Record(entry("example.com.", "allowed"))
-	entries, err := l.Query(context.Background(), 100, 0, "", "", "", "")
+	entries, err := l.Query(t.Context(), 100, 0, "", "", "", "")
 	if err != nil {
 		t.Fatalf("Query: %v", err)
 	}
 	if len(entries) != 0 {
 		t.Fatalf("disabled log returned %d entries, want 0", len(entries))
 	}
-	stats, err := l.Stats(context.Background(), time.Now().Add(-time.Hour))
+	stats, err := l.Stats(t.Context(), time.Now().Add(-time.Hour))
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}

@@ -1,7 +1,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
@@ -14,7 +13,7 @@ import (
 func TestInstallUpdatePendingMessageNoDoubleV(t *testing.T) {
 	h := &Handler{lastInstalledVersion: "v1.4.1"}
 	w := httptest.NewRecorder()
-	h.installUpdate(context.Background(), w)
+	h.installUpdate(t.Context(), w)
 
 	var body map[string]string
 	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {

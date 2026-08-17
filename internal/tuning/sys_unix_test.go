@@ -3,7 +3,6 @@
 package tuning
 
 import (
-	"context"
 	"net"
 	"testing"
 
@@ -101,7 +100,7 @@ func TestStatusSnapshot(t *testing.T) {
 // TestListenConfigServes verifies the Control hook doesn't break ordinary
 // listening (the hook runs on every socket the ListenConfig creates).
 func TestListenConfigServes(t *testing.T) {
-	ln, err := ListenConfig().Listen(context.Background(), "tcp", "127.0.0.1:0")
+	ln, err := ListenConfig().Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -161,14 +161,14 @@ func startDoQTestServer(t *testing.T) (addr string, clientTLS *tls.Config, accep
 	accepted = &atomic.Int32{}
 	go func() {
 		for {
-			conn, err := ln.Accept(context.Background())
+			conn, err := ln.Accept(t.Context())
 			if err != nil {
 				return
 			}
 			accepted.Add(1)
 			go func() {
 				for {
-					stream, err := conn.AcceptStream(context.Background())
+					stream, err := conn.AcceptStream(t.Context())
 					if err != nil {
 						return
 					}
@@ -207,7 +207,7 @@ func TestTCPUpstreamReusesConnection(t *testing.T) {
 	u := NewWithTLS(TCP, addr, "", nil)
 	t.Cleanup(u.Close)
 	for i := range 3 {
-		r, err := u.Query(context.Background(), aQuery())
+		r, err := u.Query(t.Context(), aQuery())
 		if err != nil {
 			t.Fatalf("query %d: %v", i, err)
 		}
@@ -255,7 +255,7 @@ func TestUDPUpstreamReusesSocket(t *testing.T) {
 	t.Cleanup(u.Close)
 
 	for i := range 3 {
-		r, err := u.Query(context.Background(), aQuery())
+		r, err := u.Query(t.Context(), aQuery())
 		if err != nil {
 			t.Fatalf("query %d: %v", i, err)
 		}
@@ -273,7 +273,7 @@ func TestDoTUpstreamReusesConnection(t *testing.T) {
 	u := NewWithTLS(TLS, addr, "localhost", clientTLS)
 	t.Cleanup(u.Close)
 	for i := range 3 {
-		r, err := u.Query(context.Background(), aQuery())
+		r, err := u.Query(t.Context(), aQuery())
 		if err != nil {
 			t.Fatalf("query %d: %v", i, err)
 		}
@@ -291,7 +291,7 @@ func TestDoQUpstreamReusesConnection(t *testing.T) {
 	u := NewWithTLS(QUIC, addr, "localhost", clientTLS)
 	t.Cleanup(u.Close)
 	for i := range 3 {
-		r, err := u.Query(context.Background(), aQuery())
+		r, err := u.Query(t.Context(), aQuery())
 		if err != nil {
 			t.Fatalf("query %d: %v", i, err)
 		}
@@ -328,7 +328,7 @@ func TestRecursiveUpstreamDispatches(t *testing.T) {
 	t.Cleanup(func() { _ = srv.Shutdown() })
 
 	u := NewRecursive([]string{pc.LocalAddr().String()})
-	r, err := u.Query(context.Background(), aQuery())
+	r, err := u.Query(t.Context(), aQuery())
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -381,7 +381,7 @@ func TestPoolEvictsStaleConnection(t *testing.T) {
 	addr, accepted := startTCPTestServer(t)
 	u := NewWithTLS(TCP, addr, "", nil)
 	t.Cleanup(u.Close)
-	if _, err := u.Query(context.Background(), aQuery()); err != nil {
+	if _, err := u.Query(t.Context(), aQuery()); err != nil {
 		t.Fatalf("first query: %v", err)
 	}
 	if got := accepted.Load(); got != 1 {
@@ -393,7 +393,7 @@ func TestPoolEvictsStaleConnection(t *testing.T) {
 	pc.pooledAt = time.Now().Add(-2 * poolMaxIdle)
 	u.connPool <- pc
 
-	if _, err := u.Query(context.Background(), aQuery()); err != nil {
+	if _, err := u.Query(t.Context(), aQuery()); err != nil {
 		t.Fatalf("second query: %v", err)
 	}
 	if got := accepted.Load(); got != 2 {
@@ -463,7 +463,7 @@ func TestDoHRetriesStaleConnection(t *testing.T) {
 	// retry it would fail with "unexpected EOF" — and must recover on a
 	// fresh dial. The server should therefore have answered exactly twice.
 	for i := 1; i <= 2; i++ {
-		r, err := u.Query(context.Background(), q)
+		r, err := u.Query(t.Context(), q)
 		if err != nil {
 			t.Fatalf("query %d: %v", i, err)
 		}
@@ -488,7 +488,7 @@ func TestDoHRetriesStaleConnection(t *testing.T) {
 func TestUpstreamCloseDrainsPoolAndQUICConn(t *testing.T) {
 	tcpAddr, _ := startTCPTestServer(t)
 	tcpUp := NewWithTLS(TCP, tcpAddr, "", nil)
-	if _, err := tcpUp.Query(context.Background(), aQuery()); err != nil {
+	if _, err := tcpUp.Query(t.Context(), aQuery()); err != nil {
 		t.Fatalf("tcp query: %v", err)
 	}
 	tcpUp.Close()
@@ -500,7 +500,7 @@ func TestUpstreamCloseDrainsPoolAndQUICConn(t *testing.T) {
 
 	quicAddr, clientTLS, _ := startDoQTestServer(t)
 	quicUp := NewWithTLS(QUIC, quicAddr, "localhost", clientTLS)
-	if _, err := quicUp.Query(context.Background(), aQuery()); err != nil {
+	if _, err := quicUp.Query(t.Context(), aQuery()); err != nil {
 		t.Fatalf("doq query: %v", err)
 	}
 	quicUp.Close()
@@ -586,7 +586,7 @@ func TestUDPTruncatedFallsBackToTCP(t *testing.T) {
 	t.Cleanup(func() { _ = udpSrv.Shutdown() })
 
 	u := NewWithTLS(UDP, udpAddr, "", nil)
-	r, err := u.Query(context.Background(), aQuery())
+	r, err := u.Query(t.Context(), aQuery())
 	if err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -624,7 +624,7 @@ func TestUDPQueryAdvertisesEDNS1232(t *testing.T) {
 	u := NewWithTLS(UDP, pc.LocalAddr().String(), "", nil)
 	q := aQuery()
 	q.SetEdns0(1232, false)
-	if _, err := u.Query(context.Background(), q); err != nil {
+	if _, err := u.Query(t.Context(), q); err != nil {
 		t.Fatalf("query: %v", err)
 	}
 	if got := gotSize.Load(); got != 1232 {
@@ -648,7 +648,7 @@ func TestDoHHTTPErrorCountsAsFailure(t *testing.T) {
 	pool.AddCert(srv.Certificate())
 	u.client = &http.Client{Transport: &http.Transport{TLSClientConfig: &tls.Config{RootCAs: pool}}}
 
-	if _, err := u.Query(context.Background(), aQuery()); err == nil {
+	if _, err := u.Query(t.Context(), aQuery()); err == nil {
 		t.Fatal("expected an error for HTTP 500")
 	}
 	if u.Fails() != 1 {
@@ -663,7 +663,7 @@ func TestDoHHTTPErrorCountsAsFailure(t *testing.T) {
 // query.
 func TestRecursiveFailureCountsAsFailure(t *testing.T) {
 	u := NewRecursive([]string{"127.0.0.1:1"}) // nothing listening there
-	if _, err := u.Query(context.Background(), aQuery()); err == nil {
+	if _, err := u.Query(t.Context(), aQuery()); err == nil {
 		t.Fatal("expected an error for an unreachable root hint")
 	}
 	if u.Fails() == 0 {

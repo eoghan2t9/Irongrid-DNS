@@ -462,7 +462,7 @@ func TestHandlerCoalescesBackgroundResolutions(t *testing.T) {
 	var wg sync.WaitGroup
 	for range n {
 		wg.Go(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 			defer cancel()
 			h.Refresh(ctx, q)
 		})
@@ -664,7 +664,7 @@ func TestHandlerTruncatesOversizedUDPResponse(t *testing.T) {
 	var hit *dns.Msg
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		hit = c.Get(context.Background(), q)
+		hit = c.Get(t.Context(), q)
 		if hit != nil {
 			break
 		}
@@ -1066,7 +1066,7 @@ func TestHandlerHoneypotNotLogged(t *testing.T) {
 	// The async log writer flushes on a 100ms ticker; poll briefly.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		entries, err := ql.Query(context.Background(), 100, 0, "", "", "", "")
+		entries, err := ql.Query(t.Context(), 100, 0, "", "", "", "")
 		if err != nil {
 			t.Fatalf("query log read: %v", err)
 		}
@@ -1307,7 +1307,7 @@ func TestRaceUpstreamsAllFail(t *testing.T) {
 	m := new(dns.Msg)
 	m.SetQuestion("example.com.", dns.TypeA)
 	start := time.Now()
-	resp, _, err := raceUpstreams(context.Background(), []*upstream.Upstream{
+	resp, _, err := raceUpstreams(t.Context(), []*upstream.Upstream{
 		{Transport: upstream.UDP, Addr: deadAddr},
 		{Transport: upstream.UDP, Addr: deadAddr},
 	}, m)
@@ -1344,7 +1344,7 @@ func TestHandlerCacheWriteDoesNotBlockResponse(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if got := c.Get(context.Background(), q); got != nil {
+		if got := c.Get(t.Context(), q); got != nil {
 			return
 		}
 		time.Sleep(5 * time.Millisecond)
@@ -1387,7 +1387,7 @@ func TestHandlerCacheHitPoolConcurrency(t *testing.T) {
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if got := c.Get(context.Background(), primeQ); got != nil {
+		if got := c.Get(t.Context(), primeQ); got != nil {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)

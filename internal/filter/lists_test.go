@@ -29,7 +29,7 @@ func TestFetchOneCoalescesConcurrentDownloads(t *testing.T) {
 	var wg sync.WaitGroup
 	for range n {
 		wg.Go(func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 			defer cancel()
 			if err := m.FetchOne(ctx, "test"); err != nil {
 				t.Errorf("FetchOne: %v", err)

@@ -3,7 +3,6 @@
 package tuning
 
 import (
-	"context"
 	"net"
 	"testing"
 	"time"
@@ -15,7 +14,7 @@ import (
 // them — the property the multi-socket DNS listener relies on.
 func TestReuseportListeners(t *testing.T) {
 	lc := &net.ListenConfig{Control: ReuseportControl}
-	first, err := lc.ListenPacket(context.Background(), "udp", "127.0.0.1:0")
+	first, err := lc.ListenPacket(t.Context(), "udp", "127.0.0.1:0")
 	if err != nil {
 		t.Skipf("SO_REUSEPORT unavailable here: %v", err)
 	}
@@ -30,7 +29,7 @@ func TestReuseportListeners(t *testing.T) {
 		}
 	}()
 	for i := range extra {
-		pc, err := lc.ListenPacket(context.Background(), "udp", addr)
+		pc, err := lc.ListenPacket(t.Context(), "udp", addr)
 		if err != nil {
 			t.Fatalf("reuseport bind %d on %s: %v", i+1, addr, err)
 		}

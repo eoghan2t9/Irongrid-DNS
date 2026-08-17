@@ -1,7 +1,6 @@
 package dnsserver
 
 import (
-	"context"
 	"crypto/x509"
 	"os"
 	"path/filepath"
@@ -43,7 +42,7 @@ func TestDoQRoundTrip(t *testing.T) {
 	if _, err := mgr.Start("", "", "", "", "", "127.0.0.1:0", "/dns-query"); err != nil {
 		t.Fatalf("start: %v", err)
 	}
-	defer mgr.Shutdown(context.Background())
+	defer mgr.Shutdown(t.Context())
 
 	addr := mgr.DoQAddr()
 	if addr == "" {
@@ -66,7 +65,7 @@ func TestDoQRoundTrip(t *testing.T) {
 	// which still proves the DoQ transport round-trips.
 	m := new(dns.Msg)
 	m.SetQuestion("example.com.", dns.TypeA)
-	resp, err := client.Query(context.Background(), m)
+	resp, err := client.Query(t.Context(), m)
 	if err != nil {
 		t.Fatalf("doq query failed: %v", err)
 	}
@@ -78,7 +77,7 @@ func TestDoQRoundTrip(t *testing.T) {
 	// Blocked path: the filter answers NXDOMAIN before upstream is used.
 	m2 := new(dns.Msg)
 	m2.SetQuestion("doubleclick.net.", dns.TypeA)
-	resp2, err := client.Query(context.Background(), m2)
+	resp2, err := client.Query(t.Context(), m2)
 	if err != nil {
 		t.Fatalf("doq blocked query failed: %v", err)
 	}
@@ -92,7 +91,7 @@ func TestDoQRoundTrip(t *testing.T) {
 	// from the stored packed bytes over the raw DoQ write path.
 	warm := new(dns.Msg)
 	warm.SetQuestion("cached.example.com.", dns.TypeA)
-	if resp3, err := client.Query(context.Background(), warm); err != nil || resp3 == nil || len(resp3.Answer) == 0 {
+	if resp3, err := client.Query(t.Context(), warm); err != nil || resp3 == nil || len(resp3.Answer) == 0 {
 		t.Fatalf("cache-warm query failed: resp=%v err=%v", resp3, err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
@@ -104,7 +103,7 @@ func TestDoQRoundTrip(t *testing.T) {
 	}
 	hit := new(dns.Msg)
 	hit.SetQuestion("cached.example.com.", dns.TypeA)
-	resp4, err := client.Query(context.Background(), hit)
+	resp4, err := client.Query(t.Context(), hit)
 	if err != nil {
 		t.Fatalf("cache-hit query failed: %v", err)
 	}
