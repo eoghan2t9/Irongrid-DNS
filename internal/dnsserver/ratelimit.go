@@ -4,6 +4,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/shardutil"
 )
 
 // rlShards controls lock contention: each client IP hashes to one shard, so
@@ -95,12 +97,7 @@ func (rl *RateLimiter) SetAutoBlock(after int, blockFor time.Duration) {
 // shard picks a shard for key with FNV-1a (cheap, decent spread) — same
 // scheme cache.l1Cache uses for the same reason.
 func (rl *RateLimiter) shard(key string) *rlShard {
-	var h uint32 = 2166136261
-	for i := 0; i < len(key); i++ {
-		h ^= uint32(key[i])
-		h *= 16777619
-	}
-	return rl.shards[h&(rlShards-1)]
+	return rl.shards[shardutil.FNV1a(key)&(rlShards-1)]
 }
 
 // Allow reports whether client may proceed, consuming one token if so. An

@@ -4,6 +4,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/shardutil"
 )
 
 // connLimitShards bounds lock contention on the per-IP connection counter:
@@ -36,12 +38,7 @@ func newConnLimiter(max int) *connLimiter {
 }
 
 func (cl *connLimiter) shard(ip string) *connShard {
-	var h uint32 = 2166136261
-	for i := 0; i < len(ip); i++ {
-		h ^= uint32(ip[i])
-		h *= 16777619
-	}
-	return cl.shards[h&(connLimitShards-1)]
+	return cl.shards[shardutil.FNV1a(ip)&(connLimitShards-1)]
 }
 
 // acquire reserves a connection slot for ip, reporting false when the cap is

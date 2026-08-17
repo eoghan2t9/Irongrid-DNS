@@ -4,6 +4,8 @@ import (
 	"net"
 	"sync"
 	"time"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/shardutil"
 )
 
 // NXDOMAIN flood guard: throttles random-subdomain (a.k.a. "water torture")
@@ -81,12 +83,7 @@ func NewNXGuard(threshold int, window, blockFor time.Duration) *NXGuard {
 }
 
 func (g *NXGuard) shard(prefix string) *nxShard {
-	var h uint32 = 2166136261
-	for i := 0; i < len(prefix); i++ {
-		h ^= uint32(prefix[i])
-		h *= 16777619
-	}
-	return g.shards[h&(nxShards-1)]
+	return g.shards[shardutil.FNV1a(prefix)&(nxShards-1)]
 }
 
 // Allow reports whether a query from prefix may proceed. It is a read-only

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/shardutil"
 )
 
 const (
@@ -50,12 +52,7 @@ func NewLoginGuard() *LoginGuard {
 }
 
 func (g *LoginGuard) shard(key string) *loginShard {
-	var h uint32 = 2166136261
-	for i := 0; i < len(key); i++ {
-		h ^= uint32(key[i])
-		h *= 16777619
-	}
-	return g.shards[h&(loginGuardShards-1)]
+	return g.shards[shardutil.FNV1a(key)&(loginGuardShards-1)]
 }
 
 // Locked reports whether client is currently locked out and, if so, how
