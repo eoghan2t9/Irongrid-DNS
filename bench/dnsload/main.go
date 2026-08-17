@@ -17,7 +17,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"os"
@@ -107,7 +107,7 @@ func main() {
 		wg.Add(1)
 		go func(seed int64) {
 			defer wg.Done()
-			rnd := rand.New(rand.NewSource(time.Now().UnixNano() + seed))
+			rnd := rand.New(rand.NewPCG(uint64(time.Now().UnixNano())+uint64(seed), 0))
 			for {
 				select {
 				case <-ctx.Done():
@@ -118,7 +118,7 @@ func main() {
 					time.Sleep(pace)
 				}
 				m := new(dns.Msg)
-				m.SetQuestion(mix[rnd.Intn(len(mix))], dns.TypeA)
+				m.SetQuestion(mix[rnd.IntN(len(mix))], dns.TypeA)
 				start := time.Now()
 				var err error
 				if *proto == "doh" {

@@ -16,7 +16,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"os"
 	"slices"
@@ -126,7 +126,7 @@ func run(sockets int, dur time.Duration, workers int) result {
 		wg.Add(1)
 		go func(seed int64) {
 			defer wg.Done()
-			rnd := rand.New(rand.NewSource(time.Now().UnixNano() + seed))
+			rnd := rand.New(rand.NewPCG(uint64(time.Now().UnixNano())+uint64(seed), 0))
 			for {
 				select {
 				case <-ctx.Done():
@@ -134,7 +134,7 @@ func run(sockets int, dur time.Duration, workers int) result {
 				default:
 				}
 				m := new(dns.Msg)
-				m.SetQuestion(names[rnd.Intn(len(names))], dns.TypeA)
+				m.SetQuestion(names[rnd.IntN(len(names))], dns.TypeA)
 				start := time.Now()
 				_, _, err := client.Exchange(m, addr.String())
 				sent.Add(1)
