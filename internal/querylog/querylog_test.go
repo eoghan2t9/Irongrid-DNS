@@ -488,20 +488,16 @@ func TestHourlyCache(t *testing.T) {
 	}
 }
 
-// TestStatsBundle verifies the single-walk aggregate: the 24h block counts
-// every recorded entry, the today block only those since local midnight, and
-// the hourly series ends at the current hour — plus the same TTL-cache and
-// Clear-invalidation behavior as the standalone Stats/Hourly results.
+// TestStatsBundle verifies the rolling aggregate serves the dashboard's
+// bundle live: the 24h block counts the entries in the 24 hours ending at
+// the current hour, the today block only those since local midnight, and
+// the hourly series ends at the current hour. A freshly flushed entry is
+// reflected immediately (no TTL to wait out), a backdated entry is outside
+// the window, and Clear resets the aggregate.
 func TestStatsBundle(t *testing.T) {
 	l, _ := newTestLog(t, 30)
-	// One entry 25h ago: inside the 24h window (written now, so its stream
-	// ID is current) but always before today's midnight — 25h is more than
-	// any time-of-day elapsed since midnight. One entry now.
-	old := entry("old.example.com.", "blocked")
-	old.Time = time.Now().Add(-25 * time.Hour)
-	l.Record(old)
 	l.Record(entry("new.example.com.", "allowed"))
-	waitFor(t, l, 2)
+	waitFor(t, l, 1)
 
 	now := time.Now()
 	since := now.Add(-24 * time.Hour)
@@ -511,10 +507,9 @@ func TestStatsBundle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("StatsBundle: %v", err)
 	}
-	if b.Stats["total"].(int64) != 2 {
-		t.Fatalf("24h total = %v, want 2", b.Stats["total"])
+	if b.Stats["total"].(int64) != 1 {
+		t.Fatalf("24h total = %v, want 1", b.Stats["total"])
 	}
-	// The 25h-old entry is inside the 24h window but before today.
 	if b.Today["total"].(int64) != 1 {
 		t.Fatalf("today total = %v, want 1", b.Today["total"])
 	}
@@ -527,7 +522,6 @@ func TestStatsBundle(t *testing.T) {
 	if last := b.Hourly[len(b.Hourly)-1]; last.Total != 1 || last.Blocked != 0 {
 		t.Fatalf("current-hour bucket = %+v, want total 1 / blocked 0", last)
 	}
-	// The today block's top lists are wired to the same walk.
 	if tc := b.Today["top_clients"].([]TopDomain); len(tc) != 1 || tc[0].Count != 1 {
 		t.Fatalf("today top_clients = %v, want 127.0.0.1 x1", tc)
 	}
@@ -535,8 +529,71 @@ func TestStatsBundle(t *testing.T) {
 		t.Fatalf("today top_blocked = %v, want empty", tb)
 	}
 
-	// Cache: another entry flushed; the same (quantized) windows must still
-	// serve the pre-existing totals without re-scanning.
+	// Live: a freshly flushed entry is reflected on the next poll — the
+	// rolling aggregate has no TTL to wait out.
+	l.Record(entry("ads.example.com.", "blocked"))
+	waitFor(t, l, 2)
+	b2, err := l.StatsBundle(t.Context(), since, today)
+	if err != nil {
+		t.Fatalf("StatsBundle live: %v", err)
+	}
+	if b2.Stats["total"].(int64) != 2 || b2.Stats["blocked"].(int64) != 1 {
+		t.Fatalf("live totals = %v, want total 2 / blocked 1", b2.Stats)
+	}
+	if tb := b2.Stats["top_blocked"].([]TopDomain); len(tb) != 1 || tb[0].Domain != "ads.example.com." || tb[0].Count != 1 {
+		t.Fatalf("live top_blocked = %v, want ads.example.com. x1", tb)
+	}
+
+	// A backdated entry (25h ago) is outside the 24h window — the rolling
+	// aggregate buckets by the recorded query time, so it is not counted.
+	old := entry("old.example.com.", "blocked")
+	old.Time = time.Now().Add(-25 * time.Hour)
+	l.Record(old)
+	waitFor(t, l, 3)
+	b3, err := l.StatsBundle(t.Context(), since, today)
+	if err != nil {
+		t.Fatalf("StatsBundle backdated: %v", err)
+	}
+	if b3.Stats["total"].(int64) != 2 {
+		t.Fatalf("24h total with backdated entry = %v, want 2 (outside window)", b3.Stats["total"])
+	}
+
+	// Clear must reset the aggregate so the next poll serves zeros.
+	if err := l.Clear(t.Context()); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	b4, err := l.StatsBundle(t.Context(), since, today)
+	if err != nil {
+		t.Fatalf("StatsBundle after clear: %v", err)
+	}
+	if b4.Stats["total"].(int64) != 0 || b4.Today["total"].(int64) != 0 {
+		t.Fatalf("post-clear totals = %v / %v, want 0/0", b4.Stats["total"], b4.Today["total"])
+	}
+}
+
+// TestStatsBundleNonstandardWindow verifies the walk fallback: a window
+// other than the standard dashboard one (here: the last 6 hours) is served
+// by the exact bounded walk, cached for repeated polls of the same window.
+func TestStatsBundleNonstandardWindow(t *testing.T) {
+	l, _ := newTestLog(t, 30)
+	l.Record(entry("a.example.com.", "allowed"))
+	l.Record(entry("b.example.com.", "blocked"))
+	waitFor(t, l, 2)
+
+	now := time.Now()
+	since := now.Add(-6 * time.Hour)
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+
+	b, err := l.StatsBundle(t.Context(), since, today)
+	if err != nil {
+		t.Fatalf("StatsBundle: %v", err)
+	}
+	if b.Stats["total"].(int64) != 2 || b.Stats["blocked"].(int64) != 1 {
+		t.Fatalf("6h total = %v, want total 2 / blocked 1", b.Stats)
+	}
+
+	// A new entry flushed; the same window must still serve the cached
+	// totals (the fallback keeps the walk's TTL-cache behavior).
 	l.Record(entry("c.example.com.", "allowed"))
 	waitFor(t, l, 3)
 	b2, err := l.StatsBundle(t.Context(), since, today)
@@ -544,19 +601,129 @@ func TestStatsBundle(t *testing.T) {
 		t.Fatalf("StatsBundle cached: %v", err)
 	}
 	if b2.Stats["total"].(int64) != 2 {
-		t.Fatalf("cached 24h total = %v, want 2 (cache must not re-scan)", b2.Stats["total"])
+		t.Fatalf("cached 6h total = %v, want 2 (cache must not re-scan)", b2.Stats["total"])
+	}
+}
+
+// TestAggregateSeededAtStartup verifies a restarted log serves the last 24h
+// from its seed walk: entries written to the stream before reopening are in
+// the new log's aggregate without any fresh writes.
+func TestAggregateSeededAtStartup(t *testing.T) {
+	mr := miniredis.RunT(t)
+	l, err := New(mr.Addr(), "", 0, 30, 0)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	l.Record(entry("a.example.com.", "blocked"))
+	l.Record(entry("b.example.com.", "allowed"))
+	waitFor(t, l, 2)
+	if err := l.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
 	}
 
-	// Clear must invalidate the cache so the next poll re-scans the stream.
-	if err := l.Clear(t.Context()); err != nil {
-		t.Fatalf("Clear: %v", err)
-	}
-	b3, err := l.StatsBundle(t.Context(), since, today)
+	l2, err := New(mr.Addr(), "", 0, 30, 0) // restart over the same stream
 	if err != nil {
-		t.Fatalf("StatsBundle after clear: %v", err)
+		t.Fatalf("New (restart): %v", err)
 	}
-	if b3.Stats["total"].(int64) != 0 || b3.Today["total"].(int64) != 0 {
-		t.Fatalf("post-clear totals = %v / %v, want 0/0", b3.Stats["total"], b3.Today["total"])
+	defer l2.Close()
+
+	now := time.Now()
+	b, err := l2.StatsBundle(t.Context(), now.Add(-24*time.Hour),
+		time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location()))
+	if err != nil {
+		t.Fatalf("StatsBundle after restart: %v", err)
+	}
+	if b.Stats["total"].(int64) != 2 || b.Stats["blocked"].(int64) != 1 {
+		t.Fatalf("seeded totals = %v, want total 2 / blocked 1", b.Stats)
+	}
+	if len(b.Hourly) != 24 {
+		t.Fatalf("seeded hourly slots = %d, want 24", len(b.Hourly))
+	}
+}
+
+// TestRollingAggRollover verifies entries age out of the window exactly:
+// the oldest slot's contribution — including its top-N keys — is dropped
+// from the running totals when the hour rolls.
+func TestRollingAggRollover(t *testing.T) {
+	a := newRollingAgg()
+	now := time.Now().Truncate(time.Hour)
+	start := now.Add(-23 * time.Hour)
+	mk := func(h time.Time, domain, action string) Entry {
+		return Entry{Time: h.Add(time.Minute), Client: "10.0.0.1", Domain: domain, Action: action, ResponseTimeMS: 5}
+	}
+	a.add(mk(start, "old.com.", "blocked"))
+	a.add(mk(now, "cur.com.", "allowed"))
+
+	b := a.snapshot()
+	if b.Stats["total"].(int64) != 2 || b.Stats["blocked"].(int64) != 1 {
+		t.Fatalf("initial totals = %v, want total 2 / blocked 1", b.Stats)
+	}
+
+	// Roll one hour: the oldest slot (window start) ages out entirely.
+	a.add(mk(now.Add(time.Hour), "next.com.", "cached"))
+	b = a.snapshot()
+	if b.Stats["total"].(int64) != 2 || b.Stats["blocked"].(int64) != 0 || b.Stats["cached"].(int64) != 1 {
+		t.Fatalf("after roll totals = %v, want total 2 / blocked 0 / cached 1", b.Stats)
+	}
+	if tb := b.Stats["top_blocked"].([]TopDomain); len(tb) != 0 {
+		t.Fatalf("after roll top_blocked = %v, want empty (old.com. aged out)", tb)
+	}
+	if tc := b.Stats["top_clients"].([]TopDomain); len(tc) != 1 || tc[0].Count != 2 {
+		t.Fatalf("after roll top_clients = %v, want 10.0.0.1 x2", tc)
+	}
+	// The hourly series slid: the new current hour is at the end.
+	if last := b.Hourly[len(b.Hourly)-1]; last.Total != 1 {
+		t.Fatalf("rolled current-hour total = %d, want 1", last.Total)
+	}
+	if first := b.Hourly[0]; first.Total != 0 {
+		t.Fatalf("rolled oldest-hour total = %d, want 0", first.Total)
+	}
+}
+
+// TestRollingAggTodayReset verifies the today block resets at midnight: a
+// write after midnight starts a fresh day, and a read after midnight with no
+// intervening write does not serve yesterday's numbers.
+func TestRollingAggTodayReset(t *testing.T) {
+	a := newRollingAgg()
+	now := time.Now()
+	a.add(Entry{Time: now, Client: "10.0.0.1", Domain: "a.com.", Action: "allowed"})
+	if b := a.snapshot(); b.Today["total"].(int64) != 1 {
+		t.Fatalf("today total = %v, want 1", b.Today["total"])
+	}
+
+	// A write after midnight: the today block resets and counts only the
+	// new day's entry.
+	nextDay := now.Add(24 * time.Hour).Add(time.Minute)
+	a.add(Entry{Time: nextDay, Client: "10.0.0.1", Domain: "b.com.", Action: "blocked"})
+	b := a.snapshot()
+	if b.Today["total"].(int64) != 1 || b.Today["blocked"].(int64) != 1 || b.Today["allowed"].(int64) != 0 {
+		t.Fatalf("post-midnight today = %v, want total 1 / blocked 1", b.Today)
+	}
+
+	// A read after another midnight with no writes in between must not
+	// serve the previous day.
+	a.resetTodayIfNeeded(nextDay.Add(24 * time.Hour))
+	b = a.snapshot()
+	if b.Today["total"].(int64) != 0 {
+		t.Fatalf("quiet-midnight today total = %v, want 0", b.Today["total"])
+	}
+}
+
+// TestRollingAggClear verifies Clear zeroes the aggregate and a subsequent
+// write re-anchors the ring without double-counting.
+func TestRollingAggClear(t *testing.T) {
+	a := newRollingAgg()
+	now := time.Now()
+	a.add(Entry{Time: now, Client: "10.0.0.1", Domain: "a.com.", Action: "blocked"})
+	a.clear()
+	b := a.snapshot()
+	if b.Stats["total"].(int64) != 0 || b.Today["total"].(int64) != 0 {
+		t.Fatalf("post-clear totals = %v / %v, want 0/0", b.Stats["total"], b.Today["total"])
+	}
+	a.add(Entry{Time: now, Client: "10.0.0.1", Domain: "b.com.", Action: "allowed"})
+	b = a.snapshot()
+	if b.Stats["total"].(int64) != 1 {
+		t.Fatalf("post-clear write total = %v, want 1 (no double count)", b.Stats["total"])
 	}
 }
 

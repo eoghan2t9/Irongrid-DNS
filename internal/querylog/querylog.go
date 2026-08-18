@@ -126,8 +126,16 @@ type Log struct {
 	// writer flushes on a ticker even when the server is down).
 	lastFlushErr atomic.Int64
 
-	// statsCache/hourlyCache/bundleCache short-circuit repeated dashboard
-	// polls — see the aggCache* constants. Zero values are ready to use.
+	// agg is the writer-maintained rolling aggregate serving StatsBundle
+	// (see rolling.go): polls read an O(1) in-memory snapshot instead of
+	// re-walking the stream. nil for a disabled log (no backing store).
+	agg *rollingAgg
+
+	// statsCache/hourlyCache/bundleCache short-circuit repeated
+	// dashboard polls — see the aggCache* constants. Zero values are ready
+	// to use. The bundle cache backs only the walk fallback in
+	// StatsBundle (non-standard windows); the rolling aggregate is served
+	// live.
 	statsCache  aggCache[map[string]any]
 	hourlyCache aggCache[[]HourBucket]
 	bundleCache aggCache[StatsBundle]
@@ -162,7 +170,13 @@ func New(addr, password string, db, retentionDays, batchSize int) (*Log, error) 
 		batchSize: bs,
 		entries:   make(chan Entry, logQueueCap),
 		done:      make(chan struct{}),
+		agg:       newRollingAgg(),
 	}
+	// Seed the aggregate from whatever the stream already holds (a restart
+	// must keep showing the last 24h, not zeros until the window refills).
+	// Runs before the writer starts, so the single-threaded add path never
+	// races a live flush.
+	l.seedAggregate(ctx)
 	l.wg.Add(1)
 	go l.runWriter()
 	return l, nil
@@ -317,6 +331,41 @@ func (l *Log) writeBatch(entries []Entry) {
 			l.lastFlushErr.Store(now)
 			slog.Error("querylog stream flush failed", "error", err)
 		}
+		return
+	}
+	// The batch is durably in the stream: fold it into the rolling
+	// aggregate so polls reflect it without re-walking. Only on success, so
+	// the aggregate always equals the stream (a failed flush's entries are
+	// in neither).
+	if l.agg != nil {
+		for i := range entries {
+			l.agg.add(entries[i])
+		}
+	}
+}
+
+// seedAggregate rebuilds the rolling aggregate from the stream at startup
+// (see New). Bounded by maxStatsScan like the old stats walk; under extreme
+// volume the oldest entries are skipped rather than stalling boot. A walk
+// failure is logged and the log keeps serving — the aggregate is a live
+// view that self-heals as new entries land.
+func (l *Log) seedAggregate(ctx context.Context) {
+	if l.agg == nil {
+		return
+	}
+	// Walk forward from an hour before the window so the far edge is
+	// covered; addLocked skips anything older than the window itself.
+	start := strconv.FormatInt(time.Now().Add(-25*time.Hour).UnixMilli(), 10) + "-0"
+	for m, err := range l.walkStream(ctx, false, start, "+", maxStatsScan, aggPage) {
+		if err != nil {
+			slog.Error("querylog aggregate seed failed", "error", err)
+			return
+		}
+		var e Entry
+		if !entryFromMessage(&e, m) {
+			continue
+		}
+		l.agg.add(e)
 	}
 }
 
@@ -630,18 +679,47 @@ type StatsBundle struct {
 	Hourly []HourBucket
 }
 
-// StatsBundle computes the dashboard's aggregate set from a single walk of
-// the stream (see StatsBundle). since is the 24h window bound and today the
-// since-midnight bound (local midnight, supplied by the caller — querylog
-// doesn't know the server's timezone). The walk is newest-first so a scan
-// bound (maxStatsScan) can only under-count the OLDEST entries in the
-// window: the current hour and the today block — what the dashboard shows
-// first — are always complete. The result is cached for aggCacheTTL keyed
-// on both quantized windows.
+// StatsBundle returns the dashboard's aggregate set. The standard window
+// (24h ending at the current hour + since local midnight) is served live
+// from the writer-maintained rolling aggregate in O(1) — no stream walk.
+// Any other window falls back to the exact bounded walk (see
+// statsBundleWalk), which is what Stats/Hourly have always done. since is
+// the 24h window bound and today the since-midnight bound (local midnight,
+// supplied by the caller — querylog doesn't know the server's timezone).
 func (l *Log) StatsBundle(ctx context.Context, since, today time.Time) (*StatsBundle, error) {
 	if l.client == nil {
 		return &StatsBundle{Stats: emptyStats(), Today: emptyStats(), Hourly: []HourBucket{}}, nil
 	}
+	// Fast path: the standard dashboard window, served live and uncached —
+	// reads are O(1), so there is no reason to serve stale totals.
+	if l.agg != nil && bundleWindowMatches(since, today) {
+		l.agg.resetTodayIfNeeded(time.Now())
+		b := l.agg.snapshot()
+		return &b, nil
+	}
+	return l.statsBundleWalk(ctx, since, today)
+}
+
+// bundleWindowMatches reports whether since/today are the standard
+// dashboard window the rolling aggregate serves: since ≈ now-24h and today
+// ≈ local midnight. The tolerance covers the hour-aligned rolling window's
+// boundary (see rolling.go) and any caller-computed "now" skew.
+func bundleWindowMatches(since, today time.Time) bool {
+	now := time.Now()
+	d := now.Sub(since)
+	if d < 23*time.Hour || d > 25*time.Hour {
+		return false
+	}
+	return today.Sub(midnightOf(now)).Abs() < time.Minute
+}
+
+// statsBundleWalk computes the bundle with a single bounded walk of the
+// stream: the 24h stats, the today stats and the 24-slot hourly series all
+// come from one newest-first scan (bounded by maxStatsScan, so extreme
+// volume can only under-count the oldest entries). The result is cached
+// for aggCacheTTL keyed on both quantized windows; the cache serves any
+// repeated poll with the same window without re-scanning.
+func (l *Log) statsBundleWalk(ctx context.Context, since, today time.Time) (*StatsBundle, error) {
 	// Key on both windows: today advances at local midnight, and serving a
 	// pre-midnight "today" block just after midnight would be stale until
 	// the next bucket (<= aggCacheBucket). Packing both Unix-bucket values
@@ -789,11 +867,14 @@ func (l *Log) Clear(ctx context.Context) error {
 	if l.client == nil {
 		return nil
 	}
-	// Drop cached aggregates too, or the next poll would serve the pre-clear
-	// numbers until the TTL expires.
+	// Drop cached aggregates and reset the rolling aggregate too, or the
+	// next poll would serve the pre-clear numbers.
 	l.statsCache.clear()
 	l.hourlyCache.clear()
 	l.bundleCache.clear()
+	if l.agg != nil {
+		l.agg.clear()
+	}
 	return l.client.Del(ctx, streamKey).Err()
 }
 
