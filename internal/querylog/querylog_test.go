@@ -1,6 +1,7 @@
 package querylog
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -810,6 +811,47 @@ func TestDisabledMode(t *testing.T) {
 	}
 }
 
+// TestTopN exercises the bounded-heap top-k selection directly: descending
+// count order, alphabetical tie-break, and — the case a heap-based
+// selection can get wrong if the "worst kept" comparison is inverted — a
+// three-way tie straddling the n-entry cutoff, where only the two
+// alphabetically-first domains of the tied group must survive.
+func TestTopN(t *testing.T) {
+	counts := map[string]int64{
+		"z.example.com.": 5,
+		"a.example.com.": 5, // ties with z at count 5; a sorts first
+		"m.example.com.": 3, // three-way tie at count 3, cutoff lands inside it
+		"b.example.com.": 3,
+		"c.example.com.": 3,
+		"only-one.com.":  1,
+	}
+	got := topN(counts, 4)
+	want := []TopDomain{
+		{Domain: "a.example.com.", Count: 5},
+		{Domain: "z.example.com.", Count: 5},
+		{Domain: "b.example.com.", Count: 3},
+		{Domain: "c.example.com.", Count: 3},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("topN returned %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("topN[%d] = %+v, want %+v (full: %v)", i, got[i], want[i], got)
+		}
+	}
+
+	if got := topN(counts, 0); len(got) != 0 {
+		t.Fatalf("topN with n=0 = %v, want empty", got)
+	}
+	if got := topN(nil, 5); len(got) != 0 {
+		t.Fatalf("topN of nil map = %v, want empty", got)
+	}
+	if got := topN(counts, 100); len(got) != len(counts) {
+		t.Fatalf("topN with n > len(counts) returned %d entries, want %d", len(got), len(counts))
+	}
+}
+
 // BenchmarkRecord measures the enqueue throughput of the async writer — the
 // rate the DNS hot path can log at without ever blocking on a round trip.
 func BenchmarkRecord(b *testing.B) {
@@ -818,4 +860,17 @@ func BenchmarkRecord(b *testing.B) {
 		l.Record(entry("bench.example.com.", "allowed"))
 	}
 	_ = l.Close()
+}
+
+// BenchmarkTopN sizes the win from the bounded-heap rewrite at a realistic
+// distinct-domain count for a busy blocklist window (getStats calls this
+// four times per /api/stats poll).
+func BenchmarkTopN(b *testing.B) {
+	counts := make(map[string]int64, 5000)
+	for i := range 5000 {
+		counts[fmt.Sprintf("domain-%d.example.com.", i)] = int64(i % 500)
+	}
+	for b.Loop() {
+		topN(counts, 10)
+	}
 }

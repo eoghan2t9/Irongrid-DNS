@@ -7,12 +7,14 @@
 package querylog
 
 import (
+	"cmp"
+	"container/heap"
 	"context"
 	"encoding/json"
 	"fmt"
 	"iter"
 	"log/slog"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -534,22 +536,61 @@ func emptyStats() map[string]any {
 	}
 }
 
+// topDomainHeap is a min-heap over TopDomain ordered by "worseness" (the
+// inverse of topN's output order): the root is always the weakest of the
+// entries currently kept, so topN can evict it in O(log n) when a stronger
+// candidate arrives instead of re-sorting everything.
+type topDomainHeap []TopDomain
+
+func (h topDomainHeap) Len() int { return len(h) }
+func (h topDomainHeap) Less(i, j int) bool {
+	if h[i].Count != h[j].Count {
+		return h[i].Count < h[j].Count
+	}
+	return h[i].Domain > h[j].Domain // ties: alphabetically later is weaker
+}
+func (h topDomainHeap) Swap(i, j int) { h[i], h[j] = h[j], h[i] }
+func (h *topDomainHeap) Push(x any)   { *h = append(*h, x.(TopDomain)) }
+func (h *topDomainHeap) Pop() any {
+	old := *h
+	last := len(old) - 1
+	x := old[last]
+	*h = old[:last]
+	return x
+}
+
 // topN returns the n entries with the highest counts, descending (ties
-// broken alphabetically for determinism).
+// broken alphabetically for determinism). counts can hold thousands of
+// distinct domains/clients in a busy window and this runs on every
+// dashboard poll (four times, for the 24h/today × blocked/clients splits),
+// so it keeps a bounded size-n min-heap in a single pass over the map
+// instead of sorting all of it — O(len(counts) log n) instead of
+// O(len(counts) log len(counts)), with no full-slice sort allocation.
 func topN(counts map[string]int64, n int) []TopDomain {
-	out := make([]TopDomain, 0, len(counts))
+	if n <= 0 {
+		return []TopDomain{}
+	}
+	h := make(topDomainHeap, 0, n)
 	for d, c := range counts {
-		out = append(out, TopDomain{Domain: d, Count: c})
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Count != out[j].Count {
-			return out[i].Count > out[j].Count
+		cand := TopDomain{Domain: d, Count: c}
+		if len(h) < n {
+			heap.Push(&h, cand)
+			continue
 		}
-		return out[i].Domain < out[j].Domain
-	})
-	if len(out) > n {
-		out = out[:n]
+		// h[0] is the weakest of the n entries kept so far; only replace it
+		// when cand would rank ahead of it in the final descending order.
+		if cand.Count > h[0].Count || (cand.Count == h[0].Count && cand.Domain < h[0].Domain) {
+			h[0] = cand
+			heap.Fix(&h, 0)
+		}
 	}
+	out := []TopDomain(h)
+	slices.SortFunc(out, func(a, b TopDomain) int {
+		if c := cmp.Compare(b.Count, a.Count); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Domain, b.Domain)
+	})
 	return out
 }
 
