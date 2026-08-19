@@ -8,6 +8,7 @@ import { Kbd, Logo, MenuIcon, XIcon } from './components/ui'
 import Dashboard from './components/Dashboard'
 import UpdateChecker from './components/UpdateChecker'
 const QueryLog = lazy(() => import('./components/QueryLog'))
+const BlockedClients = lazy(() => import('./components/BlockedClients'))
 const Blocklists = lazy(() => import('./components/Blocklists'))
 const Lists = lazy(() => import('./components/Lists'))
 const Rewrites = lazy(() => import('./components/Rewrites'))
@@ -77,6 +78,19 @@ const NAV = [
         <line x1="3" y1="6" x2="3.01" y2="6" />
         <line x1="3" y1="12" x2="3.01" y2="12" />
         <line x1="3" y1="18" x2="3.01" y2="18" />
+      </>,
+    ),
+  },
+  {
+    id: 'blocked-clients',
+    label: 'Blocked Clients',
+    section: 'Overview',
+    desc: 'Clients currently auto-blocked — honeypot hits and rate-limit offenders',
+    keywords: ['honeypot', 'rate limit', 'auto-block', 'abuse', 'attackers', 'ban'],
+    icon: navSvg(
+      <>
+        <circle cx="12" cy="12" r="9" />
+        <line x1="5.5" y1="5.5" x2="18.5" y2="18.5" />
       </>,
     ),
   },
@@ -671,6 +685,7 @@ export default function App() {
               <div key={view} className="view-transition">
                 {view === 'dashboard' && <Dashboard onNavigate={navigate} />}
                 {view === 'log' && <QueryLog />}
+                {view === 'blocked-clients' && <BlockedClients />}
                 {view === 'blocklists' && <Blocklists />}
                 {view === 'lists' && <Lists />}
                 {view === 'rewrites' && <Rewrites />}
