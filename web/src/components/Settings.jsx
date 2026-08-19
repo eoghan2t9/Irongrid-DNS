@@ -146,7 +146,6 @@ export default function Settings({ onSessionInvalidated }) {
   const [benchmarkAdded, setBenchmarkAdded] = useState([])
   const [blocked, setBlocked] = useState([])
   const [geoInfo, setGeoInfo] = useState({ enabled: false, countries: [] })
-  const [honeyBlocked, setHoneyBlocked] = useState([])
   const [backupBusy, setBackupBusy] = useState(false)
   const [backupErr, setBackupErr] = useState('')
   const [restoring, setRestoring] = useState(false)
@@ -202,11 +201,6 @@ export default function Settings({ onSessionInvalidated }) {
     }
     try {
       setGeoInfo(await api.geoStatus())
-    } catch {
-      /* ignore */
-    }
-    try {
-      setHoneyBlocked((await api.geoBlocked()).blocked || [])
     } catch {
       /* ignore */
     }
@@ -314,51 +308,6 @@ export default function Settings({ onSessionInvalidated }) {
       setTimeout(loadAbuse, 2000)
     } catch (e) {
       toast('Geo refresh failed: ' + e.message, 'error')
-    }
-  }
-
-  const reportAbuse = async (ip) => {
-    if (
-      !window.confirm(
-        `Report ${ip} to AbuseIPDB (DDoS category)? Uses the AbuseIPDB key from the Abuse reporting section above.`,
-      )
-    )
-      return
-    try {
-      const r = await api.abuseReport(ip)
-      toast(`Reported ${ip} to AbuseIPDB — abuse confidence ${r.abuse_confidence_score ?? 'n/a'}.`)
-    } catch (e) {
-      toast('Report failed: ' + e.message, 'error')
-    }
-  }
-
-  const unblockHoney = async (ip) => {
-    try {
-      await api.geoUnblock(ip)
-      toast(`Unblocked ${ip}`)
-      await loadAbuse()
-    } catch (e) {
-      toast('Unblock failed: ' + e.message, 'error')
-    }
-  }
-
-  // blockNet permanently adds a honeypot-hit client (or its /24 or /64
-  // network) to geo_block.ips — the config-level block list, enforced by DNS
-  // REFUSED and the host firewall at the packet level.
-  const blockNet = async (ip, prefix) => {
-    const label = prefix ? `${ip}/${prefix}` : ip
-    if (
-      !window.confirm(
-        `Permanently block ${label}? It is added to geo_block.ips (config, survives restarts) and dropped at the host firewall. Remove it under Blocked client IPs in Settings to undo.`,
-      )
-    )
-      return
-    try {
-      await api.geoBlockIP(ip, prefix)
-      toast(`Blocked ${label}`)
-      await loadAbuse()
-    } catch (e) {
-      toast('Block failed: ' + e.message, 'error')
     }
   }
 
@@ -723,10 +672,6 @@ export default function Settings({ onSessionInvalidated }) {
     unblock,
     loadAbuse,
     geoInfo,
-    honeyBlocked,
-    reportAbuse,
-    blockNet,
-    unblockHoney,
     refreshGeo,
     // network
     setStaticLease,

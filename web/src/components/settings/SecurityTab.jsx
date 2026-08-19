@@ -1,10 +1,12 @@
 import { AlertIcon } from '../ui'
 
 // SecurityTab is the "Security" sub page of Settings: rate limiting (with
-// the currently auto-blocked clients), geo blocking (with honeypot-blocked
-// clients and country-data status) and abuse reporting. The blocked-client
-// lists are tables with right-aligned action columns so rows stay aligned
-// no matter how many actions a row offers.
+// the currently auto-blocked clients), geo blocking (with country-data
+// status) and abuse reporting. The blocked-client list is a table with a
+// right-aligned action column so rows stay aligned no matter how many
+// actions a row offers. Honeypot-blocked clients moved to their own page
+// (Overview > Blocked Clients), which also covers rate-limit auto-blocks
+// with ASN/hostname lookups, AbuseIPDB reporting and CSV export.
 export default function SecurityTab({ f }) {
   const { set, field, text, number, toggle, textarea, deepGet } = f
   return (
@@ -197,50 +199,6 @@ export default function SecurityTab({ f }) {
               victim. Only enable on a trusted network where client addresses are genuine.
             </span>
           </p>
-        )}
-        <h4 style={{ margin: '16px 0 10px' }}>Honeypot-blocked clients</h4>
-        {f.honeyBlocked.length === 0 ? (
-          <p className="dim small">No clients blocked yet — honeypot-domain queries auto-block their client here.</p>
-        ) : (
-          <div className="table-scroll">
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>Client</th>
-                  <th>Blocked</th>
-                  <th className="actions-cell">Actions</th>
-                </tr>
-              </thead>
-              <tbody>
-                {f.honeyBlocked.map((ip) => (
-                  <tr key={ip}>
-                    <td>
-                      <div className="mono">{ip}</div>
-                    </td>
-                    <td className="dim small">permanently · firewall drop</td>
-                    <td className="actions-cell">
-                      <button className="btn ghost tiny" type="button" onClick={() => f.reportAbuse(ip)}>
-                        Report
-                      </button>
-                      <button className="btn tiny" type="button" onClick={() => f.blockNet(ip, 0)}>
-                        Block IP
-                      </button>
-                      <button
-                        className="btn tiny"
-                        type="button"
-                        onClick={() => f.blockNet(ip, ip.includes(':') ? 64 : 24)}
-                      >
-                        Block /{ip.includes(':') ? 64 : 24}
-                      </button>
-                      <button className="btn tiny danger" type="button" onClick={() => f.unblockHoney(ip)}>
-                        Unblock
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
         )}
         <h4 style={{ margin: '16px 0 10px' }}>Geo data status</h4>
         {f.geoInfo && f.geoInfo.countries && f.geoInfo.countries.length > 0 ? (
