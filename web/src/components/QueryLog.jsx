@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api'
+import { useToast } from '../toast-context'
 import { EmptyState } from './ui'
 
 const fmtTime = (iso) => {
@@ -21,6 +22,7 @@ const ACTION_LABEL = {
 }
 
 export default function QueryLog() {
+  const toast = useToast()
   const [entries, setEntries] = useState([])
   const [action, setAction] = useState('')
   const [domain, setDomain] = useState('')
@@ -149,6 +151,22 @@ export default function QueryLog() {
     load()
   }
 
+  // unblock adds an allow-list entry for a blocked query's domain. A plain
+  // domain entry also covers every subdomain (the filter engine walks parent
+  // suffixes for allow-list matches), so withSubdomains just controls whether
+  // we write the "=" exact-only prefix — no separate backend support needed.
+  const unblock = async (domain, withSubdomains) => {
+    const clean = domain.replace(/\.$/, '')
+    const entry = withSubdomains ? clean : `=${clean}`
+    try {
+      await api.addFilterEntry('whitelist', entry)
+      toast(withSubdomains ? `Allowed ${clean} and its subdomains` : `Allowed ${clean}`)
+      load()
+    } catch (e) {
+      toast('Failed to unblock: ' + e.message, 'error')
+    }
+  }
+
   return (
     <div className="stack">
       <div className="card">
@@ -234,6 +252,7 @@ export default function QueryLog() {
                 <th>Action</th>
                 <th>Reason / Upstream</th>
                 <th>ms</th>
+                <th className="actions-cell">Actions</th>
               </tr>
             </thead>
             <tbody>
@@ -283,6 +302,28 @@ export default function QueryLog() {
                   </td>
                   <td className="dim small">{e.reason || e.upstream || ''}</td>
                   <td className="mono dim">{e.response_time_ms}</td>
+                  <td className="actions-cell">
+                    {e.action === 'blocked' && (
+                      <>
+                        <button
+                          className="btn ghost tiny"
+                          type="button"
+                          onClick={() => unblock(e.domain, false)}
+                          title={`Allow ${e.domain} — this exact name only`}
+                        >
+                          Unblock
+                        </button>
+                        <button
+                          className="btn ghost tiny"
+                          type="button"
+                          onClick={() => unblock(e.domain, true)}
+                          title={`Allow ${e.domain} and every subdomain of it`}
+                        >
+                          + subdomains
+                        </button>
+                      </>
+                    )}
+                  </td>
                 </tr>
               ))}
             </tbody>
