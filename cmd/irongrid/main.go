@@ -622,7 +622,6 @@ func main() {
 				AWSAccessKeyID:     cfg.TLS.ACME.DNS01.AWSAccessKeyID,
 				AWSSecretAccessKey: cfg.TLS.ACME.DNS01.AWSSecretAccessKey,
 			},
-			time.Duration(cfg.TLS.ACME.DNS01.PropagationWait)*time.Second,
 		)
 		if err != nil {
 			slog.Warn("acme disabled", "error", err)
@@ -649,6 +648,7 @@ func main() {
 			RenewBeforeDays: cfg.TLS.ACME.RenewBeforeDays,
 			DNS:             dnsProvider,
 			DNSProvider:     cfg.TLS.ACME.DNS01.Provider,
+			DNSWait:         time.Duration(cfg.TLS.ACME.DNS01.PropagationWait) * time.Second,
 			ExternalHTTP01:  acmeExternalHTTP01,
 		})
 		acmeMgr.Store(m)

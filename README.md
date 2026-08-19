@@ -852,8 +852,8 @@ tls:
 **HTTP-01 vs DNS-01:** HTTP-01 needs the domain to answer on port 80 at this server. DNS-01
 creates a `_acme-challenge` TXT record through your DNS provider's API and works anywhere —
 ideal behind a tunnel or NAT. Supported providers: **Cloudflare**, **DigitalOcean**, **Hetzner**,
-**GoDaddy**, and **AWS Route53** (all implemented in-process with zero extra dependencies;
-Route53 uses SigV4 signing over the standard API).
+**GoDaddy**, and **AWS Route53**, via [go-acme/lego](https://github.com/go-acme/lego)'s
+maintained provider implementations rather than hand-rolled API clients.
 When `server.web_tls` is on, `server.web_redirect: true` adds a plain-HTTP listener
 (`web_redirect_port`, default 80) that 301s every request to `https://<host>/`.
 

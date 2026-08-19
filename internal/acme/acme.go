@@ -67,6 +67,12 @@ type Manager struct {
 	// records instead of the HTTP-01 challenge server.
 	dns DNSProvider
 
+	// dnsWait is how long to pause after Present before asking the CA to
+	// validate, giving the TXT record time to propagate to the CA's
+	// resolvers. lego's DNS providers don't wait internally (unlike the
+	// hand-rolled providers this replaced), so the manager owns it.
+	dnsWait time.Duration
+
 	// Status mirrors the last issuance/renewal attempt for the dashboard.
 	Status Status
 }
@@ -100,6 +106,9 @@ type Options struct {
 	RenewBeforeDays int
 	DNS             DNSProvider // optional DNS-01 provider
 	DNSProvider     string      // provider name for status, e.g. "cloudflare"
+	// DNSWait is how long to pause after publishing the TXT record before
+	// asking the CA to validate it (propagation wait). Only used when DNS is set.
+	DNSWait time.Duration
 	// ExternalHTTP01 tells the manager that the web server serves the http-01
 	// challenge on the same port (web_redirect on port 80), so it must not
 	// bind its own challenge listener.
@@ -124,6 +133,7 @@ func New(o Options) *Manager {
 		httpPort:       o.HTTP01Port,
 		renewIn:        renewIn,
 		dns:            o.DNS,
+		dnsWait:        o.DNSWait,
 		externalHTTP01: o.ExternalHTTP01,
 		tokens:         map[string]string{},
 		stopCh:         make(chan struct{}),
@@ -304,20 +314,35 @@ func (m *Manager) Issue(ctx context.Context) error {
 			// DNS-01: publish the TXT record, then accept and wait. The record
 			// is removed on every exit path so a failed order never leaks a
 			// stale _acme-challenge record.
-			val, err := client.DNS01ChallengeRecord(chal.Token)
+			//
+			// keyAuth is the token + account-key thumbprint. It is the same
+			// value regardless of challenge type — HTTP-01 serves it directly
+			// (HTTP01ChallengeResponse), DNS-01 publishes its SHA-256 digest
+			// instead. lego's DNS providers compute that digest themselves
+			// from (domain, token, keyAuth), so they need keyAuth here, not
+			// the pre-hashed DNS01ChallengeRecord value.
+			keyAuth, err := client.HTTP01ChallengeResponse(chal.Token)
 			if err != nil {
 				m.noteErr(err)
 				return err
 			}
-			if err := m.dns.Present(ctx, domain, val); err != nil {
+			if err := m.dns.Present(domain, chal.Token, keyAuth); err != nil {
 				m.noteErr(fmt.Errorf("present dns-01 record for %s: %w", domain, err))
 				return err
 			}
 			defer func() {
-				if err := m.dns.CleanUp(ctx, domain, val); err != nil {
+				if err := m.dns.CleanUp(domain, chal.Token, keyAuth); err != nil {
 					slog.Error("acme TXT record cleanup failed", "domain", domain, "error", err)
 				}
 			}()
+			if m.dnsWait > 0 {
+				select {
+				case <-time.After(m.dnsWait):
+				case <-ctx.Done():
+					m.noteErr(ctx.Err())
+					return ctx.Err()
+				}
+			}
 			if _, err := client.Accept(ctx, chal); err != nil {
 				m.noteErr(fmt.Errorf("accept challenge: %w", err))
 				return err
