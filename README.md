@@ -46,7 +46,7 @@ commercial ad-blocking DNS with sub-millisecond local responses.
 
 | 📊 **Full dashboard** | 🔐 **TLS made easy** | 🧩 **One binary** | 🐳 **Runs anywhere** |
 |---|---|---|---|
-| Live stats, query log, per-client policy, geo blocking, threat intel | Self-signed or Let's Encrypt auto-issuance (HTTP-01 **and** DNS-01) | Dashboard + cloudflared + ACME compiled in — no external installs | Linux, macOS, Windows (static binary) plus Docker + Dragonfly Compose |
+| Live stats, query log, per-client policy, geo blocking, threat intel | Self-signed or Let's Encrypt auto-issuance (HTTP-01 **and** DNS-01) | Dashboard + ACME compiled in; cloudflared auto-installed and kept updated — no manual installs | Linux, macOS, Windows (static binary) plus Docker + Dragonfly Compose |
 
 ## Screenshots
 
@@ -236,7 +236,7 @@ startup service (systemd / launchd / Windows task).
 | 🔄 **Built-in updater** | Checks GitHub Releases, pops up the changelog, offers the download |
 | 🔐 **TLS manager** | In-dashboard certificate management: view, generate self-signed, upload CA certs, download — applied live to DoT/DoH/DoQ |
 | 🪪 **Let's Encrypt (ACME)** | Zero-config auto-issuance + renewal for your domains via HTTP-01, or run the dashboard itself over HTTPS (`web_tls`) |
-| 🔗 **Cloudflare Tunnel** | cloudflared compiled **into the binary** (imported as Go modules) — no external install, managed from the dashboard |
+| 🔗 **Cloudflare Tunnel** | cloudflared runs as a managed subprocess — Irongrid downloads, verifies and updates the binary automatically, no manual install, managed from the dashboard |
 | 📱 **Android Private DNS** | DoT/DoH on your own domain via the tunnel, with auto-generated or custom TLS certificates |
 | 🐳 **Cross-platform** | Linux, macOS, Windows (single static binary) plus Docker + Dragonfly Compose |
 | 🏠 **Local DNS records** | Answer a domain yourself (`nas.home → 192.168.1.10`) — A/AAAA/CNAME, exact or `*.subtree` wildcard, wins over blocklists and the cache |
@@ -261,7 +261,7 @@ startup service (systemd / launchd / Windows task).
                     │                      │ whitelist│            │  └───────────────┘  │
                     │                      └──────────┘            │                     │
                     │         Query log (Dragonfly) ◄────────────────┘                   │
-                    │  Dashboard (React, embedded) ◄── REST API ◄── cloudflared (embedded)│
+                    │  Dashboard (React, embedded) ◄── REST API ◄── cloudflared (managed) │
                     └──────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -581,10 +581,10 @@ written automatically on first launch. Key options:
 | `server.web_tls` | Serve the dashboard + API over HTTPS using the same TLS certificate |
 | `server.web_redirect` | With `web_tls`, also serve plain HTTP on `web_redirect_port` that 301s to HTTPS |
 | `server.web_listen == listen_doh` | Same port + `web_tls` → dashboard and DoH share one HTTPS listener (`https://host`, no port) |
-| `server.trusted_proxies` | Reverse proxies (IPs/CIDRs) in front of the DoH endpoint whose `X-Forwarded-For` header is honored, in addition to loopback/private peers (local nginx/Caddy, the baked-in cloudflared tunnel — always trusted). Needed when DoH sits behind a **public** proxy (CDN, edge box) so geo/ASN blocking, rate limiting and per-client policy see the end client instead of the proxy. The direct peer must itself be trusted before XFF is read at all, so the header can't be spoofed from the internet |
+| `server.trusted_proxies` | Reverse proxies (IPs/CIDRs) in front of the DoH endpoint whose `X-Forwarded-For` header is honored, in addition to loopback/private peers (local nginx/Caddy, the managed cloudflared tunnel — always trusted). Needed when DoH sits behind a **public** proxy (CDN, edge box) so geo/ASN blocking, rate limiting and per-client policy see the end client instead of the proxy. The direct peer must itself be trusted before XFF is read at all, so the header can't be spoofed from the internet |
 | `server.xff_hop_limit` | Trusted proxy hops in the DoH `X-Forwarded-For` chain: the client IP is the *hop_limit*-th entry from the right — `1` (default) = the direct peer only, `2` = client → CDN → nginx → Irongrid, etc. `0` selects the default |
 | `server.doh_asn_header` | Add `X-Irongrid-Client-ASN` to DoH responses — the ASN the server attributes to the client's IP (only when it matches a configured ASN list — `geo_block` or a client group), handy for verifying which ISP a client resolves as |
-| `tunnel` | Baked-in cloudflared settings |
+| `tunnel` | Managed cloudflared settings |
 | `rewrites` | Local DNS records (A/AAAA/CNAME) — answered directly, ahead of blocklists and the cache |
 | `dhcp` | Built-in DHCP server for the LAN: `enabled`, `interface` (NIC to serve on, empty = all), `subnet`, `range_start`/`range_end` (dynamic pool), `gateway` (defaults to this host), `dns` (defaults to this host — the point), `lease_time`, `domain` (client hostnames resolve as `<hostname>.<domain>` plus bare `<hostname>` with PTR), `static_leases` (MAC keys DHCPv4, DUID keys DHCPv6), and `ipv6`/`ipv6_prefix`/`ipv6_range_start`/`ipv6_range_end` for stateful DHCPv6 + stateless DNS options |
 | `client_groups` | Per-client policy: groups matched by CIDR/IP **or ISP ASN** (e.g. `AS13335`, using the same ip2asn dataset as geo blocking) with their own blocklist subset, allow/block entries and (optional) upstream override |
@@ -686,11 +686,13 @@ validates before dialing), a 2 MiB page cap and a 10-second budget — so a
 hostile URL can't turn the tool into a LAN probe. The same scan is available
 over the API as `POST /api/filter/site`.
 
-## Cloudflare Tunnel (baked in)
+## Cloudflare Tunnel (managed)
 
-cloudflared is imported as Go modules and compiled into the binary — there is
-no external `cloudflared` process to install. Use it from the **Tunnel** page
-in the dashboard or via config:
+Irongrid runs cloudflared as a managed subprocess — the binary is downloaded,
+checksum-verified and installed automatically on first boot, and re-checked
+against `cloudflare/cloudflared`'s GitHub releases on every restart, so there
+is no external `cloudflared` install or update step to do by hand. Use it
+from the **Tunnel** page in the dashboard or via config:
 
 ```yaml
 tunnel:

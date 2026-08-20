@@ -79,18 +79,29 @@ export default function Tunnel() {
     }
   }
 
+  const checkCloudflaredUpdate = async () => {
+    try {
+      const r = await api.tunnelCheckCloudflaredUpdate()
+      toast(r.installed ? `cloudflared updated to ${r.new_version}` : 'cloudflared is already up to date')
+      load()
+    } catch (e) {
+      toast('Update check failed: ' + e.message, 'error')
+    }
+  }
+
   return (
     <div className="stack">
       <div className="card">
         <div className="row-between">
-          <h3>Cloudflare Tunnel (cloudflared baked in)</h3>
+          <h3>Cloudflare Tunnel</h3>
           <span className={`badge ${status?.running ? 'badge-allowed' : 'badge-error'}`}>
             {status?.running ? 'RUNNING' : 'STOPPED'}
           </span>
         </div>
         <p className="dim">
-          The cloudflared agent is compiled into this binary — no external installation needed. Expose your DoH endpoint
-          (<code>/dns-query</code>) or the dashboard to the internet, or route a hostname for Android Private DNS.
+          Irongrid manages a cloudflared binary automatically — it's downloaded and kept up to date for you, no
+          manual install required. Expose your DoH endpoint (<code>/dns-query</code>) or the dashboard to the
+          internet, or route a hostname for Android Private DNS.
         </p>
         {status?.started && (
           <div className="dim small">
@@ -99,6 +110,17 @@ export default function Tunnel() {
             {status.error && <div className="error-text">Last error: {status.error}</div>}
           </div>
         )}
+        <div className="dim small row-between">
+          <span>
+            cloudflared binary: <span className="mono">{status?.binary?.version || 'not installed yet'}</span>
+            {status?.binary?.last_error && (
+              <div className="error-text">Update check failed: {status.binary.last_error}</div>
+            )}
+          </span>
+          <button className="btn" type="button" onClick={checkCloudflaredUpdate}>
+            Check for cloudflared update
+          </button>
+        </div>
       </div>
 
       <div className="card">

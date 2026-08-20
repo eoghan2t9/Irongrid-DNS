@@ -1,84 +1,56 @@
 package tunnel
 
 import (
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
-
-	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
-	cftunnel "github.com/cloudflare/cloudflared/cmd/cloudflared/tunnel"
 )
 
-// TestStartFlagOrdering guards against a regression where --no-autoupdate and
-// --logfile were appended *after* the `tunnel run` subcommand. cloudflared
-// only defines those as app-level (global) flags, not as flags of the `run`
-// subcommand, so urfave/cli failed with
-// "flag provided but not defined: -no-autoupdate". The construction here
-// mirrors Manager.Start: global flags first, subcommand last.
-func TestStartFlagOrdering(t *testing.T) {
-	os.Setenv("QUIC_GO_DISABLE_ECN", "1")
-	registerBuildInfo()
-	shutdownC := make(chan struct{})
-	cftunnel.Init(cliutil.GetBuildInfo("IrongridDNS", ""), shutdownC)
+// TestBuildArgsFlagOrdering guards against a regression where --no-autoupdate
+// and --logfile were appended *after* the `tunnel run` subcommand.
+// cloudflared only defines those as app-level (global) flags, not as flags of
+// the `run` subcommand, so it fails with "flag provided but not defined:
+// -no-autoupdate" if they land after the subcommand.
+func TestBuildArgsFlagOrdering(t *testing.T) {
+	logFile := filepath.Join(t.TempDir(), "cloudflared.log")
+	args := buildArgs(ModeToken, "definitely-not-a-valid-tunnel-token", "", "", logFile)
 
-	app := cloudflaredApp()
-
-	// Token mode with a garbage token: cloudflared fails fast and offline in
-	// ParseToken (hyphens are invalid base64), so the error we get back is a
-	// token-validation error rather than a flag-parse error. If the global
-	// flags regress to after `tunnel run`, parsing fails first.
-	args := buildArgs(ModeToken, "definitely-not-a-valid-tunnel-token", "", "",
-		filepath.Join(t.TempDir(), "cloudflared.log"))
-
-	// The whole point: --no-autoupdate / --logfile must precede the
-	// subcommand, or cloudflared rejects them as undefined subcommand flags.
-	if i, j := slices.Index(args, "tunnel"), slices.Index(args, "--no-autoupdate"); j > i {
-		t.Fatalf("--no-autoupdate must precede the tunnel subcommand: %v", args)
+	tunnelIdx := slices.Index(args, "tunnel")
+	if tunnelIdx < 0 {
+		t.Fatalf("expected a tunnel subcommand in args: %v", args)
 	}
-
-	err := app.Run(args)
-	if err == nil {
-		t.Fatal("expected cloudflared to reject the bogus token, got no error")
-	}
-	if strings.Contains(err.Error(), "flag provided but not defined") {
-		t.Fatalf("global flags must precede the tunnel subcommand, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "token") {
-		t.Fatalf("expected a token-validation error, got: %v", err)
+	for _, flag := range []string{"--no-autoupdate", "--logfile"} {
+		if idx := slices.Index(args, flag); idx < 0 || idx > tunnelIdx {
+			t.Fatalf("%s must precede the tunnel subcommand: %v", flag, args)
+		}
 	}
 }
 
 // TestStartTwiceNoPanic reproduces the production crash where the second
 // Start call panicked with "duplicate metrics collector registration
-// attempted" (cloudflared's RegisterBuildInfo calls prometheus.MustRegister,
-// which cannot be called twice). The sync.Once guard plus panic recovery in
-// Start must turn that into a clean error and leave the manager not-running.
+// attempted" back when cloudflared ran embedded in-process. Now that
+// cloudflared runs as a managed subprocess, the same "start twice" sequence
+// is exercised against the deterministic failure mode available in a unit
+// test — no cloudflared binary installed at t.TempDir() — but the guard
+// being tested (repeated failed starts must never wedge the Manager or
+// panic) is identical.
 func TestStartTwiceNoPanic(t *testing.T) {
-	os.Setenv("QUIC_GO_DISABLE_ECN", "1")
-	registerBuildInfo()
-
 	m := NewManager(t.TempDir())
 
-	// First start with a garbage token: cloudflared fails fast and offline.
-	// The panic that previously happened here would crash the whole test
-	// binary, so reaching this line at all is the regression check.
 	if err := m.Start(ModeToken, "definitely-not-a-valid-tunnel-token", "", "", ""); err == nil {
-		t.Fatal("expected first start to fail on the bogus token")
+		t.Fatal("expected first start to fail: no cloudflared binary installed")
 	}
-
-	// Second start must not panic; it must return a clean error too.
 	if err := m.Start(ModeToken, "definitely-not-a-valid-tunnel-token", "", "", ""); err == nil {
-		t.Fatal("expected second start to fail on the bogus token")
+		t.Fatal("expected second start to fail: no cloudflared binary installed")
 	}
 
 	st := m.Status()
 	if st.Running {
 		t.Fatal("manager must not report running after failed starts")
 	}
-	if !strings.Contains(st.Error, "token") {
-		t.Fatalf("expected a token error in status, got: %q", st.Error)
+	if !strings.Contains(st.Error, "cloudflared") {
+		t.Fatalf("expected a cloudflared-binary error in status, got: %q", st.Error)
 	}
 }
 
@@ -86,12 +58,9 @@ func TestStartTwiceNoPanic(t *testing.T) {
 // resets the manager to not-running and that a normal token-mode start is
 // still possible afterwards.
 func TestStartRejectedLeavesUsable(t *testing.T) {
-	os.Setenv("QUIC_GO_DISABLE_ECN", "1")
-	registerBuildInfo()
-
 	m := NewManager(t.TempDir())
 
-	// Unknown mode hits the validation path before launching cloudflared.
+	// Unknown mode hits the validation path before touching the binary.
 	if err := m.Start("bogus-mode", "", "", "", ""); err == nil {
 		t.Fatal("expected unknown-mode start to fail")
 	}
@@ -99,8 +68,9 @@ func TestStartRejectedLeavesUsable(t *testing.T) {
 		t.Fatal("manager must not report running after a rejected start")
 	}
 
-	// And a normal token-mode start is still possible afterwards.
+	// And a normal token-mode start is still possible afterwards (fails here
+	// only because no cloudflared binary is installed in the test env).
 	if err := m.Start(ModeToken, "definitely-not-a-valid-tunnel-token", "", "", ""); err == nil {
-		t.Fatal("expected token-mode start to fail on the bogus token")
+		t.Fatal("expected token-mode start to fail: no cloudflared binary installed")
 	}
 }

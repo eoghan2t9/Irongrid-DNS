@@ -26,6 +26,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/catalog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cert"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/cfupdate"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dhcp"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsserver"
@@ -391,7 +392,7 @@ func main() {
 		}
 	}()
 
-	// ---- cloudflared tunnel (baked in) ----
+	// ---- cloudflared tunnel (managed subprocess; binary auto-installed below) ----
 	tunnelMgr := tunnel.NewManager(*dataDir)
 
 	// ---- REST API + web UI ----
@@ -1064,6 +1065,34 @@ func main() {
 		startRedirect()
 		slog.Info("config reload applied: listeners, cache, TLS, upstreams")
 		return nil
+	}
+
+	// ---- keep the managed cloudflared binary up to date ----
+	// Runs once per process start (i.e. on every restart), always-on and
+	// best-effort: a slow or failed GitHub check must never block the rest
+	// of the server, so it runs synchronously but bounded, right before the
+	// tunnel would auto-start — everything else in main has already bound
+	// its listeners by this point.
+	{
+		cfCtx, cfCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		cfRes, cfErr := (&cfupdate.Client{}).Install(cfCtx, tunnelMgr.BinaryPath())
+		cfCancel()
+		binStatus := tunnel.BinaryStatus{LastChecked: time.Now()}
+		switch {
+		case cfErr != nil:
+			slog.Warn("cloudflared update check failed", "error", cfErr)
+			binStatus.Version = cfupdate.CurrentVersion(tunnelMgr.BinaryPath())
+			binStatus.LastError = cfErr.Error()
+		case cfRes.Installed:
+			slog.Info("cloudflared updated", "from", cfRes.PreviousVersion, "to", cfRes.NewVersion)
+			binStatus.Version = cfRes.NewVersion
+			binStatus.LatestVersion = cfRes.NewVersion
+		default:
+			slog.Info("cloudflared up to date", "version", cfRes.NewVersion)
+			binStatus.Version = cfRes.NewVersion
+			binStatus.LatestVersion = cfRes.NewVersion
+		}
+		tunnelMgr.SetBinaryStatus(binStatus)
 	}
 
 	// ---- auto-start tunnel if configured ----

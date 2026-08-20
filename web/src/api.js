@@ -217,6 +217,7 @@ export const api = {
     }),
   tunnelStop: () => request('/api/tunnel/stop', { method: 'POST' }),
   tunnelLog: () => request('/api/tunnel/log'),
+  tunnelCheckCloudflaredUpdate: () => request('/api/tunnel/cloudflared-update', { method: 'POST' }),
   dhcpLeases: () => request('/api/dhcp/leases'),
   config: () => request('/api/config'),
   saveConfig: (cfg) =>

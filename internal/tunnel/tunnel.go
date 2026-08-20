@@ -1,21 +1,18 @@
-// Package tunnel embeds Cloudflare's cloudflared source (imported as Go
-// modules) so tunnel lifecycle is managed entirely from within the Irongrid
-// DNS binary — no external cloudflared installation required.
+// Package tunnel manages a Cloudflare cloudflared subprocess so a tunnel can
+// be started/stopped from the dashboard. The cloudflared binary itself is
+// downloaded and kept up to date by internal/cfupdate — see NewManager.
 package tunnel
 
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
-
-	"github.com/urfave/cli/v2"
-
-	"github.com/cloudflare/cloudflared/cmd/cloudflared/cliutil"
-	cftunnel "github.com/cloudflare/cloudflared/cmd/cloudflared/tunnel"
-	"github.com/cloudflare/cloudflared/metrics"
 )
 
 // Mode describes how the tunnel authenticates to Cloudflare.
@@ -30,46 +27,68 @@ const (
 	ModeConfig Mode = "config"
 )
 
+// BinaryStatus reports the state of the managed cloudflared binary, as last
+// observed by internal/cfupdate. Set via Manager.SetBinaryStatus.
+type BinaryStatus struct {
+	Version         string    `json:"version"`
+	LatestVersion   string    `json:"latest_version,omitempty"`
+	UpdateAvailable bool      `json:"update_available"`
+	LastChecked     time.Time `json:"last_checked"`
+	LastError       string    `json:"last_error,omitempty"`
+}
+
 // Status is the current tunnel state.
 type Status struct {
-	Running bool      `json:"running"`
-	Mode    Mode      `json:"mode"`
-	Started time.Time `json:"started"`
-	Error   string    `json:"error"`
-	LastLog string    `json:"last_log"`
-	LogFile string    `json:"log_file"`
+	Running bool         `json:"running"`
+	Mode    Mode         `json:"mode"`
+	Started time.Time    `json:"started"`
+	Error   string       `json:"error"`
+	LastLog string       `json:"last_log"`
+	LogFile string       `json:"log_file"`
+	Binary  BinaryStatus `json:"binary"`
 }
 
-// Manager controls the embedded cloudflared process.
+// Manager controls the managed cloudflared subprocess.
 type Manager struct {
-	mu       sync.Mutex
-	running  bool
-	started  time.Time
-	mode     Mode
-	lastErr  string
-	lastLog  string
-	shutdown chan struct{}
-	logFile  string
-	stopOnce sync.Once
+	mu           sync.Mutex
+	running      bool
+	started      time.Time
+	mode         Mode
+	lastErr      string
+	lastLog      string
+	logFile      string
+	binPath      string
+	cmd          *exec.Cmd
+	binaryStatus BinaryStatus
 }
 
-// NewManager creates a tunnel manager writing logs under dataDir.
+// NewManager creates a tunnel manager writing logs and the managed
+// cloudflared binary under dataDir.
 func NewManager(dataDir string) *Manager {
-	return &Manager{logFile: filepath.Join(dataDir, "cloudflared.log")}
+	binDir := filepath.Join(dataDir, "bin")
+	_ = os.MkdirAll(binDir, 0o755)
+	binName := "cloudflared"
+	if runtime.GOOS == "windows" {
+		binName += ".exe"
+	}
+	return &Manager{
+		logFile: filepath.Join(dataDir, "cloudflared.log"),
+		binPath: filepath.Join(binDir, binName),
+	}
 }
 
-// registerBuildInfoOnce registers cloudflared's Prometheus build-info metric
-// exactly once per process. RegisterBuildInfo calls prometheus.MustRegister,
-// which panics on a second registration — so calling it from every Start
-// (to support stop-then-start) crashed the API handler with "duplicate
-// metrics collector registration attempted" and left the Manager wedged with
-// running=true but no tunnel.
-var registerBuildInfoOnce sync.Once
+// BinaryPath returns where the managed cloudflared binary is expected —
+// internal/cfupdate installs to this exact path.
+func (m *Manager) BinaryPath() string {
+	return m.binPath
+}
 
-func registerBuildInfo() {
-	registerBuildInfoOnce.Do(func() {
-		metrics.RegisterBuildInfo("IrongridDNS", time.Now().Format(time.RFC3339), "v0.1.0")
-	})
+// SetBinaryStatus records the outcome of the last cfupdate check/install so
+// Status can report it alongside the tunnel's own run state.
+func (m *Manager) SetBinaryStatus(s BinaryStatus) {
+	m.mu.Lock()
+	m.binaryStatus = s
+	m.mu.Unlock()
 }
 
 // Start launches the tunnel in the given mode. origin is used for quick
@@ -80,36 +99,14 @@ func (m *Manager) Start(mode Mode, token, configFile, origin, hostname string) (
 		m.mu.Unlock()
 		return fmt.Errorf("tunnel already running")
 	}
-	shutdownC := make(chan struct{})
-	m.shutdown = shutdownC
 	m.running = true
 	m.started = time.Now()
 	m.mode = mode
 	m.lastErr = ""
 	m.mu.Unlock()
+	_ = hostname
 
-	// Never leave the manager marked running if cloudflared's package-level
-	// init panics (e.g. the duplicate-metrics registration above, before the
-	// sync.Once guard existed). Reset state and surface the error instead.
-	// Installed after the first lock is released: failStart takes m.mu, so
-	// this must never run while that lock is still held.
-	defer func() {
-		if r := recover(); r != nil {
-			m.failStart(fmt.Sprintf("tunnel init panic: %v", r))
-			err = fmt.Errorf("tunnel init panic: %v", r)
-		}
-	}()
-
-	os.Setenv("QUIC_GO_DISABLE_ECN", "1")
-	registerBuildInfo()
-
-	// cloudflared's command packages keep package-level state; re-init on
-	// every start so restarting works.
-	cftunnel.Init(cliutil.GetBuildInfo("IrongridDNS", ""), shutdownC)
-
-	app := cloudflaredApp()
-
-	// Validate inputs before touching the running state.
+	// Validate inputs before touching the running state further.
 	switch mode {
 	case ModeToken:
 		if token == "" {
@@ -127,15 +124,30 @@ func (m *Manager) Start(mode Mode, token, configFile, origin, hostname string) (
 		return fmt.Errorf("unknown tunnel mode %q", mode)
 	}
 
+	if _, statErr := os.Stat(m.binPath); statErr != nil {
+		m.failStart("cloudflared binary not installed yet")
+		return fmt.Errorf("cloudflared binary not installed at %s: %w", m.binPath, statErr)
+	}
+
 	args := buildArgs(mode, token, configFile, origin, m.logFile)
-	_ = hostname
+	cmd := exec.Command(m.binPath, args...)
+	cmd.Env = append(os.Environ(), "QUIC_GO_DISABLE_ECN=1")
+	if startErr := cmd.Start(); startErr != nil {
+		m.failStart(fmt.Sprintf("failed to start cloudflared: %v", startErr))
+		return fmt.Errorf("start cloudflared: %w", startErr)
+	}
+
+	m.mu.Lock()
+	m.cmd = cmd
+	m.mu.Unlock()
 
 	go func() {
-		err := app.Run(args)
+		waitErr := cmd.Wait()
 		m.mu.Lock()
 		m.running = false
-		if err != nil {
-			m.lastErr = err.Error()
+		m.cmd = nil
+		if waitErr != nil {
+			m.lastErr = waitErr.Error()
 		}
 		if tail := m.tailLog(); tail != "" {
 			m.lastLog = tail
@@ -153,14 +165,14 @@ func (m *Manager) Start(mode Mode, token, configFile, origin, hostname string) (
 	return nil
 }
 
-// buildArgs assembles the cloudflared command line for the given mode.
-// Global flags must precede the subcommand: cloudflared's flag parsing only
-// knows --no-autoupdate / --logfile as app-level flags, not as flags of the
-// `tunnel run` subcommand (which defines only credentials and proxy flags).
-// Passing them after `tunnel run ...` fails with
-// "flag provided but not defined: -no-autoupdate".
+// buildArgs assembles the cloudflared flag list for the given mode (argv[0]
+// is supplied separately by exec.Command). Global flags must precede the
+// subcommand: cloudflared's flag parsing only knows --no-autoupdate /
+// --logfile as app-level flags, not as flags of the `tunnel run` subcommand
+// (which defines only credentials and proxy flags). Passing them after
+// `tunnel run ...` fails with "flag provided but not defined: -no-autoupdate".
 func buildArgs(mode Mode, token, configFile, origin, logFile string) []string {
-	args := []string{"cloudflared", "--no-autoupdate"}
+	args := []string{"--no-autoupdate"}
 	if logFile != "" {
 		args = append(args, "--logfile", logFile)
 	}
@@ -180,24 +192,6 @@ func buildArgs(mode Mode, token, configFile, origin, logFile string) []string {
 	return args
 }
 
-// cloudflaredApp builds the embedded cloudflared CLI. ExitErrHandler is
-// required: cloudflared wraps action failures (bad token, unreachable edge,
-// etc.) in cli.Exit, and the cli library's default handler calls os.Exit —
-// which, from inside the tunnel goroutine, would terminate the whole
-// Irongrid process. Swallowing the exit here lets app.Run return the error
-// so Start can record it in Status.Error instead.
-func cloudflaredApp() *cli.App {
-	app := &cli.App{
-		Name:     "cloudflared",
-		Usage:    "embedded in Irongrid DNS",
-		Flags:    cftunnel.Flags(),
-		Commands: cftunnel.Commands(),
-		Version:  "2024.12.1 (embedded)",
-	}
-	app.ExitErrHandler = func(_ *cli.Context, _ error) {}
-	return app
-}
-
 func (m *Manager) failStart(msg string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -205,27 +199,19 @@ func (m *Manager) failStart(msg string) {
 	m.lastErr = msg
 }
 
-// safeClose closes ch, tolerating a close performed by cloudflared's own
-// signal handler (waitForSignal) which may fire first on SIGTERM.
-func safeClose(ch chan struct{}) {
-	defer func() { _ = recover() }()
-	close(ch)
-}
-
-// Stop gracefully shuts the tunnel down by closing cloudflared's shutdown
-// channel (the same mechanism its SIGTERM handler uses).
+// Stop gracefully shuts the tunnel down by sending SIGTERM to the cloudflared
+// process (the same signal its own shutdown handler expects), falling back
+// to SIGKILL if it hasn't exited within the grace period.
 func (m *Manager) Stop() {
 	m.mu.Lock()
-	shutdown := m.shutdown
+	cmd := m.cmd
 	running := m.running
 	m.mu.Unlock()
-	if !running {
+	if !running || cmd == nil || cmd.Process == nil {
 		return
 	}
-	m.stopOnce.Do(func() {
-		safeClose(shutdown)
-	})
-	// Wait for the goroutine to observe shutdown.
+	_ = cmd.Process.Signal(syscall.SIGTERM)
+
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		m.mu.Lock()
@@ -235,6 +221,13 @@ func (m *Manager) Stop() {
 			return
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+
+	m.mu.Lock()
+	stillRunning := m.running
+	m.mu.Unlock()
+	if stillRunning {
+		_ = cmd.Process.Kill()
 	}
 }
 
@@ -249,6 +242,7 @@ func (m *Manager) Status() Status {
 		Error:   m.lastErr,
 		LastLog: m.lastLog,
 		LogFile: m.logFile,
+		Binary:  m.binaryStatus,
 	}
 }
 

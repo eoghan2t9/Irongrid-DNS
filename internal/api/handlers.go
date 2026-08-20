@@ -29,6 +29,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/catalog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cert"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/cfupdate"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dhcp"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsserver"
@@ -204,6 +205,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.tunnelStop(w)
 	case len(parts) == 2 && parts[0] == "tunnel" && parts[1] == "log" && r.Method == http.MethodGet:
 		h.tunnelLog(w)
+	case len(parts) == 2 && parts[0] == "tunnel" && parts[1] == "cloudflared-update" && r.Method == http.MethodPost:
+		h.installCloudflaredUpdate(ctx, w)
 	case len(parts) == 1 && parts[0] == "config" && r.Method == http.MethodGet:
 		h.getConfig(w)
 	case len(parts) == 1 && parts[0] == "config" && r.Method == http.MethodPut:
@@ -814,6 +817,42 @@ func (h *Handler) tunnelStop(w http.ResponseWriter) {
 
 func (h *Handler) tunnelLog(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, map[string]any{"lines": h.Tunnel.TailLog(50)})
+}
+
+// installCloudflaredUpdate checks cloudflare/cloudflared's GitHub releases
+// and installs a newer managed binary if one exists. Unlike installUpdate
+// (Irongrid's own self-update), no restart is needed afterward: the swap
+// only affects the *next* tunnel Start(), not the running Irongrid process.
+func (h *Handler) installCloudflaredUpdate(ctx context.Context, w http.ResponseWriter) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+
+	client := &cfupdate.Client{}
+	res, err := client.Install(ctx, h.Tunnel.BinaryPath())
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
+
+	h.Tunnel.SetBinaryStatus(tunnel.BinaryStatus{
+		Version:       res.NewVersion,
+		LatestVersion: res.NewVersion,
+		LastChecked:   time.Now(),
+	})
+
+	payload := map[string]any{
+		"installed":        res.Installed,
+		"previous_version": res.PreviousVersion,
+		"new_version":      res.NewVersion,
+		"asset_name":       res.AssetName,
+		"asset_size":       res.AssetSize,
+	}
+	if !res.Installed {
+		payload["note"] = "cloudflared is already up to date"
+	} else if h.Tunnel.Status().Running {
+		payload["note"] = "cloudflared updated; the running tunnel keeps using the old binary until it is next restarted"
+	}
+	writeJSON(w, http.StatusOK, payload)
 }
 
 // ---- config & diagnostics ----
