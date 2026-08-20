@@ -190,7 +190,7 @@ func (c *Client) Install(ctx context.Context, binPath string) (*InstallResult, e
 		return nil, fmt.Errorf("install %s: %w", asset.Name, err)
 	}
 
-	if err := os.WriteFile(versionPath(binPath), []byte(rel.TagName), 0o644); err != nil {
+	if err := os.WriteFile(versionPath(binPath), []byte(rel.TagName), 0o600); err != nil {
 		return nil, fmt.Errorf("record installed version: %w", err)
 	}
 

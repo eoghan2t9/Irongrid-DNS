@@ -53,6 +53,15 @@ linters:
       - path: (.+)_test\.go
         linters:
           - gosec
+      # G204 (subprocess with variable args) for the cloudflared launcher is
+      # by design: binPath is the manager's own pinned install path (never
+      # user input), and args come from buildArgs, which only ever emits
+      # flags built from the validated mode/token/config/origin the tunnel
+      # was started with.
+      - path: internal/tunnel/tunnel\.go
+        linters:
+          - gosec
+        text: "Subprocess launched with a potential tainted input or cmd arguments"
 
 run:
   timeout: 5m
