@@ -92,7 +92,7 @@ func (m *Manager) DoQAddr() string {
 	return m.doqLns[len(m.doqLns)-1].Addr().String()
 }
 
-func (m *Manager) handleDoQConn(conn quic.Connection) {
+func (m *Manager) handleDoQConn(conn *quic.Conn) {
 	defer func() { _ = conn.CloseWithError(0, "") }()
 	defer recoverPanic("DoQ connection handler")
 	for {
@@ -104,7 +104,7 @@ func (m *Manager) handleDoQConn(conn quic.Connection) {
 	}
 }
 
-func (m *Manager) handleDoQStream(stream quic.Stream, remote net.Addr) {
+func (m *Manager) handleDoQStream(stream *quic.Stream, remote net.Addr) {
 	defer stream.Close()
 	// Handler.serve recovers panics from the handler call below, but
 	// req.Unpack runs before that — this covers the gap the same way the
@@ -142,7 +142,7 @@ func (m *Manager) handleDoQStream(stream quic.Stream, remote net.Addr) {
 
 // doqResponseWriter adapts dns.ResponseWriter to a QUIC stream.
 type doqResponseWriter struct {
-	stream   quic.Stream
+	stream   *quic.Stream
 	clientIP string
 }
 

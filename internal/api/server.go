@@ -115,6 +115,12 @@ func registerPprof(mux *http.ServeMux, a *App) {
 	mux.HandleFunc("/debug/pprof/profile", wrap(pprof.Profile))
 	mux.HandleFunc("/debug/pprof/symbol", wrap(pprof.Symbol))
 	mux.HandleFunc("/debug/pprof/trace", wrap(pprof.Trace))
+	// goroutineleak (GA since Go 1.27) flags goroutines blocked on a
+	// concurrency primitive with no way to ever unblock — pulled via
+	// pprof.Handler like the other named profiles (heap, goroutine, ...)
+	// since pprof.Index only auto-lists profiles registered on the
+	// package-level runtime/pprof registry.
+	mux.HandleFunc("/debug/pprof/goroutineleak", wrap(pprof.Handler("goroutineleak").ServeHTTP))
 }
 
 // sessionCookie is the signed login cookie. It keeps the dashboard logged in
@@ -230,12 +236,11 @@ func (a *App) validSession(r *http.Request, username, secret string) bool {
 	}
 	// The payload is "<user>.<exp>"; usernames may themselves contain dots,
 	// so split on the last dot (the expiry is always the final field).
-	idx := strings.LastIndexByte(string(raw), '.')
-	if idx < 0 {
+	user, expStr, ok := strings.CutLast(string(raw), ".")
+	if !ok {
 		return false
 	}
-	user := string(raw[:idx])
-	exp, err := strconv.ParseInt(string(raw[idx+1:]), 10, 64)
+	exp, err := strconv.ParseInt(expStr, 10, 64)
 	if err != nil || time.Now().Unix() > exp {
 		return false
 	}

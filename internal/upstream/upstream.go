@@ -127,7 +127,7 @@ type Upstream struct {
 	// the connection: quic-go's Dial doesn't own a caller-provided packet
 	// conn, so Irongrid closes it alongside the connection.
 	quicMu   sync.Mutex
-	quicConn quic.Connection
+	quicConn *quic.Conn
 	quicPc   net.PacketConn
 
 	// resolver performs the walk for Transport == Recursive; nil for every

@@ -10,7 +10,14 @@ linters:
     - govet
     - ineffassign
     - modernize
-    - staticcheck
+    # staticcheck disabled (temporary): its bundled honnef.co/go/tools
+    # v0.8.0-rc.1 nilness pass panics ("unhandled builtin recover") building
+    # IR for sentry-go under the go1.27 compiler — reproduces on both
+    # golangci-lint v2.12.2 (crashes on stdlib itself, worse) and v2.13.0
+    # (crashes narrower, on sentry-go's recover() pattern). Not our code;
+    # go-tools hasn't caught up with go1.27 yet (go1.27 and go-tools
+    # v0.8.0-rc.1 both shipped within the same week). Re-enable once
+    # honnef.co/go/tools ships a go1.27-compatible release.
     - unused
     - misspell
     - gosec

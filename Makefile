@@ -76,7 +76,7 @@ test:
 ## enough that pulling it into this module's go.sum roughly triples it, and
 ## CI installs it independently via golangci-lint-action anyway)
 lint:
-	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2 run ./...
+	go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.0 run ./...
 
 ## vuln: scan the Go dependency tree for known CVEs (golang.org/x/vuln, pinned
 ## via the go.mod tool directive)

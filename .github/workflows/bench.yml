@@ -28,9 +28,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
-          # Keep the same pinned patch as release.yml (go1.26.6 fixes the
-          # stdlib vulns govulncheck reports in earlier 1.26.x).
-          go-version: '1.26.6'
+          # Keep the same pinned version as release.yml.
+          go-version: '1.27.0'
           cache: true
 
       - name: Datagram throughput — 1 vs 8 reuseport sockets

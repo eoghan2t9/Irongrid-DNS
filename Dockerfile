@@ -14,9 +14,9 @@ COPY web/ ./
 RUN npm run build
 
 # ---- Stage 2: build the Go backend (cloudflared baked in) ----
-# Pinned patch: golang:1.26-alpine floated to a pre-go1.26.6 build whose
-# stdlib carries the vulns govulncheck reports (fixed in 1.26.6).
-FROM golang:1.26.6-alpine AS gobuild
+# go.mod requires go 1.27; govulncheck reports 0 vulnerabilities against
+# 1.27.0. Keep in sync with the go-version pins in .github/workflows/.
+FROM golang:1.27.0-alpine AS gobuild
 ARG VERSION
 ARG COMMIT
 ARG BUILDTIME

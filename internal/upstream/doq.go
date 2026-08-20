@@ -52,7 +52,7 @@ func queryDoQClient(ctx context.Context, u *Upstream, m *dns.Msg) (*dns.Msg, err
 
 // getQUICConn returns the upstream's persistent QUIC connection, dialing one
 // if there isn't a live one yet.
-func (u *Upstream) getQUICConn(ctx context.Context) (quic.Connection, error) {
+func (u *Upstream) getQUICConn(ctx context.Context) (*quic.Conn, error) {
 	u.quicMu.Lock()
 	defer u.quicMu.Unlock()
 	if u.quicConn != nil && u.quicConn.Context().Err() == nil {
@@ -93,7 +93,7 @@ func (u *Upstream) getQUICConn(ctx context.Context) (quic.Connection, error) {
 // dropQUICConn closes conn (and the UDP socket backing it) and clears it if
 // it's still the upstream's current connection (a concurrent call may have
 // already replaced it).
-func (u *Upstream) dropQUICConn(conn quic.Connection) {
+func (u *Upstream) dropQUICConn(conn *quic.Conn) {
 	u.quicMu.Lock()
 	var pc net.PacketConn
 	if u.quicConn == conn {
@@ -112,7 +112,7 @@ func (u *Upstream) dropQUICConn(conn quic.Connection) {
 // Opening a stream is cheap (no handshake) and safe to do concurrently from
 // multiple goroutines sharing the same conn — that concurrency-safety is
 // exactly what QUIC's stream multiplexing is for.
-func doQStream(ctx context.Context, conn quic.Connection, m *dns.Msg) (*dns.Msg, error) {
+func doQStream(ctx context.Context, conn *quic.Conn, m *dns.Msg) (*dns.Msg, error) {
 	stream, err := conn.OpenStreamSync(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("doq open stream: %w", err)

@@ -63,7 +63,7 @@ func TestDoH3RoundTrip(t *testing.T) {
 	rt := &http3.Transport{
 		TLSClientConfig: clientTLS,
 		QUICConfig:      &quic.Config{},
-		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (quic.EarlyConnection, error) {
+		Dial: func(ctx context.Context, addr string, tlsCfg *tls.Config, cfg *quic.Config) (*quic.Conn, error) {
 			return quic.DialAddrEarly(ctx, addr, tlsCfg, cfg)
 		},
 	}

@@ -32,16 +32,24 @@ server:
   # web_redirect: true         # with web_tls: plain HTTP on web_redirect_port 301s to HTTPS
   # web_redirect_port: 80
   timeout_sec: 5               # per-query upstream timeout
+  # MaxTCPConnsPerIP caps how many concurrent connections one client IP
+  # may hold on the plain-TCP and DoT listeners (0 = unlimited).
+  # It stops connection floods and slowloris-style attacks from
+  # exhausting file descriptors and goroutines.
+  max_tcp_conns_per_ip: 100
+  # MaxHTTPConnsPerIP caps how many concurrent connections one client IP
+  # may hold on the DoH listener (0 = unlimited).
+  max_http_conns_per_ip: 100
   # UDP sockets bound for the plain UDP, DoQ and DoH3 listeners
   # (SO_REUSEPORT spreads incoming datagrams across them). 0 = auto (one per
   # CPU, capped at 8); 1 = a single exclusive socket (no port sharing with
   # other processes); N = exactly N sockets (capped at 64).
-  udp_sockets: 0
+  udp_sockets: 4
   # Handler workers per plain-UDP socket (the worker pool replaces
   # goroutine-per-datagram, so a flood costs no goroutine churn). 0 = auto
   # (4 x CPU per socket, floor 16, capped 256); N = exactly N per socket
   # (capped at 512).
-  # udp_workers: 0
+  udp_workers: 64
   # debug_pprof: true            # expose Go's net/http/pprof under /debug/pprof/
                                  # on the dashboard port, behind the same admin
                                  # login as the REST API. Off by default: even
@@ -121,7 +129,7 @@ upstreams:
 # upstreams), so steady-state upstream traffic is low. Off by default because
 # it uses upstreams even when nobody is asking.
 warmer:
-  enabled: false             # turn the background warmer on
+  enabled: true             # turn the background warmer on
   interval: 15m              # how often a pass runs
   lookback: 24h              # how far back into the query log to find active domains
   max_domains: 5000          # cap on domains warmed per pass (0 = all in the window)

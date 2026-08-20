@@ -914,7 +914,14 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		h.record(client, qname, q, "blocked", decision.Reason, "", start, blocked)
 		_ = h.write(w, blocked, r, proto)
 		return
-	} // 4. Cache lookup (only for standard record types). Cached messages carry
+	}
+	// A domain-whitelist hit must also exempt the answer from IP-based
+	// blocking below (step 7) — otherwise a whitelisted domain that happens
+	// to resolve to a blocklisted IP (a shared CDN address, for instance)
+	// gets blocked anyway, contradicting "whitelist overrides everything"
+	// above.
+	domainWhitelisted := strings.HasPrefix(decision.Reason, "whitelist")
+	// 4. Cache lookup (only for standard record types). Cached messages carry
 	//    the ID of the original query, so rebase to this request's ID.
 	// Lookup hashes the question once and checks positive then negative
 	// entries, instead of two independent Get/GetNegative calls that each
@@ -1107,7 +1114,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	//    read so the common domain-only list setup skips the answer walk
 	//    entirely — answerIPs allocates a slice and ip.String() per address
 	//    on every upstream response otherwise.
-	if engine.HasIPRules() {
+	if engine.HasIPRules() && !domainWhitelisted {
 		if blockedByIP, reason := engine.CheckIPs(answerIPs(resp)); blockedByIP {
 			blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 			h.Stats.Blocked.Add(1)
