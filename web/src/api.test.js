@@ -54,6 +54,12 @@ describe('api request', () => {
     expect(globalThis.fetch.mock.calls[0][1].headers.Authorization).toBeUndefined()
   })
 
+  it('passes cache control options through for restart polling', async () => {
+    globalThis.fetch = vi.fn().mockResolvedValue({ status: 200, ok: true, json: async () => ({}) })
+    await api.status({ cache: 'no-store' })
+    expect(globalThis.fetch.mock.calls[0][1].cache).toBe('no-store')
+  })
+
   it('throws "unauthorized" and fires the auth handler on 401', async () => {
     const onAuth = vi.fn()
     setAuthHandler(onAuth)

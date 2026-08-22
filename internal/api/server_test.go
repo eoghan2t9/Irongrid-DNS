@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/json"
 	"io"
 	"io/fs"
 	"net/http"
@@ -10,9 +11,40 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
 
 	"github.com/andybalholm/brotli"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/tunnel"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/version"
 )
+
+func TestStatusIncludesMachineReadableVersion(t *testing.T) {
+	h := &Handler{
+		Cfg:       &config.Config{},
+		Tunnel:    &tunnel.Manager{},
+		StartedAt: time.Now(),
+	}
+	rr := httptest.NewRecorder()
+	h.getStatus(rr)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rr.Code)
+	}
+	var body struct {
+		Version    string `json:"version"`
+		VersionTag string `json:"version_tag"`
+	}
+	if err := json.Unmarshal(rr.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	if body.VersionTag != version.Version {
+		t.Fatalf("version_tag = %q, want %q", body.VersionTag, version.Version)
+	}
+	if body.Version == "" {
+		t.Fatal("human-readable version is empty")
+	}
+}
 
 // TestPprofDisabledByDefault verifies /debug/pprof/ isn't registered at all
 // when server.debug_pprof is left at its zero-value default: an

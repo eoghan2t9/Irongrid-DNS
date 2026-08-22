@@ -64,7 +64,7 @@ async function request(path, options = {}) {
 }
 
 export const api = {
-  status: () => request('/api/status'),
+  status: (options = {}) => request('/api/status', options),
   logout: () => request('/api/logout', { method: 'POST' }),
   stats: () => request('/api/stats'),
   log: (params = {}) => {

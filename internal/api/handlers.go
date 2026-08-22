@@ -313,6 +313,7 @@ func (h *Handler) getStatus(w http.ResponseWriter) {
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version":     version.String(),
+		"version_tag": version.Version,
 		"uptime_sec":  int(time.Since(h.StartedAt).Seconds()),
 		"listeners":   listeners,
 		"udp_sockets": udpSocks,
@@ -2372,7 +2373,7 @@ func (h *Handler) installUpdate(ctx context.Context, w http.ResponseWriter) {
 	// Only claim (and guard) a restart when it can actually happen: systemd
 	// must be running, systemd-run on PATH, and the systemd-run invocation
 	// itself (which just registers a timer unit and returns — the actual
-	// restart still happens on its own detached unit after the 1s delay,
+	// restart still happens on its own detached unit after a short delay,
 	// independent of this process) has to actually succeed. Run it
 	// synchronously so a registration failure (e.g. a stale same-named unit
 	// left over from a previous attempt) is caught here instead of only
@@ -2393,7 +2394,9 @@ func (h *Handler) installUpdate(ctx context.Context, w http.ResponseWriter) {
 		}
 	}
 	if restartable {
-		cmd := exec.Command("systemd-run", "--unit=irongrid-update", "--collect", "--on-active=1", "systemctl", "restart", unit)
+		// Half a second is enough for the small JSON response below to flush,
+		// while avoiding the old 1s timer plus 1.5s dashboard polling cadence.
+		cmd := exec.Command("systemd-run", "--unit=irongrid-update", "--collect", "--on-active=500ms", "systemctl", "restart", unit)
 		if out, err := cmd.CombinedOutput(); err != nil {
 			slog.Error("update schedule restart failed", "error", err, "output", string(out))
 			payload["restarting"] = false

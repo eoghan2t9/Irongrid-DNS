@@ -5,6 +5,8 @@ import { XIcon } from './ui'
 
 const DISMISS_KEY = 'irongrid_dismissed_update'
 const INSTALL_CMD = 'curl -fsSL https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.sh | bash'
+const RESTART_POLL_MS = 500
+const RESTART_TIMEOUT_MS = 45000
 
 // Stroke-only SVG icons (the app's icon standard — see App.jsx's navSvg)
 // replacing the ⬆/⬇ emoji that can render in color on some platforms.
@@ -111,12 +113,19 @@ export default function UpdateChecker({ onNavigate }) {
       if (res && res.restarting) {
         setInstalling('restarting')
         setInstallNotice('Installed — restarting the service…')
-        // Poll /api/status every 1.5s (up to 45s); reload once it answers.
-        const deadline = Date.now() + 45000
+        // Poll quickly with browser caching disabled. The old process can
+        // remain reachable briefly after systemd accepts the restart job, so
+        // only reload once the status endpoint reports the version we just
+        // installed — any response from the previous process is ignored.
+        const deadline = Date.now() + RESTART_TIMEOUT_MS
         const tick = async () => {
           try {
-            const st = await api.status()
-            if (st && st.version) {
+            const st = await api.status({ cache: 'no-store' })
+            const startedVersion = st?.version_tag || st?.version || ''
+            const runningNewVersion = st?.version_tag
+              ? st.version_tag === res.new_version
+              : startedVersion.includes(res.new_version)
+            if (runningNewVersion) {
               window.location.reload()
               return
             }
@@ -124,13 +133,13 @@ export default function UpdateChecker({ onNavigate }) {
             // service still down — keep polling
           }
           if (Date.now() < deadline) {
-            setTimeout(tick, 1500)
+            setTimeout(tick, RESTART_POLL_MS)
           } else {
             setInstalling('idle')
             setInstallNotice('The service restarted slowly — click reload to continue.')
           }
         }
-        setTimeout(tick, 1500)
+        setTimeout(tick, RESTART_POLL_MS)
       } else {
         setInstalling('idle')
         setInstallNotice((res && res.note) || 'Update installed. Restart Irongrid manually to apply it.')
