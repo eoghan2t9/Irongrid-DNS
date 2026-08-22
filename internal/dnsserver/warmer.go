@@ -142,13 +142,26 @@ func (w *Warmer) Start(ctx context.Context) {
 			} else if enabled {
 				wait = defaultWarmInterval
 			}
+			timer := time.NewTimer(wait)
 			select {
 			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				return
 			case <-w.trigger:
 				// An enable-toggle or manual warm: fall through, re-read the
 				// config and run a pass when enabled.
-			case <-time.After(wait):
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+			case <-timer.C:
 			}
 			w.mu.Lock()
 			enabled = w.enabled

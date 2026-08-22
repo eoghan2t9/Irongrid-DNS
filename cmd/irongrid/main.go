@@ -570,10 +570,17 @@ func main() {
 			if g.Enabled && (len(g.Countries) > 0 || len(g.AllowASNs) > 0 || len(g.BlockASNs) > 0) && g.AutoUpdate > 0 {
 				wait = g.AutoUpdate
 			}
+			timer := time.NewTimer(wait)
 			select {
 			case <-ctx.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
 				return
-			case <-time.After(wait):
+			case <-timer.C:
 			}
 			// Re-read the config after the sleep: the user may have disabled
 			// geo (or changed countries / the interval) while we waited, and
