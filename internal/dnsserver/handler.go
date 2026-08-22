@@ -68,6 +68,15 @@ type Stats struct {
 	// client's ISP resolved in a configured ASN list) — the dashboard's
 	// "ASN headers" row.
 	ASNHeader atomic.Int64
+	// UDP listener counters distinguish packets that reached userspace from
+	// packets rejected before the shared handler. They make worker-pool
+	// saturation and malformed traffic visible without platform-specific
+	// socket APIs.
+	UDPReceived   atomic.Int64
+	UDPInvalid    atomic.Int64
+	UDPQueueDrops atomic.Int64
+	UDPCompleted  atomic.Int64
+	WriteErrors   atomic.Int64
 }
 
 func newStats() *Stats {
@@ -549,6 +558,7 @@ func (h *Handler) SetCookies(on bool) {
 }
 
 func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) {
+	w = &statsResponseWriter{ResponseWriter: w, writeErrors: &h.Stats.WriteErrors}
 	// Every listener (UDP/TCP/DoT/DoH/DoH3/DoQ) funnels into this one
 	// function in this one process — an unrecovered panic anywhere in the
 	// pipeline below (filter engine, cache, upstream, DHCP host lookups, …)
@@ -1183,6 +1193,31 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			// Saturated — skip this write.
 		}
 	}
+}
+
+// statsResponseWriter records transport write failures in one place. Handler
+// call sites deliberately remain free to ignore write errors because a DNS
+// response cannot be retried safely after a partial stream write, but the
+// failures must still be observable.
+type statsResponseWriter struct {
+	dns.ResponseWriter
+	writeErrors *atomic.Int64
+}
+
+func (w *statsResponseWriter) WriteMsg(m *dns.Msg) error {
+	err := w.ResponseWriter.WriteMsg(m)
+	if err != nil {
+		w.writeErrors.Add(1)
+	}
+	return err
+}
+
+func (w *statsResponseWriter) Write(b []byte) (int, error) {
+	n, err := w.ResponseWriter.Write(b)
+	if err != nil {
+		w.writeErrors.Add(1)
+	}
+	return n, err
 }
 
 func (h *Handler) record(client, qname string, q dns.Question, action, reason, upstreamName string, start time.Time, m *dns.Msg) {

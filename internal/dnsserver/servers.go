@@ -314,7 +314,7 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 		}
 		slog.Info("dns listener started", "proto", proto, "addr", addr, "sockets", len(pcs), "socket_noun", noun)
 		for _, pc := range pcs {
-			srv := newUDPServer(pc, handler, m.udpWorkerCount())
+			srv := newUDPServer(pc, handler, m.handler.Stats, m.udpWorkerCount())
 			m.mu.Lock()
 			m.udpSrvs = append(m.udpSrvs, srv)
 			m.mu.Unlock()
@@ -394,7 +394,9 @@ func (m *Manager) Shutdown(ctx context.Context) {
 		_ = s.ShutdownContext(ctx)
 	}
 	for _, s := range m.udpSrvs {
-		s.Close()
+		if err := s.Shutdown(ctx); err != nil {
+			slog.Warn("UDP listener shutdown timed out", "error", err)
+		}
 	}
 	if m.httpSrv != nil {
 		_ = m.httpSrv.Shutdown(ctx)

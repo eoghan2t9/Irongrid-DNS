@@ -1,11 +1,13 @@
 package dnsserver
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -22,10 +24,9 @@ const dnsHeaderLen = 12
 // later reaped) a goroutine plus its stack — real per-query cost at flat-out
 // rates, and unbounded goroutine growth under a flood. Here the workers are
 // pre-spawned once per socket, so a burst costs zero goroutine creation and
-// bounded memory, and the read loop stays ahead of the handler: it only ever
-// pushes to the jobs channel, and when the channel is full it blocks, giving
-// the kernel receive buffer natural backpressure instead of spawning more
-// goroutines.
+// bounded memory. The read loop stays ahead of the handler while queue space
+// remains; at capacity it counts and rejects excess datagrams rather than
+// blocking and allowing the kernel receive queue to overflow invisibly.
 //
 // The worker pool is safe for the handler because the handler is stateless
 // with respect to the socket: every goroutine-safe facility it touches
@@ -35,11 +36,14 @@ type udpServer struct {
 	pc      net.PacketConn
 	conn    *net.UDPConn // nil when pc isn't a *net.UDPConn (never today)
 	handler dns.Handler
+	stats   *Stats
 	workers int
 
-	// jobs is the handoff queue from the read loop to the workers. Buffered
-	// at the worker count so a burst beyond that blocks the reader (kernel
-	// buffer backpressure) rather than growing memory.
+	// jobs is the bounded handoff queue from the read loop to the workers.
+	// The read loop never blocks on it: continuing to drain the socket keeps
+	// short bursts out of the kernel receive queue, while a full queue is an
+	// explicit, measurable overload rejection instead of an opaque kernel
+	// packet drop.
 	jobs chan udpJob
 	// bufs pools the read buffers as *[]byte — a pointer-like pool argument
 	// avoids boxing an allocation per datagram (see packBufPool). Each
@@ -47,11 +51,17 @@ type udpServer struct {
 	// copies everything it needs).
 	bufs sync.Pool
 
-	closeOnce sync.Once
-	closed    atomic.Bool
-	done      chan struct{}
-	wg        sync.WaitGroup
+	closeOnce  sync.Once
+	socketOnce sync.Once
+	closed     atomic.Bool
+	finished   chan struct{}
+	wg         sync.WaitGroup
 }
+
+// udpQueuePerWorker absorbs short scheduling and upstream-latency bursts
+// without allowing stale UDP work to grow without bound. At the largest
+// explicit pool this is 8 MiB of 4 KiB packet buffers per socket.
+const udpQueuePerWorker = 4
 
 // udpJob is one datagram handed from the read loop to a worker. bp is the
 // pooled read buffer (pointer so the worker can return it to the pool); n
@@ -64,16 +74,17 @@ type udpJob struct {
 
 // newUDPServer builds a worker-pool UDP server over an already-bound packet
 // connection (see newUDPListeners). workers is the per-socket worker count.
-func newUDPServer(pc net.PacketConn, handler dns.Handler, workers int) *udpServer {
+func newUDPServer(pc net.PacketConn, handler dns.Handler, stats *Stats, workers int) *udpServer {
 	if workers < 1 {
 		workers = 1
 	}
 	s := &udpServer{
-		pc:      pc,
-		handler: handler,
-		workers: workers,
-		jobs:    make(chan udpJob, workers),
-		done:    make(chan struct{}),
+		pc:       pc,
+		handler:  handler,
+		stats:    stats,
+		workers:  workers,
+		jobs:     make(chan udpJob, workers*udpQueuePerWorker),
+		finished: make(chan struct{}),
 	}
 	s.bufs.New = func() any {
 		b := make([]byte, udpMaxPacketSize)
@@ -120,33 +131,55 @@ func udpWorkersFor(cfg int) int {
 // shutdown and the read-loop error otherwise — never both running past
 // Close, so the Manager's shutdown path can rely on it terminating.
 func (s *udpServer) Serve() error {
-	defer s.Close()
+	defer s.closeSocket()
+	defer close(s.finished)
 	for i := 0; i < s.workers; i++ {
 		s.wg.Add(1)
 		go s.worker()
 	}
-	s.wg.Add(1)
 	err := s.readLoop()
+	// readLoop is the only sender, so it owns channel closure. Workers drain
+	// every accepted job before exiting.
+	close(s.jobs)
 	s.wg.Wait()
 	return err
 }
 
-// Close stops the server: workers exit after their current packet, the read
-// loop unblocks on the closed socket and returns, and Serve's wg.Wait
-// releases. Safe to call more than once (and from both Manager.Shutdown and
-// Serve's deferred close).
+// Close stops accepting new packets. A read deadline wakes the read loop but
+// leaves the socket writable while workers drain accepted jobs. Serve closes
+// the socket after the drain completes. Safe to call more than once.
 func (s *udpServer) Close() {
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
-		close(s.done)
-		_ = s.pc.Close() // unblocks the read loop and frees the socket
+		if err := s.pc.SetReadDeadline(time.Now()); err != nil {
+			// Every net.PacketConn implementation supports deadlines, but a
+			// custom implementation may not. Closing is the safe fallback.
+			s.closeSocket()
+		}
 	})
+}
+
+func (s *udpServer) closeSocket() {
+	s.socketOnce.Do(func() { _ = s.pc.Close() })
+}
+
+// Shutdown stops accepting datagrams and waits for already-accepted jobs to
+// drain, bounded by ctx. Close remains the non-blocking primitive used by
+// Serve's error path.
+func (s *udpServer) Shutdown(ctx context.Context) error {
+	s.Close()
+	select {
+	case <-s.finished:
+		return nil
+	case <-ctx.Done():
+		s.closeSocket()
+		return ctx.Err()
+	}
 }
 
 // readLoop reads datagrams and dispatches them to the worker pool. It
 // returns nil on a clean shutdown, or the first read error that isn't the
-// socket closing underneath us (no read deadline is set, so a spurious
-// timeout can't occur).
+// shutdown deadline waking the socket.
 func (s *udpServer) readLoop() error {
 	for {
 		bp := s.bufs.Get().(*[]byte)
@@ -176,17 +209,29 @@ func (s *udpServer) readLoop() error {
 			}
 			return err
 		}
+		if s.closed.Load() {
+			s.bufs.Put(bp)
+			return nil
+		}
+		if s.stats != nil {
+			s.stats.UDPReceived.Add(1)
+		}
 		if n < dnsHeaderLen {
 			// Too short to be a DNS message: drop without a reply (a reply
 			// to garbage is an amplification vector).
 			s.bufs.Put(bp)
+			if s.stats != nil {
+				s.stats.UDPInvalid.Add(1)
+			}
 			continue
 		}
 		select {
 		case s.jobs <- udpJob{bp: bp, n: n, addr: addr}:
-		case <-s.done:
+		default:
 			s.bufs.Put(bp)
-			return nil
+			if s.stats != nil {
+				s.stats.UDPQueueDrops.Add(1)
+			}
 		}
 	}
 }
@@ -195,12 +240,11 @@ func (s *udpServer) readLoop() error {
 // packet at a time inline (unpack → handler → write), so a single worker
 // can never have two in-flight responses racing on the same buffer.
 func (s *udpServer) worker() {
-	for {
-		select {
-		case job := <-s.jobs:
-			s.handleRecovered(job)
-		case <-s.done:
-			return
+	defer s.wg.Done()
+	for job := range s.jobs {
+		s.handleRecovered(job)
+		if s.stats != nil {
+			s.stats.UDPCompleted.Add(1)
 		}
 	}
 }
@@ -238,6 +282,9 @@ func (s *udpServer) handle(job udpJob) {
 	if err := req.Unpack((*job.bp)[:job.n]); err != nil {
 		// Unparseable: drop, matching miekg/dns's serveDNS (a FORMERR reply
 		// to a malformed datagram is amplification surface).
+		if s.stats != nil {
+			s.stats.UDPInvalid.Add(1)
+		}
 		return
 	}
 	w := &udpResponseWriter{conn: s.conn, pc: s.pc, addr: job.addr}

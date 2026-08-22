@@ -89,6 +89,38 @@ func (f *fakeWriter) TsigStatus() error     { return nil }
 func (f *fakeWriter) TsigTimersOnly(b bool) {}
 func (f *fakeWriter) Hijack()               {}
 
+type errorWriter struct {
+	fakeWriter
+}
+
+func (w *errorWriter) WriteMsg(*dns.Msg) error {
+	return fmt.Errorf("simulated write failure")
+}
+
+func (w *errorWriter) Write([]byte) (int, error) {
+	return 0, fmt.Errorf("simulated write failure")
+}
+
+func TestHandlerCountsWriteErrors(t *testing.T) {
+	h := NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, time.Second)
+	rw := filter.NewRewriter()
+	rw.Set([]filter.RewriteSpec{{
+		Domain: "write-error.test",
+		Type:   "A",
+		Value:  "192.0.2.1",
+		TTL:    60,
+	}})
+	h.SetRewriter(rw)
+	m := new(dns.Msg)
+	m.SetQuestion("write-error.test.", dns.TypeA)
+
+	h.ServeDNS(&errorWriter{}, m)
+
+	if got := h.Stats.WriteErrors.Load(); got != 1 {
+		t.Fatalf("WriteErrors = %d, want 1", got)
+	}
+}
+
 // TestHandlerUpstreamQuerySingleOPT verifies the query forwarded to an
 // upstream carries exactly one EDNS OPT record even when the client sent its
 // own — the handler must replace (not append to) the client's OPT. A query
