@@ -269,6 +269,12 @@ func (s *udpServer) handleRecovered(job udpJob) {
 // is exclusively this worker's again.
 var reqPool = sync.Pool{New: func() any { return new(dns.Msg) }}
 
+// udpWriterPool recycles the short-lived response-writer wrapper created for
+// each datagram. ServeDNS is synchronous, so the wrapper cannot be reused
+// until the handler returns; clearing its socket/address references before
+// putting it back also prevents retaining a client's address unnecessarily.
+var udpWriterPool = sync.Pool{New: func() any { return new(udpResponseWriter) }}
+
 // handle unpacks one datagram and runs the handler, then returns the read
 // buffer and request to their pools. Unpack copies every name and record
 // into the *dns.Msg, so the buffer is free the moment it returns.
@@ -287,7 +293,12 @@ func (s *udpServer) handle(job udpJob) {
 		}
 		return
 	}
-	w := &udpResponseWriter{conn: s.conn, pc: s.pc, addr: job.addr}
+	w := udpWriterPool.Get().(*udpResponseWriter)
+	w.conn, w.pc, w.addr = s.conn, s.pc, job.addr
+	defer func() {
+		w.conn, w.pc, w.addr = nil, nil, nil
+		udpWriterPool.Put(w)
+	}()
 	s.handler.ServeDNS(w, req)
 }
 
