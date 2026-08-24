@@ -125,6 +125,12 @@ func main() {
 	defer func() { _ = dfly.Close() }()
 	slog.Info("Dragonfly caching enabled", "positive_ttl", cfg.Cache.TTL, "negative_ttl", cfg.Cache.NegativeTTL)
 
+	// ---- validate Dragonfly config against system specs ----
+	// If Dragonfly was started with outdated flags (e.g. the old hardcoded
+	// 512mb/2 threads), this restarts it with the correct auto-detected values.
+	// Best-effort: failures are logged but never prevent irongrid from starting.
+	tuning.ValidateDragonfly(cfg.Cache.Addr)
+
 	// ---- authoritative root hints for recursive upstreams ----
 	// recursive:// upstreams walk referrals from the root servers; seed them
 	// from IANA's named.root file instead of the bundled snapshot so a

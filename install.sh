@@ -287,17 +287,55 @@ VERSION_OUT="$("$DEST/irongrid${EXT}" -version 2>/dev/null || true)"
 # Linux gets a native binary + systemd service. macOS/Windows have no native
 # Dragonfly build, so a Docker container is used when Docker is available.
 DFLY_STARTED=0
-# --maxmemory must be >= 256MiB per proactor thread; 2 threads x 256MiB =
-# 512mb. Pinning --proactor_threads makes the flag combination valid on any
-# machine (the default of one thread per core can exceed it).
-DFLY_FLAGS="--port=6379 --bind=127.0.0.1 --cache_mode=true --maxmemory=512mb --proactor_threads=2 --snapshot_cron=\"0 * * * *\" --dbfilename=irongrid-dump"
-# In Docker the container must NOT bind to 127.0.0.1 — docker-proxy reaches
+# Auto-compute Dragonfly flags from system specs: 25%% of host RAM for
+# maxmemory (clamped to 256mb-32gb), proactor_threads = min(CPUs, 8) floor 2.
+# Dragonfly requires >= 256MiB per proactor thread at startup.
+detect_dragonfly_flags() {
+  local cpus mem_bytes mem_pct maxmem threads min_per_thread=268435456  # 256 MiB
+
+  # CPU count: nproc (Linux), sysctl (macOS), fallback 2
+  cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
+  [ "$cpus" -lt 2 ] && cpus=2
+  [ "$cpus" -gt 8 ] && cpus=8
+  threads=$cpus
+
+  # Memory: /proc/meminfo (Linux), sysctl hw.memsize (macOS), fallback 512 MiB
+  if [ -r /proc/meminfo ]; then
+    mem_bytes=$(awk '/^MemTotal:/{print $2 * 1024}' /proc/meminfo 2>/dev/null)
+  elif command -v sysctl >/dev/null 2>&1; then
+    mem_bytes=$(sysctl -n hw.memsize 2>/dev/null)
+  fi
+  [ -z "$mem_bytes" ] || [ "$mem_bytes" -eq 0 ] && mem_bytes=$((512 * 1024 * 1024))
+
+  # 25%% of host RAM, clamped to 256 MiB - 32 GiB
+  mem_pct=$((mem_bytes / 4))
+  [ "$mem_pct" -lt $((256 * 1024 * 1024)) ] && mem_pct=$((256 * 1024 * 1024))
+  [ "$mem_pct" -gt $((32 * 1024 * 1024 * 1024)) ] && mem_pct=$((32 * 1024 * 1024 * 1024))
+
+  # Ensure maxmemory >= 256 MiB x proactor_threads
+  min_for_threads=$((threads * min_per_thread))
+  [ "$mem_pct" -lt "$min_for_threads" ] && mem_pct=$min_for_threads
+
+  # Format as "512mb" / "2gb"
+  if [ $((mem_pct %% (1024 * 1024 * 1024))) -eq 0 ]; then
+    maxmem="$((mem_pct / (1024 * 1024 * 1024)))gb"
+  else
+    maxmem="$((mem_pct / (1024 * 1024)))mb"
+  fi
+
+  DFLY_MAXMEM="$maxmem"
+  DFLY_THREADS="$threads"
+}
+detect_dragonfly_flags
+
+DFLY_FLAGS="--port=6379 --bind=127.0.0.1 --cache_mode=true --maxmemory=$DFLY_MAXMEM --proactor_threads=$DFLY_THREADS --snapshot_cron=\"0 * * * \"\" --dbfilename=irongrid-dump"
+# In Docker the container must NOT bind to 127.0.0.1 -- docker-proxy reaches
 # the container via its eth0 IP, so --bind would make the published port
 # refuse connections. The host-side -p 127.0.0.1:6379:6379 mapping already
 # keeps the port private.
 # --snapshot_cron + --dbfilename give hourly persistence (the query log and
 # cache survive a hard crash; a graceful restart snapshots anyway).
-DFLY_DOCKER_FLAGS="--port=6379 --cache_mode=true --maxmemory=512mb --proactor_threads=2 --snapshot_cron=\"0 * * * *\" --dbfilename=irongrid-dump"
+DFLY_DOCKER_FLAGS="--port=6379 --cache_mode=true --maxmemory=$DFLY_MAXMEM --proactor_threads=$DFLY_THREADS --snapshot_cron=\"0 * * * \"\" --dbfilename=irongrid-dump"
 
 # 1 if a Redis-compatible server answers PING on the given local port.
 # The read is bounded (-t) so a socket that accepts but is still initialising

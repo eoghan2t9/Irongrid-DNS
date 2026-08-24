@@ -21,6 +21,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
 const (
@@ -174,15 +176,19 @@ func ensureDragonflyNative(addr string, out io.Writer) error {
 	}
 	defer logFile.Close()
 
+	dfly := tuning.AutoDragonflyFlags()
 	args := []string{
 		"--port=" + port, "--bind=127.0.0.1",
-		"--cache_mode=true", "--maxmemory=512mb", "--proactor_threads=2",
+		"--cache_mode=true",
+		"--maxmemory=" + dfly.MaxMemory,
+		"--proactor_threads=" + fmt.Sprintf("%d", dfly.ProactorThreads),
 		"--dir=" + dataDir,
 	}
 	if err := startDragonflyProcess(dst, args, logFile); err != nil {
 		return fmt.Errorf("start dragonfly: %w", err)
 	}
-	fmt.Fprintf(out, "  … Dragonfly %s starting (%s)\n", ver, dst)
+	fmt.Fprintf(out, "  … Dragonfly %s starting (%s) — maxmemory=%s proactor_threads=%d\n",
+		ver, dst, dfly.MaxMemory, dfly.ProactorThreads)
 
 	if waitForRedis(addr, 30*time.Second) {
 		fmt.Fprintf(out, "  ✓ Dragonfly running at %s (log: %s)\n", addr, logPath)
@@ -233,17 +239,22 @@ func ensureDragonflyDocker(addr string, out io.Writer) error {
 	}
 	_ = exec.Command("docker", "rm", "-f", "dragonfly").Run()
 	fmt.Fprintf(out, "  … starting Dragonfly in Docker (port %s)\n", port)
+	dfly := tuning.AutoDragonflyFlags()
 	//nolint:gosec // fixed docker command, literal args, no shell interpolation
 	cmd := exec.Command("docker", "run", "-d", "--name", "dragonfly", "--restart", "unless-stopped",
 		"-p", "127.0.0.1:"+port+":6379", dflyImage,
-		"--cache_mode=true", "--maxmemory=512mb", "--proactor_threads=2", "--port=6379")
+		"--cache_mode=true",
+		"--maxmemory=" + dfly.MaxMemory,
+		"--proactor_threads=" + fmt.Sprintf("%d", dfly.ProactorThreads),
+		"--port=6379")
 	cmd.Stdout = out
 	cmd.Stderr = out
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("docker run failed: %w", err)
 	}
 	if waitForRedis(addr, 60*time.Second) {
-		fmt.Fprintf(out, "  ✓ Dragonfly running at %s (container: dragonfly)\n", addr)
+		fmt.Fprintf(out, "  ✓ Dragonfly running at %s (container: dragonfly) — maxmemory=%s proactor_threads=%d\n",
+			addr, dfly.MaxMemory, dfly.ProactorThreads)
 		return nil
 	}
 	return fmt.Errorf("dragonfly container started but did not answer at %s", addr)

@@ -277,6 +277,7 @@ func writeDockerCompose(w *wizard, dir, configPath string) ([]string, error) {
 	// The compose file lives in deploy/ while the config is one level up,
 	// so the mount path is relative (../<config>).
 	cfgName := filepath.Base(configPath)
+	dfly := tuning.AutoDragonflyFlags()
 	compose := fmt.Sprintf(`services:
   irongrid-dns:
     image: irongrid:latest
@@ -301,9 +302,7 @@ func writeDockerCompose(w *wizard, dir, configPath string) ([]string, error) {
     image: docker.dragonflydb.io/dragonfly/dragonfly
     container_name: irongrid-dragonfly
     restart: unless-stopped
-    # --proactor_threads=2 keeps 2 x 256MiB <= the 512mb maxmemory cap
-    # (Dragonfly requires >= 256MiB per proactor thread on startup).
-    command: --cache_mode=true --maxmemory=512mb --proactor_threads=2 --port=6379
+    command: --cache_mode=true --maxmemory=%s --proactor_threads=%d --port=6379
     ports:
       - "127.0.0.1:6379:6379"
     volumes:
@@ -312,7 +311,7 @@ func writeDockerCompose(w *wizard, dir, configPath string) ([]string, error) {
 volumes:
   irongrid-data:
   dragonfly-data:
-`, cfgName, cfgName)
+`, cfgName, cfgName, dfly.MaxMemory, dfly.ProactorThreads)
 	f := filepath.Join(dir, "docker-compose.yml")
 	if err := os.WriteFile(f, []byte(compose), 0o600); err != nil {
 		return nil, err
