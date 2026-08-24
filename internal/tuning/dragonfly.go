@@ -30,13 +30,7 @@ func DragonflyFlagsForSystem(cpus int, memBytes uint64) DragonflyFlags {
 	)
 
 	// --- proactor threads ---
-	threads := cpus
-	if threads < minProactors {
-		threads = minProactors
-	}
-	if threads > maxProactors {
-		threads = maxProactors
-	}
+	threads := max(min(cpus, maxProactors), minProactors)
 
 	// --- maxmemory ---
 	var mem uint64

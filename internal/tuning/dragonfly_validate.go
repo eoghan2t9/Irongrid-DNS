@@ -88,7 +88,7 @@ func inspectDragonfly(addr string) (*DragonflyState, error) {
 	}
 
 	state := &DragonflyState{ThreadCount: 2}
-	for _, line := range strings.Split(info, "\n") {
+	for line := range strings.SplitSeq(info, "\n") {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "maxmemory:"):
@@ -193,7 +193,7 @@ func restartDragonflySystemd(flags DragonflyFlags) error {
 		}
 	}
 
-	if err := os.WriteFile(unitPath, []byte(strings.Join(lines, "\n")), 0o644); err != nil {
+	if err := os.WriteFile(unitPath, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
 		return fmt.Errorf("write %s: %w", unitPath, err)
 	}
 	slog.Info("dragonfly systemd unit updated", "path", unitPath, "new_exec", newExecStart)
@@ -277,7 +277,7 @@ func restartDragonflyBackground(flags DragonflyFlags) error {
 
 // parseExecStart extracts the binary path and arguments from an ExecStart= line.
 func parseExecStart(content string) (basePath, args string) {
-	for _, line := range strings.Split(content, "\n") {
+	for line := range strings.SplitSeq(content, "\n") {
 		line = strings.TrimSpace(line)
 		if !strings.HasPrefix(line, "ExecStart=") {
 			continue
@@ -360,9 +360,9 @@ func getDataDirFromProc(pid int) string {
 	if err != nil {
 		return ""
 	}
-	for _, arg := range strings.Split(string(data), "\000") {
-		if strings.HasPrefix(arg, "--dir=") {
-			return strings.TrimPrefix(arg, "--dir=")
+	for arg := range strings.SplitSeq(string(data), "\000") {
+		if dir, ok := strings.CutPrefix(arg, "--dir="); ok {
+			return dir
 		}
 	}
 	return ""
@@ -371,12 +371,12 @@ func getDataDirFromProc(pid int) string {
 // parseMemoryString converts "2917mb" or "2gb" to bytes.
 func parseMemoryString(s string) uint64 {
 	s = strings.TrimSpace(strings.ToLower(s))
-	if strings.HasSuffix(s, "gb") {
-		v, _ := strconv.ParseUint(strings.TrimSuffix(s, "gb"), 10, 64)
+	if rest, ok := strings.CutSuffix(s, "gb"); ok {
+		v, _ := strconv.ParseUint(rest, 10, 64)
 		return v << 30
 	}
-	if strings.HasSuffix(s, "mb") {
-		v, _ := strconv.ParseUint(strings.TrimSuffix(s, "mb"), 10, 64)
+	if rest, ok := strings.CutSuffix(s, "mb"); ok {
+		v, _ := strconv.ParseUint(rest, 10, 64)
 		return v << 20
 	}
 	v, _ := strconv.ParseUint(s, 10, 64)
