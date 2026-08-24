@@ -37,7 +37,7 @@ func cpusFromProcCPUInfo() int {
 		return 0
 	}
 	count := 0
-	for _, line := range strings.Split(string(b), "\n") {
+	for line := range strings.SplitSeq(string(b), "\n") {
 		if strings.HasPrefix(line, "processor\t:") {
 			count++
 		}
