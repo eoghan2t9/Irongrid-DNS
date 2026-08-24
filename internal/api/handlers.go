@@ -14,8 +14,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"cmp"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -442,7 +442,7 @@ func (h *Handler) clearLog(ctx context.Context, w http.ResponseWriter) {
 
 func (h *Handler) getLists(w http.ResponseWriter) {
 	snapshot := h.Lists.Snapshot()
-	sort.Slice(snapshot, func(i, j int) bool { return snapshot[i].Spec.ID < snapshot[j].Spec.ID })
+	slices.SortFunc(snapshot, func(a, b filter.StoredList) int { return cmp.Compare(a.Spec.ID, b.Spec.ID) })
 	writeJSON(w, http.StatusOK, map[string]any{"lists": snapshot})
 }
 

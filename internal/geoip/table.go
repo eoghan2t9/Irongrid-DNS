@@ -2,8 +2,10 @@ package geoip
 
 import (
 	"bytes"
+	"cmp"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -92,9 +94,9 @@ func v6Range(p netip.Prefix) range6 {
 // sortMerge sorts each family by start address and merges overlapping or
 // adjacent ranges, leaving a canonical disjoint, sorted table.
 func (t *Table) sortMerge() {
-	sort.Slice(t.v4, func(i, j int) bool { return t.v4[i].start < t.v4[j].start })
+	slices.SortFunc(t.v4, func(a, b range4) int { return cmp.Compare(a.start, b.start) })
 	t.v4 = mergeRanges4(t.v4)
-	sort.Slice(t.v6, func(i, j int) bool { return bytes.Compare(t.v6[i].start[:], t.v6[j].start[:]) < 0 })
+	slices.SortFunc(t.v6, func(a, b range6) int { return bytes.Compare(a.start[:], b.start[:]) })
 	t.v6 = mergeRanges6(t.v6)
 }
 

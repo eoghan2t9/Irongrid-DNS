@@ -16,7 +16,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
+	"cmp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -201,7 +202,7 @@ func (b *Blocker) Countries() []string {
 	for cc := range b.blocked {
 		out = append(out, cc)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
@@ -325,7 +326,7 @@ func (m *Manager) Status() []CountryStatus {
 	for _, st := range m.status {
 		out = append(out, st)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Code < out[j].Code })
+	slices.SortFunc(out, func(a, b CountryStatus) int { return cmp.Compare(a.Code, b.Code) })
 	return out
 }
 

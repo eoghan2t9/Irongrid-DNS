@@ -264,10 +264,8 @@ func (w *Warmer) run(ctx context.Context) {
 				continue
 			}
 		}
-		wg.Add(1)
-		go func() {
+		wg.Go(func() {
 			defer recoverPanic("cache warmer domain")
-			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			wn, sn, err := w.warmDomain(passCtx, cache, name)
@@ -277,7 +275,7 @@ func (w *Warmer) run(ctx context.Context) {
 			}
 			warmed.Add(wn)
 			skipped.Add(sn)
-		}()
+		})
 	}
 	wg.Wait()
 

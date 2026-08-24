@@ -7,7 +7,6 @@ import (
 	"maps"
 	"net"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -453,6 +452,6 @@ func (e *Engine) SortedLists() []string {
 	for id := range rs.listNames {
 		ids = append(ids, id)
 	}
-	sort.Strings(ids)
+	slices.Sort(ids)
 	return ids
 }

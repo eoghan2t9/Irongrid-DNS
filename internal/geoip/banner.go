@@ -5,7 +5,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -326,7 +326,7 @@ func (b *Banner) rawListLocked() []string {
 	for e := range b.raw {
 		out = append(out, e)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 
@@ -336,7 +336,7 @@ func (b *Banner) autoListLocked() []string {
 	for e := range b.auto {
 		out = append(out, e)
 	}
-	sort.Strings(out)
+	slices.Sort(out)
 	return out
 }
 

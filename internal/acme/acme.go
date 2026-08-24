@@ -57,7 +57,7 @@ type Manager struct {
 
 	// stopCh is closed by Stop to halt the renewal loop.
 	stopCh   chan struct{}
-	stopOnce sync.Once
+	stopOnce func()
 
 	// OnIssued, when non-nil, is called after a successful issuance so the
 	// server can rebind its listeners with the fresh certificate.
@@ -138,6 +138,7 @@ func New(o Options) *Manager {
 		tokens:         map[string]string{},
 		stopCh:         make(chan struct{}),
 	}
+	m.stopOnce = sync.OnceFunc(func() { close(m.stopCh) })
 	m.Status.Enabled = true
 	m.Status.Email = o.Email
 	m.Status.Domains = m.domains
@@ -198,7 +199,7 @@ func (m *Manager) Stop() {
 	}
 	m.Status.Running = false
 	m.mu.Unlock()
-	m.stopOnce.Do(func() { close(m.stopCh) })
+	m.stopOnce()
 }
 
 // HandleChallenge serves an http-01 challenge token when the request path is

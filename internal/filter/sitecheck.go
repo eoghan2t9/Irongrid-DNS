@@ -5,7 +5,7 @@ import (
 	"net"
 	"net/url"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"golang.org/x/net/html"
@@ -113,7 +113,7 @@ func ExtractSitePage(r io.Reader, base *url.URL) (domains []string, title string
 	for h := range hosts {
 		domains = append(domains, h)
 	}
-	sort.Strings(domains)
+	slices.Sort(domains)
 	return domains, title
 }
 

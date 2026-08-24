@@ -113,21 +113,17 @@ func TestParseRootHintsRejectsMangled(t *testing.T) {
 
 // testSigningEntity returns a package-shared test keypair (generated once —
 // RSA keygen is slow) used to sign served hints in the PGP-path tests.
-var (
-	testEntityOnce sync.Once
-	testEntity     *openpgp.Entity
-)
+var testEntityOnce = sync.OnceValue(func() *openpgp.Entity {
+	e, err := openpgp.NewEntity("Test", "", "test@example.com", nil)
+	if err != nil {
+		panic("NewEntity: " + err.Error())
+	}
+	return e
+})
 
 func testSigningEntity(t *testing.T) *openpgp.Entity {
 	t.Helper()
-	testEntityOnce.Do(func() {
-		e, err := openpgp.NewEntity("Test", "", "test@example.com", nil)
-		if err != nil {
-			t.Fatalf("NewEntity: %v", err)
-		}
-		testEntity = e
-	})
-	return testEntity
+	return testEntityOnce()
 }
 
 // signedHintsServer serves sampleRootHints and its detached signature

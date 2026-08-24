@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -175,7 +174,7 @@ func ParseRootHints(data []byte) ([]string, error) {
 	for n := range names {
 		sorted = append(sorted, n)
 	}
-	sort.Strings(sorted)
+	slices.Sort(sorted)
 
 	var out []string
 	seen := map[string]bool{}

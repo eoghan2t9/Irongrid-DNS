@@ -108,11 +108,10 @@ func inspectDragonfly(addr string) (*DragonflyState, error) {
 // Uses python3 as a portable Redis protocol client to avoid importing net
 // in the tuning package.
 func redisCommand(addr, cmd string) (string, error) {
-	host := "127.0.0.1"
-	port := "6379"
-	if parts := strings.SplitN(addr, ":", 2); len(parts) == 2 {
-		host = parts[0]
-		port = parts[1]
+	host, port, ok := strings.Cut(addr, ":")
+	if !ok {
+		host = "127.0.0.1"
+		port = "6379"
 	}
 
 	script := fmt.Sprintf(`import socket, time
@@ -285,10 +284,10 @@ func parseExecStart(content string) (basePath, args string) {
 			continue
 		}
 		line = strings.TrimPrefix(line, "ExecStart=")
-		parts := strings.SplitN(line, " ", 2)
-		basePath = parts[0]
-		if len(parts) > 1 {
-			args = parts[1]
+		base, rest, _ := strings.Cut(line, " ")
+		basePath = base
+		if rest != "" {
+			args = rest
 		}
 		return
 	}

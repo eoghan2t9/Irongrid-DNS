@@ -103,7 +103,7 @@ func main() {
 	client := &dns.Client{Net: *proto, Timeout: 3 * time.Second}
 
 	var wg sync.WaitGroup
-	for i := 0; i < *workers; i++ {
+	for i := range *workers {
 		wg.Go(func() {
 			rnd := rand.New(rand.NewPCG(uint64(time.Now().UnixNano())+uint64(i), 0))
 			for {

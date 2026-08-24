@@ -51,8 +51,8 @@ type udpServer struct {
 	// copies everything it needs).
 	bufs sync.Pool
 
-	closeOnce  sync.Once
-	socketOnce sync.Once
+	closeOnce  func()
+	socketOnce func()
 	closed     atomic.Bool
 	finished   chan struct{}
 	wg         sync.WaitGroup
@@ -90,6 +90,13 @@ func newUDPServer(pc net.PacketConn, handler dns.Handler, stats *Stats, workers 
 		b := make([]byte, udpMaxPacketSize)
 		return &b
 	}
+	s.closeOnce = sync.OnceFunc(func() {
+		s.closed.Store(true)
+		if err := s.pc.SetReadDeadline(time.Now()); err != nil {
+			s.closeSocket()
+		}
+	})
+	s.socketOnce = sync.OnceFunc(func() { _ = s.pc.Close() })
 	if c, ok := pc.(*net.UDPConn); ok {
 		s.conn = c
 	}
@@ -133,9 +140,8 @@ func udpWorkersFor(cfg int) int {
 func (s *udpServer) Serve() error {
 	defer s.closeSocket()
 	defer close(s.finished)
-	for i := 0; i < s.workers; i++ {
-		s.wg.Add(1)
-		go s.worker()
+	for range s.workers {
+		s.wg.Go(s.worker)
 	}
 	err := s.readLoop()
 	// readLoop is the only sender, so it owns channel closure. Workers drain
@@ -149,18 +155,11 @@ func (s *udpServer) Serve() error {
 // leaves the socket writable while workers drain accepted jobs. Serve closes
 // the socket after the drain completes. Safe to call more than once.
 func (s *udpServer) Close() {
-	s.closeOnce.Do(func() {
-		s.closed.Store(true)
-		if err := s.pc.SetReadDeadline(time.Now()); err != nil {
-			// Every net.PacketConn implementation supports deadlines, but a
-			// custom implementation may not. Closing is the safe fallback.
-			s.closeSocket()
-		}
-	})
+	s.closeOnce()
 }
 
 func (s *udpServer) closeSocket() {
-	s.socketOnce.Do(func() { _ = s.pc.Close() })
+	s.socketOnce()
 }
 
 // Shutdown stops accepting datagrams and waits for already-accepted jobs to
@@ -240,7 +239,6 @@ func (s *udpServer) readLoop() error {
 // packet at a time inline (unpack → handler → write), so a single worker
 // can never have two in-flight responses racing on the same buffer.
 func (s *udpServer) worker() {
-	defer s.wg.Done()
 	for job := range s.jobs {
 		s.handleRecovered(job)
 		if s.stats != nil {

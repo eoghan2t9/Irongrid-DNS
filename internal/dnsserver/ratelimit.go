@@ -1,7 +1,7 @@
 package dnsserver
 
 import (
-	"sort"
+	"slices"
 	"sync"
 	"time"
 
@@ -267,7 +267,7 @@ func (rl *RateLimiter) BlockedList() []BlockedClient {
 		}
 		s.mu.Unlock()
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].BlockedUntil.After(out[j].BlockedUntil) })
+	slices.SortFunc(out, func(a, b BlockedClient) int { return b.BlockedUntil.Compare(a.BlockedUntil) })
 	return out
 }
 

@@ -163,8 +163,7 @@ func (c *Cache) startWriter() {
 	}
 	c.writes = make(chan l2Write, writeQueueCap)
 	c.wdone = make(chan struct{})
-	c.wwg.Add(1)
-	go c.runWriter()
+	c.wwg.Go(c.runWriter)
 }
 
 // enqueueL2 queues a write for the batched writer, falling back to a direct
@@ -192,7 +191,6 @@ func (c *Cache) enqueueL2(ctx context.Context, key string, val []byte, ttl time.
 // before exiting. The writes channel is deliberately never closed: enqueueL2
 // may race Close, and a send on a closed channel would panic.
 func (c *Cache) runWriter() {
-	defer c.wwg.Done()
 	batch := make([]l2Write, 0, writeBatchSize)
 	ticker := time.NewTicker(writeFlushInterval)
 	defer ticker.Stop()

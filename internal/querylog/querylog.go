@@ -179,8 +179,7 @@ func New(addr, password string, db, retentionDays, batchSize int) (*Log, error) 
 	// Runs before the writer starts, so the single-threaded add path never
 	// races a live flush.
 	l.seedAggregate(ctx)
-	l.wg.Add(1)
-	go l.runWriter()
+	l.wg.Go(l.runWriter)
 	return l, nil
 }
 
@@ -194,8 +193,7 @@ func NewDisabled(retentionDays int) *Log {
 		entries:   make(chan Entry, logQueueCap),
 		done:      make(chan struct{}),
 	}
-	l.wg.Add(1)
-	go l.runWriter()
+	l.wg.Go(l.runWriter)
 	return l
 }
 
@@ -263,7 +261,6 @@ func (l *Log) Record(e Entry) {
 // channel is deliberately never closed: Record may race Close and a send on
 // a closed channel would panic.
 func (l *Log) runWriter() {
-	defer l.wg.Done()
 	batch := make([]Entry, 0, l.batchSize)
 	ticker := time.NewTicker(logFlushInterval)
 	defer ticker.Stop()

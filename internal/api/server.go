@@ -225,11 +225,10 @@ func (a *App) validSession(r *http.Request, username, secret string) bool {
 	if secret == "" {
 		return false
 	}
-	parts := strings.SplitN(c.Value, ".", 2)
-	if len(parts) != 2 {
+	payload, sig, ok := strings.Cut(c.Value, ".")
+	if !ok {
 		return false
 	}
-	payload, sig := parts[0], parts[1]
 	raw, err := base64.RawURLEncoding.DecodeString(payload)
 	if err != nil {
 		return false

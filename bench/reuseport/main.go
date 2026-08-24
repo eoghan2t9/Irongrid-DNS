@@ -89,7 +89,7 @@ func main() {
 	// 4-tuple for the kernel's reuseport hash) and floods as fast as it can.
 	payload := make([]byte, *size)
 	var sent atomic.Int64
-	for i := 0; i < *senders; i++ {
+	for range *senders {
 		wg.Go(func() {
 			src, err := net.Dial("udp", addr)
 			if err != nil {

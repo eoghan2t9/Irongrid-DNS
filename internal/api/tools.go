@@ -8,8 +8,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"cmp"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -197,9 +197,10 @@ func (h *Handler) toolsFastest(ctx context.Context, w http.ResponseWriter, r *ht
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
+			transport, _, _ := strings.Cut(cand.spec, "://")
 			res := fastestResult{
 				Label:     cand.label,
-				Transport: strings.SplitN(cand.spec, "://", 2)[0],
+				Transport: transport,
 				Spec:      cand.spec,
 			}
 			up, err := upstream.Parse(cand.spec)
@@ -232,8 +233,7 @@ func (h *Handler) toolsFastest(ctx context.Context, w http.ResponseWriter, r *ht
 					// refusal or no-route won't fix itself next round, and
 					// burning the remaining rounds keeps the whole benchmark
 					// near its 25s budget when several hosts are firewalled.
-					var ne net.Error
-					if errors.As(qerr, &ne) && ne.Timeout() {
+					if ne, ok := errors.AsType[net.Error](qerr); ok && ne.Timeout() {
 						continue
 					}
 					break
@@ -261,15 +261,21 @@ func (h *Handler) toolsFastest(ctx context.Context, w http.ResponseWriter, r *ht
 	wg.Wait()
 
 	// Reachable candidates first, sorted by latency; failures last.
-	sort.Slice(out, func(i, j int) bool {
-		ei, ej := out[i].Error != "", out[j].Error != ""
-		if ei != ej {
-			return !ei
+	slices.SortFunc(out, func(a, b fastestResult) int {
+		ae, be := 0, 0
+		if a.Error != "" {
+			ae = 1
 		}
-		if ei {
-			return out[i].Label < out[j].Label
+		if b.Error != "" {
+			be = 1
 		}
-		return out[i].LatencyMS < out[j].LatencyMS
+		if c := cmp.Compare(ae, be); c != 0 {
+			return c
+		}
+		if a.Error != "" {
+			return cmp.Compare(a.Label, b.Label)
+		}
+		return cmp.Compare(a.LatencyMS, b.LatencyMS)
 	})
 
 	writeJSON(w, http.StatusOK, map[string]any{"query": "example.com", "type": "A", "results": out})
@@ -839,7 +845,7 @@ func (h *Handler) toolsSubdomains(ctx context.Context, w http.ResponseWriter, r 
 	for n := range unique {
 		names = append(names, n)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 
 	truncated := len(names) > maxSubdomains
 	if truncated {

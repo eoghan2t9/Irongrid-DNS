@@ -8,10 +8,12 @@ package geoip
 
 import (
 	"bytes"
+	"cmp"
 	"math/big"
 	"math/bits"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -127,8 +129,8 @@ func addr4(a netip.Addr) uint32 {
 // sorted table is mandatory). Ranges are disjoint by construction, so no
 // merge pass is needed.
 func (t *ASNTable) sort() {
-	sort.Slice(t.v4, func(i, j int) bool { return t.v4[i].start < t.v4[j].start })
-	sort.Slice(t.v6, func(i, j int) bool { return bytes.Compare(t.v6[i].start[:], t.v6[j].start[:]) < 0 })
+	slices.SortFunc(t.v4, func(a, b asnRange4) int { return cmp.Compare(a.start, b.start) })
+	slices.SortFunc(t.v6, func(a, b asnRange6) int { return bytes.Compare(a.start[:], b.start[:]) })
 }
 
 // Contains reports whether ip falls inside any range of the table — i.e.

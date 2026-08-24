@@ -360,16 +360,14 @@ func TestHandlerCoalescesConcurrentIdenticalQueries(t *testing.T) {
 	var wg sync.WaitGroup
 	fws := make([]*fakeWriter, n)
 	for i := range n {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			fw := &fakeWriter{}
 			fws[i] = fw
 			m := new(dns.Msg)
 			m.SetQuestion("example.com.", dns.TypeA)
 			m.Id = uint16(1000 + i)
 			h.ServeDNS(fw, m)
-		}(i)
+		})
 	}
 	wg.Wait()
 
@@ -436,15 +434,13 @@ func TestHandlerCoalescesMergedFailure(t *testing.T) {
 	var wg sync.WaitGroup
 	fws := make([]*fakeWriter, n)
 	for i := range n {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			fw := &fakeWriter{}
 			fws[i] = fw
 			m := new(dns.Msg)
 			m.SetQuestion("example.com.", dns.TypeA)
 			h.ServeDNS(fw, m)
-		}(i)
+		})
 	}
 	wg.Wait()
 
@@ -534,13 +530,11 @@ func TestHandlerDoesNotCoalesceDistinctQuestions(t *testing.T) {
 	const n = 4
 	var wg sync.WaitGroup
 	for i := range n {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
+		wg.Go(func() {
 			m := new(dns.Msg)
 			m.SetQuestion(fmt.Sprintf("host%d.example.com.", i), dns.TypeA)
 			h.ServeDNS(&fakeWriter{}, m)
-		}(i)
+		})
 	}
 	wg.Wait()
 

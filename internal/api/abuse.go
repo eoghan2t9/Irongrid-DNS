@@ -9,7 +9,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"sort"
+	"cmp"
+	"slices"
 	"strings"
 	"time"
 )
@@ -121,7 +122,7 @@ func (h *Handler) abuseExport(w http.ResponseWriter) {
 			rows = append(rows, r)
 		}
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].ip < rows[j].ip })
+	slices.SortFunc(rows, func(a, b row) int { return cmp.Compare(a.ip, b.ip) })
 
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="irongrid-blocked-clients-`+time.Now().Format("20060102")+`.csv"`)
