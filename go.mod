@@ -19,7 +19,6 @@ require (
 	golang.org/x/sync v0.22.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
-	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
@@ -59,6 +58,7 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
+	github.com/goccy/go-yaml v1.19.2
 	github.com/kr/text v0.2.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
@@ -87,6 +87,6 @@ require (
 
 replace github.com/prometheus/golang_client => github.com/prometheus/golang_client v1.12.1
 
-replace gopkg.in/yaml.v3 => gopkg.in/yaml.v3 v3.0.1
+
 
 tool golang.org/x/vuln/cmd/govulncheck
