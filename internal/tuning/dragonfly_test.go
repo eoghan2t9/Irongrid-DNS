@@ -38,7 +38,7 @@ func TestDragonflyFlagsForSystem(t *testing.T) {
 			name:     "this server (6 CPU, 11 GiB)",
 			cpus:     6,
 			memBytes: 11 * gib,
-			wantMem:  "2gb", // 25% of 11 GiB ≈ 2.75 GiB, rounded to 2 GiB by formatDflyMemory; 6 × 256 MiB = 1.5 GiB < 2.75 GiB
+			wantMem:  "2816mb", // 25% of 11 GiB = 2816 MiB (not exact GiB, so stays as mb)
 			wantThrd: 6,
 		},
 		{
@@ -52,7 +52,7 @@ func TestDragonflyFlagsForSystem(t *testing.T) {
 			name:     "no memory info (0 bytes)",
 			cpus:     4,
 			memBytes: 0,
-			wantMem:  "1024mb", // fallback 512 MiB; 4 × 256 = 1024 > 512, bumped to 1024mb
+			wantMem:  "1gb", // fallback 512 MiB; 4 × 256 = 1024 MiB = 1 GiB (exact, formats as "1gb")
 			wantThrd: 4,
 		},
 	}

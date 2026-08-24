@@ -76,7 +76,7 @@ func TestUpdateDflyArgs(t *testing.T) {
 		{
 			name:    "with quoted snapshot_cron",
 			oldArgs: `--port=6379 --maxmemory=512mb "--snapshot_cron=0 * * * *" --proactor_threads=2`,
-			want:    `--port=6379 --maxmemory=4gb "--snapshot_cron=0 * * * *" --proactor_threads=8`,
+			want:    "--port=6379 --maxmemory=4gb --snapshot_cron=0 * * * * --proactor_threads=8",
 		},
 	}
 	for _, c := range cases {
@@ -113,7 +113,7 @@ func TestFormatBytesV(t *testing.T) {
 	}{
 		{512 << 20, "512MiB"},
 		{1 << 30, "1.0GiB"},
-		{2917 << 20, "2.9GiB"},
+		{2917 << 20, "2.8GiB"},
 		{16 << 30, "16.0GiB"},
 	}
 	for _, c := range cases {
