@@ -193,11 +193,12 @@ func restartDragonflySystemd(flags DragonflyFlags) error {
 		}
 	}
 
-	cleanPath := filepath.Clean(unitPath)
-	if err := os.WriteFile(cleanPath, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
-		return fmt.Errorf("write %s: %w", cleanPath, err)
+	// unitPath is a hardcoded constant (/etc/systemd/system/dragonfly.service).
+	//#nosec G703 -- unitPath is a constant, not user-controlled
+	if err := os.WriteFile(unitPath, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
+		return fmt.Errorf("write %s: %w", unitPath, err)
 	}
-	slog.Info("dragonfly systemd unit updated", "path", cleanPath, "new_exec", newExecStart)
+	slog.Info("dragonfly systemd unit updated", "path", unitPath, "new_exec", newExecStart)
 
 	if out, err := exec.Command("systemctl", "daemon-reload").CombinedOutput(); err != nil {
 		slog.Warn("systemctl daemon-reload failed", "output", string(out), "error", err)
