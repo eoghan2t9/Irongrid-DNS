@@ -16,6 +16,7 @@ import (
 
 	"github.com/miekg/dns"
 
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
@@ -437,11 +438,12 @@ func (h *Handler) toolsMail(ctx context.Context, w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "domain required"})
 		return
 	}
-	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(p.Domain), "."))
+	domain := dnsname.CanonicalDomain(p.Domain)
 	if !validDomain(domain) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid domain"})
 		return
 	}
+
 
 	ctx, cancel := context.WithTimeout(ctx, toolsTimeout)
 	defer cancel()
@@ -664,11 +666,12 @@ func (h *Handler) toolsAXFR(ctx context.Context, w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "domain required"})
 		return
 	}
-	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(p.Domain), "."))
+	domain := dnsname.CanonicalDomain(p.Domain)
 	if !validDomain(domain) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid domain"})
 		return
 	}
+
 
 	ctx, cancel := context.WithTimeout(ctx, toolsTimeout)
 	defer cancel()
@@ -682,7 +685,7 @@ func (h *Handler) toolsAXFR(ctx context.Context, w http.ResponseWriter, r *http.
 	var nsHosts []string
 	for _, rr := range nsm.Answer {
 		if ns, ok := rr.(*dns.NS); ok {
-			host := strings.ToLower(strings.TrimSuffix(ns.Ns, "."))
+			host := dnsname.CanonicalDomain(ns.Ns)
 			if !seen[host] {
 				seen[host] = true
 				nsHosts = append(nsHosts, host)
@@ -781,7 +784,7 @@ func (h *Handler) toolsSubdomains(ctx context.Context, w http.ResponseWriter, r 
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "domain required"})
 		return
 	}
-	domain := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(p.Domain), "."))
+	domain := dnsname.CanonicalDomain(p.Domain)
 	// dns.IsDomainName also blocks query-parameter injection into the crt.sh
 	// URL built below (characters like & and = fail label validation).
 	if !validDomain(domain) {
@@ -834,7 +837,7 @@ func (h *Handler) toolsSubdomains(ctx context.Context, w http.ResponseWriter, r 
 	unique := map[string]bool{}
 	for _, row := range rows {
 		for _, n := range append(strings.Fields(row.CommonName), strings.Fields(row.NameValue)...) {
-			n = strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(n), "*."), "."))
+			n = strings.TrimPrefix(dnsname.CanonicalDomain(n), "*.")
 			if n == "" || (n != domain && !strings.HasSuffix(n, suffix)) {
 				continue
 			}

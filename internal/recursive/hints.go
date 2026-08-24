@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"github.com/ProtonMail/go-crypto/openpgp"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 )
 
 // RootHintsURL is the authoritative root-server hints file published by
@@ -149,13 +151,13 @@ func ParseRootHints(data []byte) ([]string, error) {
 		if strings.ToUpper(f[2]) == "IN" && len(f) >= 5 {
 			typIdx, valIdx = 3, 4
 		}
-		owner := strings.ToLower(strings.TrimSuffix(f[0], "."))
+		owner := dnsname.CanonicalDomain(f[0])
 		typ := strings.ToUpper(f[typIdx])
 		val := f[valIdx]
 		switch typ {
 		case "NS":
 			if owner == "" {
-				names[strings.ToLower(strings.TrimSuffix(val, "."))] = true
+				names[dnsname.CanonicalDomain(val)] = true
 			}
 		case "A":
 			if ip := net.ParseIP(val); ip != nil && ip.To4() != nil {

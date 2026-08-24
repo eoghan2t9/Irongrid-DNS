@@ -93,8 +93,8 @@ func TestWarmerWarmsActiveDomains(t *testing.T) {
 	}
 
 	s := w.Snapshot()
-	if s.Runs != 1 || s.Domains != 2 {
-		t.Fatalf("runs/domains = %d/%d, want 1/2", s.Runs, s.Domains)
+	if s.Runs != 1 || s.DomainsConsidered != 2 {
+		t.Fatalf("runs/domains = %d/%d, want 1/2", s.Runs, s.DomainsConsidered)
 	}
 	if s.Warmed != 2 {
 		t.Fatalf("warmed = %d, want 2 (A + AAAA for warm.com)", s.Warmed)
@@ -148,7 +148,7 @@ func TestWarmerDisabledLogIsNoOp(t *testing.T) {
 	w.SetConfig(config.WarmerConfig{Enabled: true, Interval: time.Hour, Lookback: 24 * time.Hour, MaxDomains: 100, Concurrency: 4})
 	w.run(t.Context())
 	s := w.Snapshot()
-	if s.Runs != 1 || s.Domains != 0 || s.Warmed != 0 || s.Failed != 0 {
+	if s.Runs != 1 || s.DomainsConsidered != 0 || s.Warmed != 0 || s.Failed != 0 {
 		t.Fatalf("disabled-log pass stats = %+v, want runs=1 and zeros", s)
 	}
 }

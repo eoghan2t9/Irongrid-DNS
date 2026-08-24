@@ -17,6 +17,8 @@ import (
 
 	"golang.org/x/crypto/bcrypt"
 	"github.com/goccy/go-yaml"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
 )
 
 // Config is the root configuration document.
@@ -1109,24 +1111,13 @@ func (c *Config) validate() error {
 
 // parseASN normalizes an ASN config entry ("AS13335" or "13335") to the
 // canonical "AS<number>" form, validating the 32-bit ASN space
-// (1..4294967295). Rules mirror geoip.ParseASN, which converts the
-// canonical form to the number at refresh time.
+// (1..4294967295). Delegates to geoip.ParseASN for the actual parsing.
 func parseASN(s string) (string, error) {
-	s = strings.ToUpper(strings.TrimSpace(s))
-	s = strings.TrimPrefix(s, "AS")
-	if s == "" {
-		return "", fmt.Errorf("empty ASN (use e.g. AS13335)")
+	n, ok := geoip.ParseASN(s)
+	if !ok {
+		return "", fmt.Errorf("%q is not a valid ASN (use e.g. AS13335)", strings.TrimSpace(s))
 	}
-	for _, r := range s {
-		if r < '0' || r > '9' {
-			return "", fmt.Errorf("%q is not a valid ASN (use e.g. AS13335)", s)
-		}
-	}
-	n, err := strconv.ParseUint(s, 10, 32)
-	if err != nil || n == 0 {
-		return "", fmt.Errorf("%q is not a valid ASN (use e.g. AS13335)", s)
-	}
-	return "AS" + strconv.FormatUint(n, 10), nil
+	return "AS" + strconv.FormatUint(uint64(n), 10), nil
 }
 
 // validMAC reports whether s parses as a colon-separated MAC address.

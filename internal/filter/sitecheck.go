@@ -8,6 +8,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"golang.org/x/net/html"
 )
 
@@ -159,7 +160,7 @@ func hostOf(u *url.URL) string {
 	if u == nil {
 		return ""
 	}
-	return strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	return dnsname.CanonicalDomain(u.Hostname())
 }
 
 func extractCSSURLs(s string, add func(string)) {

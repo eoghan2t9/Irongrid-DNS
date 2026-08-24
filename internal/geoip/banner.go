@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strings"
 	"sync"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 )
 
 // Banner blocks specific client IPs/CIDRs and auto-blocks the clients that
@@ -61,7 +63,7 @@ func NewBanner(path string, allowlist, ips, honeypots []string) *Banner {
 		b.addRaw(strings.TrimSpace(e), false)
 	}
 	for _, d := range honeypots {
-		if d = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(d), ".")); d != "" {
+		if d = dnsname.CanonicalDomain(d); d != "" {
 			b.honeypots[d] = true
 		}
 	}

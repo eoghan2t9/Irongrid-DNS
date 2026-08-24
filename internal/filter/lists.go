@@ -304,13 +304,20 @@ func (m *ListManager) StartRefresh(ctx context.Context) {
 	}()
 }
 
-// Snapshot returns a copy of all stored lists for the API.
+// Snapshot returns a deep copy of all stored lists for the API.
+// The Content byte slice is cloned so concurrent fetches can't corrupt
+// the snapshot while the JSON encoder serializes it.
 func (m *ListManager) Snapshot() []StoredList {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	out := make([]StoredList, 0, len(m.store))
 	for _, s := range m.store {
-		out = append(out, *s)
+		snap := *s
+		if len(s.Content) > 0 {
+			snap.Content = make([]byte, len(s.Content))
+			copy(snap.Content, s.Content)
+		}
+		out = append(out, snap)
 	}
 	return out
 }

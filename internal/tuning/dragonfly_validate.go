@@ -92,13 +92,15 @@ func inspectDragonfly(addr string) (*DragonflyState, error) {
 		line = strings.TrimSpace(line)
 		switch {
 		case strings.HasPrefix(line, "maxmemory:"):
-			v, _ := strconv.ParseUint(strings.TrimPrefix(line, "maxmemory:"), 10, 64)
+			rest, _ := strings.CutPrefix(line, "maxmemory:")
+			v, _ := strconv.ParseUint(rest, 10, 64)
 			state.MaxMemoryBytes = v
 		case strings.HasPrefix(line, "thread_count:"):
-			v, _ := strconv.Atoi(strings.TrimPrefix(line, "thread_count:"))
+			rest, _ := strings.CutPrefix(line, "thread_count:")
+			v, _ := strconv.Atoi(rest)
 			state.ThreadCount = v
 		case strings.HasPrefix(line, "dragonfly_version:"):
-			state.Version = strings.TrimPrefix(line, "dragonfly_version:")
+			state.Version, _ = strings.CutPrefix(line, "dragonfly_version:")
 		}
 	}
 	return state, nil
@@ -280,10 +282,12 @@ func restartDragonflyBackground(flags DragonflyFlags) error {
 func parseExecStart(content string) (basePath, args string) {
 	for line := range strings.SplitSeq(content, "\n") {
 		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "ExecStart=") {
+
+		rest, ok := strings.CutPrefix(line, "ExecStart=")
+		if !ok {
 			continue
 		}
-		line = strings.TrimPrefix(line, "ExecStart=")
+		line = rest
 		base, rest, _ := strings.Cut(line, " ")
 		basePath = base
 		if rest != "" {

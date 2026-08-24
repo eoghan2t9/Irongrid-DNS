@@ -25,6 +25,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
@@ -287,7 +288,7 @@ func ParseRoutes(specs []RouteSpec) ([]UpstreamRoute, error) {
 			ups = append(ups, up)
 		}
 		compiled = append(compiled, UpstreamRoute{
-			Domain:    strings.ToLower(strings.TrimSuffix(s.Domain, ".")),
+			Domain:    dnsname.CanonicalDomain(s.Domain),
 			Upstreams: ups,
 		})
 	}
@@ -698,7 +699,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	}
 
 	q := r.Question[0]
-	qname := strings.ToLower(strings.TrimSuffix(q.Name, "."))
+	qname := dnsname.CanonicalDomain(q.Name)
 
 	// 0.5 Client blocking: a geo-blocked country (source-IP country in the
 	//    blocked set), a block-listed ASN's client, or a banner-blocked
@@ -1692,7 +1693,19 @@ func coalesceEligible(r *dns.Msg) bool {
 // names are case-insensitive, so the key must be canonicalised or two
 // clients spelling the same name differently would resolve twice.
 func flightKey(q dns.Question) string {
-	return strings.ToLower(q.Name) + "|" + strconv.Itoa(int(q.Qtype)) + "|" + strconv.Itoa(int(q.Qclass))
+	var b strings.Builder
+	b.Grow(len(q.Name) + 8)
+	for _, c := range q.Name {
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b.WriteRune(c)
+	}
+	b.WriteByte('|')
+	b.WriteString(strconv.Itoa(int(q.Qtype)))
+	b.WriteByte('|')
+	b.WriteString(strconv.Itoa(int(q.Qclass)))
+	return b.String()
 }
 
 // queryUpstreams forwards r to the upstream set according to the resolution
@@ -1859,7 +1872,7 @@ func (h *Handler) resolveAndCache(ctx context.Context, q dns.Question) error {
 	// or warmed question under a routed subtree must resolve through the
 	// same upstreams a live query would use, or the cached entry could
 	// disagree with the route's split-horizon answer.
-	if rt := routeMatch(routes, strings.ToLower(strings.TrimSuffix(q.Name, "."))); rt != nil && len(rt.Upstreams) > 0 {
+	if rt := routeMatch(routes, dnsname.CanonicalDomain(q.Name)); rt != nil && len(rt.Upstreams) > 0 {
 		ups = rt.Upstreams
 	}
 	if len(ups) == 0 {
@@ -1923,7 +1936,7 @@ const dhcpHostTTL = 120
 // zone (only full 4-octet IPv4 and full 32-nibble IPv6 names are accepted,
 // so a query for a /24 reverse zone or a random name falls through).
 func reverseNameIP(name string) net.IP {
-	n := strings.ToLower(strings.TrimSuffix(name, "."))
+	n := dnsname.CanonicalDomain(name)
 	if before, ok := strings.CutSuffix(n, ".in-addr.arpa"); ok {
 		octets := strings.Split(before, ".")
 		if len(octets) != 4 {

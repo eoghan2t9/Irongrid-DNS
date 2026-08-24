@@ -178,7 +178,7 @@ type WarmerStats struct {
 	Enabled   bool      `json:"enabled"`
 	Runs      int64     `json:"runs"`
 	LastRun   time.Time `json:"last_run,omitzero"`
-	Domains   int64     `json:"domains"` // distinct domains considered, cumulative
+	DomainsConsidered int64 `json:"domains"` // distinct domains considered, cumulative
 	Warmed    int64     `json:"warmed"`  // answers written to the cache, cumulative
 	Skipped   int64     `json:"skipped"` // blocked/rewritten/already-fresh, cumulative
 	Failed    int64     `json:"failed"`  // failed resolutions, cumulative
@@ -193,7 +193,7 @@ func (w *Warmer) Snapshot() WarmerStats {
 		Enabled:   w.enabled,
 		Runs:      w.runs,
 		LastRun:   w.lastRun,
-		Domains:   w.domains,
+		DomainsConsidered: w.domains,
 		Warmed:    w.warmed,
 		Skipped:   w.skipped,
 		Failed:    w.failed,

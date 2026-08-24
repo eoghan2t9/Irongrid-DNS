@@ -25,6 +25,7 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/catalog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"golang.org/x/term"
 )
 
@@ -600,7 +601,7 @@ func (a *answers) buildConfig(cat *catalog.Catalog) (*config.Config, error) {
 			continue
 		}
 		for _, d := range wl.Domains {
-			d = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(d), "."))
+			d = dnsname.CanonicalDomain(d)
 			if d != "" && !seen[d] {
 				seen[d] = true
 				cfg.Filter.Whitelist = append(cfg.Filter.Whitelist, d)

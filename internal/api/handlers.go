@@ -32,6 +32,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cfupdate"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dhcp"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsserver"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/firewall"
@@ -661,7 +662,7 @@ func (h *Handler) checkFilter(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "entry required"})
 		return
 	}
-	name := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(p.Entry), "."))
+	name := dnsname.CanonicalDomain(p.Entry)
 	if ip := net.ParseIP(name); ip != nil {
 		blocked, reason := h.Engine.CheckIPs([]net.IP{ip})
 		writeJSON(w, http.StatusOK, map[string]any{"domain": name, "blocked": blocked, "reason": reason})

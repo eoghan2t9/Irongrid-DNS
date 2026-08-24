@@ -23,6 +23,8 @@ import (
 	"github.com/insomniacslk/dhcp/dhcpv6"
 	"github.com/insomniacslk/dhcp/dhcpv6/server6"
 	"github.com/insomniacslk/dhcp/iana"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 )
 
 const (
@@ -452,12 +454,12 @@ func (s *Server) markDirtyLocked() { s.dirty = true }
 // matches both the bare hostname and <hostname>.<domain> (case-insensitive),
 // returning the IPv4 and/or IPv6 lease. ok=false when the name is unknown.
 func (s *Server) LookupHost(name string) (ips []net.IP, ok bool) {
-	name = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+	name = dnsname.CanonicalDomain(name)
 	if name == "" {
 		return nil, false
 	}
 	// Peel the configured domain suffix: printer.lan -> printer.
-	domain := strings.ToLower(strings.TrimSuffix(s.domain(), "."))
+	domain := dnsname.CanonicalDomain(s.domain())
 	if domain != "" && strings.HasSuffix(name, "."+domain) {
 		name = strings.TrimSuffix(name, "."+domain)
 	}
