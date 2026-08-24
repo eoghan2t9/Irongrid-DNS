@@ -702,6 +702,7 @@ body {
   flex: 1;
 }
 .content {
+  margin: 0 auto;
   padding: 20px 24px 56px;
   max-width: 1280px;
   width: 100%;
