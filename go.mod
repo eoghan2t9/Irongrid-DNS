@@ -59,7 +59,6 @@ require (
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
-	github.com/kr/text v0.2.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
@@ -71,7 +70,6 @@ require (
 	github.com/pierrec/lz4/v4 v4.1.29 // indirect
 	github.com/quic-go/qpack v0.6.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/rogpeppe/go-internal v1.16.0 // indirect
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
 	github.com/xo/terminfo v1.0.0 // indirect
 	github.com/yuin/gopher-lua v1.1.2 // indirect
