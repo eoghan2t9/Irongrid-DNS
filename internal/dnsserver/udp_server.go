@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+	"golang.org/x/net/ipv4"
 )
 
 // dnsHeaderLen is the fixed DNS message header size (RFC 1035 §4.1.1).
@@ -38,6 +39,22 @@ type udpServer struct {
 	handler dns.Handler
 	stats   *Stats
 	workers int
+
+	// batchPC drives a recvmmsg-batched read loop instead of one ReadMsgUDP
+	// syscall per datagram — profiling under load showed the raw syscall
+	// trap (not handler/cache/filter logic) as the dominant CPU cost at high
+	// QPS, roughly split across the read and write paths. batchPC is nil
+	// unless both hold: GOOS is linux (x/net's ipv4.PacketConn.ReadBatch
+	// transparently falls back to one message per call everywhere else, so
+	// there's no correctness risk in leaving it enabled elsewhere — this is
+	// scoped to Linux purely because that's the only platform tested here)
+	// and the socket is IPv4-bound (the common case; ipv4.Message and
+	// ipv6.Message are the same underlying type, but IPv6 batching isn't
+	// exercised by this codebase's test suite yet, so it stays on the
+	// original single-message path for now). readLoop dispatches on this
+	// field; nothing else about the worker pool, response writer, or stats
+	// changes — only how datagrams are pulled off the socket.
+	batchPC *ipv4.PacketConn
 
 	// jobs is the bounded handoff queue from the read loop to the workers.
 	// The read loop never blocks on it: continuing to drain the socket keeps
@@ -99,6 +116,11 @@ func newUDPServer(pc net.PacketConn, handler dns.Handler, stats *Stats, workers 
 	s.socketOnce = sync.OnceFunc(func() { _ = s.pc.Close() })
 	if c, ok := pc.(*net.UDPConn); ok {
 		s.conn = c
+	}
+	if runtime.GOOS == "linux" {
+		if udpAddr, ok := pc.LocalAddr().(*net.UDPAddr); ok && udpAddr.IP.To4() != nil {
+			s.batchPC = ipv4.NewPacketConn(pc)
+		}
 	}
 	return s
 }
@@ -176,10 +198,97 @@ func (s *udpServer) Shutdown(ctx context.Context) error {
 	}
 }
 
+// udpReadBatchSize is how many datagrams one recvmmsg call pulls off the
+// socket at once on the batched path. Sized as a middle ground: large enough
+// that a busy socket actually amortizes the syscall trap cost across many
+// datagrams, small enough that the per-socket buffer footprint (each slot
+// holds one pooled udpMaxPacketSize buffer) stays modest even across every
+// reuseport socket. Unlike udpQueuePerWorker this isn't a backpressure
+// knob — it's purely how many buffers one syscall can fill.
+const udpReadBatchSize = 32
+
 // readLoop reads datagrams and dispatches them to the worker pool. It
 // returns nil on a clean shutdown, or the first read error that isn't the
 // shutdown deadline waking the socket.
 func (s *udpServer) readLoop() error {
+	if s.batchPC != nil {
+		return s.readLoopBatch()
+	}
+	return s.readLoopSingle()
+}
+
+// readLoopBatch is the recvmmsg-batched read loop (see udpServer.batchPC):
+// one syscall fills as many of udpReadBatchSize pooled buffers as the kernel
+// has queued, instead of one syscall per datagram. Dispatch to the worker
+// pool is identical to readLoopSingle — only how datagrams are pulled off
+// the wire differs.
+func (s *udpServer) readLoopBatch() error {
+	msgs := make([]ipv4.Message, udpReadBatchSize)
+	bps := make([]*[]byte, udpReadBatchSize)
+	for i := range msgs {
+		bp := s.bufs.Get().(*[]byte)
+		bps[i] = bp
+		msgs[i].Buffers = [][]byte{*bp}
+	}
+	release := func() {
+		for _, bp := range bps {
+			if bp != nil {
+				s.bufs.Put(bp)
+			}
+		}
+	}
+	for {
+		n, err := s.batchPC.ReadBatch(msgs, 0)
+		if err != nil {
+			release()
+			if s.closed.Load() {
+				return nil
+			}
+			return err
+		}
+		if s.closed.Load() {
+			release()
+			return nil
+		}
+		for i := range n {
+			m := &msgs[i]
+			bp := bps[i]
+			nRead := m.N
+			addr, _ := m.Addr.(*net.UDPAddr)
+			if s.stats != nil {
+				s.stats.UDPReceived.Add(1)
+			}
+			switch {
+			case addr == nil || nRead < dnsHeaderLen:
+				// Unaddressed or too short to be a DNS message: drop without
+				// a reply, same amplification rationale as readLoopSingle.
+				s.bufs.Put(bp)
+				if s.stats != nil {
+					s.stats.UDPInvalid.Add(1)
+				}
+			default:
+				select {
+				case s.jobs <- udpJob{bp: bp, n: nRead, addr: addr}:
+				default:
+					s.bufs.Put(bp)
+					if s.stats != nil {
+						s.stats.UDPQueueDrops.Add(1)
+					}
+				}
+			}
+			// This slot's buffer is now either owned by a job or already
+			// returned to the pool above — refill it for the next ReadBatch.
+			nbp := s.bufs.Get().(*[]byte)
+			bps[i] = nbp
+			msgs[i].Buffers = [][]byte{*nbp}
+			msgs[i].N = 0
+		}
+	}
+}
+
+// readLoopSingle is the original one-syscall-per-datagram read loop, used
+// whenever udpServer.batchPC is nil (non-Linux, or a non-IPv4 socket).
+func (s *udpServer) readLoopSingle() error {
 	for {
 		bp := s.bufs.Get().(*[]byte)
 		buf := *bp
