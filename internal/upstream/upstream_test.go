@@ -304,6 +304,107 @@ func TestDoQUpstreamReusesConnection(t *testing.T) {
 	}
 }
 
+// startDoQTestServerWithHang runs a DoQ test server like startDoQTestServer,
+// except every stream it accepts while hang is true is read and then never
+// answered — the exchange goes silent without the QUIC connection itself
+// erroring or closing, exactly the black-hole this test suite guards
+// against. The caller flips hang back to false once the hung exchange under
+// test has been issued.
+func startDoQTestServerWithHang(t *testing.T) (addr string, clientTLS *tls.Config, hang *atomic.Bool) {
+	t.Helper()
+	serverTLS, clientTLS := testTLSConfig(t)
+	serverTLS = serverTLS.Clone()
+	serverTLS.NextProtos = []string{"doq"}
+	ln, err := quic.ListenAddr("127.0.0.1:0", serverTLS, &quic.Config{MaxIdleTimeout: 30 * time.Second})
+	if err != nil {
+		t.Fatalf("quic listen: %v", err)
+	}
+	hang = &atomic.Bool{}
+	go func() {
+		for {
+			conn, err := ln.Accept(t.Context())
+			if err != nil {
+				return
+			}
+			go func() {
+				for {
+					stream, err := conn.AcceptStream(t.Context())
+					if err != nil {
+						return
+					}
+					go func() {
+						reqBytes, err := readLenPrefixed(stream)
+						if err != nil {
+							return
+						}
+						if hang.Load() {
+							// Leave the stream open and never respond.
+							return
+						}
+						defer stream.Close()
+						req := new(dns.Msg)
+						if err := req.Unpack(reqBytes); err != nil {
+							return
+						}
+						resp := new(dns.Msg)
+						resp.SetReply(req)
+						resp.Answer = append(resp.Answer, &dns.A{
+							Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+							A:   net.ParseIP("9.9.9.9"),
+						})
+						packed, err := resp.Pack()
+						if err != nil {
+							return
+						}
+						_ = writeLenPrefixed(stream, packed)
+					}()
+				}
+			}()
+		}
+	}()
+	t.Cleanup(func() { ln.Close() })
+	return ln.Addr().String(), clientTLS, hang
+}
+
+// TestDoQStreamRespectsDeadline guards against the resolver-wide hang this
+// package used to be exposed to: doQStream read/wrote a QUIC stream with no
+// deadline, so an upstream that opened a stream and then went silent (while
+// its QUIC connection stayed alive via keepalives) blocked the query
+// goroutine on io.ReadFull forever and permanently consumed one slot of the
+// connection's peer-granted stream credit. Enough of those and every future
+// query on that persistent connection would eventually wedge too. The query
+// must now fail within its own context deadline, and the abandoned stream
+// must not prevent a subsequent query from succeeding on the same
+// connection.
+func TestDoQStreamRespectsDeadline(t *testing.T) {
+	addr, clientTLS, hang := startDoQTestServerWithHang(t)
+	u := NewWithTLS(QUIC, addr, "localhost", clientTLS)
+	t.Cleanup(u.Close)
+
+	hang.Store(true)
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	if _, err := u.Query(ctx, aQuery()); err == nil {
+		t.Fatal("expected the black-holed query to fail, got a response")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("query on a black-holed stream took %v to fail — it did not respect ctx's deadline", elapsed)
+	}
+
+	// The stream leaked by the hung query above must not have wedged the
+	// shared persistent connection: a normal query right after must still
+	// get through.
+	hang.Store(false)
+	r, err := u.Query(t.Context(), aQuery())
+	if err != nil {
+		t.Fatalf("query after a black-holed stream: %v", err)
+	}
+	if len(r.Answer) == 0 {
+		t.Fatal("query after a black-holed stream: no answer")
+	}
+}
+
 // TestRecursiveUpstreamDispatches verifies Transport == Recursive routes
 // through the iterative resolver rather than dialing Addr (which is empty
 // for this transport) — a single fake "root" that answers directly is

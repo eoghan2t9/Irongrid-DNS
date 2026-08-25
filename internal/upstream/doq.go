@@ -108,6 +108,19 @@ func (u *Upstream) dropQUICConn(conn *quic.Conn) {
 	}
 }
 
+// doqStreamIODeadline bounds a DoQ stream's read/write when the caller's
+// ctx carries no deadline (defensive — every real call path sets one via
+// context.WithTimeout). quic-go's Stream.Write/Read take no context, only
+// their own deadline, unlike OpenStreamSync above which does — so without
+// an explicit deadline, an upstream that goes silent mid-exchange while its
+// QUIC connection otherwise stays alive (keepalives still succeeding) blocks
+// this goroutine on io.ReadFull forever. That leaked stream permanently
+// holds one slot of the peer-granted stream credit; enough of them and
+// every future DoQ query on this connection blocks in OpenStreamSync until
+// its own timeout too — resolution "randomly" stops for good on that
+// upstream until the process restarts.
+const doqStreamIODeadline = 10 * time.Second
+
 // doQStream runs one query on its own stream over an existing connection.
 // Opening a stream is cheap (no handshake) and safe to do concurrently from
 // multiple goroutines sharing the same conn — that concurrency-safety is
@@ -119,6 +132,14 @@ func doQStream(ctx context.Context, conn *quic.Conn, m *dns.Msg) (*dns.Msg, erro
 	}
 	defer stream.Close()
 
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		deadline = time.Now().Add(doqStreamIODeadline)
+	}
+	if err := stream.SetDeadline(deadline); err != nil {
+		return nil, fmt.Errorf("doq set deadline: %w", err)
+	}
+
 	packed, err := m.Pack()
 	if err != nil {
 		return nil, err
@@ -127,6 +148,9 @@ func doQStream(ctx context.Context, conn *quic.Conn, m *dns.Msg) (*dns.Msg, erro
 	binary.BigEndian.PutUint16(buf[:2], uint16(len(packed)))
 	copy(buf[2:], packed)
 	if _, err := stream.Write(buf); err != nil {
+		// Release the peer's stream credit immediately rather than
+		// waiting out the deadline on an otherwise-abandoned stream.
+		stream.CancelWrite(0)
 		return nil, fmt.Errorf("doq write: %w", err)
 	}
 	if err := stream.Close(); err != nil {
@@ -136,16 +160,19 @@ func doQStream(ctx context.Context, conn *quic.Conn, m *dns.Msg) (*dns.Msg, erro
 	// Read the 2-byte length, then the message.
 	var lenBuf [2]byte
 	if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
+		stream.CancelRead(0)
 		return nil, fmt.Errorf("doq read length: %w", err)
 	}
 	msgLen := binary.BigEndian.Uint16(lenBuf[:])
 	// msgLen is already uint16, so it can't exceed 65535 — only the zero
 	// (empty message) case is worth rejecting (staticcheck SA4003).
 	if msgLen == 0 {
+		stream.CancelRead(0)
 		return nil, fmt.Errorf("doq invalid message length %d", msgLen)
 	}
 	msgBuf := make([]byte, msgLen)
 	if _, err := io.ReadFull(stream, msgBuf); err != nil {
+		stream.CancelRead(0)
 		return nil, fmt.Errorf("doq read message: %w", err)
 	}
 	r := new(dns.Msg)
