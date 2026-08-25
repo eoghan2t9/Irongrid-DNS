@@ -8,6 +8,7 @@ import (
 )
 
 func TestBannerConfiguredIPs(t *testing.T) {
+	t.Parallel()
 	b := NewBanner("", nil, []string{"38.11.106.3", "203.0.113.0/24", "2001:db8::/32", "not-an-ip"}, nil)
 	if !b.Blocked("38.11.106.3") {
 		t.Error("explicit IP must be blocked")
@@ -30,6 +31,7 @@ func TestBannerConfiguredIPs(t *testing.T) {
 }
 
 func TestBannerHoneypotAutoBlockPersistsAndReloads(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blocked-ips.txt")
 	var fired []string
@@ -89,6 +91,7 @@ func TestBannerHoneypotAutoBlockPersistsAndReloads(t *testing.T) {
 }
 
 func TestBannerUnblock(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blocked-ips.txt")
 	b := NewBanner(path, nil, []string{"198.51.100.7"}, nil)
@@ -124,6 +127,7 @@ func TestBannerUnblock(t *testing.T) {
 // never told to drop them), and persisted auto-block entries left over from
 // before the allowlist existed.
 func TestBannerAllowlistNeverBlocked(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blocked-ips.txt")
 	var fired []string
@@ -175,6 +179,7 @@ func TestBannerAllowlistNeverBlocked(t *testing.T) {
 }
 
 func TestBannerBlockRejectsCIDR(t *testing.T) {
+	t.Parallel()
 	b := NewBanner("", nil, nil, nil)
 	// Auto-blocks are bare IPs only; a CIDR is refused (defence in depth —
 	// the handler only ever passes client source IPs).

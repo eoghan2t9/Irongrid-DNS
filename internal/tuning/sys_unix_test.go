@@ -35,6 +35,7 @@ func TestRaiseFileLimit(t *testing.T) {
 // TestSoftLimitCandidates verifies the preferred target comes first and the
 // list is deduplicated.
 func TestSoftLimitCandidates(t *testing.T) {
+	t.Parallel()
 	// Unbounded hard limit (the common macOS case): maxFileLimit first, then
 	// the fallbacks — all unique (the first entry dedupes against maxFileLimit).
 	got := softLimitCandidates(unix.RLIM_INFINITY)
@@ -59,6 +60,7 @@ func TestSoftLimitCandidates(t *testing.T) {
 // (Linux caps at net.core.rmem_max without privileges; macOS at its sockbuf
 // ceiling), so reading back an exact value would be flaky.
 func TestSetSocketBufferSizes(t *testing.T) {
+	t.Parallel()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -80,6 +82,7 @@ func TestSetSocketBufferSizes(t *testing.T) {
 // TestStatusSnapshot verifies Status reports the fd limits and runtime
 // settings sanely (the dashboard feeds on this).
 func TestStatusSnapshot(t *testing.T) {
+	t.Parallel()
 	st := Status()
 	if st.SocketBuffer != SocketBufferSize {
 		t.Errorf("SocketBuffer = %d, want %d", st.SocketBuffer, SocketBufferSize)
@@ -100,6 +103,7 @@ func TestStatusSnapshot(t *testing.T) {
 // TestListenConfigServes verifies the Control hook doesn't break ordinary
 // listening (the hook runs on every socket the ListenConfig creates).
 func TestListenConfigServes(t *testing.T) {
+	t.Parallel()
 	ln, err := ListenConfig().Listen(t.Context(), "tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

@@ -14,6 +14,7 @@ import (
 // triggers (boot FetchAll, the auto-refresh ticker, a manual refresh) don't
 // download the same list twice at once.
 func TestFetchOneCoalescesConcurrentDownloads(t *testing.T) {
+	t.Parallel()
 	var hits atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)

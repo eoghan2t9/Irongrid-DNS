@@ -7,6 +7,7 @@ import (
 )
 
 func TestSplitRule(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in         string
 		want       string
@@ -33,6 +34,7 @@ func TestSplitRule(t *testing.T) {
 }
 
 func TestBlockAndWhitelist(t *testing.T) {
+	t.Parallel()
 	e := NewEngine()
 	// hosts format + adblock format + plain
 	_, err := e.LoadList("test", "test list", []byte("0.0.0.0 blocked.net\n||ads.example.com^\nplain.org\n"))
@@ -62,6 +64,7 @@ func TestBlockAndWhitelist(t *testing.T) {
 }
 
 func TestAdblockExceptionFromList(t *testing.T) {
+	t.Parallel()
 	e := NewEngine()
 	_, err := e.LoadList("ad", "ad", []byte("||tracker.com^\n@@||good.tracker.com^\n"))
 	if err != nil {
@@ -77,6 +80,7 @@ func TestAdblockExceptionFromList(t *testing.T) {
 }
 
 func TestIPRules(t *testing.T) {
+	t.Parallel()
 	e := NewEngine()
 	_, err := e.LoadList("ip", "ip", []byte("1.2.3.4\n"))
 	if err != nil {
@@ -98,6 +102,7 @@ func TestIPRules(t *testing.T) {
 // rule is loaded, and false again when the last one is removed or the
 // engine is reset.
 func TestHasIPRulesGate(t *testing.T) {
+	t.Parallel()
 	e := NewEngine()
 	if e.HasIPRules() {
 		t.Fatal("empty engine must not report IP rules")
@@ -125,6 +130,7 @@ func TestHasIPRulesGate(t *testing.T) {
 // regressing back to a linear scan: it must still find a match sitting deep
 // in a large allow-list, and correctly miss for a domain absent from it.
 func TestWhitelistLargeSubtree(t *testing.T) {
+	t.Parallel()
 	e := NewEngine()
 	if _, err := e.LoadList("test", "test", []byte("evil.example\n")); err != nil {
 		t.Fatal(err)
@@ -163,6 +169,7 @@ func BenchmarkDecideDomainLargeWhitelist(b *testing.B) {
 }
 
 func TestWhitelistAlwaysWins(t *testing.T) {
+	t.Parallel()
 	e := NewEngine()
 	if _, err := e.LoadList("test", "test", []byte("manual.org\n")); err != nil {
 		t.Fatal(err)

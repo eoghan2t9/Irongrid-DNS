@@ -38,6 +38,7 @@ func fakeRedis(t *testing.T) string {
 }
 
 func TestRedisPing(t *testing.T) {
+	t.Parallel()
 	addr := fakeRedis(t)
 	if !redisPing(addr) {
 		t.Fatalf("redisPing(%s) = false, want true", addr)
@@ -53,6 +54,7 @@ func TestRedisPing(t *testing.T) {
 }
 
 func TestSplitHostPort(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ in, host, port string }{
 		{"localhost:6379", "localhost", "6379"},
 		{"127.0.0.1:6380", "127.0.0.1", "6380"},
@@ -69,6 +71,7 @@ func TestSplitHostPort(t *testing.T) {
 }
 
 func TestEnsureDragonflyAlreadyRunning(t *testing.T) {
+	t.Parallel()
 	addr := fakeRedis(t)
 	var out bytes.Buffer
 	if err := EnsureDragonfly(addr, &out); err != nil {
@@ -80,6 +83,7 @@ func TestEnsureDragonflyAlreadyRunning(t *testing.T) {
 }
 
 func TestEnsureDragonflyNonLocalAddr(t *testing.T) {
+	t.Parallel()
 	// A non-local address must be left alone (no download, no docker).
 	var out bytes.Buffer
 	err := EnsureDragonfly("dragonfly:6379", &out)
@@ -92,6 +96,7 @@ func TestEnsureDragonflyNonLocalAddr(t *testing.T) {
 }
 
 func TestExtractDragonflyBinaryMissing(t *testing.T) {
+	t.Parallel()
 	// A tarball without the expected binary must error, not panic.
 	gz := []byte{0x1f, 0x8b} // truncated gzip header
 	if _, err := extractDragonflyBinary(bytes.NewReader(gz), "x86_64"); err == nil {

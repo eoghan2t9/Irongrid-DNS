@@ -3,6 +3,7 @@ package tuning
 import "testing"
 
 func TestParseMemoryString(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		input string
 		want  uint64
@@ -23,6 +24,7 @@ func TestParseMemoryString(t *testing.T) {
 }
 
 func TestSplitArgs(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		input string
 		want  []string
@@ -56,6 +58,7 @@ func TestSplitArgs(t *testing.T) {
 }
 
 func TestUpdateDflyArgs(t *testing.T) {
+	t.Parallel()
 	flags := DragonflyFlags{MaxMemory: "4gb", ProactorThreads: 8}
 
 	cases := []struct {
@@ -90,6 +93,7 @@ func TestUpdateDflyArgs(t *testing.T) {
 }
 
 func TestParseExecStart(t *testing.T) {
+	t.Parallel()
 	content := `[Unit]
 Description=DragonflyDB
 
@@ -107,6 +111,7 @@ Restart=on-failure
 }
 
 func TestFormatBytesV(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		b    uint64
 		want string

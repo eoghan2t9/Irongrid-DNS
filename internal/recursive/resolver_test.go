@@ -180,6 +180,7 @@ func newTestResolver(rootAddr, nsPort string) *Resolver {
 }
 
 func TestResolveWalksRootToAuthoritative(t *testing.T) {
+	t.Parallel()
 	rootAddr, _, nsPort := buildChain(t)
 	r := newTestResolver(rootAddr, nsPort)
 
@@ -208,6 +209,7 @@ func TestResolveWalksRootToAuthoritative(t *testing.T) {
 // skips the root and TLD hops — proven by shutting down the root server
 // before the second query and confirming it still resolves.
 func TestResolveCachesDelegation(t *testing.T) {
+	t.Parallel()
 	rootAddr, _, nsPort := buildChain(t)
 	r := newTestResolver(rootAddr, nsPort)
 
@@ -227,6 +229,7 @@ func TestResolveCachesDelegation(t *testing.T) {
 }
 
 func TestResolveChasesCNAME(t *testing.T) {
+	t.Parallel()
 	rootAddr, _, nsPort := buildChain(t)
 	r := newTestResolver(rootAddr, nsPort)
 
@@ -251,6 +254,7 @@ func TestResolveChasesCNAME(t *testing.T) {
 }
 
 func TestResolveNXDOMAIN(t *testing.T) {
+	t.Parallel()
 	rootAddr, _, nsPort := buildChain(t)
 	r := newTestResolver(rootAddr, nsPort)
 
@@ -271,6 +275,7 @@ func TestResolveNXDOMAIN(t *testing.T) {
 // per-server timeout before the live one was tried (blowing the whole query
 // budget); racing must answer in a small fraction of that.
 func TestResolveRacesNameservers(t *testing.T) {
+	t.Parallel()
 	nsPort := freePort(t)
 
 	// Reserve a dead address (bound then released) for the dead delegate. It
@@ -361,6 +366,7 @@ func TestSetDefaultServerTimeout(t *testing.T) {
 // TestResolveAllRootsUnreachable verifies a prompt error instead of a hang
 // when every root hint is dead.
 func TestResolveAllRootsUnreachable(t *testing.T) {
+	t.Parallel()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -384,6 +390,7 @@ func TestResolveAllRootsUnreachable(t *testing.T) {
 }
 
 func TestReferralParsing(t *testing.T) {
+	t.Parallel()
 	resp := new(dns.Msg)
 	ns, _ := dns.NewRR("example.com. 300 IN NS ns1.example.com.")
 	resp.Ns = []dns.RR{ns}
@@ -411,6 +418,7 @@ func TestReferralParsing(t *testing.T) {
 }
 
 func TestReferralNoGlue(t *testing.T) {
+	t.Parallel()
 	resp := new(dns.Msg)
 	ns, _ := dns.NewRR("example.com. 300 IN NS ns1.example.com.")
 	resp.Ns = []dns.RR{ns}
@@ -433,6 +441,7 @@ func TestReferralNoGlue(t *testing.T) {
 // Cloudflare/Route53/DNSimple-style DNS hosting) — the TLD has no glue
 // obligation for them, so the resolver must look them up independently.
 func TestResolveGluelessOutOfBailiwickNS(t *testing.T) {
+	t.Parallel()
 	nsPort := freePort(t)
 
 	// The DNS host's own server answers its nameserver's own A record (so
@@ -508,6 +517,7 @@ func TestResolveGluelessOutOfBailiwickNS(t *testing.T) {
 // domains hosted by the same DNS provider resolved at once must not each
 // walk the tree to find that provider's nameservers.
 func TestResolveCoalescesNSAddressLookups(t *testing.T) {
+	t.Parallel()
 	nsPort := freePort(t)
 
 	// The DNS host answers ns1.dnshost.invalid's own A record slowly, so
@@ -577,6 +587,7 @@ func TestResolveCoalescesNSAddressLookups(t *testing.T) {
 // TLD that a fresh nameserver-address lookup would need before resolving
 // the second domain.
 func TestResolveCachesNSAddress(t *testing.T) {
+	t.Parallel()
 	nsPort := freePort(t)
 
 	// One provider host answers its own nameserver's A record plus two
@@ -666,6 +677,7 @@ func TestResolveCachesNSAddress(t *testing.T) {
 // cap its answers at 512 bytes while a bigger buffer would risk IP
 // fragmentation.
 func TestResolverAdvertisesEDNS1232(t *testing.T) {
+	t.Parallel()
 	var gotSize atomic.Int32
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -708,6 +720,7 @@ func TestResolverAdvertisesEDNS1232(t *testing.T) {
 // successful query and reuses it (rather than dialing fresh) on the next
 // query to the same nameserver address.
 func TestResolverConnPoolReuse(t *testing.T) {
+	t.Parallel()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -750,6 +763,7 @@ func TestResolverConnPoolReuse(t *testing.T) {
 // the cap must be rejected (connection closed, not pooled) rather than
 // growing pool state without bound.
 func TestResolverConnPoolKeyCap(t *testing.T) {
+	t.Parallel()
 	r := New([]string{"127.0.0.1:53"})
 	t.Cleanup(r.Close)
 

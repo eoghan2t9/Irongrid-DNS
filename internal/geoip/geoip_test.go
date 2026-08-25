@@ -10,6 +10,7 @@ import (
 )
 
 func TestLoadTableAndContains(t *testing.T) {
+	t.Parallel()
 	ipv4 := []byte("1.2.3.0/24\n# comment line\n10.0.0.0/8\n1.2.3.4/32\n")
 	ipv6 := []byte("2001:db8::/32\n")
 	tbl, err := LoadTable(ipv4, ipv6)
@@ -37,6 +38,7 @@ func TestLoadTableAndContains(t *testing.T) {
 }
 
 func TestTableAdjacentRangesMerge(t *testing.T) {
+	t.Parallel()
 	// 1.2.3.0/24 + 1.2.4.0/24 are adjacent: they must merge so a lookup in
 	// either half still hits (and the table stays small).
 	tbl, err := LoadTable([]byte("1.2.3.0/24\n1.2.4.0/24\n"), nil)
@@ -52,6 +54,7 @@ func TestTableAdjacentRangesMerge(t *testing.T) {
 }
 
 func TestBlockerConfigAllowlistAndUnknownIPs(t *testing.T) {
+	t.Parallel()
 	b := NewBlocker()
 	tbl, _ := LoadTable([]byte("93.0.0.0/8\n"), nil)
 	b.AddTable("RU", tbl)
@@ -76,6 +79,7 @@ func TestBlockerConfigAllowlistAndUnknownIPs(t *testing.T) {
 }
 
 func TestManagerRefreshFromSource(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	src := t.TempDir()
 	// ipverse keeps per-country directories lowercase with the file names
@@ -117,6 +121,7 @@ func TestManagerRefreshFromSource(t *testing.T) {
 }
 
 func TestManagerHTTPFallbackToCache(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// Seed the disk cache (as a previous successful refresh would have).
 	_ = os.WriteFile(filepath.Join(dir, "CN.ipv4.txt"), []byte("1.0.1.0/24\n"), 0o644)
@@ -152,6 +157,7 @@ func TestManagerHTTPFallbackToCache(t *testing.T) {
 }
 
 func TestBlockerRebuildOnEnable(t *testing.T) {
+	t.Parallel()
 	// A country loaded before it was enabled must take effect once enabled.
 	b := NewBlocker()
 	tbl, _ := LoadTable([]byte("203.0.113.0/24\n"), nil)

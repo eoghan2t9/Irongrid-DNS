@@ -14,6 +14,7 @@ import (
 // correctly. durationOrEmpty must emit the compact form for every preset
 // the UI offers.
 func TestDurationOrEmptyMatchesDropdownPresets(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in   time.Duration
 		want string
@@ -36,6 +37,7 @@ func TestDurationOrEmptyMatchesDropdownPresets(t *testing.T) {
 // value) still round-trips through Go's standard format rather than
 // panicking or truncating.
 func TestDurationOrEmptyNonHourAligned(t *testing.T) {
+	t.Parallel()
 	got := durationOrEmpty(90 * time.Minute)
 	want := (90 * time.Minute).String()
 	if got != want {

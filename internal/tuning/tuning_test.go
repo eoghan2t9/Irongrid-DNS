@@ -3,6 +3,7 @@ package tuning
 import "testing"
 
 func TestGogcForScalesWithMemory(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		mem  uint64
 		want int
@@ -23,6 +24,7 @@ func TestGogcForScalesWithMemory(t *testing.T) {
 }
 
 func TestMemLimitFor(t *testing.T) {
+	t.Parallel()
 	const host = 16 << 30 // 16 GiB
 	wantHost := uint64(float64(host) * memoryFraction)
 	if got := memLimitFor(host, false); got != wantHost {
@@ -49,6 +51,7 @@ func TestMemLimitFor(t *testing.T) {
 }
 
 func TestFormatBytes(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		b    uint64
 		want string
@@ -65,6 +68,7 @@ func TestFormatBytes(t *testing.T) {
 }
 
 func TestResultChangedFrom(t *testing.T) {
+	t.Parallel()
 	a := result{gomaxprocs: 2, memLimitSet: 100, gogcSet: 60}
 	b := a
 	if a.changedFrom(b) {

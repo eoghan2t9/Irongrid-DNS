@@ -13,6 +13,7 @@ import (
 // the `run` subcommand, so it fails with "flag provided but not defined:
 // -no-autoupdate" if they land after the subcommand.
 func TestBuildArgsFlagOrdering(t *testing.T) {
+	t.Parallel()
 	logFile := filepath.Join(t.TempDir(), "cloudflared.log")
 	args := buildArgs(ModeToken, "definitely-not-a-valid-tunnel-token", "", "", logFile)
 
@@ -36,6 +37,7 @@ func TestBuildArgsFlagOrdering(t *testing.T) {
 // being tested (repeated failed starts must never wedge the Manager or
 // panic) is identical.
 func TestStartTwiceNoPanic(t *testing.T) {
+	t.Parallel()
 	m := NewManager(t.TempDir())
 
 	if err := m.Start(ModeToken, "definitely-not-a-valid-tunnel-token", "", "", ""); err == nil {
@@ -58,6 +60,7 @@ func TestStartTwiceNoPanic(t *testing.T) {
 // resets the manager to not-running and that a normal token-mode start is
 // still possible afterwards.
 func TestStartRejectedLeavesUsable(t *testing.T) {
+	t.Parallel()
 	m := NewManager(t.TempDir())
 
 	// Unknown mode hits the validation path before touching the binary.

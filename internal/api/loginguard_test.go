@@ -8,6 +8,7 @@ import (
 )
 
 func TestLoginGuardLocksOutAfterThreshold(t *testing.T) {
+	t.Parallel()
 	g := NewLoginGuard()
 	for i := range loginMaxFailures - 1 {
 		g.RecordFailure("1.2.3.4")
@@ -26,6 +27,7 @@ func TestLoginGuardLocksOutAfterThreshold(t *testing.T) {
 }
 
 func TestLoginGuardPerClientIndependent(t *testing.T) {
+	t.Parallel()
 	g := NewLoginGuard()
 	for range loginMaxFailures {
 		g.RecordFailure("1.2.3.4")
@@ -39,6 +41,7 @@ func TestLoginGuardPerClientIndependent(t *testing.T) {
 }
 
 func TestLoginGuardSuccessClearsFailures(t *testing.T) {
+	t.Parallel()
 	g := NewLoginGuard()
 	for range loginMaxFailures - 1 {
 		g.RecordFailure("1.2.3.4")
@@ -56,6 +59,7 @@ func TestLoginGuardSuccessClearsFailures(t *testing.T) {
 // (older than loginFailureWindow) doesn't count toward a fresh lockout —
 // seeded directly rather than sleeping loginFailureWindow in a test.
 func TestLoginGuardWindowExpiryResetsCount(t *testing.T) {
+	t.Parallel()
 	g := NewLoginGuard()
 	s := g.shard("1.2.3.4")
 	s.entries["1.2.3.4"] = &loginEntry{
@@ -70,6 +74,7 @@ func TestLoginGuardWindowExpiryResetsCount(t *testing.T) {
 }
 
 func TestClientIPFromRequestTrustsXFFOnlyFromLoopback(t *testing.T) {
+	t.Parallel()
 	// Direct connection (no tunnel): a self-reported XFF must be ignored —
 	// otherwise a remote attacker could claim a fresh IP on every request
 	// and dodge the lockout entirely.
@@ -94,6 +99,7 @@ func TestClientIPFromRequestTrustsXFFOnlyFromLoopback(t *testing.T) {
 // authorize() itself: repeated wrong passwords from one IP eventually get
 // a 429 even for the CORRECT password, while a different IP is unaffected.
 func TestAuthorizeLocksOutAfterFailedAttempts(t *testing.T) {
+	t.Parallel()
 	a := testApp(t)
 	const attacker = "203.0.113.50:1111"
 
@@ -135,6 +141,7 @@ func TestAuthorizeLocksOutAfterFailedAttempts(t *testing.T) {
 // session just expired) never count toward the lockout — only requests
 // that actually presented a wrong password should.
 func TestAuthorizeDoesNotCountCredentialFreeRequests(t *testing.T) {
+	t.Parallel()
 	a := testApp(t)
 	for range loginMaxFailures * 2 {
 		req := httptest.NewRequest(http.MethodGet, "/api/status", nil)

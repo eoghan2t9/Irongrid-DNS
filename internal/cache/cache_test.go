@@ -42,6 +42,7 @@ func emptyResponse() *dns.Msg {
 }
 
 func TestL1GetSet(t *testing.T) {
+	t.Parallel()
 	c := l1onlyCache(time.Hour, time.Minute)
 	ctx := t.Context()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
@@ -60,6 +61,7 @@ func TestL1GetSet(t *testing.T) {
 // TestL1TTLRebase verifies answer TTLs are reduced by the elapsed time on
 // read (the same rebasing the L2 path applies).
 func TestL1TTLRebase(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		c := l1onlyCache(time.Hour, time.Minute)
 		ctx := t.Context()
@@ -82,6 +84,7 @@ func TestL1TTLRebase(t *testing.T) {
 // TestL1CapExpiry verifies entries expire at the configured TTL cap, even
 // when the underlying record TTL is much larger.
 func TestL1CapExpiry(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		c := l1onlyCache(300*time.Millisecond, time.Minute)
 		ctx := t.Context()
@@ -94,6 +97,7 @@ func TestL1CapExpiry(t *testing.T) {
 }
 
 func TestL1Negative(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		c := l1onlyCache(time.Hour, 50*time.Millisecond)
 		ctx := t.Context()
@@ -109,6 +113,7 @@ func TestL1Negative(t *testing.T) {
 }
 
 func TestL1Flush(t *testing.T) {
+	t.Parallel()
 	c := l1onlyCache(time.Hour, time.Minute)
 	ctx := t.Context()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
@@ -124,6 +129,7 @@ func TestL1Flush(t *testing.T) {
 // lookup counts as one hit and a missed lookup as one miss, counted once per
 // logical query even though Lookup probes two keys.
 func TestL1Counters(t *testing.T) {
+	t.Parallel()
 	c := l1onlyCache(time.Hour, time.Minute)
 	ctx := t.Context()
 
@@ -180,6 +186,7 @@ func BenchmarkLookupL1Hit(b *testing.B) {
 }
 
 func TestLookupL1Positive(t *testing.T) {
+	t.Parallel()
 	c := l1onlyCache(time.Hour, time.Minute)
 	ctx := t.Context()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
@@ -196,6 +203,7 @@ func TestLookupL1Positive(t *testing.T) {
 }
 
 func TestLookupL1Negative(t *testing.T) {
+	t.Parallel()
 	c := l1onlyCache(time.Hour, time.Minute)
 	ctx := t.Context()
 	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
@@ -213,6 +221,7 @@ func TestLookupL1Negative(t *testing.T) {
 // file) has anything — the path a genuinely new domain takes before ever
 // reaching upstream.
 func TestLookupMissWithNilClient(t *testing.T) {
+	t.Parallel()
 	c := l1onlyCache(time.Hour, time.Minute)
 	res := c.Lookup(aQuestion())
 	if res.Msg() != nil || res.Negative {
@@ -224,6 +233,7 @@ func TestLookupMissWithNilClient(t *testing.T) {
 // serve-stale window is reported with Stale=true (still decodable), and is
 // reported as a plain miss once the stale window itself passes.
 func TestLookupStale(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		c := l1onlyCache(300*time.Millisecond, time.Minute)
 		c.l1.staleTTL = 2 * time.Second
@@ -256,6 +266,7 @@ func TestLookupStale(t *testing.T) {
 // counters), a miss and an expired entry report not-fresh, and the counters
 // stay untouched by probes.
 func TestFresh(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		c := l1onlyCache(300*time.Millisecond, 50*time.Millisecond)
 		ctx := t.Context()
@@ -294,6 +305,7 @@ func TestFresh(t *testing.T) {
 // positive entry is served close to its cache-lifetime end, and that a fresh
 // entry with plenty of life left does not trigger one.
 func TestPrefetchNearExpiry(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		c := l1onlyCache(5*time.Second, time.Minute) // lead = 1s
 		ctx := t.Context()
@@ -334,6 +346,7 @@ func TestPrefetchNearExpiry(t *testing.T) {
 // the default, a tiny box hits the floor, a huge one is capped, and sizing
 // grows monotonically with the machine in between.
 func TestAutoPerShard(t *testing.T) {
+	t.Parallel()
 	if got := AutoPerShard(0, false); got != l1AutoDefault {
 		t.Fatalf("unknown memory: AutoPerShard = %d, want default %d", got, l1AutoDefault)
 	}
@@ -360,6 +373,7 @@ func TestAutoPerShard(t *testing.T) {
 // rather than an arbitrary one: three keys hashing to the same shard under a
 // per-shard cap of two evict the first-inserted key while the later two stay.
 func TestL1FIFOEviction(t *testing.T) {
+	t.Parallel()
 	c := newL1(2, 0) // cap 2 per shard
 	now := time.Now()
 	// h=0, h=l1Shards and h=2*l1Shards all mask to shard 0.
@@ -397,6 +411,7 @@ func servfailResponse() *dns.Msg {
 // them would re-probe the failing upstream on every query instead of letting
 // the failure cache absorb the retries.
 func TestNegativePrefetch(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		negTTL := 2 * time.Second // negPrefetchLead = max(2s/5, 1s) = 1s
 		c := l1onlyCache(5*time.Second, negTTL)
@@ -457,6 +472,7 @@ func TestNegativePrefetch(t *testing.T) {
 // connection — go-redis returns a present key as a string and a missing key
 // as nil in the result slice.
 func TestDecodeMGetResult(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		vals    []any
@@ -491,6 +507,7 @@ func TestDecodeMGetResult(t *testing.T) {
 // handler's raw serve path needs — and that Msg() still decodes it into a
 // correctly-TTL'd dns.Msg for the fallback paths.
 func TestLookupRawPositive(t *testing.T) {
+	t.Parallel()
 	c := l1onlyCache(time.Hour, time.Minute)
 	ctx := t.Context()
 	c.Set(ctx, aQuestion(), aResponse("1.2.3.4", 3600), 0)
@@ -520,6 +537,7 @@ func TestLookupRawPositive(t *testing.T) {
 // TestLookupRawNegative verifies a negative L1 hit is raw too, tagged
 // Negative and without TTL offsets (negative TTLs are never rebased).
 func TestLookupRawNegative(t *testing.T) {
+	t.Parallel()
 	c := l1onlyCache(time.Hour, time.Minute)
 	ctx := t.Context()
 	c.SetNegative(ctx, aQuestion(), emptyResponse(), 0)
@@ -537,6 +555,7 @@ func TestLookupRawNegative(t *testing.T) {
 // a realistic compressed multi-RR answer (eight distinct-owner TXT records):
 // every Answer-section TTL is located and reads its original value.
 func TestLookupRawMultiAnswerTTLOffsets(t *testing.T) {
+	t.Parallel()
 	m := new(dns.Msg)
 	m.SetQuestion("example.com.", dns.TypeTXT)
 	m.Response = true
@@ -570,6 +589,7 @@ func TestLookupRawMultiAnswerTTLOffsets(t *testing.T) {
 // TestLookupRawMsgRebasesTTL verifies the lazy Msg() path rebases answer
 // TTLs to the remaining lifetime, exactly like the pre-raw Lookup did.
 func TestLookupRawMsgRebasesTTL(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		c := l1onlyCache(time.Hour, time.Minute)
 		ctx := t.Context()
@@ -595,6 +615,7 @@ func TestLookupRawMsgRebasesTTL(t *testing.T) {
 // exposes its raw bytes so the handler can answer from it (after decoding)
 // when re-resolution fails.
 func TestLookupRawStaleKeepsRaw(t *testing.T) {
+	t.Parallel()
 	synctest.Test(t, func(t *testing.T) {
 		c := l1onlyCache(300*time.Millisecond, time.Minute)
 		c.l1.staleTTL = 2 * time.Second

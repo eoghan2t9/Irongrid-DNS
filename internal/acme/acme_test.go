@@ -23,6 +23,7 @@ import (
 )
 
 func TestChallengeHandler(t *testing.T) {
+	t.Parallel()
 	m := New(Options{Email: "a@b.c", Domains: []string{"example.com"}, CertDir: t.TempDir()})
 	m.setToken("tok123", "resp456")
 
@@ -48,6 +49,7 @@ func TestChallengeHandler(t *testing.T) {
 }
 
 func TestChallengeHandlerWrongPath(t *testing.T) {
+	t.Parallel()
 	m := New(Options{Email: "a@b.c", Domains: []string{"example.com"}, CertDir: t.TempDir()})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !m.HandleChallenge(w, r) {
@@ -63,6 +65,7 @@ func TestChallengeHandlerWrongPath(t *testing.T) {
 }
 
 func TestAccountKeyPersisted(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	m := New(Options{Email: "a@b.c", Domains: []string{"example.com"}, CertDir: dir})
 	k1 := mustAccountKey(m)
@@ -76,6 +79,7 @@ func TestAccountKeyPersisted(t *testing.T) {
 }
 
 func TestNeedsRenewal(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	m := New(Options{
 		Email: "a@b.c", Domains: []string{"example.com"},
@@ -143,6 +147,7 @@ func writeCACert(t *testing.T, dir string, domains []string, days int) {
 }
 
 func TestGetStatus(t *testing.T) {
+	t.Parallel()
 	m := New(Options{
 		Email: "a@b.c", Domains: []string{"one.example.com", "two.example.com"},
 		CertDir: t.TempDir(), Staging: true, HTTP01Port: 8081,
@@ -160,6 +165,7 @@ func TestGetStatus(t *testing.T) {
 }
 
 func TestServePortConflict(t *testing.T) {
+	t.Parallel()
 	// Occupy a port, then Serve on the same one must fail with a clear error
 	// rather than panic or hang.
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
@@ -185,6 +191,7 @@ func TestServePortConflict(t *testing.T) {
 // ("0001-01-01T00:00:00Z"), which the frontend rendered as "31/12/1" with
 // absurd day counts. They must serialize as null instead.
 func TestStatusZeroTimesMarshalsNull(t *testing.T) {
+	t.Parallel()
 	m := New(Options{Email: "a@b.c", Domains: []string{"dns.example.com"}})
 	b, err := json.Marshal(m.GetStatus())
 	if err != nil {
@@ -202,6 +209,7 @@ func TestStatusZeroTimesMarshalsNull(t *testing.T) {
 // timestamps once populated (the Issue path sets them; this only checks the
 // plumbing used there, without hitting the network).
 func TestStatusTimesPointersSet(t *testing.T) {
+	t.Parallel()
 	m := New(Options{Email: "a@b.c", Domains: []string{"dns.example.com"}})
 	issued := time.Now()
 	next := issued.Add(30 * 24 * time.Hour)

@@ -9,6 +9,7 @@ import (
 // the /i flag, per-list attribution, classic rules coexisting, and broken
 // patterns being skipped without failing the list.
 func TestRegexBlocklistRules(t *testing.T) {
+	t.Parallel()
 	e := NewEngine()
 	res, err := e.LoadList("re1", "Regex list", []byte(strings.Join([]string{
 		"/^ads\\./",                  // first label is "ads"
@@ -52,6 +53,7 @@ func TestRegexBlocklistRules(t *testing.T) {
 // TestRegexExceptions verifies @@/pattern/ rules override block rules (both
 // regex and classic domain rules) — matching AdGuard's exception semantics.
 func TestRegexExceptions(t *testing.T) {
+	t.Parallel()
 	e := NewEngine()
 	if _, err := e.LoadList("re2", "Regex list", []byte(strings.Join([]string{
 		"/ads\\./",         // blocks any name containing "ads."
@@ -86,6 +88,7 @@ func TestRegexExceptions(t *testing.T) {
 // whitelist fields (SetUserLists) compile and take precedence like domain
 // entries do.
 func TestRegexUserLists(t *testing.T) {
+	t.Parallel()
 	e := NewEngine()
 	e.SetUserLists([]string{"/^track\\./", "blocked.example.com"}, []string{"/^keep\\./"})
 	e.Compile()

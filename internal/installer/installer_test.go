@@ -29,6 +29,7 @@ func testAnswers() *answers {
 }
 
 func TestBuildConfigValid(t *testing.T) {
+	t.Parallel()
 	a := testAnswers()
 	cfg, err := a.buildConfig(catalog.Default())
 	if err != nil {
@@ -58,6 +59,7 @@ func TestBuildConfigValid(t *testing.T) {
 }
 
 func TestBuildConfigWhitelistDedup(t *testing.T) {
+	t.Parallel()
 	a := testAnswers()
 	cfg, err := a.buildConfig(catalog.Default())
 	if err != nil {
@@ -79,6 +81,7 @@ func TestBuildConfigWhitelistDedup(t *testing.T) {
 // webOnDoHPort puts the dashboard on the same HTTPS port as DoH
 // (https://host, no :8080 suffix).
 func TestBuildConfigWebOnDoHPort(t *testing.T) {
+	t.Parallel()
 	a := testAnswers()
 	a.webOnDoHPort = true
 	cfg, err := a.buildConfig(catalog.Default())
@@ -101,6 +104,7 @@ func TestBuildConfigWebOnDoHPort(t *testing.T) {
 }
 
 func TestBuildConfigNoProtocolsFails(t *testing.T) {
+	t.Parallel()
 	a := testAnswers()
 	a.protos = []string{}
 	if _, err := a.buildConfig(catalog.Default()); err == nil {
@@ -138,6 +142,7 @@ func TestAskDragonflyDefaultsYes(t *testing.T) {
 // the whole line as the value, so `WorkingDirectory=/data   # note` breaks
 // startup with status=200/CHDIR (the service crash-loops forever).
 func TestGeneratedUnitsNoTrailingComments(t *testing.T) {
+	t.Parallel()
 	w := &wizard{out: os.Stdout}
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "irongrid.yaml")
@@ -177,6 +182,7 @@ func TestGeneratedUnitsNoTrailingComments(t *testing.T) {
 }
 
 func TestWriteDockerCompose(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "..", "irongrid.yaml") // one level above deploy/
 	w := &wizard{a: &answers{service: "docker"}, out: os.Stdout}

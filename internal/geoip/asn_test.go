@@ -10,6 +10,7 @@ import (
 )
 
 func TestParseASN(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in   string
 		want uint32
@@ -56,6 +57,7 @@ not a line
 // TestLoadASNTablesPrunesAndSplits verifies the dataset is pruned to exactly
 // the configured ASNs and split into the allow/block sides.
 func TestLoadASNTablesPrunesAndSplits(t *testing.T) {
+	t.Parallel()
 	allow, block, err := LoadASNTables([]byte(sampleASNData), []byte(sampleASNData), map[uint32]bool{13335: true}, map[uint32]bool{3257: true})
 	if err != nil {
 		t.Fatalf("LoadASNTables: %v", err)
@@ -98,6 +100,7 @@ func TestLoadASNTablesPrunesAndSplits(t *testing.T) {
 }
 
 func TestLoadASNTablesEmptyLists(t *testing.T) {
+	t.Parallel()
 	allow, block, err := LoadASNTables([]byte(sampleASNData), nil, map[uint32]bool{}, map[uint32]bool{})
 	if err != nil {
 		t.Fatalf("LoadASNTables: %v", err)
@@ -109,6 +112,7 @@ func TestLoadASNTablesEmptyLists(t *testing.T) {
 
 // TestASNTableCIDRs verifies ranges expand to the minimal aligned CIDR set.
 func TestASNTableCIDRs(t *testing.T) {
+	t.Parallel()
 	allow, _, err := LoadASNTables([]byte(sampleASNData), []byte(sampleASNData), map[uint32]bool{13335: true}, map[uint32]bool{})
 	if err != nil {
 		t.Fatalf("LoadASNTables: %v", err)
@@ -128,6 +132,7 @@ func TestASNTableCIDRs(t *testing.T) {
 // TestCIDRs4UnalignedRange verifies an unaligned v4 range splits into the
 // minimal set of aligned prefixes covering exactly [start,end].
 func TestCIDRs4UnalignedRange(t *testing.T) {
+	t.Parallel()
 	// 10.1.2.5 .. 10.1.2.9 = 5 addresses, not a single prefix: the minimal
 	// aligned cover is 10.1.2.5/32 + 10.1.2.6/31 + 10.1.2.8/31.
 	start, end := uint32(10)<<24|1<<16|2<<8|5, uint32(10)<<24|1<<16|2<<8|9
@@ -165,6 +170,7 @@ func TestCIDRs4UnalignedRange(t *testing.T) {
 
 // TestCIDRs6UnalignedRange verifies the same for a v6 range.
 func TestCIDRs6UnalignedRange(t *testing.T) {
+	t.Parallel()
 	var start, end [16]byte
 	copy(start[:], net.ParseIP("2001:db8:1:2:3:4:5:6").To16())
 	copy(end[:], net.ParseIP("2001:db8:1:2:3:4:5:9").To16())
@@ -209,6 +215,7 @@ func TestCIDRs6UnalignedRange(t *testing.T) {
 // checked before the combined country ranges, and BlockedAs reports the
 // blocking source.
 func TestBlockerASNRules(t *testing.T) {
+	t.Parallel()
 	b := NewBlocker()
 	tbl, _ := LoadTable([]byte("93.0.0.0/8\n91.0.0.0/8\n198.51.100.0/24\n"), nil)
 	b.AddTable("RU", tbl)
@@ -271,6 +278,7 @@ func TestBlockerASNRules(t *testing.T) {
 // block list and honeypot auto-blocks; ASN block blocks without an explicit
 // IP entry.
 func TestBannerASNRules(t *testing.T) {
+	t.Parallel()
 	allow, block, err := LoadASNTables([]byte(sampleASNData), nil, map[uint32]bool{13335: true}, map[uint32]bool{3257: true})
 	if err != nil {
 		t.Fatalf("LoadASNTables: %v", err)
@@ -317,6 +325,7 @@ func TestBannerASNRules(t *testing.T) {
 // TestBannerSetASNsPrunesPersistedAutoBlocks verifies that installing the
 // ASN tables drops persisted auto-blocks of now-ASN-allowlisted sources.
 func TestBannerSetASNsPrunesPersistedAutoBlocks(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "blocked-ips.txt")
 	// A persisted auto-block of a Cloudflare (AS13335) address.
@@ -342,6 +351,7 @@ func TestBannerSetASNsPrunesPersistedAutoBlocks(t *testing.T) {
 // TestManagerRefreshASN verifies the full refresh path: file:// source,
 // gzip decompression, pruning, and the firewall CIDR files.
 func TestManagerRefreshASN(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	src := t.TempDir()
 	// The v4 file is gzipped (as shipped), the v6 file plain — both must
@@ -409,6 +419,7 @@ func TestManagerRefreshASN(t *testing.T) {
 // TestManagerRefreshASNFallbackToCache verifies a dead source still loads
 // the cached dataset, and that a dead source with no cache fails.
 func TestManagerRefreshASNFallbackToCache(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	src := t.TempDir()
 	_ = os.WriteFile(filepath.Join(src, "ip2asn-v4.tsv.gz"), []byte(sampleASNData), 0o644)

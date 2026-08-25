@@ -54,6 +54,7 @@ func waitFor(t *testing.T, l *Log, n int) []Entry {
 // IP→ASN attribution) survives the JSON round-trip through the stream, and
 // that entries recorded without one read back as 0.
 func TestEntryASNField(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 7)
 	e := entry("asn-test.example", "allowed")
 	e.ASN = 13335
@@ -73,6 +74,7 @@ func TestEntryASNField(t *testing.T) {
 // to the stream — the final partial batch must not be lost at shutdown — and
 // that a reopened log over the same server sees them.
 func TestRecordFlushesOnClose(t *testing.T) {
+	t.Parallel()
 	mr := miniredis.RunT(t)
 	l, err := New(mr.Addr(), "", 0, 30, 0)
 	if err != nil {
@@ -108,6 +110,7 @@ func TestRecordFlushesOnClose(t *testing.T) {
 // TestBatchFlush verifies queued entries are flushed without Close, via both
 // the batch-size and the ticker paths.
 func TestBatchFlush(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 30)
 	const n = logBatchSize + 50
 	for range n {
@@ -122,6 +125,7 @@ func TestBatchFlush(t *testing.T) {
 // TestQueryOrderAndFilters verifies newest-first ordering, the in-memory
 // filters (action/qtype exact, domain substring) and pagination.
 func TestQueryOrderAndFilters(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 30)
 	// Record in a distinct order so "newest first" is observable.
 	l.Record(entry("aaa.com.", "allowed"))
@@ -170,6 +174,7 @@ func TestQueryOrderAndFilters(t *testing.T) {
 // bound, exactly max messages are handed to the callback — the shared helper
 // behind Query/Stats/Hourly/StatsBundle must never overshoot by a page.
 func TestWalkStreamStrictBound(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 30)
 	for range 30 {
 		l.Record(entry("a.com.", "allowed"))
@@ -208,6 +213,7 @@ func TestWalkStreamStrictBound(t *testing.T) {
 // TestQueryNoMatch verifies a filter with no matches returns an empty (not
 // nil) slice and walks the scan bound without error.
 func TestQueryNoMatch(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 30)
 	l.Record(entry("aaa.com.", "allowed"))
 	waitFor(t, l, 1)
@@ -223,6 +229,7 @@ func TestQueryNoMatch(t *testing.T) {
 // TestQueryClientFilter verifies the exact-match client (source IP) filter,
 // the mechanism behind the dashboard's click-through top-clients rows.
 func TestQueryClientFilter(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 30)
 	e1 := entry("a.com.", "allowed")
 	e1.Client = "203.0.113.9"
@@ -261,6 +268,7 @@ func TestQueryClientFilter(t *testing.T) {
 // the entries recorded so far, blocked entries are bucketed separately, and
 // the series is always exactly 24 slots ending at the current hour.
 func TestHourly(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 30)
 	l.Record(entry("ads.com.", "blocked"))
 	l.Record(entry("ok.com.", "allowed"))
@@ -300,6 +308,7 @@ func TestHourly(t *testing.T) {
 
 // TestStats verifies the aggregate counters, average latency and top lists.
 func TestStats(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 30)
 	before := time.Now()
 	l.Record(entry("ads.example.com.", "blocked"))
@@ -345,6 +354,7 @@ func TestStats(t *testing.T) {
 // actions counting (blocked/error entries are excluded), a result cap, and
 // an empty window.
 func TestActiveDomains(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 30)
 	// a.com: 2 warmable hits (allowed + cached). b.com: blocked (excluded).
 	// c.com: 1 allowed + 1 error (the error must not count).
@@ -393,6 +403,7 @@ func TestActiveDomains(t *testing.T) {
 
 // TestActiveDomainsDisabled verifies the no-store path returns an empty slice.
 func TestActiveDomainsDisabled(t *testing.T) {
+	t.Parallel()
 	l := NewDisabled(30)
 	defer l.Close()
 	domains, err := l.ActiveDomains(t.Context(), time.Now().Add(-time.Hour), 0)
@@ -410,6 +421,7 @@ func TestActiveDomainsDisabled(t *testing.T) {
 // recomputes fresh, and Clear invalidates the cache so a post-clear poll
 // re-scans the (now empty) stream.
 func TestStatsCache(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 30)
 	l.Record(entry("a.com.", "allowed"))
 	waitFor(t, l, 1)
@@ -462,6 +474,7 @@ func TestStatsCache(t *testing.T) {
 // TestHourlyCache verifies Hourly results are cached the same way: the second
 // call with the same window returns the pre-recorded bucket totals.
 func TestHourlyCache(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 30)
 	l.Record(entry("a.com.", "allowed"))
 	waitFor(t, l, 1)
@@ -496,6 +509,7 @@ func TestHourlyCache(t *testing.T) {
 // reflected immediately (no TTL to wait out), a backdated entry is outside
 // the window, and Clear resets the aggregate.
 func TestStatsBundle(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 30)
 	l.Record(entry("new.example.com.", "allowed"))
 	waitFor(t, l, 1)
@@ -576,6 +590,7 @@ func TestStatsBundle(t *testing.T) {
 // other than the standard dashboard one (here: the last 6 hours) is served
 // by the exact bounded walk, cached for repeated polls of the same window.
 func TestStatsBundleNonstandardWindow(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 30)
 	l.Record(entry("a.example.com.", "allowed"))
 	l.Record(entry("b.example.com.", "blocked"))
@@ -610,6 +625,7 @@ func TestStatsBundleNonstandardWindow(t *testing.T) {
 // from its seed walk: entries written to the stream before reopening are in
 // the new log's aggregate without any fresh writes.
 func TestAggregateSeededAtStartup(t *testing.T) {
+	t.Parallel()
 	mr := miniredis.RunT(t)
 	l, err := New(mr.Addr(), "", 0, 30, 0)
 	if err != nil {
@@ -646,6 +662,7 @@ func TestAggregateSeededAtStartup(t *testing.T) {
 // the oldest slot's contribution — including its top-N keys — is dropped
 // from the running totals when the hour rolls.
 func TestRollingAggRollover(t *testing.T) {
+	t.Parallel()
 	a := newRollingAgg()
 	now := time.Now().Truncate(time.Hour)
 	start := now.Add(-23 * time.Hour)
@@ -685,6 +702,7 @@ func TestRollingAggRollover(t *testing.T) {
 // write after midnight starts a fresh day, and a read after midnight with no
 // intervening write does not serve yesterday's numbers.
 func TestRollingAggTodayReset(t *testing.T) {
+	t.Parallel()
 	a := newRollingAgg()
 	now := time.Now()
 	a.add(Entry{Time: now, Client: "10.0.0.1", Domain: "a.com.", Action: "allowed"})
@@ -713,6 +731,7 @@ func TestRollingAggTodayReset(t *testing.T) {
 // TestRollingAggClear verifies Clear zeroes the aggregate and a subsequent
 // write re-anchors the ring without double-counting.
 func TestRollingAggClear(t *testing.T) {
+	t.Parallel()
 	a := newRollingAgg()
 	now := time.Now()
 	a.add(Entry{Time: now, Client: "10.0.0.1", Domain: "a.com.", Action: "blocked"})
@@ -731,6 +750,7 @@ func TestRollingAggClear(t *testing.T) {
 // TestStatsBundleDisabled verifies the no-store path returns zeroed blocks
 // (the API's stats response still carries the expected shapes).
 func TestStatsBundleDisabled(t *testing.T) {
+	t.Parallel()
 	l := NewDisabled(30)
 	defer l.Close()
 	now := time.Now()
@@ -746,6 +766,7 @@ func TestStatsBundleDisabled(t *testing.T) {
 
 // TestClear verifies the whole stream is deleted.
 func TestClear(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 30)
 	for range 5 {
 		l.Record(entry("example.com.", "allowed"))
@@ -766,6 +787,7 @@ func TestClear(t *testing.T) {
 // TestPruneKeepsFreshEntries verifies the retention trim runs without error
 // and never removes entries younger than the window.
 func TestPruneKeepsFreshEntries(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 30)
 	for range 5 {
 		l.Record(entry("example.com.", "allowed"))
@@ -783,6 +805,7 @@ func TestPruneKeepsFreshEntries(t *testing.T) {
 
 // TestRecordAfterCloseIsSafe verifies Record never panics after Close.
 func TestRecordAfterCloseIsSafe(t *testing.T) {
+	t.Parallel()
 	l, _ := newTestLog(t, 30)
 	if err := l.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -792,6 +815,7 @@ func TestRecordAfterCloseIsSafe(t *testing.T) {
 
 // TestDisabledMode verifies NewDisabled records nothing and queries cleanly.
 func TestDisabledMode(t *testing.T) {
+	t.Parallel()
 	l := NewDisabled(30)
 	defer l.Close()
 	l.Record(entry("example.com.", "allowed"))
@@ -817,6 +841,7 @@ func TestDisabledMode(t *testing.T) {
 // three-way tie straddling the n-entry cutoff, where only the two
 // alphabetically-first domains of the tied group must survive.
 func TestTopN(t *testing.T) {
+	t.Parallel()
 	counts := map[string]int64{
 		"z.example.com.": 5,
 		"a.example.com.": 5, // ties with z at count 5; a sorts first

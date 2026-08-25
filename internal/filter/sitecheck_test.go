@@ -8,6 +8,7 @@ import (
 )
 
 func TestExtractSitePage(t *testing.T) {
+	t.Parallel()
 	base, _ := url.Parse("https://example.com/shop/index.html")
 	page := `<html><head>
 		<title> Shop — Example </title>
@@ -48,6 +49,7 @@ func TestExtractSitePage(t *testing.T) {
 }
 
 func TestExtractSitePageBaseHref(t *testing.T) {
+	t.Parallel()
 	base, _ := url.Parse("https://example.com/page")
 	page := `<html><head><base href="https://cdn.example.com/assets/"></head>
 		<body>
@@ -68,6 +70,7 @@ func TestExtractSitePageBaseHref(t *testing.T) {
 }
 
 func TestExtractSitePageJunk(t *testing.T) {
+	t.Parallel()
 	base, _ := url.Parse("https://example.com/")
 
 	// Garbage input must not panic and yields at most the page's own host.

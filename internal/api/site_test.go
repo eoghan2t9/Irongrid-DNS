@@ -77,6 +77,7 @@ func TestSiteCheck(t *testing.T) {
 }
 
 func TestSiteCheckBadInput(t *testing.T) {
+	t.Parallel()
 	h := &Handler{}
 	for _, body := range []string{`{}`, `{"url": ""}`, `{"url": "ftp://example.com"}`, `{"url": "file:///etc/passwd"}`} {
 		req := httptest.NewRequest(http.MethodPost, "/api/filter/site", strings.NewReader(body))
@@ -89,6 +90,7 @@ func TestSiteCheckBadInput(t *testing.T) {
 }
 
 func TestResolvePublicIP(t *testing.T) {
+	t.Parallel()
 	ctx := t.Context()
 	// Addresses a site scan must never reach (loopback, private, CGNAT,
 	// link-local, unspecified — both IP literals and a resolving hostname).
@@ -109,6 +111,7 @@ func TestResolvePublicIP(t *testing.T) {
 }
 
 func TestSiteRedirectGuard(t *testing.T) {
+	t.Parallel()
 	c := newSiteScanClient()
 	via := make([]*http.Request, 0)
 

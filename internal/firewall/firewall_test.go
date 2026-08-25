@@ -55,6 +55,7 @@ func writeCountry(t *testing.T, dir, cc, fam, content string) {
 // Manager feed the firewall: block-listed ISPs join the drop sets next to
 // the country CIDRs, allow-listed ISPs join the allow sets.
 func TestApplyASNRules(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeCountry(t, dir, "RU", "ipv4", "93.0.0.0/8\n")
 	if err := os.WriteFile(filepath.Join(dir, "asn-blocked.txt"), []byte("10.0.0.0/24\n2001:db8::/32\n"), 0o644); err != nil {
@@ -89,6 +90,7 @@ func TestApplyASNRules(t *testing.T) {
 // every country is absent, so the earlier "no cached country CIDRs" error
 // must not fire.
 func TestApplyASNRulesOnly(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "asn-blocked.txt"), []byte("10.0.0.0/24\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -105,6 +107,7 @@ func TestApplyASNRulesOnly(t *testing.T) {
 }
 
 func TestApplyNft(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeCountry(t, dir, "RU", "ipv4", "# Country: Russia\n5.45.192.0/24\n93.0.0.0/8\n")
 	writeCountry(t, dir, "RU", "ipv6", "2001:db8::/32\n")
@@ -175,6 +178,7 @@ func TestApplyNft(t *testing.T) {
 }
 
 func TestApplyNftIPBlocksOnly(t *testing.T) {
+	t.Parallel()
 	// Explicit block IPs alone (no countries, no country data) must still
 	// build the sets and the drop rules — so AddIP can extend them later.
 	f := &fakeRunner{available: map[string]bool{"nft": true}}
@@ -195,6 +199,7 @@ func TestApplyNftIPBlocksOnly(t *testing.T) {
 }
 
 func TestAddIPNft(t *testing.T) {
+	t.Parallel()
 	f := &fakeRunner{available: map[string]bool{"nft": true}}
 	m := NewWithRunner(f)
 	if _, err := m.Apply([]string{"RU"}, nil, nil, t.TempDir()); err == nil {
@@ -222,6 +227,7 @@ func TestAddIPNft(t *testing.T) {
 }
 
 func TestAddIPRemoveIPIptables(t *testing.T) {
+	t.Parallel()
 	f := &fakeRunner{available: map[string]bool{"ipset": true, "iptables": true, "ip6tables": true}}
 	m := NewWithRunner(f)
 	if _, err := m.Apply(nil, nil, nil, t.TempDir()); err != nil {
@@ -242,6 +248,7 @@ func TestAddIPRemoveIPIptables(t *testing.T) {
 }
 
 func TestApplyNftNoData(t *testing.T) {
+	t.Parallel()
 	f := &fakeRunner{available: map[string]bool{"nft": true}}
 	m := NewWithRunner(f)
 	if _, err := m.Apply([]string{"XX"}, nil, nil, t.TempDir()); err == nil {
@@ -250,6 +257,7 @@ func TestApplyNftNoData(t *testing.T) {
 }
 
 func TestApplyIptables(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	writeCountry(t, dir, "RU", "ipv4", "93.0.0.0/8\n")
 
@@ -288,6 +296,7 @@ func TestApplyIptables(t *testing.T) {
 }
 
 func TestNoBackend(t *testing.T) {
+	t.Parallel()
 	f := &fakeRunner{available: map[string]bool{}}
 	m := NewWithRunner(f)
 	if _, err := m.Apply([]string{"RU"}, nil, nil, t.TempDir()); err == nil || !strings.Contains(err.Error(), "no supported firewall backend") {
@@ -296,6 +305,7 @@ func TestNoBackend(t *testing.T) {
 }
 
 func TestClearNft(t *testing.T) {
+	t.Parallel()
 	f := &fakeRunner{available: map[string]bool{"nft": true}}
 	m := NewWithRunner(f)
 	if err := m.Clear(); err != nil {
@@ -307,6 +317,7 @@ func TestClearNft(t *testing.T) {
 }
 
 func TestClearIptables(t *testing.T) {
+	t.Parallel()
 	f := &fakeRunner{available: map[string]bool{"ipset": true, "iptables": true, "ip6tables": true}}
 	m := NewWithRunner(f)
 	if err := m.Clear(); err != nil {
@@ -326,6 +337,7 @@ func TestClearIptables(t *testing.T) {
 }
 
 func TestParseCIDRs(t *testing.T) {
+	t.Parallel()
 	got := parseCIDRs("# header\n93.0.0.0/8  ; trailing comment\n\n1.2.3.0/24 # inline\n2001:db8::/32\n")
 	want := []string{"93.0.0.0/8", "1.2.3.0/24", "2001:db8::/32"}
 	if len(got) != len(want) {
@@ -339,6 +351,7 @@ func TestParseCIDRs(t *testing.T) {
 }
 
 func TestClassifyIPs(t *testing.T) {
+	t.Parallel()
 	v4, v6 := classifyIPs([]string{"198.51.100.7", "10.0.0.0/8", "2001:db8::1", "2400::/12", "not-an-ip"})
 	if len(v4) != 2 || v4[0] != "198.51.100.7" || v4[1] != "10.0.0.0/8" {
 		t.Fatalf("v4 = %v", v4)
@@ -349,6 +362,7 @@ func TestClassifyIPs(t *testing.T) {
 }
 
 func TestStatusNft(t *testing.T) {
+	t.Parallel()
 	f := &fakeRunner{available: map[string]bool{"nft": true}, failWhen: "nft list table"}
 	m := NewWithRunner(f)
 	// `nft list table` fails → nothing installed → inactive.

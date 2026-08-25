@@ -41,6 +41,7 @@ func newTunnelTestHandler(t *testing.T) (*Handler, *config.Config, string, *bool
 // but auto-start must NOT be enabled — a bad token must not retry on every
 // boot.
 func TestTunnelStartPersistsOnFailure(t *testing.T) {
+	t.Parallel()
 	h, cfg, cfgPath, saved := newTunnelTestHandler(t)
 
 	const token = "definitely-not-a-valid-tunnel-token"
@@ -81,6 +82,7 @@ func TestTunnelStartPersistsOnFailure(t *testing.T) {
 // directly because reaching a real successful cloudflared start in a unit
 // test would require network access.
 func TestTunnelStartPersistsEnabledOnSuccess(t *testing.T) {
+	t.Parallel()
 	h, cfg, cfgPath, saved := newTunnelTestHandler(t)
 
 	p := tunnelStartPayload{Token: "real-tunnel-token", Hostname: "dns.example.com"}
@@ -116,6 +118,7 @@ func TestTunnelStartPersistsEnabledOnSuccess(t *testing.T) {
 // the origin URL (used as the auto-start origin) and the quick flag. Also
 // exercised through the helper so no real trycloudflare tunnel is launched.
 func TestTunnelStartQuickPersistsOrigin(t *testing.T) {
+	t.Parallel()
 	h, cfg, _, saved := newTunnelTestHandler(t)
 
 	p := tunnelStartPayload{Origin: "http://localhost:8443"}
@@ -140,6 +143,7 @@ func TestTunnelStartQuickPersistsOrigin(t *testing.T) {
 // configuration (empty token, missing config file, unknown mode) is rejected
 // with 400 and never persisted as auto-start-enabled.
 func TestTunnelStartRejectsBadInput(t *testing.T) {
+	t.Parallel()
 	h, cfg, _, saved := newTunnelTestHandler(t)
 
 	cases := []struct {
@@ -172,6 +176,7 @@ func TestTunnelStartRejectsBadInput(t *testing.T) {
 // Enabled=false so it does not auto-start on the next boot, while keeping
 // the token so the form is still pre-filled.
 func TestTunnelStopDisablesAutoStart(t *testing.T) {
+	t.Parallel()
 	h, cfg, _, saved := newTunnelTestHandler(t)
 	cfg.Tunnel.Enabled = true
 	cfg.Tunnel.Token = "previously-saved-token"

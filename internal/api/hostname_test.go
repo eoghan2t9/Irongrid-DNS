@@ -19,6 +19,7 @@ import (
 // the configured upstream, omits IPs without a PTR (and invalid entries), and
 // reports the reverse name without its trailing dot.
 func TestLogHostnames(t *testing.T) {
+	t.Parallel()
 	addr := startUDPDNS(t, map[string][]dns.RR{
 		"4.3.2.1.in-addr.arpa.|PTR": {&dns.PTR{
 			Hdr: dns.RR_Header{Name: "4.3.2.1.in-addr.arpa.", Rrtype: dns.TypePTR, Class: dns.ClassINET, Ttl: 300},
@@ -55,6 +56,7 @@ func TestLogHostnames(t *testing.T) {
 // lookups for the same IP collapse into one upstream query: parallel
 // dashboard polls must not double upstream reverse-DNS traffic.
 func TestResolveHostnameCoalescesConcurrentLookups(t *testing.T) {
+	t.Parallel()
 	var hits atomic.Int64
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -96,6 +98,7 @@ func TestResolveHostnameCoalescesConcurrentLookups(t *testing.T) {
 // TestLogHostnamesEmpty verifies the endpoint with no usable IPs returns a
 // clean empty map rather than an error.
 func TestLogHostnamesEmpty(t *testing.T) {
+	t.Parallel()
 	h := &Handler{}
 	rr := httptest.NewRecorder()
 	h.logHostnames(rr, httptest.NewRequest(http.MethodGet, "/api/log/hostnames?ips=,not-an-ip,,", nil))
@@ -117,6 +120,7 @@ func TestLogHostnamesEmpty(t *testing.T) {
 // that a repeated lookup for a PTR-less IP is served from the negative cache
 // instead of re-querying.
 func TestHostCache(t *testing.T) {
+	t.Parallel()
 	c := newHostCache()
 	now := time.Now()
 	if _, ok := c.get("1.2.3.4", now); ok {

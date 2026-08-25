@@ -9,6 +9,7 @@ import (
 // TestValidateUpstreamMode verifies the resolution strategy accepts race and
 // sequential, defaults an empty value to race, and rejects anything else.
 func TestValidateUpstreamMode(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.UpstreamMode = ""
 	if err := c.Validate(); err != nil {
@@ -33,6 +34,7 @@ func TestValidateUpstreamMode(t *testing.T) {
 // TestPerfTunablesDefaults verifies the performance tunables ship with sane
 // defaults: the L1 cache on (512 entries/shard) and a 256-entry log batch.
 func TestPerfTunablesDefaults(t *testing.T) {
+	t.Parallel()
 	c := Default()
 	if c.Cache.L1Entries != 0 {
 		t.Errorf("cache.l1_entries = %d, want default 0 (auto-size from available RAM)", c.Cache.L1Entries)
@@ -60,6 +62,7 @@ func TestPerfTunablesDefaults(t *testing.T) {
 
 // TestPerfTunablesValidation verifies negative values are rejected.
 func TestPerfTunablesValidation(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.Cache.L1Entries = -2
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "l1_entries") {
@@ -96,6 +99,7 @@ func TestPerfTunablesValidation(t *testing.T) {
 }
 
 func TestUDPSocketsValidation(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.Server.UDPSockets = -1
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "udp_sockets") {
@@ -109,6 +113,7 @@ func TestUDPSocketsValidation(t *testing.T) {
 }
 
 func TestUDPWorkersValidation(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.Server.UDPWorkers = -1
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "udp_workers") {
@@ -136,6 +141,7 @@ func validBase() *Config {
 }
 
 func TestValidateWebRedirect(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.Server.WebTLS = true
 	c.Server.WebRedirect = true
@@ -148,6 +154,7 @@ func TestValidateWebRedirect(t *testing.T) {
 }
 
 func TestValidateWebRedirectRequiresWebTLS(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.Server.WebRedirect = true // web_tls stays false
 	err := c.Validate()
@@ -157,6 +164,7 @@ func TestValidateWebRedirectRequiresWebTLS(t *testing.T) {
 }
 
 func TestValidateWebSharesDoHPort(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.Server.WebListen = "0.0.0.0:443"
 	c.Server.ListenDoH = "0.0.0.0:443"
@@ -168,6 +176,7 @@ func TestValidateWebSharesDoHPort(t *testing.T) {
 }
 
 func TestValidateWebSharesDoHRequiresWebTLS(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.Server.WebListen = "0.0.0.0:443"
 	c.Server.ListenDoH = "0.0.0.0:443"
@@ -180,6 +189,7 @@ func TestValidateWebSharesDoHRequiresWebTLS(t *testing.T) {
 }
 
 func TestValidateWebSharesDoHRequiresDoHPath(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.Server.WebListen = "0.0.0.0:443"
 	c.Server.ListenDoH = "0.0.0.0:443"
@@ -192,6 +202,7 @@ func TestValidateWebSharesDoHRequiresDoHPath(t *testing.T) {
 }
 
 func TestValidateWebRedirectPortCollision(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.Server.WebTLS = true
 	c.Server.WebRedirect = true
@@ -203,6 +214,7 @@ func TestValidateWebRedirectPortCollision(t *testing.T) {
 }
 
 func TestValidateTrustedProxies(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.Server.TrustedProxies = []string{"203.0.113.7", "198.51.100.0/24", " 2001:db8::1 "}
 	if err := c.Validate(); err != nil {
@@ -221,6 +233,7 @@ func TestValidateTrustedProxies(t *testing.T) {
 }
 
 func TestValidateXFFHopLimit(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.Server.XFFHopLimit = 0 // 0 selects the default
 	if err := c.Validate(); err != nil {
@@ -237,6 +250,7 @@ func TestValidateXFFHopLimit(t *testing.T) {
 }
 
 func TestValidateDNS01Cloudflare(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.TLS.ACME = ACMEConfig{
 		Enabled: true,
@@ -253,6 +267,7 @@ func TestValidateDNS01Cloudflare(t *testing.T) {
 }
 
 func TestValidateDNS01CloudflareRequiresToken(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.TLS.ACME = ACMEConfig{
 		Enabled: true,
@@ -267,6 +282,7 @@ func TestValidateDNS01CloudflareRequiresToken(t *testing.T) {
 }
 
 func TestValidateDNS01UnsupportedProvider(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.TLS.ACME = ACMEConfig{
 		Enabled: true,
@@ -281,6 +297,7 @@ func TestValidateDNS01UnsupportedProvider(t *testing.T) {
 }
 
 func TestValidateRateLimitAutoBlock(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.RateLimit = RateLimitConfig{Enabled: true, QPS: 10, Burst: 20, AutoBlock: true, BlockAfter: 3, BlockFor: 10 * time.Minute}
 	if err := c.Validate(); err != nil {
@@ -305,6 +322,7 @@ func TestValidateRateLimitAutoBlock(t *testing.T) {
 }
 
 func TestValidateNXGuard(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.RateLimit = RateLimitConfig{
 		Enabled: false, // the NXDOMAIN guard is independent of the token bucket
@@ -337,6 +355,7 @@ func TestValidateNXGuard(t *testing.T) {
 }
 
 func TestValidateConnCaps(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.Server.MaxTCPConnsPerIP = 32
 	c.Server.MaxHTTPConnsPerIP = 64
@@ -355,6 +374,7 @@ func TestValidateConnCaps(t *testing.T) {
 }
 
 func TestValidateGeoBlock(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.GeoBlock = GeoBlockConfig{
 		Enabled:   true,
@@ -393,6 +413,7 @@ func TestValidateGeoBlock(t *testing.T) {
 }
 
 func TestValidateGeoBlockASNs(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.GeoBlock = GeoBlockConfig{
 		Enabled:    true,
@@ -430,6 +451,7 @@ func TestValidateGeoBlockASNs(t *testing.T) {
 }
 
 func TestValidateClientGroupASNs(t *testing.T) {
+	t.Parallel()
 	// A group may match purely by ASN (no CIDRs at all).
 	c := validBase()
 	c.ClientGroups = []ClientGroup{
@@ -464,6 +486,7 @@ func TestValidateClientGroupASNs(t *testing.T) {
 }
 
 func TestValidateGeoBlockIPsAndHoneypots(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.GeoBlock = GeoBlockConfig{
 		Enabled:   true,
@@ -492,6 +515,7 @@ func TestValidateGeoBlockIPsAndHoneypots(t *testing.T) {
 }
 
 func TestValidateGeoBlockHoneypotUDPBlock(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.GeoBlock = GeoBlockConfig{Enabled: true, Countries: []string{"RU"}, HoneypotUDPBlock: 10 * time.Minute}
 	c.RateLimit = RateLimitConfig{Enabled: true, QPS: 10, Burst: 20}
@@ -515,6 +539,7 @@ func TestValidateGeoBlockHoneypotUDPBlock(t *testing.T) {
 }
 
 func TestGeoAutoUpdateDefault(t *testing.T) {
+	t.Parallel()
 	if d := Default().GeoBlock.AutoUpdate; d != 168*time.Hour {
 		t.Errorf("geo_block.auto_update default = %v, want 168h (weekly)", d)
 	}
@@ -524,6 +549,7 @@ func TestGeoAutoUpdateDefault(t *testing.T) {
 // off by default (warming generates upstream traffic), a 15m interval over a
 // 24h lookback, capped at 5000 domains per pass with 8-way concurrency.
 func TestWarmerDefaults(t *testing.T) {
+	t.Parallel()
 	c := Default()
 	if c.Warmer.Enabled {
 		t.Error("warmer.enabled should default to false (off = no upstream traffic)")
@@ -544,6 +570,7 @@ func TestWarmerDefaults(t *testing.T) {
 
 // TestWarmerValidation verifies negative warmer values are rejected.
 func TestWarmerValidation(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.Warmer = WarmerConfig{Interval: -time.Minute}
 	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "warmer.interval") {
@@ -568,6 +595,7 @@ func TestWarmerValidation(t *testing.T) {
 
 // TestWarmerValid verifies a fully-configured warmer is accepted.
 func TestWarmerValid(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.Warmer = WarmerConfig{Enabled: true, Interval: 5 * time.Minute, Lookback: time.Hour, MaxDomains: 100, Concurrency: 4}
 	if err := c.Validate(); err != nil {
@@ -576,6 +604,7 @@ func TestWarmerValid(t *testing.T) {
 }
 
 func TestValidateDNS01SupportedProviders(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		provider string
 		dns01    DNS01Config
@@ -616,12 +645,14 @@ func dhcpBase() *Config {
 }
 
 func TestValidateDHCPValid(t *testing.T) {
+	t.Parallel()
 	if err := dhcpBase().Validate(); err != nil {
 		t.Fatalf("valid DHCP config rejected: %v", err)
 	}
 }
 
 func TestValidateDHCPRequiresRange(t *testing.T) {
+	t.Parallel()
 	c := dhcpBase()
 	c.DHCP.RangeStart = ""
 	if err := c.Validate(); err == nil {
@@ -630,6 +661,7 @@ func TestValidateDHCPRequiresRange(t *testing.T) {
 }
 
 func TestValidateDHCPBadSubnet(t *testing.T) {
+	t.Parallel()
 	c := dhcpBase()
 	c.DHCP.Subnet = "not-a-cidr"
 	if err := c.Validate(); err == nil {
@@ -638,6 +670,7 @@ func TestValidateDHCPBadSubnet(t *testing.T) {
 }
 
 func TestValidateDHCPRangeOutsideSubnet(t *testing.T) {
+	t.Parallel()
 	c := dhcpBase()
 	c.DHCP.RangeEnd = "10.9.9.9"
 	if err := c.Validate(); err == nil {
@@ -646,6 +679,7 @@ func TestValidateDHCPRangeOutsideSubnet(t *testing.T) {
 }
 
 func TestValidateDHCPReversedRange(t *testing.T) {
+	t.Parallel()
 	c := dhcpBase()
 	c.DHCP.RangeStart = "192.168.1.200"
 	c.DHCP.RangeEnd = "192.168.1.100"
@@ -655,6 +689,7 @@ func TestValidateDHCPReversedRange(t *testing.T) {
 }
 
 func TestValidateDHCPBadGateway(t *testing.T) {
+	t.Parallel()
 	c := dhcpBase()
 	c.DHCP.Gateway = "203.0.113.1" // outside the subnet
 	if err := c.Validate(); err == nil {
@@ -663,6 +698,7 @@ func TestValidateDHCPBadGateway(t *testing.T) {
 }
 
 func TestValidateDHCPBadDNS(t *testing.T) {
+	t.Parallel()
 	c := dhcpBase()
 	c.DHCP.DNS = []string{"not-an-ip"}
 	if err := c.Validate(); err == nil {
@@ -671,6 +707,7 @@ func TestValidateDHCPBadDNS(t *testing.T) {
 }
 
 func TestValidateDHCPBadDomain(t *testing.T) {
+	t.Parallel()
 	c := dhcpBase()
 	c.DHCP.Domain = "bad domain!"
 	if err := c.Validate(); err == nil {
@@ -679,6 +716,7 @@ func TestValidateDHCPBadDomain(t *testing.T) {
 }
 
 func TestValidateDHCPStaticLease(t *testing.T) {
+	t.Parallel()
 	// Valid static reservation passes.
 	c := dhcpBase()
 	c.DHCP.StaticLeases = []DHCPStaticLease{{MAC: "aa:bb:cc:dd:ee:ff", IP: "192.168.1.50", Hostname: "printer"}}
@@ -700,6 +738,7 @@ func TestValidateDHCPStaticLease(t *testing.T) {
 }
 
 func TestValidateDHCPv6(t *testing.T) {
+	t.Parallel()
 	// Valid v6 config passes.
 	c := dhcpBase()
 	c.DHCP.IPv6 = true
@@ -723,6 +762,7 @@ func TestValidateDHCPv6(t *testing.T) {
 // ---- upstream routes (conditional / split-horizon forwarding) ----
 
 func TestValidateUpstreamRoutes(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.UpstreamRoutes = []UpstreamRoute{
 		{Domain: "lan", Upstreams: []string{"udp://192.168.1.1:53"}},
@@ -738,6 +778,7 @@ func TestValidateUpstreamRoutes(t *testing.T) {
 }
 
 func TestValidateUpstreamRoutesRequireUpstreams(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.UpstreamRoutes = []UpstreamRoute{{Domain: "lan"}}
 	if err := c.Validate(); err == nil {
@@ -746,6 +787,7 @@ func TestValidateUpstreamRoutesRequireUpstreams(t *testing.T) {
 }
 
 func TestValidateUpstreamRoutesRejectEmptyEntry(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.UpstreamRoutes = []UpstreamRoute{{Domain: "lan", Upstreams: []string{"udp://192.168.1.1:53", ""}}}
 	if err := c.Validate(); err == nil {
@@ -754,6 +796,7 @@ func TestValidateUpstreamRoutesRejectEmptyEntry(t *testing.T) {
 }
 
 func TestValidateUpstreamRoutesRejectBadDomain(t *testing.T) {
+	t.Parallel()
 	c := validBase()
 	c.UpstreamRoutes = []UpstreamRoute{{Domain: "bad domain!", Upstreams: []string{"udp://192.168.1.1:53"}}}
 	if err := c.Validate(); err == nil {

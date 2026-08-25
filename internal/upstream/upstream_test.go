@@ -203,6 +203,7 @@ func startDoQTestServer(t *testing.T) (addr string, clientTLS *tls.Config, accep
 }
 
 func TestTCPUpstreamReusesConnection(t *testing.T) {
+	t.Parallel()
 	addr, accepted := startTCPTestServer(t)
 	u := NewWithTLS(TCP, addr, "", nil)
 	t.Cleanup(u.Close)
@@ -226,6 +227,7 @@ func TestTCPUpstreamReusesConnection(t *testing.T) {
 // per query. The dial count comes from the Dialer's Control hook, which the
 // kernel invokes once per socket.
 func TestUDPUpstreamReusesSocket(t *testing.T) {
+	t.Parallel()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -269,6 +271,7 @@ func TestUDPUpstreamReusesSocket(t *testing.T) {
 }
 
 func TestDoTUpstreamReusesConnection(t *testing.T) {
+	t.Parallel()
 	addr, clientTLS, accepted := startDoTTestServer(t)
 	u := NewWithTLS(TLS, addr, "localhost", clientTLS)
 	t.Cleanup(u.Close)
@@ -287,6 +290,7 @@ func TestDoTUpstreamReusesConnection(t *testing.T) {
 }
 
 func TestDoQUpstreamReusesConnection(t *testing.T) {
+	t.Parallel()
 	addr, clientTLS, accepted := startDoQTestServer(t)
 	u := NewWithTLS(QUIC, addr, "localhost", clientTLS)
 	t.Cleanup(u.Close)
@@ -377,6 +381,7 @@ func startDoQTestServerWithHang(t *testing.T) (addr string, clientTLS *tls.Confi
 // must not prevent a subsequent query from succeeding on the same
 // connection.
 func TestDoQStreamRespectsDeadline(t *testing.T) {
+	t.Parallel()
 	addr, clientTLS, hang := startDoQTestServerWithHang(t)
 	u := NewWithTLS(QUIC, addr, "localhost", clientTLS)
 	t.Cleanup(u.Close)
@@ -411,6 +416,7 @@ func TestDoQStreamRespectsDeadline(t *testing.T) {
 // enough to prove the wiring; internal/recursive's own tests cover the
 // referral-walking logic in depth.
 func TestRecursiveUpstreamDispatches(t *testing.T) {
+	t.Parallel()
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
@@ -444,6 +450,7 @@ func TestRecursiveUpstreamDispatches(t *testing.T) {
 // TestParseRecursiveScheme verifies "recursive://" parses to the Recursive
 // transport without requiring a host.
 func TestParseRecursiveScheme(t *testing.T) {
+	t.Parallel()
 	u, err := Parse("recursive://")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
@@ -457,6 +464,7 @@ func TestParseRecursiveScheme(t *testing.T) {
 // actually treats as the recursive transport, so the startup root-hints
 // fetch can't drift from the real classification.
 func TestIsRecursiveSpec(t *testing.T) {
+	t.Parallel()
 	cases := map[string]bool{
 		"recursive://":     true,
 		"recursive://root": true,
@@ -479,6 +487,7 @@ func TestIsRecursiveSpec(t *testing.T) {
 // of being reused — resolvers close idle DoT/TCP connections on their own
 // schedule, and reusing one would waste a query on a guaranteed EOF.
 func TestPoolEvictsStaleConnection(t *testing.T) {
+	t.Parallel()
 	addr, accepted := startTCPTestServer(t)
 	u := NewWithTLS(TCP, addr, "", nil)
 	t.Cleanup(u.Close)
@@ -509,6 +518,7 @@ func TestPoolEvictsStaleConnection(t *testing.T) {
 // fail with "unexpected EOF" — and that the blip is not counted as an
 // upstream failure (the retry succeeded, so the server was never down).
 func TestDoHRetriesStaleConnection(t *testing.T) {
+	t.Parallel()
 	var mu sync.Mutex
 	answered := 0
 	closing := true // first request closes its connection after answering
@@ -587,6 +597,7 @@ func TestDoHRetriesStaleConnection(t *testing.T) {
 // actually clears the pooled/persistent connections it holds — the property
 // SetUpstreams' hot-swap relies on to avoid leaking sockets on reload.
 func TestUpstreamCloseDrainsPoolAndQUICConn(t *testing.T) {
+	t.Parallel()
 	tcpAddr, _ := startTCPTestServer(t)
 	tcpUp := NewWithTLS(TCP, tcpAddr, "", nil)
 	if _, err := tcpUp.Query(t.Context(), aQuery()); err != nil {
@@ -617,6 +628,7 @@ func TestUpstreamCloseDrainsPoolAndQUICConn(t *testing.T) {
 // open it (Available false), a success closes it, and an open circuit re-arms
 // once the cooldown elapses so the next query probes the upstream again.
 func TestCircuitBreaker(t *testing.T) {
+	t.Parallel()
 	u := &Upstream{Transport: UDP, Addr: "127.0.0.1:1"}
 	for range circuitOpenFails {
 		u.markResult(context.DeadlineExceeded)
@@ -654,6 +666,7 @@ func TestCircuitBreaker(t *testing.T) {
 // truncated UDP reply (the answer outgrew the negotiated EDNS buffer) is
 // retried over TCP on the same server address instead of failing the query.
 func TestUDPTruncatedFallsBackToTCP(t *testing.T) {
+	t.Parallel()
 	// The TCP and UDP listeners must share one address (the fallback retries
 	// the same server over TCP): the TCP side answers 1.2.3.4, the UDP side
 	// always truncates.
@@ -704,6 +717,7 @@ func TestUDPTruncatedFallsBackToTCP(t *testing.T) {
 // for realistic answers without risking IP fragmentation (the old 4096
 // could be dropped silently on fragmented paths).
 func TestUDPQueryAdvertisesEDNS1232(t *testing.T) {
+	t.Parallel()
 	var gotSize atomic.Int32
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -739,6 +753,7 @@ func TestUDPQueryAdvertisesEDNS1232(t *testing.T) {
 // storm on an up-but-misbehaving endpoint can no longer hide from
 // availability checks and cooldowns.
 func TestDoHHTTPErrorCountsAsFailure(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "upstream unhappy", http.StatusInternalServerError)
 	}))
@@ -763,6 +778,7 @@ func TestDoHHTTPErrorCountsAsFailure(t *testing.T) {
 // transport — so race mode skips it instead of burning its timeout per
 // query.
 func TestRecursiveFailureCountsAsFailure(t *testing.T) {
+	t.Parallel()
 	u := NewRecursive([]string{"127.0.0.1:1"}) // nothing listening there
 	if _, err := u.Query(t.Context(), aQuery()); err == nil {
 		t.Fatal("expected an error for an unreachable root hint")

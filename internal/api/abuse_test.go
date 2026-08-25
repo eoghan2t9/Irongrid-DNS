@@ -80,6 +80,7 @@ func TestAbuseReportHandler(t *testing.T) {
 }
 
 func TestAbuseReportHandlerNoKey(t *testing.T) {
+	t.Parallel()
 	h := &Handler{Cfg: config.Default()} // key empty
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/abuse/report", bytes.NewBufferString(`{"ip":"203.0.113.9"}`))
@@ -90,6 +91,7 @@ func TestAbuseReportHandlerNoKey(t *testing.T) {
 }
 
 func TestAbuseReportHandlerBadIP(t *testing.T) {
+	t.Parallel()
 	h := &Handler{Cfg: config.Default()}
 	for _, body := range []string{`{}`, `{"ip":""}`, `{"ip":"not-an-ip"}`} {
 		rr := httptest.NewRecorder()
@@ -102,6 +104,7 @@ func TestAbuseReportHandlerBadIP(t *testing.T) {
 }
 
 func TestAbuseExportCSV(t *testing.T) {
+	t.Parallel()
 	dnsH := dnsserver.NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, 5)
 	banner := geoip.NewBanner("", nil, nil, []string{"trap.example.com"})
 	if err := banner.Block("203.0.113.9"); err != nil {

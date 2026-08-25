@@ -3,6 +3,7 @@ package tuning
 import "testing"
 
 func TestDragonflyFlagsForSystem(t *testing.T) {
+	t.Parallel()
 	const gib = 1 << 30
 	const mib = 1 << 20
 
@@ -71,6 +72,7 @@ func TestDragonflyFlagsForSystem(t *testing.T) {
 }
 
 func TestFormatDflyMemory(t *testing.T) {
+	t.Parallel()
 	const gib = 1 << 30
 	const mib = 1 << 20
 

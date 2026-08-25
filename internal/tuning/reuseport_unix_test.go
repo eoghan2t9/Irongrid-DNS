@@ -13,6 +13,7 @@ import (
 // them) and that a datagram sent to the shared address is received by one of
 // them — the property the multi-socket DNS listener relies on.
 func TestReuseportListeners(t *testing.T) {
+	t.Parallel()
 	lc := &net.ListenConfig{Control: ReuseportControl}
 	first, err := lc.ListenPacket(t.Context(), "udp", "127.0.0.1:0")
 	if err != nil {

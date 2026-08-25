@@ -21,6 +21,7 @@ import (
 )
 
 func TestStatusIncludesMachineReadableVersion(t *testing.T) {
+	t.Parallel()
 	h := &Handler{
 		Cfg:       &config.Config{},
 		Tunnel:    &tunnel.Manager{},
@@ -53,6 +54,7 @@ func TestStatusIncludesMachineReadableVersion(t *testing.T) {
 // (401) — 401 here would mean the route exists and just happens to reject
 // this particular request, not that it's absent.
 func TestPprofDisabledByDefault(t *testing.T) {
+	t.Parallel()
 	a := testApp(t)
 	router := NewRouter(a)
 	rr := httptest.NewRecorder()
@@ -69,6 +71,7 @@ func TestPprofDisabledByDefault(t *testing.T) {
 // still sits behind the same auth as the REST API — an unauthenticated
 // request must never see profiling data.
 func TestPprofRequiresAuth(t *testing.T) {
+	t.Parallel()
 	a := testApp(t)
 	a.Config.Server.DebugPprof = true
 	router := NewRouter(a)
@@ -85,6 +88,7 @@ func TestPprofRequiresAuth(t *testing.T) {
 // TestPprofServesWhenAuthorized verifies an authenticated request to the
 // pprof index actually reaches the handler (not just "not 401").
 func TestPprofServesWhenAuthorized(t *testing.T) {
+	t.Parallel()
 	a := testApp(t)
 	a.Config.Server.DebugPprof = true
 	router := NewRouter(a)
@@ -112,6 +116,7 @@ func TestPprofServesWhenAuthorized(t *testing.T) {
 // picked up, and compressible assets are served with the best encoding the
 // client accepts — Brotli when offered, otherwise gzip, else raw.
 func TestServeFromFSAssetCachingAndGzip(t *testing.T) {
+	t.Parallel()
 	big := strings.Repeat("const data = 'x'; ", 200) // > compressThreshold bytes
 	root := fstest.MapFS{
 		"index.html":         &fstest.MapFile{Data: []byte("<html>dashboard</html>")},
@@ -190,6 +195,7 @@ func TestServeFromFSAssetCachingAndGzip(t *testing.T) {
 }
 
 func TestServeFromFSContentType(t *testing.T) {
+	t.Parallel()
 	root := fstest.MapFS{
 		"index.html":    &fstest.MapFile{Data: []byte("<html>dashboard</html>")},
 		"assets/app.js": &fstest.MapFile{Data: []byte("console.log('hi')")},

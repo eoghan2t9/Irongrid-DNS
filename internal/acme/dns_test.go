@@ -3,6 +3,7 @@ package acme
 import "testing"
 
 func TestNewDNSProvider(t *testing.T) {
+	t.Parallel()
 	if p, err := NewDNSProvider("", DNSProviderConfig{}); err != nil || p != nil {
 		t.Fatalf("empty provider = %v, %v; want nil,nil", p, err)
 	}

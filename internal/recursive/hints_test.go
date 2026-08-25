@@ -68,6 +68,7 @@ extra.invalid. 3600000 TXT "ignored"
 `
 
 func TestParseRootHints(t *testing.T) {
+	t.Parallel()
 	hints, err := ParseRootHints([]byte(sampleRootHints))
 	if err != nil {
 		t.Fatalf("ParseRootHints: %v", err)
@@ -92,6 +93,7 @@ func TestParseRootHints(t *testing.T) {
 }
 
 func TestParseRootHintsRejectsMangled(t *testing.T) {
+	t.Parallel()
 	var nsOnly, v6Only strings.Builder
 	for _, l := range "abcdefghijklm" {
 		name := fmt.Sprintf("%c.ROOT-SERVERS.NET.", l)
@@ -147,6 +149,7 @@ func signedHintsServer(t *testing.T, entity *openpgp.Entity) *httptest.Server {
 }
 
 func TestLoadRootHints(t *testing.T) {
+	t.Parallel()
 	acceptAll := func(sig, signed []byte) error { return nil }
 	srv := signedHintsServer(t, testSigningEntity(t))
 	dir := t.TempDir()
@@ -197,6 +200,7 @@ func TestLoadRootHints(t *testing.T) {
 }
 
 func TestVerifyRootHintsFlow(t *testing.T) {
+	t.Parallel()
 	entity := testSigningEntity(t)
 	keyring := openpgp.EntityList{entity}
 	verify := func(sig, signed []byte) error {
@@ -231,6 +235,7 @@ func TestVerifyRootHintsFlow(t *testing.T) {
 // TestRootHintsEmbeddedKey pins the embedded Verisign key: it must parse,
 // carry the documented fingerprint, and be what VerifyRootHints uses.
 func TestRootHintsEmbeddedKey(t *testing.T) {
+	t.Parallel()
 	keyring, err := openpgp.ReadArmoredKeyRing(strings.NewReader(RootHintsKey))
 	if err != nil {
 		t.Fatalf("embedded key does not parse: %v", err)
@@ -299,6 +304,7 @@ func TestHintsManager(t *testing.T) {
 }
 
 func TestHintsManagerStart(t *testing.T) {
+	t.Parallel()
 	var calls atomic.Int32
 	srv := signedHintsServer(t, testSigningEntity(t))
 	ctx := t.Context()

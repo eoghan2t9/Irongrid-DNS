@@ -18,6 +18,7 @@ import (
 // Dragonfly-cache and query-log cards read. A disabled log and local-only
 // cache keep the test free of a live Redis server.
 func TestGetStatsShape(t *testing.T) {
+	t.Parallel()
 	ql := querylog.NewDisabled(30)
 	defer ql.Close()
 	h := &Handler{

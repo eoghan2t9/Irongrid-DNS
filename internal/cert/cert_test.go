@@ -9,6 +9,7 @@ import (
 )
 
 func TestGenerateECDSA(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	info, err := Generate(dir, []string{"dns.example.com", "192.168.1.10"}, "ecdsa", 0, 30)
 	if err != nil {
@@ -55,6 +56,7 @@ func TestGenerateECDSA(t *testing.T) {
 }
 
 func TestGenerateRSA(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	info, err := Generate(dir, []string{"localhost"}, "rsa", 2048, 0)
 	if err != nil {
@@ -69,6 +71,7 @@ func TestGenerateRSA(t *testing.T) {
 }
 
 func TestGenerateOverwrites(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	a, err := Generate(dir, []string{"one.example.com"}, "ecdsa", 0, 30)
 	if err != nil {
@@ -87,6 +90,7 @@ func TestGenerateOverwrites(t *testing.T) {
 }
 
 func TestInspectNone(t *testing.T) {
+	t.Parallel()
 	info, err := Inspect(t.TempDir(), "", "")
 	if err != nil {
 		t.Fatalf("Inspect on empty dir: %v", err)
@@ -97,6 +101,7 @@ func TestInspectNone(t *testing.T) {
 }
 
 func TestInspectCustom(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	if _, err := Generate(dir, []string{"ca.example.com"}, "ecdsa", 0, 30); err != nil {
 		t.Fatal(err)
@@ -120,12 +125,14 @@ func TestInspectCustom(t *testing.T) {
 }
 
 func TestGenerateBadHosts(t *testing.T) {
+	t.Parallel()
 	if _, err := Generate(t.TempDir(), nil, "ecdsa", 0, 30); err != nil {
 		t.Fatalf("Generate with nil hosts should default to localhost, got error: %v", err)
 	}
 }
 
 func TestInspectNotAfterInFuture(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	info, err := Generate(dir, []string{"localhost"}, "ecdsa", 0, 30)
 	if err != nil {

@@ -16,6 +16,7 @@ import (
 )
 
 func TestParseSemver(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in  string
 		ok  bool
@@ -49,6 +50,7 @@ func TestParseSemver(t *testing.T) {
 }
 
 func TestNewer(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		latest, current string
 		want            bool
@@ -74,6 +76,7 @@ func TestNewer(t *testing.T) {
 }
 
 func TestAssetName(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		goos, goarch, want string
 	}{
@@ -90,6 +93,7 @@ func TestAssetName(t *testing.T) {
 }
 
 func TestV3AssetName(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		goos, goarch, want string
 	}{
@@ -150,6 +154,7 @@ const releaseJSON = `{
 }`
 
 func TestCheckFindsUpdate(t *testing.T) {
+	t.Parallel()
 	srv := fakeRelease(t, releaseJSON, http.StatusOK)
 	defer srv.Close()
 	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL}
@@ -240,6 +245,7 @@ func TestCheckFallsBackWhenReleaseHasNoV3Asset(t *testing.T) {
 }
 
 func TestCheckUpToDate(t *testing.T) {
+	t.Parallel()
 	srv := fakeRelease(t, releaseJSON, http.StatusOK)
 	defer srv.Close()
 	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.1", latestURL: srv.URL}
@@ -257,6 +263,7 @@ const releasesJSON = `[
 ]`
 
 func TestListFiltersPrereleases(t *testing.T) {
+	t.Parallel()
 	srv := fakeRelease(t, releasesJSON, http.StatusOK)
 	defer srv.Close()
 	c := &Client{HTTPClient: srv.Client(), listURL: srv.URL}
@@ -277,6 +284,7 @@ func TestListFiltersPrereleases(t *testing.T) {
 }
 
 func TestListHTTPError(t *testing.T) {
+	t.Parallel()
 	srv := fakeRelease(t, `{"message":"rate limited"}`, http.StatusForbidden)
 	defer srv.Close()
 	c := &Client{HTTPClient: srv.Client(), listURL: srv.URL}
@@ -286,6 +294,7 @@ func TestListHTTPError(t *testing.T) {
 }
 
 func TestCheckHTTPError(t *testing.T) {
+	t.Parallel()
 	srv := fakeRelease(t, `{"message":"rate limited"}`, http.StatusForbidden)
 	defer srv.Close()
 	c := &Client{HTTPClient: srv.Client(), Current: "v1.0.0", latestURL: srv.URL}
@@ -334,6 +343,7 @@ func installTestServer(t *testing.T, bin []byte, goodSum bool) *httptest.Server 
 }
 
 func TestInstall(t *testing.T) {
+	t.Parallel()
 	bin := []byte("#!/bin/sh\necho fake binary v9.9.9\n")
 	srv := installTestServer(t, bin, true)
 
@@ -465,6 +475,7 @@ func releaseWithoutSums(t *testing.T, bin []byte) *httptest.Server {
 }
 
 func TestInstallRefusesReleaseWithoutChecksums(t *testing.T) {
+	t.Parallel()
 	bin := []byte("new binary")
 	srv := releaseWithoutSums(t, bin)
 
@@ -486,6 +497,7 @@ func TestInstallRefusesReleaseWithoutChecksums(t *testing.T) {
 }
 
 func TestUnitName(t *testing.T) {
+	t.Parallel()
 	// On a systemd host the cgroup or executable name always yields a
 	// *.service; otherwise it falls back to the executable basename, which
 	// is never empty for a running test binary.
@@ -499,6 +511,7 @@ func TestUnitName(t *testing.T) {
 }
 
 func TestUnitFromCgroupData(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		data string
@@ -524,6 +537,7 @@ func TestUnitFromCgroupData(t *testing.T) {
 }
 
 func TestInstallChecksumMismatch(t *testing.T) {
+	t.Parallel()
 	bin := []byte("new binary")
 	srv := installTestServer(t, bin, false) // wrong checksum served
 
@@ -545,6 +559,7 @@ func TestInstallChecksumMismatch(t *testing.T) {
 }
 
 func TestInstallUpToDate(t *testing.T) {
+	t.Parallel()
 	bin := []byte("new binary")
 	srv := installTestServer(t, bin, true)
 	c := &Client{HTTPClient: srv.Client(), Current: "v9.9.9", latestURL: srv.URL + "/release"}
@@ -554,6 +569,7 @@ func TestInstallUpToDate(t *testing.T) {
 }
 
 func TestInfoJSONShape(t *testing.T) {
+	t.Parallel()
 	// The frontend consumes these exact keys; lock the shape down.
 	raw, err := json.Marshal(Info{CurrentVersion: "v1.0.0", LatestVersion: "v1.0.1", Available: true})
 	if err != nil {

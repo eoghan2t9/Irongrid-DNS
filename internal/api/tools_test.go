@@ -83,6 +83,7 @@ func postTools(t *testing.T, h *Handler, path, body string) (int, []byte) {
 }
 
 func TestToolsResolve(t *testing.T) {
+	t.Parallel()
 	addr := startUDPDNS(t, map[string][]dns.RR{
 		"test.example.|A": {&dns.A{Hdr: dns.RR_Header{Name: "test.example.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("1.2.3.4")}},
 	})
@@ -118,6 +119,7 @@ func TestToolsResolve(t *testing.T) {
 // must serialize answers as [] — not null — because the frontend reads
 // res.answers.length and null.length throws, blanking the whole page.
 func TestToolsResolveNXDOMAINAnswersNotNull(t *testing.T) {
+	t.Parallel()
 	addr := startUDPDNS(t, map[string][]dns.RR{}) // nothing answers -> NXDOMAIN
 	h := handlerFor(t, addr)
 
@@ -153,6 +155,7 @@ func TestToolsResolveNXDOMAINAnswersNotNull(t *testing.T) {
 }
 
 func TestToolsResolveBadSource(t *testing.T) {
+	t.Parallel()
 	h := &Handler{} // no local upstreams at all
 	code, body := postTools(t, h, "/api/tools/resolve", `{"name": "x.com", "sources": ["local"]}`)
 	if code != http.StatusOK {
@@ -168,6 +171,7 @@ func TestToolsResolveBadSource(t *testing.T) {
 }
 
 func TestToolsMail(t *testing.T) {
+	t.Parallel()
 	addr := startUDPDNS(t, map[string][]dns.RR{
 		"example.com.|MX":                     {&dns.MX{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: 300}, Preference: 10, Mx: "mail.example.com."}},
 		"example.com.|TXT":                    {txtRR("example.com.", "v=spf1 include:spf.example.net -all")},
@@ -203,6 +207,7 @@ func TestToolsMail(t *testing.T) {
 }
 
 func TestSpfIssues(t *testing.T) {
+	t.Parallel()
 	if issues := spfIssues("v=spf1 include:ok.example -all"); len(issues) != 0 {
 		t.Errorf("clean spf flagged: %v", issues)
 	}
@@ -218,6 +223,7 @@ func TestSpfIssues(t *testing.T) {
 }
 
 func TestToolsRBL(t *testing.T) {
+	t.Parallel()
 	addr := startUDPDNS(t, map[string][]dns.RR{
 		"4.3.2.1.zen.spamhaus.org.|A":   {&dns.A{Hdr: dns.RR_Header{Name: "4.3.2.1.zen.spamhaus.org.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("127.0.0.2")}},
 		"4.3.2.1.zen.spamhaus.org.|TXT": {txtRR("4.3.2.1.zen.spamhaus.org.", "Spam from this IP")},
@@ -257,6 +263,7 @@ func TestToolsRBL(t *testing.T) {
 }
 
 func TestToolsRBLBadIP(t *testing.T) {
+	t.Parallel()
 	code, _ := postTools(t, &Handler{}, "/api/tools/rbl", `{"ip": "not-an-ip"}`)
 	if code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", code)
@@ -369,6 +376,7 @@ func TestToolsAXFRRefused(t *testing.T) {
 // strategy survives the API payload mapping in both directions — a silently
 // dropped field here would make the Settings select a no-op.
 func TestConfigPayloadUpstreamMode(t *testing.T) {
+	t.Parallel()
 	c := config.Default()
 	if c.UpstreamMode != "race" {
 		t.Fatalf("default upstream_mode = %q, want race", c.UpstreamMode)
@@ -391,6 +399,7 @@ func TestConfigPayloadUpstreamMode(t *testing.T) {
 // exact bug that dropped listen_doh3/padding/cookies/debug_pprof (and later
 // udp_workers) on every Settings save.
 func TestConfigPayloadServerRoundTrip(t *testing.T) {
+	t.Parallel()
 	c := config.Default()
 	c.Server = config.ServerConfig{
 		ListenUDP:       "0.0.0.0:53",
@@ -455,6 +464,7 @@ func TestConfigPayloadServerRoundTrip(t *testing.T) {
 // survive the payload mapping in both directions — a silently dropped field
 // here would make the Settings ASN textareas a no-op on every save.
 func TestConfigPayloadGeoBlockRoundTrip(t *testing.T) {
+	t.Parallel()
 	c := config.Default()
 	c.GeoBlock = config.GeoBlockConfig{
 		Enabled:    true,
@@ -496,6 +506,7 @@ func TestConfigPayloadGeoBlockRoundTrip(t *testing.T) {
 // field survives the payload mapping in both directions — a silently dropped
 // field here would make the Client Groups ASN textarea a no-op on save.
 func TestConfigPayloadClientGroupASNsRoundTrip(t *testing.T) {
+	t.Parallel()
 	c := config.Default()
 	c.ClientGroups = []config.ClientGroup{
 		{ID: "cloud", Name: "Cloud egress", Enabled: true, ASNs: []string{"AS13335", "AS15169"}, CIDRs: []string{"10.0.0.0/8"}},
@@ -539,6 +550,7 @@ func startDelayedUDPDNS(t *testing.T, delay time.Duration) string {
 // to the same canonical form as the benchmark's candidate spec, so the UI
 // flags already-configured resolvers and never offers a duplicate.
 func TestCanonicalUpstreamKey(t *testing.T) {
+	t.Parallel()
 	cases := []struct{ spec, want string }{
 		{"1.1.1.1", "udp://1.1.1.1:53"},
 		{"udp://1.1.1.1:53", "udp://1.1.1.1:53"},

@@ -52,6 +52,7 @@ func newTestServer(t *testing.T, cfg Config, dir string) *Server {
 // ---- pool allocation ----
 
 func TestPoolAllocV4RoundRobin(t *testing.T) {
+	t.Parallel()
 	cfg, dir := testConfig(t)
 	s := newTestServer(t, cfg, dir)
 	mac1 := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01}
@@ -75,6 +76,7 @@ func TestPoolAllocV4RoundRobin(t *testing.T) {
 }
 
 func TestPoolAllocV4StaticWins(t *testing.T) {
+	t.Parallel()
 	cfg, dir := testConfig(t)
 	cfg.Static = []StaticLease{{MAC: "aa:bb:cc:dd:ee:01", IP: net.ParseIP("192.168.1.50"), Hostname: "printer"}}
 	s := newTestServer(t, cfg, dir)
@@ -89,6 +91,7 @@ func TestPoolAllocV4StaticWins(t *testing.T) {
 }
 
 func TestPoolAllocV4Exhaustion(t *testing.T) {
+	t.Parallel()
 	cfg, dir := testConfig(t)
 	// Tiny pool: 3 addresses.
 	cfg.RangeStart = net.ParseIP("192.168.1.100")
@@ -116,6 +119,7 @@ func TestPoolAllocV4Exhaustion(t *testing.T) {
 }
 
 func TestPoolAllocV6(t *testing.T) {
+	t.Parallel()
 	cfg, dir := testConfig(t)
 	s := newTestServer(t, cfg, dir)
 	duid := "000100011234567890abcdef"
@@ -155,6 +159,7 @@ func (f *fakeV4Conn) SetReadDeadline(t time.Time) error        { return nil }
 func (f *fakeV4Conn) SetWriteDeadline(t time.Time) error       { return nil }
 
 func TestV4DORA(t *testing.T) {
+	t.Parallel()
 	cfg, dir := testConfig(t)
 	s := newTestServer(t, cfg, dir)
 
@@ -227,6 +232,7 @@ func TestV4DORA(t *testing.T) {
 // ---- reverse (PTR) lookups ----
 
 func TestLookupPTR(t *testing.T) {
+	t.Parallel()
 	cfg, dir := testConfig(t)
 	s := newTestServer(t, cfg, dir)
 	mac := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x07}
@@ -264,6 +270,7 @@ func TestLookupPTR(t *testing.T) {
 }
 
 func TestV4RequestRejectsTakenAddress(t *testing.T) {
+	t.Parallel()
 	cfg, dir := testConfig(t)
 	s := newTestServer(t, cfg, dir)
 	macA := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x01}
@@ -295,6 +302,7 @@ func TestV4RequestRejectsTakenAddress(t *testing.T) {
 }
 
 func TestV4ReleaseFreesLease(t *testing.T) {
+	t.Parallel()
 	cfg, dir := testConfig(t)
 	s := newTestServer(t, cfg, dir)
 	mac := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x09}
@@ -314,6 +322,7 @@ func TestV4ReleaseFreesLease(t *testing.T) {
 // ---- persistence ----
 
 func TestLeasePersistenceRoundTrip(t *testing.T) {
+	t.Parallel()
 	cfg, dir := testConfig(t)
 	s := newTestServer(t, cfg, dir)
 	mac := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0x07}
@@ -333,6 +342,7 @@ func TestLeasePersistenceRoundTrip(t *testing.T) {
 }
 
 func TestStaticLeasePersistsOnlyWhileConfigured(t *testing.T) {
+	t.Parallel()
 	cfg, dir := testConfig(t)
 	cfg.Static = []StaticLease{{MAC: "aa:bb:cc:dd:ee:01", IP: net.ParseIP("192.168.1.50"), Hostname: "printer"}}
 	s := newTestServer(t, cfg, dir)
@@ -352,6 +362,7 @@ func TestStaticLeasePersistsOnlyWhileConfigured(t *testing.T) {
 // ---- misc ----
 
 func TestHostnameSanitize(t *testing.T) {
+	t.Parallel()
 	cases := map[string]string{
 		"Kitchen-PC":  "kitchen-pc",
 		"  cam  ":     "cam",
@@ -367,6 +378,7 @@ func TestHostnameSanitize(t *testing.T) {
 }
 
 func TestDomainPeeling(t *testing.T) {
+	t.Parallel()
 	cfg, dir := testConfig(t)
 	cfg.Domain = "lan"
 	s := newTestServer(t, cfg, dir)
@@ -438,6 +450,7 @@ func clientDUID6(mac byte) dhcpv6.DUID {
 }
 
 func TestV6SolicitAdvertiseRequest(t *testing.T) {
+	t.Parallel()
 	cfg, dir := testConfig(t)
 	s := newTestServer(t, cfg, dir)
 	conn := &fakeV6Conn{}
@@ -523,6 +536,7 @@ func TestV6SolicitAdvertiseRequest(t *testing.T) {
 }
 
 func TestV6RapidCommit(t *testing.T) {
+	t.Parallel()
 	cfg, dir := testConfig(t)
 	s := newTestServer(t, cfg, dir)
 	conn := &fakeV6Conn{}
@@ -555,6 +569,7 @@ func TestV6RapidCommit(t *testing.T) {
 }
 
 func TestV6Release(t *testing.T) {
+	t.Parallel()
 	cfg, dir := testConfig(t)
 	s := newTestServer(t, cfg, dir)
 	conn := &fakeV6Conn{}
@@ -581,6 +596,7 @@ func TestV6Release(t *testing.T) {
 }
 
 func TestV6RequestUnavailableNoAddrs(t *testing.T) {
+	t.Parallel()
 	cfg, dir := testConfig(t)
 	s := newTestServer(t, cfg, dir)
 	conn := &fakeV6Conn{}

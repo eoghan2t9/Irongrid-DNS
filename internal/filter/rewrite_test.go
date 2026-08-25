@@ -7,6 +7,7 @@ import (
 )
 
 func TestRewriterExactAndWildcard(t *testing.T) {
+	t.Parallel()
 	rw := NewRewriter()
 	rw.Set([]RewriteSpec{
 		{Domain: "nas.home", Type: "A", Value: "192.168.1.10", TTL: 300},
@@ -28,6 +29,7 @@ func TestRewriterExactAndWildcard(t *testing.T) {
 }
 
 func TestRewriterExactWinsOverWildcard(t *testing.T) {
+	t.Parallel()
 	rw := NewRewriter()
 	rw.Set([]RewriteSpec{
 		{Domain: "*.example.com", Type: "A", Value: "10.0.0.1", TTL: 60},
@@ -40,6 +42,7 @@ func TestRewriterExactWinsOverWildcard(t *testing.T) {
 }
 
 func TestRewriterBuildAnswerTypeMismatchIsNoMatch(t *testing.T) {
+	t.Parallel()
 	rw := NewRewriter()
 	rw.Set([]RewriteSpec{{Domain: "nas.home", Type: "A", Value: "192.168.1.10", TTL: 300}})
 	rules, ok := rw.Lookup("nas.home.")
@@ -55,6 +58,7 @@ func TestRewriterBuildAnswerTypeMismatchIsNoMatch(t *testing.T) {
 }
 
 func TestRewriterBuildAnswerA(t *testing.T) {
+	t.Parallel()
 	rw := NewRewriter()
 	rw.Set([]RewriteSpec{{Domain: "nas.home", Type: "A", Value: "192.168.1.10", TTL: 300}})
 	rules, _ := rw.Lookup("nas.home.")
@@ -71,6 +75,7 @@ func TestRewriterBuildAnswerA(t *testing.T) {
 }
 
 func TestRewriterCNAMEAnswersAnyQtype(t *testing.T) {
+	t.Parallel()
 	rw := NewRewriter()
 	rw.Set([]RewriteSpec{{Domain: "web.home", Type: "CNAME", Value: "nas.home", TTL: 300}})
 	rules, ok := rw.Lookup("web.home.")
@@ -89,6 +94,7 @@ func TestRewriterCNAMEAnswersAnyQtype(t *testing.T) {
 }
 
 func TestRewriterSetReplacesWholeTable(t *testing.T) {
+	t.Parallel()
 	rw := NewRewriter()
 	rw.Set([]RewriteSpec{{Domain: "a.home", Type: "A", Value: "1.1.1.1", TTL: 60}})
 	rw.Set([]RewriteSpec{{Domain: "b.home", Type: "A", Value: "2.2.2.2", TTL: 60}})
@@ -101,6 +107,7 @@ func TestRewriterSetReplacesWholeTable(t *testing.T) {
 }
 
 func TestRewriterInvalidSpecsAreSkipped(t *testing.T) {
+	t.Parallel()
 	rw := NewRewriter()
 	rw.Set([]RewriteSpec{
 		{Domain: "", Type: "A", Value: "1.1.1.1"},

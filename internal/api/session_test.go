@@ -26,6 +26,7 @@ func testApp(t *testing.T) *App {
 // login sets a signed cookie, and a subsequent request carrying only that
 // cookie (as a page reload would) is authorized.
 func TestSessionCookieRoundTrip(t *testing.T) {
+	t.Parallel()
 	a := testApp(t)
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
@@ -60,6 +61,7 @@ func TestSessionCookieRoundTrip(t *testing.T) {
 // TestSessionCookieRejectsUnauthenticated verifies requests with no valid
 // credentials and tampered cookies are rejected.
 func TestSessionCookieRejectsUnauthenticated(t *testing.T) {
+	t.Parallel()
 	a := testApp(t)
 	rr := httptest.NewRecorder()
 	if a.authorize(rr, httptest.NewRequest(http.MethodGet, "/api/status", nil)) {
@@ -91,6 +93,7 @@ func TestSessionCookieRejectsUnauthenticated(t *testing.T) {
 // keeps login persistence working when the configured username contains dots
 // (e.g. "john.doe") — the old raw "user.exp.sig" format would mis-split.
 func TestSessionCookieDottedUsername(t *testing.T) {
+	t.Parallel()
 	a := testApp(t)
 	a.Config.Web.Username = "john.doe"
 	rr := httptest.NewRecorder()
@@ -120,6 +123,7 @@ func TestSessionCookieDottedUsername(t *testing.T) {
 // kept when no new password is supplied, but rotated to a fresh value whenever
 // a new plaintext password is — invalidating every previously issued cookie.
 func TestSessionSecretRotation(t *testing.T) {
+	t.Parallel()
 	const current = "0123456789abcdef0123456789abcdef"
 
 	// No new password: keep the current secret (existing sessions survive).
@@ -155,6 +159,7 @@ func TestSessionSecretRotation(t *testing.T) {
 // TestLogoutClearsSessionCookie verifies POST /api/logout expires the session
 // cookie so the browser drops it.
 func TestLogoutClearsSessionCookie(t *testing.T) {
+	t.Parallel()
 	h := &Handler{Cfg: &config.Config{}}
 	rr := httptest.NewRecorder()
 	h.logout(rr)

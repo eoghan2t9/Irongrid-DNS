@@ -44,6 +44,7 @@ func TestLogASN(t *testing.T) {
 // TestLogASNEmpty verifies the endpoint with no usable IPs returns a clean
 // empty map.
 func TestLogASNEmpty(t *testing.T) {
+	t.Parallel()
 	h := &Handler{}
 	rr := httptest.NewRecorder()
 	h.logASN(rr, httptest.NewRequest(http.MethodGet, "/api/log/asn?ips=,not-an-ip,,", nil))
@@ -63,6 +64,7 @@ func TestLogASNEmpty(t *testing.T) {
 
 // TestASNCache covers positive, negative and expiry behaviour.
 func TestASNCache(t *testing.T) {
+	t.Parallel()
 	c := newASNCache()
 	now := time.Now()
 	if _, ok := c.get("8.8.8.8", now); ok {

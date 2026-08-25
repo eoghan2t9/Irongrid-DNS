@@ -15,6 +15,7 @@ import (
 // TestBackupRestoreRoundTrip verifies that a backup archive restores the
 // config (including the newer conditional-route section) and the cert files.
 func TestBackupRestoreRoundTrip(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	cfg := config.Default()
 	cfg.Upstreams = []string{"udp://1.1.1.1", "tls://8.8.8.8:853"}
@@ -69,6 +70,7 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 // exactly like a plain one once decrypted with the right passphrase, and
 // that restoreFromZip never sees anything but the plaintext zip.
 func TestBackupRestoreEncryptedRoundTrip(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	cfg := config.Default()
 	cfg.Upstreams = []string{"udp://1.1.1.1"}
@@ -122,6 +124,7 @@ func TestBackupRestoreEncryptedRoundTrip(t *testing.T) {
 // TestRestoreRejectsZipSlip verifies that an archive whose entries escape
 // the extraction root is refused outright.
 func TestRestoreRejectsZipSlip(t *testing.T) {
+	t.Parallel()
 	zipData := zipWith(t, map[string]string{"../evil.txt": "x"})
 	if _, err := restoreFromZip(zipData, t.TempDir()); err == nil {
 		t.Fatal("zip-slip archive accepted")
@@ -131,6 +134,7 @@ func TestRestoreRejectsZipSlip(t *testing.T) {
 // TestRestoreRejectsAbsolutePath verifies absolute paths in the archive are
 // refused.
 func TestRestoreRejectsAbsolutePath(t *testing.T) {
+	t.Parallel()
 	zipData := zipWith(t, map[string]string{"/etc/irongrid.yaml": "x"})
 	if _, err := restoreFromZip(zipData, t.TempDir()); err == nil {
 		t.Fatal("absolute-path archive accepted")
@@ -140,6 +144,7 @@ func TestRestoreRejectsAbsolutePath(t *testing.T) {
 // TestRestoreRejectsSymlink verifies symlink entries are refused (they could
 // otherwise redirect the extraction write).
 func TestRestoreRejectsSymlink(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	fh := &zip.FileHeader{Name: "certs/link"}
@@ -158,6 +163,7 @@ func TestRestoreRejectsSymlink(t *testing.T) {
 // TestRestoreRequiresConfig verifies an archive without a config file is
 // rejected.
 func TestRestoreRequiresConfig(t *testing.T) {
+	t.Parallel()
 	zipData := zipWith(t, map[string]string{"certs/cert.pem": "CERT"})
 	if _, err := restoreFromZip(zipData, t.TempDir()); err == nil {
 		t.Fatal("archive without a config file accepted")
@@ -169,6 +175,7 @@ func TestRestoreRequiresConfig(t *testing.T) {
 // restore before any cert is written (applyPayload would have failed later,
 // after the certs were already replaced).
 func TestRestoreRejectsBadUpstreamSpec(t *testing.T) {
+	t.Parallel()
 	cfg := config.Default()
 	cfg.Upstreams = []string{"ftp://1.2.3.4"}
 	cfgPath := filepath.Join(t.TempDir(), "irongrid.yaml")
@@ -195,6 +202,7 @@ func TestRestoreRejectsBadUpstreamSpec(t *testing.T) {
 // TestRestoreRejectsOversizedEntry verifies an archive entry that expands
 // past the per-entry limit is refused instead of silently truncated.
 func TestRestoreRejectsOversizedEntry(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	zw := zip.NewWriter(&buf)
 	fw, err := zw.Create("certs/big.pem")
@@ -218,6 +226,7 @@ func TestRestoreRejectsOversizedEntry(t *testing.T) {
 // TestRestoreRejectsInvalidConfig verifies a broken config in the archive
 // fails the restore before anything is written to the real cert dir.
 func TestRestoreRejectsInvalidConfig(t *testing.T) {
+	t.Parallel()
 	zipData := zipWith(t, map[string]string{"irongrid.yaml": "not: [valid"})
 	certDir := filepath.Join(t.TempDir(), "certs")
 	if _, err := restoreFromZip(zipData, certDir); err == nil {
@@ -231,6 +240,7 @@ func TestRestoreRejectsInvalidConfig(t *testing.T) {
 // TestRestoreSkipsUnknownCertTypes verifies only known cert file types are
 // written to the cert dir — a crafted archive can't plant an executable.
 func TestRestoreSkipsUnknownCertTypes(t *testing.T) {
+	t.Parallel()
 	cfg := config.Default()
 	cfgPath := filepath.Join(t.TempDir(), "irongrid.yaml")
 	if err := cfg.Save(cfgPath); err != nil {

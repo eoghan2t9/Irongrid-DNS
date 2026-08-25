@@ -22,6 +22,7 @@ func newGeoTestHandler() *Handler {
 }
 
 func TestGeoBlockIP(t *testing.T) {
+	t.Parallel()
 	h := newGeoTestHandler()
 	h.Cfg.GeoBlock.Enabled = true
 
@@ -76,6 +77,7 @@ func TestGeoBlockIP(t *testing.T) {
 // are never enforced: with geo blocking disabled the banner doesn't exist, so
 // the quick-block must refuse rather than pretend the block took effect.
 func TestGeoBlockIPRequiresEnabled(t *testing.T) {
+	t.Parallel()
 	h := newGeoTestHandler() // config.Default() has GeoBlock.Enabled == false
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/api/geo/blockip", bytes.NewBufferString(`{"ip":"203.0.113.9"}`))
