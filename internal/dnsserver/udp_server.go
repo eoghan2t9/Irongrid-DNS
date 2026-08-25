@@ -2,6 +2,7 @@ package dnsserver
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"runtime"
@@ -55,6 +56,16 @@ type udpServer struct {
 	// field; nothing else about the worker pool, response writer, or stats
 	// changes — only how datagrams are pulled off the socket.
 	batchPC *ipv4.PacketConn
+	// writes is the batching writer's input queue (see udpServer.batchWriter);
+	// nil on the same conditions as batchPC. A worker's udpResponseWriter.Write
+	// pushes a request here and blocks on its own result channel — the actual
+	// sendmmsg call is issued by the single batchWriter goroutine, but from
+	// the worker's perspective Write remains fully synchronous: it only
+	// returns once the syscall has actually run, so WriteErrors/UDPCompleted
+	// accounting and buffer-lifetime assumptions (the caller may reuse its
+	// packed bytes the instant Write returns) are unchanged from the
+	// unbatched path.
+	writes chan *udpWriteReq
 
 	// jobs is the bounded handoff queue from the read loop to the workers.
 	// The read loop never blocks on it: continuing to drain the socket keeps
@@ -120,6 +131,7 @@ func newUDPServer(pc net.PacketConn, handler dns.Handler, stats *Stats, workers 
 	if runtime.GOOS == "linux" {
 		if udpAddr, ok := pc.LocalAddr().(*net.UDPAddr); ok && udpAddr.IP.To4() != nil {
 			s.batchPC = ipv4.NewPacketConn(pc)
+			s.writes = make(chan *udpWriteReq, workers*udpQueuePerWorker)
 		}
 	}
 	return s
@@ -165,11 +177,23 @@ func (s *udpServer) Serve() error {
 	for range s.workers {
 		s.wg.Go(s.worker)
 	}
+	var writerDone chan struct{}
+	if s.writes != nil {
+		writerDone = make(chan struct{})
+		go func() { s.batchWriter(); close(writerDone) }()
+	}
 	err := s.readLoop()
 	// readLoop is the only sender, so it owns channel closure. Workers drain
 	// every accepted job before exiting.
 	close(s.jobs)
 	s.wg.Wait()
+	// Workers are the only senders on s.writes, and they've all exited by
+	// now (s.wg.Wait returned), so it's safe to close it and let the
+	// batch writer drain its remaining queue and exit.
+	if s.writes != nil {
+		close(s.writes)
+		<-writerDone
+	}
 	return err
 }
 
@@ -401,12 +425,85 @@ func (s *udpServer) handle(job udpJob) {
 		return
 	}
 	w := udpWriterPool.Get().(*udpResponseWriter)
-	w.conn, w.pc, w.addr = s.conn, s.pc, job.addr
+	w.conn, w.pc, w.addr, w.batchWrites = s.conn, s.pc, job.addr, s.writes
 	defer func() {
-		w.conn, w.pc, w.addr = nil, nil, nil
+		w.conn, w.pc, w.addr, w.batchWrites = nil, nil, nil, nil
 		udpWriterPool.Put(w)
 	}()
 	s.handler.ServeDNS(w, req)
+}
+
+// udpWriteBatchSize mirrors udpReadBatchSize on the write side: the most
+// datagrams one sendmmsg call will flush from udpServer.writes at a time.
+const udpWriteBatchSize = 32
+
+// udpWriteReq is one queued write for the batch writer. res is a
+// size-1 buffered channel so the sender (udpResponseWriter.Write) can block
+// on it without a rendezvous; pooled via udpWriteReqPool since res itself is
+// reusable across requests (only ever one pending value at a time).
+type udpWriteReq struct {
+	b    []byte
+	addr *net.UDPAddr
+	res  chan error
+}
+
+var udpWriteReqPool = sync.Pool{New: func() any { return &udpWriteReq{res: make(chan error, 1)} }}
+
+// errUDPBatchShort reports a message the batch writer never actually
+// attempted to send (see batchWriter's ms[:n] / ms[n:] doc comment).
+var errUDPBatchShort = errors.New("udp: sendmmsg sent fewer messages than requested")
+
+// batchWriter is the single goroutine per batching-enabled socket that turns
+// queued writes into sendmmsg calls: it blocks for the first request, then
+// opportunistically drains whatever else is already queued (non-blocking,
+// up to udpWriteBatchSize) before issuing one WriteBatch for the lot. Under
+// light load a "batch" is just one message — no worse than the unbatched
+// path; under concurrent load from many workers, batches form naturally
+// without adding artificial delay (nothing here ever waits to fill a
+// batch). sendmmsg sends messages in order and stops at the first failure,
+// so ms[:n] succeeded and ms[n:] were never attempted — those are reported
+// as failed to their callers rather than retried here, the same outcome an
+// unbatched send failure already had (a dropped UDP reply, which DNS
+// clients already tolerate and retry above this layer).
+func (s *udpServer) batchWriter() {
+	reqs := make([]*udpWriteReq, 0, udpWriteBatchSize)
+	msgs := make([]ipv4.Message, 0, udpWriteBatchSize)
+	for {
+		req, ok := <-s.writes
+		if !ok {
+			return
+		}
+		reqs = append(reqs, req)
+		msgs = append(msgs, ipv4.Message{Buffers: [][]byte{req.b}, Addr: req.addr})
+	drain:
+		for len(reqs) < udpWriteBatchSize {
+			select {
+			case req, ok := <-s.writes:
+				if !ok {
+					break drain
+				}
+				reqs = append(reqs, req)
+				msgs = append(msgs, ipv4.Message{Buffers: [][]byte{req.b}, Addr: req.addr})
+			default:
+				break drain
+			}
+		}
+		n, err := s.batchPC.WriteBatch(msgs, 0)
+		for i, r := range reqs {
+			switch {
+			case i < n:
+				r.res <- nil
+			case err != nil:
+				r.res <- err
+			default:
+				// n < len(reqs) but no error: never claim success for a
+				// message the syscall didn't actually confirm sending.
+				r.res <- errUDPBatchShort
+			}
+		}
+		reqs = reqs[:0]
+		msgs = msgs[:0]
+	}
 }
 
 // udpResponseWriter adapts dns.ResponseWriter to an unconnected UDP socket:
@@ -414,9 +511,10 @@ func (s *udpServer) handle(job udpJob) {
 // reply's source address is exactly the socket the query arrived on (which
 // matters to clients behind NAT).
 type udpResponseWriter struct {
-	conn *net.UDPConn
-	pc   net.PacketConn
-	addr *net.UDPAddr
+	conn        *net.UDPConn
+	pc          net.PacketConn
+	addr        *net.UDPAddr
+	batchWrites chan *udpWriteReq // nil unless the owning udpServer batches writes
 }
 
 func (w *udpResponseWriter) WriteMsg(m *dns.Msg) error {
@@ -429,6 +527,22 @@ func (w *udpResponseWriter) WriteMsg(m *dns.Msg) error {
 }
 
 func (w *udpResponseWriter) Write(b []byte) (int, error) {
+	if w.batchWrites != nil {
+		req := udpWriteReqPool.Get().(*udpWriteReq)
+		req.b, req.addr = b, w.addr
+		w.batchWrites <- req
+		// Blocks until batchWriter actually issues the sendmmsg call this
+		// request landed in — Write stays synchronous from the caller's
+		// point of view (see udpServer.writes's doc comment), so it's safe
+		// for the caller to reuse/return b the instant this returns.
+		err := <-req.res
+		req.b, req.addr = nil, nil
+		udpWriteReqPool.Put(req)
+		if err != nil {
+			return 0, err
+		}
+		return len(b), nil
+	}
 	if w.conn != nil {
 		// WriteMsgUDP returns (n, oobn, err); the bytes written are all
 		// that matter here.
