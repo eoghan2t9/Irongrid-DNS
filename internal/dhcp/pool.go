@@ -144,11 +144,20 @@ func (s *Server) nextFree4(key leaseKey) net.IP {
 	return nil
 }
 
+// poolAt returns the address offset positions after base, treating the
+// address as one big-endian integer: the addition must carry into the next
+// more significant byte both when offset's own higher digits require it and
+// when base[i]+digit alone overflows a byte (e.g. base ending in .250 plus
+// an offset of 10 must land on the next octet's .4, not wrap back to .4 of
+// the same octet) — carry starts as the full offset rather than its low
+// byte so both cases propagate through the same loop.
 func poolAt(base net.IP, offset int) net.IP {
 	b := append(net.IP(nil), base...)
-	for i := len(b) - 1; i >= 0 && offset > 0; i-- {
-		b[i] += byte(offset & 0xff)
-		offset >>= 8
+	carry := offset
+	for i := len(b) - 1; i >= 0 && carry > 0; i-- {
+		sum := int(b[i]) + carry
+		b[i] = byte(sum)
+		carry = sum >> 8
 	}
 	return b
 }

@@ -51,6 +51,20 @@ func newTestServer(t *testing.T, cfg Config, dir string) *Server {
 
 // ---- pool allocation ----
 
+// TestPoolAtCarriesAcrossOctet verifies poolAt carries into the next octet
+// when base's own byte overflows, not just when offset's own digits require
+// it — poolAt(10.0.0.250, 10) must land on 10.0.1.4 (250+10=260, one octet-3
+// carry plus 4), not wrap back to 10.0.0.4 within the same octet.
+func TestPoolAtCarriesAcrossOctet(t *testing.T) {
+	t.Parallel()
+	base := net.ParseIP("10.0.0.250").To4()
+	got := poolAt(base, 10)
+	want := net.ParseIP("10.0.1.4").To4()
+	if !got.Equal(want) {
+		t.Fatalf("poolAt(10.0.0.250, 10) = %v, want %v", got, want)
+	}
+}
+
 func TestPoolAllocV4RoundRobin(t *testing.T) {
 	t.Parallel()
 	cfg, dir := testConfig(t)
