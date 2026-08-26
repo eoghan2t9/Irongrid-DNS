@@ -1708,6 +1708,30 @@ func flightKey(q dns.Question) string {
 	return b.String()
 }
 
+// cooldownLogInterval throttles the "in failure cooldown" log lines below to
+// at most once per interval — the only place a total-cooldown outage
+// becomes visible outside the dashboard's per-query log (queryUpstreams's
+// early returns bypass raceUpstreams/sequentialUpstreams's own "all
+// upstreams failed" log entirely, since no upstream is even attempted), so
+// it must not stay silent — but it also must not flood the log once per
+// query at real query volume during a sustained outage.
+const cooldownLogInterval = 5 * time.Second
+
+// lastCooldownLog is the last time logCooldownOnce actually emitted a line.
+var lastCooldownLog atomic.Int64
+
+// logCooldownOnce logs msg at most once per cooldownLogInterval.
+func logCooldownOnce(msg string, args ...any) {
+	now := time.Now().UnixNano()
+	last := lastCooldownLog.Load()
+	if now-last < int64(cooldownLogInterval) {
+		return
+	}
+	if lastCooldownLog.CompareAndSwap(last, now) {
+		slog.Error(msg, args...)
+	}
+}
+
 // queryUpstreams forwards r to the upstream set according to the resolution
 // strategy (mode). A single upstream is queried directly to avoid goroutine
 // overhead. With several, UpstreamModeRace races them all concurrently (first
@@ -1724,6 +1748,7 @@ func queryUpstreams(ctx context.Context, upstreams []*upstream.Upstream, mode st
 	if len(upstreams) == 1 {
 		u := upstreams[0]
 		if !u.Available() {
+			logCooldownOnce("upstream in failure cooldown, query refused", "upstream", u.Name())
 			return nil, u.Name(), fmt.Errorf("upstream %s in failure cooldown", u.Name())
 		}
 		resp, err := u.Query(ctx, r)
@@ -1740,6 +1765,7 @@ func queryUpstreams(ctx context.Context, upstreams []*upstream.Upstream, mode st
 		}
 	}
 	if len(avail) == 0 {
+		logCooldownOnce("all upstreams in failure cooldown, query refused", "upstreams", len(upstreams))
 		return nil, "", fmt.Errorf("all upstreams in failure cooldown")
 	}
 	if mode == UpstreamModeSequential {

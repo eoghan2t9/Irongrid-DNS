@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/url"
@@ -60,13 +61,24 @@ func tunedDialer() *net.Dialer {
 }
 
 // Circuit breaker: after circuitOpenFails consecutive failures an upstream
-// is skipped for circuitCooldown instead of letting every query burn its
-// full timeout against a dead or unreachable server. The first query after
-// the cooldown elapses probes it again; any success closes the circuit and
-// resets the failure count.
+// is skipped for roughly circuitCooldown instead of letting every query burn
+// its full timeout against a dead or unreachable server. The cooldown
+// carries random jitter (see markResult) on top of the base duration: race
+// mode queries every upstream on every query, so a blip touching the shared
+// network path (an uplink hiccup, a route flap) can trip every configured
+// upstream's breaker within the same handful of queries — without jitter
+// they'd all reopen in lockstep too, immediately re-tripping on whatever's
+// left of the same blip and leaving every query dark for a flat window
+// (queryUpstreams logs when that happens, throttled, so it's no longer
+// silent — but it's still better avoided). Decorrelating reopen times means
+// at least one upstream is likely to probe successfully even if the others
+// are still recovering. The first query after an upstream's own cooldown
+// elapses probes it again; any success closes the circuit and resets the
+// failure count.
 const (
-	circuitOpenFails = 3
-	circuitCooldown  = 30 * time.Second
+	circuitOpenFails      = 3
+	circuitCooldown       = 20 * time.Second
+	circuitCooldownJitter = 8 * time.Second // applied as +/- this much
 )
 
 // Transport identifies the wire protocol used to reach an upstream.
@@ -450,7 +462,10 @@ func (u *Upstream) markResult(err error) {
 		return
 	}
 	if u.fails.Add(1) >= circuitOpenFails {
-		u.cooldownUntil.Store(time.Now().Add(circuitCooldown).UnixNano())
+		// +/- circuitCooldownJitter: see the const block's doc comment for
+		// why decorrelating this matters.
+		jitter := time.Duration(rand.Int64N(int64(2*circuitCooldownJitter))) - circuitCooldownJitter
+		u.cooldownUntil.Store(time.Now().Add(circuitCooldown + jitter).UnixNano())
 	}
 }
 
