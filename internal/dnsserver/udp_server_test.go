@@ -192,3 +192,47 @@ func TestUDPServerOverloadIsMeasured(t *testing.T) {
 		t.Fatalf("UDPCompleted = %d, want %d", got, wantCompleted)
 	}
 }
+
+// TestUDPServerWriteSingle verifies writeSingle — the per-message fallback
+// batchWriter uses when sendmmsg stops short of attempting a queued write
+// (see batchWriter's doc comment) — delivers the bytes to the intended
+// destination on its own, independent of any batch. This is the retry path
+// that keeps one flaky destination from taking down unrelated replies
+// queued behind it in the same sendmmsg batch.
+func TestUDPServerWriteSingle(t *testing.T) {
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer pc.Close()
+	h := NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, 5*time.Second)
+	srv := newUDPServer(pc, h, h.Stats, 1)
+
+	client, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen client: %v", err)
+	}
+	defer client.Close()
+	clientAddr, ok := client.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		t.Fatalf("client addr = %T, want *net.UDPAddr", client.LocalAddr())
+	}
+
+	want := []byte("writeSingle payload")
+	req := &udpWriteReq{b: want, addr: clientAddr, res: make(chan error, 1)}
+	if err := srv.writeSingle(req); err != nil {
+		t.Fatalf("writeSingle: %v", err)
+	}
+
+	if err := client.SetReadDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+	buf := make([]byte, 64)
+	n, _, err := client.ReadFrom(buf)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got := string(buf[:n]); got != string(want) {
+		t.Fatalf("received %q, want %q", got, want)
+	}
+}

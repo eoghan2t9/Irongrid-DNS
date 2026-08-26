@@ -2,7 +2,6 @@ package dnsserver
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"net"
 	"runtime"
@@ -449,10 +448,6 @@ type udpWriteReq struct {
 
 var udpWriteReqPool = sync.Pool{New: func() any { return &udpWriteReq{res: make(chan error, 1)} }}
 
-// errUDPBatchShort reports a message the batch writer never actually
-// attempted to send (see batchWriter's ms[:n] / ms[n:] doc comment).
-var errUDPBatchShort = errors.New("udp: sendmmsg sent fewer messages than requested")
-
 // batchWriter is the single goroutine per batching-enabled socket that turns
 // queued writes into sendmmsg calls: it blocks for the first request, then
 // opportunistically drains whatever else is already queued (non-blocking,
@@ -461,10 +456,13 @@ var errUDPBatchShort = errors.New("udp: sendmmsg sent fewer messages than reques
 // path; under concurrent load from many workers, batches form naturally
 // without adding artificial delay (nothing here ever waits to fill a
 // batch). sendmmsg sends messages in order and stops at the first failure,
-// so ms[:n] succeeded and ms[n:] were never attempted — those are reported
-// as failed to their callers rather than retried here, the same outcome an
-// unbatched send failure already had (a dropped UDP reply, which DNS
-// clients already tolerate and retry above this layer).
+// so ms[:n] succeeded and ms[n:] were never attempted — those get retried
+// individually (writeSingle) rather than reported as failed outright: the
+// failure belongs to whatever came before them in the batch, not to them.
+// Without that retry, one flaky destination (a full send buffer, a bad
+// address) would silently drop every unrelated reply queued behind it in
+// the same batch — a correlated-failure mode the unbatched path never had,
+// since every write there was its own independent syscall.
 func (s *udpServer) batchWriter() {
 	reqs := make([]*udpWriteReq, 0, udpWriteBatchSize)
 	msgs := make([]ipv4.Message, 0, udpWriteBatchSize)
@@ -496,14 +494,28 @@ func (s *udpServer) batchWriter() {
 			case err != nil:
 				r.res <- err
 			default:
-				// n < len(reqs) but no error: never claim success for a
-				// message the syscall didn't actually confirm sending.
-				r.res <- errUDPBatchShort
+				// n < len(reqs) but no error: sendmmsg stopped at the
+				// first failed message and never attempted this one, so
+				// retry it on its own rather than dropping a reply that
+				// may have nothing wrong with it.
+				r.res <- s.writeSingle(r)
 			}
 		}
 		reqs = reqs[:0]
 		msgs = msgs[:0]
 	}
+}
+
+// writeSingle issues one non-batched write, used by batchWriter to retry a
+// message sendmmsg stopped short of attempting (see batchWriter's doc
+// comment). Mirrors udpResponseWriter.Write's unbatched path exactly.
+func (s *udpServer) writeSingle(req *udpWriteReq) error {
+	if s.conn != nil {
+		_, _, err := s.conn.WriteMsgUDP(req.b, nil, req.addr)
+		return err
+	}
+	_, err := s.pc.WriteTo(req.b, req.addr)
+	return err
 }
 
 // udpResponseWriter adapts dns.ResponseWriter to an unconnected UDP socket:
