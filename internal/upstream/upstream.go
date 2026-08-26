@@ -464,6 +464,10 @@ func (u *Upstream) markResult(err error) {
 	if u.fails.Add(1) >= circuitOpenFails {
 		// +/- circuitCooldownJitter: see the const block's doc comment for
 		// why decorrelating this matters.
+		//nolint:gosec // G404: jitter only spreads out cooldown reopen
+		// times so upstreams that tripped together don't retry in
+		// lockstep — not security-sensitive, crypto/rand would just add a
+		// blocking entropy pull to a failure path for no benefit.
 		jitter := time.Duration(rand.Int64N(int64(2*circuitCooldownJitter))) - circuitCooldownJitter
 		u.cooldownUntil.Store(time.Now().Add(circuitCooldown + jitter).UnixNano())
 	}
