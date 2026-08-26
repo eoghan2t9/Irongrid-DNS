@@ -852,8 +852,13 @@ func (c *Cache) Set(ctx context.Context, q dns.Question, m *dns.Msg, capTTL time
 	if ttl <= 0 {
 		return
 	}
-	// Normalize the answer to a canonical form before caching.
-	m.SetReply(m)
+	// Compress before packing so the stored bytes match what the handler
+	// would send on the wire. m.SetReply(m) used to sit here too, but
+	// calling it with the message as its own argument is a no-op for every
+	// field except Rcode, which it unconditionally forces to NOERROR — a
+	// CNAME chain that legitimately terminates in NXDOMAIN (RFC 2308) has a
+	// non-empty Answer and a non-success Rcode, and that call silently
+	// cached it as a successful answer for every future hit.
 	m.Compress = true
 	packed, err := m.Pack()
 	if err != nil {

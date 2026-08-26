@@ -58,6 +58,34 @@ func TestL1GetSet(t *testing.T) {
 	}
 }
 
+// TestSetPreservesNonSuccessRcode verifies a CNAME chain that legitimately
+// terminates in NXDOMAIN (RFC 2308: non-empty Answer, non-success Rcode)
+// keeps its Rcode when cached and re-served. Set used to call m.SetReply(m)
+// on itself before packing, which unconditionally forces Rcode to NOERROR —
+// every future cache hit for a dead alias would come back claiming success.
+func TestSetPreservesNonSuccessRcode(t *testing.T) {
+	t.Parallel()
+	c := l1onlyCache(time.Hour, time.Minute)
+	ctx := t.Context()
+	m := new(dns.Msg)
+	m.SetQuestion("dead-alias.example.com.", dns.TypeA)
+	m.Response = true
+	m.Rcode = dns.RcodeNameError
+	m.Answer = append(m.Answer, &dns.CNAME{
+		Hdr:    dns.RR_Header{Name: "dead-alias.example.com.", Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 300},
+		Target: "gone.example.net.",
+	})
+	q := dns.Question{Name: "dead-alias.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	c.Set(ctx, q, m, 0)
+	got := c.Get(ctx, q)
+	if got == nil {
+		t.Fatal("expected a cache hit")
+	}
+	if got.Rcode != dns.RcodeNameError {
+		t.Fatalf("Rcode = %d, want %d (NXDOMAIN) — Set must not rewrite it to NOERROR", got.Rcode, dns.RcodeNameError)
+	}
+}
+
 // TestL1TTLRebase verifies answer TTLs are reduced by the elapsed time on
 // read (the same rebasing the L2 path applies).
 func TestL1TTLRebase(t *testing.T) {
