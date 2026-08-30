@@ -140,6 +140,24 @@ func TestL1Negative(t *testing.T) {
 	})
 }
 
+// SetNegative must not cache a REFUSED response: unlike NXDOMAIN/NODATA/
+// SERVFAIL, REFUSED isn't an authoritative statement about the name — an
+// upstream can hand one back for reasons unrelated to the query (its own
+// rate limiting, a momentary policy hiccup) — so caching it would memorize
+// a passing blip and replay it to every client asking the same question
+// for the rest of the negative TTL.
+func TestSetNegativeRejectsRefused(t *testing.T) {
+	t.Parallel()
+	c := l1onlyCache(time.Hour, time.Minute)
+	ctx := t.Context()
+	refused := emptyResponse()
+	refused.Rcode = dns.RcodeRefused
+	c.SetNegative(ctx, aQuestion(), refused, 0)
+	if got := c.GetNegative(ctx, aQuestion()); got != nil {
+		t.Fatal("REFUSED response should not be cached")
+	}
+}
+
 func TestL1Flush(t *testing.T) {
 	t.Parallel()
 	c := l1onlyCache(time.Hour, time.Minute)

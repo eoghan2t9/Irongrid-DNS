@@ -886,6 +886,18 @@ func (c *Cache) SetNegative(ctx context.Context, q dns.Question, m *dns.Msg, ttl
 	if m == nil || len(m.Answer) != 0 {
 		return
 	}
+	// Only NXDOMAIN, NODATA (NOERROR with no records), and SERVFAIL are
+	// legitimate negative answers (RFC 2308). REFUSED and other rcodes are
+	// not authoritative statements about the name — an upstream can return
+	// REFUSED for reasons that have nothing to do with the query (its own
+	// rate limiting, a transient policy hiccup) — so caching one would
+	// memorize a passing blip and replay it to every client asking the
+	// same question for the rest of the negative TTL.
+	switch m.Rcode {
+	case dns.RcodeSuccess, dns.RcodeNameError, dns.RcodeServerFailure:
+	default:
+		return
+	}
 	if ttl <= 0 {
 		ttl = c.negativeTTL
 	}
