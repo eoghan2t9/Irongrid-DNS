@@ -21,12 +21,12 @@ func DragonflyFlagsForSystem(cpus int, memBytes uint64) DragonflyFlags {
 		mib = 1 << 20
 		gib = 1 << 30
 
-		dflyShare     = 0.25 // fraction of host RAM for Dragonfly
-		minMemory     = 256 * mib
-		maxMemory     = 32 * gib
-		minProactors  = 2
-		maxProactors  = 8
-		memPerThread  = 256 * mib // Dragonfly requires ≥256 MiB per proactor thread
+		dflyShare    = 0.25 // fraction of host RAM for Dragonfly
+		minMemory    = 256 * mib
+		maxMemory    = 32 * gib
+		minProactors = 2
+		maxProactors = 8
+		memPerThread = 256 * mib // Dragonfly requires ≥256 MiB per proactor thread
 	)
 
 	// --- proactor threads ---

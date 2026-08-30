@@ -175,14 +175,14 @@ func (w *Warmer) Start(ctx context.Context) {
 
 // WarmerStats is the dashboard card's snapshot of the warmer's state.
 type WarmerStats struct {
-	Enabled   bool      `json:"enabled"`
-	Runs      int64     `json:"runs"`
-	LastRun   time.Time `json:"last_run,omitzero"`
-	DomainsConsidered int64 `json:"domains"` // distinct domains considered, cumulative
-	Warmed    int64     `json:"warmed"`  // answers written to the cache, cumulative
-	Skipped   int64     `json:"skipped"` // blocked/rewritten/already-fresh, cumulative
-	Failed    int64     `json:"failed"`  // failed resolutions, cumulative
-	LastError string    `json:"last_error,omitempty"`
+	Enabled           bool      `json:"enabled"`
+	Runs              int64     `json:"runs"`
+	LastRun           time.Time `json:"last_run,omitzero"`
+	DomainsConsidered int64     `json:"domains"` // distinct domains considered, cumulative
+	Warmed            int64     `json:"warmed"`  // answers written to the cache, cumulative
+	Skipped           int64     `json:"skipped"` // blocked/rewritten/already-fresh, cumulative
+	Failed            int64     `json:"failed"`  // failed resolutions, cumulative
+	LastError         string    `json:"last_error,omitempty"`
 }
 
 // Snapshot returns the warmer's current state for the API/dashboard.
@@ -190,14 +190,14 @@ func (w *Warmer) Snapshot() WarmerStats {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return WarmerStats{
-		Enabled:   w.enabled,
-		Runs:      w.runs,
-		LastRun:   w.lastRun,
+		Enabled:           w.enabled,
+		Runs:              w.runs,
+		LastRun:           w.lastRun,
 		DomainsConsidered: w.domains,
-		Warmed:    w.warmed,
-		Skipped:   w.skipped,
-		Failed:    w.failed,
-		LastError: w.lastError,
+		Warmed:            w.warmed,
+		Skipped:           w.skipped,
+		Failed:            w.failed,
+		LastError:         w.lastError,
 	}
 }
 

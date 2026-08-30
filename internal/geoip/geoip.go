@@ -8,6 +8,7 @@ package geoip
 
 import (
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"fmt"
@@ -16,7 +17,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"cmp"
 	"slices"
 	"strings"
 	"sync"

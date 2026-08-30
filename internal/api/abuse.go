@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/csv"
 	"encoding/json"
@@ -9,7 +10,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"cmp"
 	"slices"
 	"strings"
 	"time"

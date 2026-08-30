@@ -8,11 +8,11 @@ func TestDragonflyFlagsForSystem(t *testing.T) {
 	const mib = 1 << 20
 
 	cases := []struct {
-		name      string
-		cpus      int
-		memBytes  uint64
-		wantMem   string
-		wantThrd  int
+		name     string
+		cpus     int
+		memBytes uint64
+		wantMem  string
+		wantThrd int
 	}{
 		{
 			name:     "tiny VM (1 CPU, 512 MiB)",
@@ -47,7 +47,7 @@ func TestDragonflyFlagsForSystem(t *testing.T) {
 			cpus:     16,
 			memBytes: 64 * gib,
 			wantMem:  "16gb", // 25% of 64 GiB = 16 GiB (within 256mb–32gb range)
-			wantThrd: 8,     // capped at maxProactors
+			wantThrd: 8,      // capped at maxProactors
 		},
 		{
 			name:     "no memory info (0 bytes)",

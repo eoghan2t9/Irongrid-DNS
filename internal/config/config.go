@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/crypto/bcrypt"
 	"github.com/goccy/go-yaml"
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
 )

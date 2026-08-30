@@ -1,6 +1,7 @@
 package api
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,7 +9,6 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"cmp"
 	"slices"
 	"strings"
 	"sync"
@@ -444,7 +444,6 @@ func (h *Handler) toolsMail(ctx context.Context, w http.ResponseWriter, r *http.
 		return
 	}
 
-
 	ctx, cancel := context.WithTimeout(ctx, toolsTimeout)
 	defer cancel()
 
@@ -671,7 +670,6 @@ func (h *Handler) toolsAXFR(ctx context.Context, w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid domain"})
 		return
 	}
-
 
 	ctx, cancel := context.WithTimeout(ctx, toolsTimeout)
 	defer cancel()

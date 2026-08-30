@@ -244,8 +244,8 @@ func ensureDragonflyDocker(addr string, out io.Writer) error {
 	cmd := exec.Command("docker", "run", "-d", "--name", "dragonfly", "--restart", "unless-stopped",
 		"-p", "127.0.0.1:"+port+":6379", dflyImage,
 		"--cache_mode=true",
-		"--maxmemory=" + dfly.MaxMemory,
-		"--proactor_threads=" + fmt.Sprintf("%d", dfly.ProactorThreads),
+		"--maxmemory="+dfly.MaxMemory,
+		"--proactor_threads="+fmt.Sprintf("%d", dfly.ProactorThreads),
 		"--port=6379")
 	cmd.Stdout = out
 	cmd.Stderr = out

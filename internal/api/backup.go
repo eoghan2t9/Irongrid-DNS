@@ -36,9 +36,10 @@ var backupCertExts = map[string]bool{
 // out of default access-log formats, which log the request line/URI but not
 // headers.
 //
-//nolint:gosec // G101: this is an HTTP header NAME, not a credential value —
 // gosec pattern-matches "passphrase" in the identifier regardless of what
 // the string actually holds.
+//
+//nolint:gosec // G101: this is an HTTP header NAME, not a credential value —
 const backupPassphraseHeader = "X-Backup-Passphrase"
 
 // backupConfig serves a downloadable archive of the config file and the
