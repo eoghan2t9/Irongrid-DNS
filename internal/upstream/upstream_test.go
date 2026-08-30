@@ -222,6 +222,34 @@ func TestTCPUpstreamReusesConnection(t *testing.T) {
 	}
 }
 
+// TestPooledExchangeDialTimeoutBoundsHangingDial is a regression test for a
+// dead/firewalled upstream whose TCP handshake never completes (seen live as
+// "dial tcp 1.1.1.1:853: i/o timeout"). Before dialTimeout, a fresh dial in
+// pooledExchange inherited whatever was left of the query's full ctx
+// deadline, so one hung dial could burn the entire per-query timeout. It
+// dials 192.0.2.1 (RFC 5737 TEST-NET-1, reserved and never routed on the
+// real internet, so the SYN goes unanswered rather than refused) and
+// confirms the query fails in roughly dialTimeout rather than ctx's much
+// longer deadline.
+func TestPooledExchangeDialTimeoutBoundsHangingDial(t *testing.T) {
+	t.Parallel()
+	u := NewWithTLS(TCP, "192.0.2.1:853", "", nil)
+	t.Cleanup(u.Close)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+
+	start := time.Now()
+	_, err := u.Query(ctx, aQuery())
+	elapsed := time.Since(start)
+	if err == nil {
+		t.Fatalf("expected a dial failure against the black-holed address, got a response")
+	}
+	if elapsed < dialTimeout-500*time.Millisecond || elapsed > dialTimeout+2*time.Second {
+		t.Fatalf("query took %v to fail, want bounded near dialTimeout (%v) despite ctx's 10s deadline", elapsed, dialTimeout)
+	}
+}
+
 // TestUDPUpstreamReusesSocket verifies the UDP socket pool: only the first
 // of several sequential queries dials a fresh socket; the rest reuse the
 // pooled connected socket instead of paying socket/connect/close syscalls

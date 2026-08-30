@@ -81,6 +81,18 @@ const (
 	circuitCooldownJitter = 8 * time.Second // applied as +/- this much
 )
 
+// dialTimeout bounds a fresh TCP/TLS dial in pooledExchange independently of
+// the query's own remaining deadline. Without it, a dead or firewalled
+// upstream that never completes its handshake (seen live as "dial tcp
+// ...:853: i/o timeout") burns the query's entire remaining timeout_sec on
+// one dial before markResult even sees a failure — turning one bad upstream
+// into a multi-second stall, and delaying how fast circuitOpenFails
+// consecutive failures can accumulate to open the breaker. Ordinary TLS/TCP
+// handshakes complete in well under this on any reachable server; it only
+// ever binds a genuinely stuck dial, and still yields to ctx's own deadline
+// if that's shorter.
+const dialTimeout = 2 * time.Second
+
 // Transport identifies the wire protocol used to reach an upstream.
 type Transport string
 
@@ -442,7 +454,11 @@ func (u *Upstream) pooledExchange(ctx context.Context, m *dns.Msg, client *dns.C
 		// fall through to a fresh dial rather than failing the query over
 		// a warm-connection hiccup.
 	}
-	conn, err := client.DialContext(ctx, u.Addr)
+	// dialTimeout bounds the dial itself rather than letting it inherit
+	// whatever's left of ctx's full query deadline — see dialTimeout's doc.
+	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
+	conn, err := client.DialContext(dialCtx, u.Addr)
+	cancel()
 	if err != nil {
 		u.markResult(err)
 		return nil, err
