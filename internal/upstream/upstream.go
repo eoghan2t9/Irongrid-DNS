@@ -455,10 +455,29 @@ func (u *Upstream) pooledExchange(ctx context.Context, m *dns.Msg, client *dns.C
 // markResult feeds the circuit breaker: a success closes the circuit and
 // resets the consecutive-failure count; a failure increments it and, once it
 // crosses circuitOpenFails, opens the circuit until circuitCooldown elapses.
+//
+// context.Canceled is not counted as a failure. Race mode queries every
+// upstream concurrently and cancels the shared context for the losers once
+// one wins (see raceUpstreams); for a transport that honors ctx cancellation
+// mid-flight (queryDoH's http.Client does — the classic/DoT path does not,
+// since ExchangeWithConnContext only reads ctx.Deadline() once and never
+// watches ctx.Done()), that abort surfaces here as context.Canceled. That's
+// not a sign of an unhealthy upstream, just one that came in second on that
+// particular query — counting it let an upstream that is a little slower
+// than its siblings (e.g. a DoH lookup over HTTPS racing two DoT upstreams)
+// accumulate "failures" purely from losing races back-to-back
+// and get pushed into cooldown while perfectly healthy. A real timeout
+// still counts: the per-query deadline expiring produces
+// context.DeadlineExceeded (or a transport-level timeout error), not
+// context.Canceled, so genuinely unresponsive upstreams still trip the
+// breaker.
 func (u *Upstream) markResult(err error) {
 	if err == nil {
 		u.fails.Store(0)
 		u.cooldownUntil.Store(0)
+		return
+	}
+	if errors.Is(err, context.Canceled) {
 		return
 	}
 	if u.fails.Add(1) >= circuitOpenFails {

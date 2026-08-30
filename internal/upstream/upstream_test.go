@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/binary"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -659,6 +660,44 @@ func TestCircuitBreaker(t *testing.T) {
 	u.cooldownUntil.Store(time.Now().Add(-time.Second).UnixNano())
 	if !u.Available() {
 		t.Fatal("expected the circuit to re-arm once the cooldown elapsed")
+	}
+}
+
+// TestCircuitBreakerIgnoresContextCanceled is a regression test: race mode
+// (raceUpstreams, in package dnsserver) queries every upstream concurrently
+// and cancels the shared context for the losers once one wins. For a
+// transport that honors mid-flight ctx cancellation (queryDoH's http.Client
+// does), that abort must not count as a circuit-breaker failure — it just
+// means this upstream came in second on that query, not that it's
+// unhealthy. Without this, an upstream that's consistently a little slower
+// than its siblings accumulates "failures" purely from losing races
+// back-to-back and gets pushed into cooldown while perfectly healthy.
+func TestCircuitBreakerIgnoresContextCanceled(t *testing.T) {
+	t.Parallel()
+	u := &Upstream{Transport: UDP, Addr: "127.0.0.1:1"}
+	for range circuitOpenFails {
+		u.markResult(context.Canceled)
+	}
+	if u.Fails() != 0 {
+		t.Fatalf("Fails() = %d, want 0 (context.Canceled from losing a race must not count as a breaker failure)", u.Fails())
+	}
+	if !u.Available() {
+		t.Fatal("expected the circuit to stay closed after repeated context.Canceled results")
+	}
+
+	// A wrapped context.Canceled must be recognized too.
+	u.markResult(fmt.Errorf("http request failed: %w", context.Canceled))
+	if u.Fails() != 0 {
+		t.Fatalf("Fails() = %d after a wrapped context.Canceled, want 0", u.Fails())
+	}
+
+	// A real timeout must still count — only the losing-a-race signal is
+	// exempt.
+	for range circuitOpenFails {
+		u.markResult(context.DeadlineExceeded)
+	}
+	if u.Available() {
+		t.Fatal("expected a real timeout (context.DeadlineExceeded) to still trip the circuit breaker")
 	}
 }
 
