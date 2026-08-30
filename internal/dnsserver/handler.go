@@ -1781,13 +1781,24 @@ func queryUpstreams(ctx context.Context, upstreams []*upstream.Upstream, mode st
 // SERVFAILs, the last SERVFAIL response is returned so the caller can serve
 // stale / cache the failure exactly as it would for a single upstream that
 // answered SERVFAIL.
+//
+// ctx's remaining deadline is split evenly across the upstreams still to be
+// tried, via a fresh sub-context per attempt. Without this, one upstream
+// that fails slowly (e.g. a TCP/TLS dial that hangs until the timeout
+// instead of refusing instantly) can consume the entire per-query budget:
+// by the time the loop reached the next upstream, ctx.Err() was already
+// non-nil and the "if ctx.Err() != nil { break }" check below silently
+// stopped the failover after just one attempt — "sequential" mode
+// degrading to "only the first upstream" whenever that upstream failed
+// slowly rather than instantly. Splitting the budget guarantees every
+// remaining upstream gets a fair share of the time left to answer.
 func sequentialUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*dns.Msg, string, error) {
 	var (
 		lastErr    error
 		lastFail   *dns.Msg
 		lastFailUp string
 	)
-	for _, up := range ups {
+	for i, up := range ups {
 		if ctx.Err() != nil {
 			break
 		}
@@ -1797,7 +1808,17 @@ func sequentialUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.M
 		// repeatedly on a single message. The per-attempt Copy() the
 		// previous code made only mattered for race mode's concurrent
 		// sends; here the message belongs to this loop for its whole run.
-		resp, err := up.Query(ctx, r)
+		attemptCtx := ctx
+		cancel := func() {}
+		if deadline, ok := ctx.Deadline(); ok {
+			if remaining := len(ups) - i; remaining > 1 {
+				if share := time.Until(deadline) / time.Duration(remaining); share > 0 {
+					attemptCtx, cancel = context.WithTimeout(ctx, share)
+				}
+			}
+		}
+		resp, err := up.Query(attemptCtx, r)
+		cancel()
 		if err != nil {
 			lastErr = err
 			continue

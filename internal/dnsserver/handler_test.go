@@ -278,6 +278,44 @@ func TestHandlerSequentialUpstreamStopsAtFirstSuccess(t *testing.T) {
 	}
 }
 
+// TestSequentialUpstreamsFairBudgetOnSlowPrimary is a regression test for a
+// bug where a primary that fails slowly (rather than instantly) could
+// consume the entire shared per-query context and starve failover: the loop
+// shared one ctx across every attempt, so once the primary's slow failure
+// ate the whole deadline, ctx.Err() was already non-nil by the time the loop
+// reached the backup and "if ctx.Err() != nil { break }" silently stopped
+// failover after just one attempt — "sequential" mode degrading into "only
+// the first upstream" whenever that upstream failed slowly. Splitting the
+// remaining deadline across the still-untried upstreams fixes this: the
+// slow primary only gets its fair share, leaving the backup enough of the
+// budget to answer.
+func TestSequentialUpstreamsFairBudgetOnSlowPrimary(t *testing.T) {
+	slowAddr := startUDPTestServer(t, "9.9.9.9", 400*time.Millisecond)
+	fastAddr := startUDPTestServer(t, "1.1.1.1", 0)
+	ups := []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: slowAddr},
+		{Transport: upstream.UDP, Addr: fastAddr},
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+
+	resp, _, err := sequentialUpstreams(ctx, ups, m)
+	if err != nil {
+		t.Fatalf("sequentialUpstreams returned error: %v (slow primary starved the backup's share of the budget)", err)
+	}
+	if resp == nil || len(resp.Answer) == 0 {
+		t.Fatalf("no answer: %v", resp)
+	}
+	a, ok := resp.Answer[0].(*dns.A)
+	if !ok || !a.A.Equal(net.ParseIP("1.1.1.1")) {
+		t.Fatalf("answer = %v, want 1.1.1.1 (backup, reached after the slow primary's fair share expired)", resp.Answer)
+	}
+}
+
 // TestRaceUpstreamsFastestWins verifies the concurrent forward path returns
 // the fastest upstream's answer even when it is listed after a slow one
 // (sequential forwarding would take the slow path's full delay).
