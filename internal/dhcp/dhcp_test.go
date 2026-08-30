@@ -1,6 +1,7 @@
 package dhcp
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -146,10 +147,100 @@ func TestPoolAllocV6(t *testing.T) {
 	if ip2 == nil || !ip2.Equal(net.ParseIP("fd00::101")) {
 		t.Fatalf("v6 alloc 2 = %v; want fd00::101", ip2)
 	}
-	// Requested address is honoured when free.
-	ip3, _ := s.allocV6("000100011234567890abcdef", "nas", net.ParseIP("fd00::150"))
+	// Requested address is honoured when free, for a third distinct client
+	// (not one of the two above: a client with its own still-valid offer
+	// takes priority over a requested address, exactly like allocV4's
+	// equivalent step 2 — see TestPoolAllocV6RoundRobin).
+	ip3, _ := s.allocV6("000100011234567890333333", "printer", net.ParseIP("fd00::150"))
 	if ip3 == nil || !ip3.Equal(net.ParseIP("fd00::150")) {
 		t.Fatalf("v6 requested alloc = %v; want fd00::150", ip3)
+	}
+}
+
+// TestPoolAllocV6RoundRobin is the v6 analogue of
+// TestPoolAllocV4RoundRobin: an in-flight offer for one client must not
+// block the pool for the next, and re-asking returns the same offered
+// address (exercises the cursor6 round-robin nextFree6 uses, mirroring
+// nextFree4's cursor4).
+func TestPoolAllocV6RoundRobin(t *testing.T) {
+	t.Parallel()
+	cfg, dir := testConfig(t)
+	s := newTestServer(t, cfg, dir)
+	duid1, duid2 := "000100011234567890111111", "000100011234567890222222"
+
+	ip1, _ := s.allocV6(duid1, "phone", nil)
+	if ip1 == nil || !ip1.Equal(net.ParseIP("fd00::100")) {
+		t.Fatalf("first v6 alloc = %v; want fd00::100", ip1)
+	}
+	ip2, _ := s.allocV6(duid2, "laptop", nil)
+	if ip2 == nil || !ip2.Equal(net.ParseIP("fd00::101")) {
+		t.Fatalf("second v6 alloc = %v; want fd00::101", ip2)
+	}
+	ip1b, _ := s.allocV6(duid1, "phone", nil)
+	if ip1b == nil || !ip1b.Equal(ip1) {
+		t.Fatalf("v6 re-alloc = %v; want same %v", ip1b, ip1)
+	}
+}
+
+// TestPoolAllocV6DoesNotImmediatelyReuseFreedAddress proves nextFree6
+// actually continues from cursor6 rather than always rescanning from the
+// pool's start: without the cursor, freeing the earliest address would make
+// it the very next thing handed out (it's always first in a from-start
+// scan), independent of how many other addresses were allocated since.
+func TestPoolAllocV6DoesNotImmediatelyReuseFreedAddress(t *testing.T) {
+	t.Parallel()
+	cfg, dir := testConfig(t)
+	s := newTestServer(t, cfg, dir)
+	duid1 := "000100011234567890111111"
+
+	ip1, _ := s.allocV6(duid1, "phone", nil)
+	if ip1 == nil || !ip1.Equal(net.ParseIP("fd00::100")) {
+		t.Fatalf("first v6 alloc = %v; want fd00::100", ip1)
+	}
+	s.commit(&Lease{Key: string(v6Key(duid1)), DUID: duid1, IP: ip1.String(), Hostname: "phone"})
+	if !s.releaseLease(v6Key(duid1), ip1) {
+		t.Fatal("release of fd00::100 failed")
+	}
+
+	// The cursor has already moved to fd00::101, so the next distinct
+	// client must not be handed the just-freed fd00::100 back.
+	duid2 := "000100011234567890222222"
+	ip2, _ := s.allocV6(duid2, "laptop", nil)
+	if ip2 == nil || ip2.Equal(ip1) {
+		t.Fatalf("v6 alloc after release = %v; must not immediately reuse the just-freed %v", ip2, ip1)
+	}
+}
+
+// TestPoolAllocV6Exhaustion is the v6 analogue of TestPoolAllocV4Exhaustion:
+// a fully occupied pool returns nil (nextFree6's wraparound-to-first check)
+// without disturbing addresses already committed.
+func TestPoolAllocV6Exhaustion(t *testing.T) {
+	t.Parallel()
+	cfg, dir := testConfig(t)
+	// Tiny pool: 3 addresses.
+	cfg.IPv6Start = net.ParseIP("fd00::100")
+	cfg.IPv6End = net.ParseIP("fd00::102")
+	s := newTestServer(t, cfg, dir)
+
+	var ips []net.IP
+	for i := range 5 {
+		duid := fmt.Sprintf("00010001123456789%07x", i)
+		ip, _ := s.allocV6(duid, "", nil)
+		if i < 3 && ip == nil {
+			t.Fatalf("v6 alloc %d failed, want success", i)
+		}
+		if i >= 3 && ip != nil {
+			t.Fatalf("v6 alloc %d succeeded, want exhaustion", i)
+		}
+		ips = append(ips, ip)
+	}
+	// Exhaustion must not break committed leases: commit the first three.
+	for i, ip := range ips[:3] {
+		duid := fmt.Sprintf("00010001123456789%07x", i)
+		s.commit(&Lease{Key: string(v6Key(duid)), DUID: duid, IP: ip.String()})
+	}
+	if n := len(s.leases); n != 3 {
+		t.Fatalf("committed v6 leases = %d, want 3", n)
 	}
 }
 

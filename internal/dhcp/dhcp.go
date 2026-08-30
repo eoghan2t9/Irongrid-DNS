@@ -157,14 +157,18 @@ type reservation struct {
 // Server is the DHCP server. It is safe for concurrent use: the packet
 // handlers, the API and the persistence loop all read/write under mu.
 type Server struct {
-	mu         sync.RWMutex
-	cfg        Config
-	leases     map[leaseKey]*Lease
-	byIP       map[string]*Lease
-	hosts      map[string]net.IP // lowercased hostname -> address
-	ptr        map[string]string // address.String() -> hostname, for reverse lookups
-	reserved   map[string]reservation
-	cursor4    uint32
+	mu       sync.RWMutex
+	cfg      Config
+	leases   map[leaseKey]*Lease
+	byIP     map[string]*Lease
+	hosts    map[string]net.IP // lowercased hostname -> address
+	ptr      map[string]string // address.String() -> hostname, for reverse lookups
+	reserved map[string]reservation
+	cursor4  uint32
+	// cursor6 is the v6 analogue of cursor4 (see nextFree6): where the last
+	// v6 allocation left off, so the next one continues the round-robin
+	// instead of always rescanning from the pool's start.
+	cursor6    net.IP
 	serverDUID dhcpv6.DUID
 	v4srv      *server4.Server
 	v6srv      *server6.Server

@@ -162,21 +162,48 @@ func poolAt(base net.IP, offset int) net.IP {
 	return b
 }
 
-// nextFree6 is the IPv6 analogue of nextFree4. Callers hold mu.
+// nextFree6 is the IPv6 analogue of nextFree4: it round-robins from cursor6
+// instead of always rescanning from the pool's start on every call. v4's
+// pool is bounded to 32 address bits, so an always-from-start linear scan is
+// cheap even near exhaustion; a v6 pool has no such bound (a config could
+// reasonably span thousands of addresses), so restarting from the front
+// every time would mean re-walking the same long run of in-use addresses on
+// every single allocation once the pool has any real occupancy. Callers
+// hold mu.
 func (s *Server) nextFree6(key leaseKey) net.IP {
 	start, end := s.poolOfLocked(true)
 	if start == nil {
 		return nil
 	}
 	sb, eb := start.To16(), end.To16()
-	cur := append(net.IP(nil), sb...)
-	for bytesCompare(cur, eb) <= 0 {
+	cur := s.cursor6
+	// No cursor yet, or the pool bounds moved (a config change) and left it
+	// outside the current range: restart from the beginning.
+	if cur == nil || bytesCompare(cur, sb) < 0 || bytesCompare(cur, eb) > 0 {
+		cur = append(net.IP(nil), sb...)
+	} else {
+		cur = append(net.IP(nil), cur...)
+	}
+	first := append(net.IP(nil), cur...)
+	for {
 		if !s.inUseLocked(cur, key) {
+			next := append(net.IP(nil), cur...)
+			incr(next)
+			if bytesCompare(next, eb) > 0 {
+				next = append(net.IP(nil), sb...)
+			}
+			s.cursor6 = next
 			return cur
 		}
 		incr(cur)
+		if bytesCompare(cur, eb) > 0 {
+			cur = append(net.IP(nil), sb...)
+		}
+		if cur.Equal(first) {
+			// Wrapped all the way around without finding a free address.
+			return nil
+		}
 	}
-	return nil
 }
 
 func incr(ip net.IP) {
@@ -263,6 +290,21 @@ func (s *Server) allocV6(duidHex, hostname string, requested net.IP) (net.IP, bo
 		if ip := net.ParseIP(l.IP); ip != nil {
 			s.renewLocked(l, hostname)
 			return ip, false
+		}
+	}
+	// Re-offer the client's own still-valid offer reservation, exactly like
+	// allocV4's equivalent step: a re-SOLICIT before the REQUEST (common —
+	// DHCPv6 clients retry a SOLICIT that appears to have gone unanswered)
+	// must get the same address back, not a fresh one. Without this,
+	// nextFree6's cursor-based round-robin (see nextFree6's doc comment)
+	// would hand out a new address on every retry, since the previous
+	// offer's address doesn't count as "in use" against its own key
+	// (inUseLocked) and the cursor has already moved past it.
+	for addr, r := range s.reserved {
+		if r.key == key && r.until.After(time.Now()) {
+			if ip := net.ParseIP(addr); ip != nil {
+				return ip, false
+			}
 		}
 	}
 	if requested != nil && requested.To4() == nil {
