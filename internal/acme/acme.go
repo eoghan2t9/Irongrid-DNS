@@ -262,13 +262,19 @@ func (m *Manager) Issue(ctx context.Context) error {
 	if m.staging {
 		dirURL = LetsEncryptStaging
 	}
+	key, err := accountKey(m)
+	if err != nil {
+		err = fmt.Errorf("generate ACME account key: %w", err)
+		m.noteErr(err)
+		return err
+	}
 	client := &acme.Client{
-		Key:          mustAccountKey(m),
+		Key:          key,
 		DirectoryURL: dirURL,
 	}
 
 	// 1. Register the account (idempotent).
-	_, err := client.Register(ctx, &acme.Account{Contact: []string{"mailto:" + m.email}}, acme.AcceptTOS)
+	_, err = client.Register(ctx, &acme.Account{Contact: []string{"mailto:" + m.email}}, acme.AcceptTOS)
 	if err != nil {
 		// ErrAccountAlreadyExists is fine: we can proceed with the existing account.
 		if err != acme.ErrAccountAlreadyExists {
@@ -535,25 +541,33 @@ func (m *Manager) accountKeyPath() string {
 	return filepath.Join(m.dir, "acme-account.key")
 }
 
-func mustAccountKey(m *Manager) *ecdsa.PrivateKey {
+// accountKey loads the persisted ACME account key, or generates and
+// persists a new one when none exists yet or the stored one is unreadable.
+// A crypto/rand failure returns an error rather than panicking (as this
+// used to, under the name mustAccountKey): Issue can fail this one
+// operation and retry on the next renewal tick instead of taking the whole
+// process down for what is, in practice, an OS entropy failure — the same
+// recoverable-not-fatal treatment handler.go's DNS-cookie HMAC key
+// generation gives the identical failure mode.
+func accountKey(m *Manager) (*ecdsa.PrivateKey, error) {
 	path := m.accountKeyPath()
 	if data, err := os.ReadFile(path); err == nil {
 		if block, _ := pem.Decode(data); block != nil {
 			if k, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
-				return k
+				return k, nil
 			}
 		}
 	}
 	k, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 	der, err := x509.MarshalECPrivateKey(k)
 	if err == nil {
 		_ = os.MkdirAll(filepath.Dir(path), 0o755)
 		_ = os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600)
 	}
-	return k
+	return k, nil
 }
 
 // makeCSR builds a CSR for the given domains and returns it plus the key PEM.

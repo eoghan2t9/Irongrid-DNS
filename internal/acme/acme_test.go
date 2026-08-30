@@ -68,8 +68,14 @@ func TestAccountKeyPersisted(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	m := New(Options{Email: "a@b.c", Domains: []string{"example.com"}, CertDir: dir})
-	k1 := mustAccountKey(m)
-	k2 := mustAccountKey(m)
+	k1, err := accountKey(m)
+	if err != nil {
+		t.Fatalf("accountKey: %v", err)
+	}
+	k2, err := accountKey(m)
+	if err != nil {
+		t.Fatalf("accountKey: %v", err)
+	}
 	if !k1.Equal(k2) {
 		t.Error("account key should be stable across calls (persisted)")
 	}

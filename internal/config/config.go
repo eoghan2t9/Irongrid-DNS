@@ -1184,9 +1184,14 @@ func webPort(addr string) int {
 // passwords are bcrypt-hashed before persisting.
 func (c *Config) Save(path string) error {
 	if c.Web.Password != "" && !isBcrypt(c.Web.Password) {
-		if hash, err := bcrypt.GenerateFromPassword([]byte(c.Web.Password), bcrypt.DefaultCost); err == nil {
-			c.Web.Password = string(hash)
+		// A bcrypt failure must abort the save, not fall through to writing
+		// the plaintext password to disk — silently ignoring err == nil
+		// used to do exactly that.
+		hash, err := bcrypt.GenerateFromPassword([]byte(c.Web.Password), bcrypt.DefaultCost)
+		if err != nil {
+			return fmt.Errorf("hash web password: %w", err)
 		}
+		c.Web.Password = string(hash)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err

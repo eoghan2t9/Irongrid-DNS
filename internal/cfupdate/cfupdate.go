@@ -187,6 +187,16 @@ func (c *Client) Install(ctx context.Context, binPath string) (*InstallResult, e
 		_ = os.Rename(binPath, binPath+".prev")
 	}
 	if err := os.Rename(installFrom, binPath); err != nil {
+		// The previous binary (if any) was already moved aside to
+		// binPath+".prev" above, so a failure here would otherwise leave
+		// nothing at all installed at binPath — attempt to restore it
+		// rather than just reporting the install as failed. Mirrors the
+		// rollback internal/update's analogous swap performs.
+		if _, statErr := os.Stat(binPath + ".prev"); statErr == nil {
+			if restoreErr := os.Rename(binPath+".prev", binPath); restoreErr != nil {
+				return nil, fmt.Errorf("install %s: %w (restoring the previous binary also failed: %v — %s is now missing, restore manually from %s)", asset.Name, err, restoreErr, binPath, binPath+".prev")
+			}
+		}
 		return nil, fmt.Errorf("install %s: %w", asset.Name, err)
 	}
 

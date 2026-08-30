@@ -351,7 +351,14 @@ func (c *Client) Install(ctx context.Context, executable string) (*InstallResult
 		return nil, fmt.Errorf("back up current binary: %w", err)
 	}
 	if err := os.Rename(tmpName, execPath); err != nil {
-		_ = os.Rename(backup, execPath) // restore the old binary
+		if restoreErr := os.Rename(backup, execPath); restoreErr != nil {
+			// The restore itself failed too (disk full, permissions changed
+			// mid-op): this is a strictly worse failure than an ordinary
+			// update error — the running binary is now missing entirely,
+			// not just "not yet updated" — so say so explicitly rather than
+			// letting it look like a normal install failure.
+			return nil, fmt.Errorf("install new binary: %w (restoring the previous binary also failed: %v — %s is now missing, restore manually from %s)", err, restoreErr, execPath, backup)
+		}
 		return nil, fmt.Errorf("install new binary: %w", err)
 	}
 
