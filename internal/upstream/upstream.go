@@ -203,6 +203,12 @@ func Parse(spec string) (*Upstream, error) {
 	case TLS, HTTPS, QUIC:
 		u.tlsConf = &tls.Config{ServerName: u.Host, MinVersion: tls.VersionTLS12}
 	}
+	if u.Transport == TLS {
+		// RFC 7858 §9.2: a DoT client SHOULD indicate support via the "dot"
+		// ALPN identifier. HTTPS/QUIC upstreams set their own ALPN
+		// elsewhere (h2/http1.1 for DoH, "doq" for DoQ).
+		u.tlsConf.NextProtos = []string{"dot"}
+	}
 	switch u.Transport {
 	case TCP, TLS:
 		u.connPool = make(chan *pooledConn, upstreamPoolSize)

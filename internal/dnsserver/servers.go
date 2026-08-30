@@ -366,11 +366,14 @@ func (m *Manager) startDoT(addr string) {
 		m.results <- Listener{Proto: "dot", Addr: addr, Err: err}
 		return
 	}
+	// RFC 7858 §9.2: a DoT server SHOULD support the "dot" ALPN identifier.
+	dotTLS := m.tlsConf.Clone()
+	dotTLS.NextProtos = []string{"dot"}
 	srv := &dns.Server{
 		Addr:         addr,
 		Net:          "tcp-tls",
-		Listener:     tls.NewListener(m.limitTCPListener(ln), m.tlsConf),
-		TLSConfig:    m.tlsConf,
+		Listener:     tls.NewListener(m.limitTCPListener(ln), dotTLS),
+		TLSConfig:    dotTLS,
 		Handler:      protoHandler{m.handler, "dot"},
 		ReadTimeout:  tcpReadTimeout,
 		WriteTimeout: tcpWriteTimeout,

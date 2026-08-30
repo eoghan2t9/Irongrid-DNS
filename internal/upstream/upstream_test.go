@@ -461,6 +461,30 @@ func TestParseRecursiveScheme(t *testing.T) {
 	}
 }
 
+// TestParseDoTAdvertisesALPN verifies a tls:// upstream's TLS config
+// advertises the "dot" ALPN identifier (RFC 7858 §9.2), and that DoH/DoQ
+// upstreams — which set their own ALPN elsewhere — aren't given it too.
+func TestParseDoTAdvertisesALPN(t *testing.T) {
+	t.Parallel()
+	dot, err := Parse("tls://1.1.1.1:853")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if got := dot.tlsConf.NextProtos; len(got) != 1 || got[0] != "dot" {
+		t.Fatalf("DoT NextProtos = %v, want [dot]", got)
+	}
+
+	doh, err := Parse("https://dns.quad9.net/dns-query")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	for _, p := range doh.tlsConf.NextProtos {
+		if p == "dot" {
+			t.Fatalf("DoH upstream should not advertise dot ALPN, got %v", doh.tlsConf.NextProtos)
+		}
+	}
+}
+
 // TestIsRecursiveSpec verifies the scheme pre-check matches what Parse
 // actually treats as the recursive transport, so the startup root-hints
 // fetch can't drift from the real classification.
