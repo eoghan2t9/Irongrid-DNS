@@ -10,7 +10,9 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/miekg/dns"
+	"github.com/redis/go-redis/v9"
 )
 
 // l1onlyCache builds a Cache with only the in-memory L1 layer (nil Redis
@@ -677,4 +679,62 @@ func TestLookupRawStaleKeepsRaw(t *testing.T) {
 			t.Fatal("stale entry must still decode")
 		}
 	})
+}
+
+// TestL1RehydrationHonorsRealRemainingTTL is a regression test: an L1
+// miss + L2 hit used to re-seed L1 with the cache's configured maximum
+// (c.ttl, e.g. 6h) instead of the record's actual remaining lifetime,
+// letting L1 confidently serve an already-near-expiry answer as "fresh"
+// for hours. It seeds Dragonfly (via miniredis) directly with a record
+// that has a real 5s remaining TTL — far under the 6h cap — as if written
+// earlier by this or another instance in the fleet, then confirms
+// getPositive's L2-rehydration path stores that same ~5s TTL in L1, not
+// the 6h cap.
+func TestL1RehydrationHonorsRealRemainingTTL(t *testing.T) {
+	t.Parallel()
+	mr := miniredis.RunT(t)
+	// Built directly (like l1onlyCache) rather than via New: New's startup
+	// probe runs "INFO server", which miniredis doesn't implement. This
+	// test seeds L2 directly and never calls Set, so the batched writer
+	// New would start is unneeded.
+	c := &Cache{
+		client:      redis.NewClient(&redis.Options{Addr: mr.Addr()}),
+		l1:          newL1(64, 0),
+		prefix:      "irongrid:dns:",
+		ttl:         6 * time.Hour,
+		negativeTTL: time.Minute,
+	}
+	t.Cleanup(func() { _ = c.Close() })
+
+	q := aQuestion()
+	h := keyHash(q)
+
+	m := aResponse("1.2.3.4", 30)
+	m.Compress = true
+	packed, err := m.Pack()
+	if err != nil {
+		t.Fatalf("pack: %v", err)
+	}
+	buf := make([]byte, cacheEntryPrefixLen+len(packed))
+	binary.BigEndian.PutUint64(buf[:cacheEntryPrefixLen], uint64(time.Now().Unix()))
+	copy(buf[cacheEntryPrefixLen:], packed)
+	if err := mr.Set(c.msgKey(h), string(buf)); err != nil {
+		t.Fatalf("seed L2: %v", err)
+	}
+	mr.SetTTL(c.msgKey(h), 5*time.Second)
+
+	if got := c.getPositive(t.Context(), h); got == nil {
+		t.Fatal("expected a hit on L2 rehydration")
+	}
+
+	_, remaining, stale, _, ok := c.l1.get(h, false, time.Now())
+	if !ok {
+		t.Fatal("expected the entry to be rehydrated into L1")
+	}
+	if stale {
+		t.Fatal("freshly rehydrated entry should not report stale")
+	}
+	if remaining <= 0 || remaining > 6*time.Second {
+		t.Fatalf("L1 entry TTL = %v, want ~5s (the record's real remaining TTL), not anywhere near the 6h cap", remaining)
+	}
 }

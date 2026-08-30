@@ -489,7 +489,7 @@ func (c *Cache) Get(ctx context.Context, q dns.Question) *dns.Msg {
 
 func (c *Cache) getPositive(ctx context.Context, h uint64) *dns.Msg {
 	if c.l1 == nil {
-		if raw, ok := c.l2Get(ctx, c.msgKey(h)); ok {
+		if raw, _, ok := c.l2Get(ctx, c.msgKey(h)); ok {
 			return unpackEntry(raw, time.Now())
 		}
 		return nil
@@ -500,11 +500,16 @@ func (c *Cache) getPositive(ctx context.Context, h uint64) *dns.Msg {
 		return unpackEntry(raw, now)
 	}
 	c.l1Misses.Add(1)
-	raw, ok := c.l2Get(ctx, c.msgKey(h))
+	raw, ttl, ok := c.l2Get(ctx, c.msgKey(h))
 	if !ok {
 		return nil
 	}
-	c.l1.set(h, false, raw, c.ttl, now, ttlOffsets(raw[cacheEntryPrefixLen:]))
+	// ttl is the record's real remaining lifetime (from Redis), not c.ttl —
+	// see l2Get's doc. A zero ttl means it isn't trustworthy, so this read
+	// isn't cached in L1; the answer is still served from what L2 has.
+	if ttl > 0 {
+		c.l1.set(h, false, raw, ttl, now, ttlOffsets(raw[cacheEntryPrefixLen:]))
+	}
 	return unpackEntry(raw, now)
 }
 
@@ -793,14 +798,28 @@ func decodeMGetResult(vals []any) (posRaw, negRaw []byte, ok bool) {
 	return nil, nil, false
 }
 
-// l2Get fetches raw bytes from Dragonfly/Redis. A nil client (unit tests)
-// is a clean miss.
-func (c *Cache) l2Get(ctx context.Context, key string) ([]byte, bool) {
+// l2Get fetches raw bytes from Dragonfly/Redis, plus the key's remaining
+// TTL (fetched in the same pipelined round trip) so a caller rehydrating L1
+// can honor the record's actual remaining lifetime instead of guessing. A
+// nil client (unit tests) is a clean miss; ttl is 0 whenever it can't be
+// trusted (miss, or Redis reports no/expired TTL) — callers must treat that
+// as "don't cache in L1", not "cache forever".
+func (c *Cache) l2Get(ctx context.Context, key string) ([]byte, time.Duration, bool) {
 	if c.client == nil {
-		return nil, false
+		return nil, 0, false
 	}
-	raw, err := c.client.Get(ctx, key).Bytes()
-	return raw, err == nil
+	pipe := c.client.Pipeline()
+	getCmd := pipe.Get(ctx, key)
+	ttlCmd := pipe.PTTL(ctx, key)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return nil, 0, false
+	}
+	raw, err := getCmd.Bytes()
+	if err != nil {
+		return nil, 0, false
+	}
+	ttl := max(ttlCmd.Val(), 0)
+	return raw, ttl, true
 }
 
 // unpackEntry decodes a stored positive entry (8-byte store timestamp +
@@ -923,7 +942,7 @@ func (c *Cache) GetNegative(ctx context.Context, q dns.Question) *dns.Msg {
 
 func (c *Cache) getNegative(ctx context.Context, h uint64) *dns.Msg {
 	if c.l1 == nil {
-		if raw, ok := c.l2Get(ctx, c.negKey(h)); ok {
+		if raw, _, ok := c.l2Get(ctx, c.negKey(h)); ok {
 			return unpackNegative(raw)
 		}
 		return nil
@@ -934,11 +953,17 @@ func (c *Cache) getNegative(ctx context.Context, h uint64) *dns.Msg {
 		return unpackNegative(raw)
 	}
 	c.l1Misses.Add(1)
-	raw, ok := c.l2Get(ctx, c.negKey(h))
+	raw, ttl, ok := c.l2Get(ctx, c.negKey(h))
 	if !ok {
 		return nil
 	}
-	c.l1.set(h, true, raw, c.negativeTTL, now, nil)
+	// ttl is the entry's real remaining lifetime (from Redis), not
+	// c.negativeTTL — see l2Get's doc. Using the configured default here
+	// would let a short custom TTL (e.g. failure_ttl) be re-cached in L1
+	// for far longer than it was ever meant to live.
+	if ttl > 0 {
+		c.l1.set(h, true, raw, ttl, now, nil)
+	}
 	return unpackNegative(raw)
 }
 
