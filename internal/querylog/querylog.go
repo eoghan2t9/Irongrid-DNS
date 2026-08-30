@@ -22,12 +22,18 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
+// logQueueCap bounds the pending-entry queue. Serving never blocks on
+// logging: once the queue is full, new entries are dropped — unlike the
+// cache's write queue, this one has no synchronous fallback, so undersizing
+// it on a busy box silently loses query-log history exactly when it's
+// busiest. Derived from the tuned core count (tuning.ScaleByCores).
+var logQueueCap = tuning.ScaleByCores(512, 8192, 131072)
+
 const (
-	// logQueueCap bounds the pending-entry queue. Serving never blocks on
-	// logging: once the queue is full, new entries are dropped.
-	logQueueCap = 8192
 	// logBatchSize flushes the writer once this many entries have queued.
 	logBatchSize = 256
 	// logFlushInterval is the maximum age of a queued entry before the

@@ -31,8 +31,11 @@ import (
 // upstreamPoolSize bounds the number of warm TCP/DoT connections kept per
 // upstream. It's a cache of ready-to-reuse connections, not a hard
 // concurrency limit — a query that finds the pool empty just dials fresh,
-// same as before pooling existed.
-const upstreamPoolSize = 8
+// same as before pooling existed. Derived from the tuned core count
+// (tuning.ScaleByCores): a busier box has more concurrent in-flight queries
+// per upstream, so a fixed small pool would force far more needless re-dials
+// (a full TLS handshake, for DoT) than this pool exists to amortize.
+var upstreamPoolSize = tuning.ScaleByCores(2, 8, 256)
 
 // poolMaxIdle bounds how long a pooled connection may sit idle before it is
 // presumed stale and evicted. Resolvers close idle TCP/DoT connections after
@@ -241,13 +244,16 @@ func Parse(spec string) (*Upstream, error) {
 			path = "/dns-query"
 		}
 		u.URL.Path = path
+		// Derived from the tuned core count (tuning.ScaleByCores) rather than
+		// a fixed value, same reasoning as upstreamPoolSize above.
+		maxIdle := tuning.ScaleByCores(4, 32, 1024)
 		transport := &http.Transport{
 			TLSClientConfig: u.tlsConf,
-			MaxIdleConns:    32,
+			MaxIdleConns:    maxIdle,
 			// MaxIdleConnsPerHost defaults to 2, which silently dominates over
 			// MaxIdleConns with one host per upstream — a busy DoH forwarder
 			// would churn connections instead of reusing the idle pool.
-			MaxIdleConnsPerHost: 32,
+			MaxIdleConnsPerHost: maxIdle,
 			// Keep idle connections only briefly: DoH servers close them
 			// on their own schedule (often ~30-60s), and a conn the server
 			// already closed would fail the next POST with "unexpected

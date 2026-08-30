@@ -11,6 +11,8 @@ import (
 
 	"github.com/miekg/dns"
 	"golang.org/x/net/ipv4"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
 // dnsHeaderLen is the fixed DNS message header size (RFC 1035 §4.1.1).
@@ -138,13 +140,13 @@ func newUDPServer(pc net.PacketConn, handler dns.Handler, stats *Stats, workers 
 
 // udpWorkersPerSocket is how many handler workers each plain-UDP socket's
 // read loop dispatches to. Sized off the tuned GOMAXPROCS like the socket
-// count; the jobs channel absorbs bursts beyond the workers. A floor keeps a
-// tiny VM from collapsing to a handful of workers, and the cap bounds total
-// pre-spawned stacks (each worker's stack grows only as deep as one query
-// actually needs).
+// count, via tuning.ScaleByCores; the jobs channel absorbs bursts beyond the
+// workers. The floor keeps a tiny VM from collapsing to a handful of
+// workers, and the ceiling bounds total pre-spawned stacks (each worker's
+// stack grows only as deep as one query actually needs) rather than
+// flattening at a fixed count regardless of how many cores the box has.
 func udpWorkersPerSocket() int {
-	n := min(max(runtime.GOMAXPROCS(0), 4), 64)
-	return 4 * n
+	return tuning.ScaleByCores(4, 16, 1024)
 }
 
 // maxExplicitUDPWorkers bounds an explicit server.udp_workers value so a typo

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -312,9 +311,11 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 		if len(pcs) == 1 {
 			noun = "socket"
 		}
-		slog.Info("dns listener started", "proto", proto, "addr", addr, "sockets", len(pcs), "socket_noun", noun)
+		workers := m.udpWorkerCount()
+		slog.Info("dns listener started", "proto", proto, "addr", addr, "sockets", len(pcs), "socket_noun", noun,
+			"workers_per_socket", workers, "total_udp_concurrency", len(pcs)*workers)
 		for _, pc := range pcs {
-			srv := newUDPServer(pc, handler, m.handler.Stats, m.udpWorkerCount())
+			srv := newUDPServer(pc, handler, m.handler.Stats, workers)
 			m.mu.Lock()
 			m.udpSrvs = append(m.udpSrvs, srv)
 			m.mu.Unlock()
@@ -446,14 +447,10 @@ func (m *Manager) Restart(udpAddr, tcpAddr, dotAddr, dohAddr, doh3Addr, doqAddr,
 	return err
 }
 
-// maxUDPSockets caps the auto socket count for one UDP address: each socket
-// carries its own SocketBufferSize kernel receive/send buffers, so past a
-// handful the extra kernel memory buys nothing measurable on any box this
-// runs on.
-const maxUDPSockets = 8
-
-// maxExplicitUDPSockets bounds an explicit server.udp_sockets value so a
-// typo (say 1000) can't open a thousand 2 MiB-buffered sockets.
+// maxExplicitUDPSockets bounds an explicit server.udp_sockets value (and the
+// auto-sized default below) so a typo (say 1000) can't open a thousand
+// 2 MiB-buffered sockets. Past one socket per core, extra sockets just
+// contend for the same cores rather than buying measurable throughput.
 const maxExplicitUDPSockets = 64
 
 // udpSocketCountFor is how many sockets a UDP listen address is bound from.
@@ -461,8 +458,11 @@ const maxExplicitUDPSockets = 64
 // restores the strictly-exclusive single socket — up to maxExplicitUDPSockets
 // (clamped past that). The default (0) is one per available CPU (the
 // runtime's tuned GOMAXPROCS, which the tuning package makes cgroup-aware),
-// capped at maxUDPSockets. The kernel hashes incoming datagrams across the
-// sockets, each with its own receive queue and read goroutine.
+// via tuning.ScaleByCores so a Raspberry Pi and a large multi-core server
+// each get a socket count proportional to what they actually have, instead
+// of a fixed cap that flattens throughput past a handful of cores. The
+// kernel hashes incoming datagrams across the sockets, each with its own
+// receive queue and read goroutine.
 func udpSocketCountFor(cfg int) int {
 	if cfg > 0 {
 		if cfg > maxExplicitUDPSockets {
@@ -471,8 +471,7 @@ func udpSocketCountFor(cfg int) int {
 		}
 		return cfg
 	}
-	n := min(max(runtime.GOMAXPROCS(0), 1), maxUDPSockets)
-	return n
+	return tuning.ScaleByCores(1, 1, maxExplicitUDPSockets)
 }
 
 // newUDPListeners binds addr from n sockets and raises the receive/send

@@ -107,6 +107,30 @@ func TestRecordFlushesOnClose(t *testing.T) {
 	}
 }
 
+// BenchmarkQueryLogRecord exercises the full hot-path call: Record's enqueue
+// onto the bounded, drop-on-full entries channel (see logQueueCap) drained
+// by the single runWriter goroutine, backed by a real miniredis instance so
+// the writer actually flushes batches instead of hitting a nil client. Each
+// parallel iteration logs a distinct domain, mirroring real traffic.
+func BenchmarkQueryLogRecord(b *testing.B) {
+	mr := miniredis.RunT(b)
+	l, err := New(mr.Addr(), "", 0, 30, 0)
+	if err != nil {
+		b.Fatalf("New: %v", err)
+	}
+	b.Cleanup(func() { _ = l.Close() })
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		i := 0
+		for pb.Next() {
+			l.Record(entry(fmt.Sprintf("bench-%d.example.com.", i), "allowed"))
+			i++
+		}
+	})
+}
+
 // TestBatchFlush verifies queued entries are flushed without Close, via both
 // the batch-size and the ticker paths.
 func TestBatchFlush(t *testing.T) {

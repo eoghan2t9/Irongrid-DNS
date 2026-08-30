@@ -211,6 +211,93 @@ func TestL1Counters(t *testing.T) {
 
 // BenchmarkL1Get measures the hot path: a pure in-memory cache hit with no
 // Redis round-trip.
+// TestCloseFlushesAllWriterShards verifies Close's wwg.Wait() actually
+// blocks until every write-writer shard (see writerShardCount/writeShard),
+// not just one, has committed its queued writes to Dragonfly — the risk a
+// sharded writer pool adds over the single-writer version, where "wait for
+// the writer" meant waiting for the only one there was. One question is
+// deliberately picked per shard (searching by suffix until keyHash(q) lands
+// on that shard index) so every shard has exactly one entry in flight when
+// Close is called.
+func TestCloseFlushesAllWriterShards(t *testing.T) {
+	t.Parallel()
+	mr := miniredis.RunT(t)
+	c := &Cache{
+		client:      redis.NewClient(&redis.Options{Addr: mr.Addr()}),
+		l1:          newL1(64, 0),
+		prefix:      "irongrid:dns:",
+		ttl:         6 * time.Hour,
+		negativeTTL: time.Minute,
+	}
+	c.startWriter()
+	n := len(c.writes)
+	if n < 2 {
+		t.Skip("writerShardCount() < 2 on this box; sharding has nothing to exercise")
+	}
+
+	questions := make([]dns.Question, n)
+	for shard := range n {
+		for i := 0; ; i++ {
+			q := dns.Question{Name: fmt.Sprintf("shard%d-%d.example.com.", shard, i), Qtype: dns.TypeA, Qclass: dns.ClassINET}
+			if int(keyHash(q)%uint64(n)) == shard {
+				questions[shard] = q
+				break
+			}
+		}
+	}
+	for _, q := range questions {
+		c.Set(t.Context(), q, aResponse("1.2.3.4", 30), 0)
+	}
+	if err := c.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Reopen over the same (still running) miniredis with a fresh Cache (no
+	// L1) so every read is forced through L2 — a get straight from this
+	// process's own L1 would prove nothing about whether the write actually
+	// reached Dragonfly.
+	verify := &Cache{client: redis.NewClient(&redis.Options{Addr: mr.Addr()}), prefix: "irongrid:dns:", ttl: 6 * time.Hour}
+	t.Cleanup(func() { _ = verify.Close() })
+	for shard, q := range questions {
+		if got := verify.Get(t.Context(), q); got == nil {
+			t.Errorf("shard %d's entry missing after Close — that shard's writer did not flush before Close returned", shard)
+		}
+	}
+}
+
+// BenchmarkCacheSetThroughput exercises the full miss-path write: L1 set
+// plus enqueuing onto the L2 batched-writer channel (see writeQueueCap and
+// Cache.runWriter), backed by a real miniredis instance so the writer
+// goroutine actually flushes batches instead of hitting a nil client. Each
+// parallel iteration uses a distinct question so writes spread across L1
+// shards — this is the baseline for comparing a single writer goroutine
+// against a sharded writer pool (see cache.go's runWriter doc comment on the
+// planned sharding).
+func BenchmarkCacheSetThroughput(b *testing.B) {
+	mr := miniredis.RunT(b)
+	c := &Cache{
+		client:      redis.NewClient(&redis.Options{Addr: mr.Addr()}),
+		l1:          newL1(4096, 0),
+		prefix:      "irongrid:dns:",
+		ttl:         6 * time.Hour,
+		negativeTTL: time.Minute,
+	}
+	c.startWriter()
+	b.Cleanup(func() { _ = c.Close() })
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		ctx := context.Background()
+		i := 0
+		for pb.Next() {
+			q := dns.Question{Name: fmt.Sprintf("bench-%d.example.com.", i), Qtype: dns.TypeA, Qclass: dns.ClassINET}
+			c.Set(ctx, q, aResponse("1.2.3.4", 30), 0)
+			i++
+		}
+	})
+}
+
 func BenchmarkL1Get(b *testing.B) {
 	c := l1onlyCache(time.Hour, time.Minute)
 	q := aQuestion()

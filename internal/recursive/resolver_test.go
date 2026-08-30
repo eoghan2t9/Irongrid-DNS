@@ -773,7 +773,7 @@ func TestResolverConnPoolKeyCap(t *testing.T) {
 		addr := "10.0.0.1:" + strconv.Itoa(i) // port varies so every key is distinct
 		r.putConn("udp", addr, &dns.Conn{Conn: c1})
 	}
-	if got := r.poolKeyCount.Load(); got != nsConnPoolMaxKeys {
+	if got := r.poolKeyCount.Load(); got != int64(nsConnPoolMaxKeys) {
 		t.Fatalf("poolKeyCount = %d, want exactly %d (capped)", got, nsConnPoolMaxKeys)
 	}
 }

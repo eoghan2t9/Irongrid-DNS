@@ -29,6 +29,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
 
@@ -455,7 +456,7 @@ func (h *Handler) ClientASN(clientIP string) (uint32, bool) {
 			}
 		}
 	}
-	if h.asnCacheSize.Add(1) > maxASNCache {
+	if h.asnCacheSize.Add(1) > int64(maxASNCache) {
 		h.asnCache.Clear()
 		h.asnCacheSize.Store(0)
 	}
@@ -2081,13 +2082,19 @@ func reverseNameIP(name string) net.IP {
 // the TCP fallback instead of being dropped as fragments.
 // maxCacheWriters caps how many background cache-write goroutines (Set /
 // SetNegative on the success and failure paths) may be in flight at once;
-// further writes are skipped until a slot frees. Sized well above the
-// sustained miss rates a busy resolver sees, so it only ever bounds a flood.
-const maxCacheWriters = 64
+// further writes are skipped until a slot frees. Derived from the tuned core
+// count (tuning.ScaleByCores) so a busier box — which also means more
+// concurrent cache-miss writes — gets proportionally more headroom before
+// this ever bounds anything but a genuine flood.
+var maxCacheWriters = tuning.ScaleByCores(16, 64, 4096)
 
 // maxASNCache bounds the per-client ASN memo (see Handler.asnCache). When
 // full it resets — attribution is cheap to recompute for a few clients.
-const maxASNCache = 4096
+// Derived from the tuned memory ceiling (tuning.ScaleByMemory) so a busy
+// LAN/CGNAT edge with many concurrent unique clients on a big box can hold a
+// bigger memo before paying a full-map reset, while a Raspberry Pi keeps
+// today's default.
+var maxASNCache = tuning.ScaleByMemory(0.001, 64, 4096, 262144, 4096)
 
 const ednsUDPSize = 1232
 

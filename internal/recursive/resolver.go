@@ -12,6 +12,8 @@ import (
 
 	"github.com/miekg/dns"
 	"golang.org/x/sync/singleflight"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
 const (
@@ -37,28 +39,35 @@ const (
 	// nameservers (see dnsserver.ednsUDPSize for the reasoning).
 	ednsUDPSize = 1232
 
-	// nsConnPoolSize bounds warm connections kept per (network, address)
-	// pair — a cache of ready-to-reuse connections, not a concurrency limit:
-	// a query that finds the pool empty just dials fresh, same as before
-	// pooling existed. Mirrors upstream.upstreamPoolSize.
-	nsConnPoolSize = 2
-	// nsConnPoolMaxKeys bounds how many distinct (network, address) pairs
-	// get pooled at all. Unlike upstream.Upstream's fixed forwarder set, a
-	// resolver may talk to thousands of distinct authoritative servers over
-	// its lifetime, most queried exactly once (a random domain's own
-	// nameservers) — pooling every one of them would grow unbounded pool
-	// state for a long-running process. Root and TLD servers are hit on
-	// nearly every cold cache-miss walk and are the first ones pooled, so
-	// the cap naturally concentrates the reuse benefit on the addresses that
-	// are actually hot. An address that shows up once the cap is full just
-	// dials fresh, exactly like the no-pooling case.
-	nsConnPoolMaxKeys = 512
 	// nsPoolMaxIdle mirrors upstream.poolMaxIdle: a connection idle in the
 	// pool longer than this is presumed stale (the server closed it) and
 	// evicted instead of reused, so reuse never wastes a query on a
 	// guaranteed EOF.
 	nsPoolMaxIdle = 20 * time.Second
 )
+
+// nsConnPoolSize bounds warm connections kept per (network, address) pair —
+// a cache of ready-to-reuse connections, not a concurrency limit: a query
+// that finds the pool empty just dials fresh, same as before pooling
+// existed. Mirrors upstream.upstreamPoolSize, proportionally smaller since
+// recursive mode fans out across many distinct nameservers rather than one
+// upstream, so per-key reuse benefit is lower.
+var nsConnPoolSize = tuning.ScaleByCores(2, 2, 64)
+
+// nsConnPoolMaxKeys bounds how many distinct (network, address) pairs get
+// pooled at all. Unlike upstream.Upstream's fixed forwarder set, a resolver
+// may talk to thousands of distinct authoritative servers over its
+// lifetime, most queried exactly once (a random domain's own nameservers) —
+// pooling every one of them would grow unbounded pool state for a
+// long-running process. Root and TLD servers are hit on nearly every cold
+// cache-miss walk and are the first ones pooled, so the cap naturally
+// concentrates the reuse benefit on the addresses that are actually hot. An
+// address that shows up once the cap is full just dials fresh, exactly like
+// the no-pooling case. Derived from the tuned memory ceiling
+// (tuning.ScaleByMemory) so a big box doing recursive resolution at scale —
+// more concurrent domains in flight, more distinct hot nameservers — can
+// hold a bigger key set before the cap starts forcing fresh dials.
+var nsConnPoolMaxKeys = tuning.ScaleByMemory(0.0002, 128, 512, 8192, 512)
 
 // defaultServerTimeout is the package-wide per-server exchange timeout used
 // by resolvers that haven't been individually configured — overridable via
@@ -394,7 +403,7 @@ func (r *Resolver) putConn(network, addr string, c *dns.Conn) {
 	key := network + "|" + addr
 	v, ok := r.connPools.Load(key)
 	if !ok {
-		if r.poolKeyCount.Load() >= nsConnPoolMaxKeys {
+		if r.poolKeyCount.Load() >= int64(nsConnPoolMaxKeys) {
 			c.Close()
 			return
 		}

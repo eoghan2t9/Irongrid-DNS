@@ -16,6 +16,8 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/redis/go-redis/v9"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
 // defaultLookupTimeout is the budget for the L2 (Dragonfly) read on the DNS
@@ -35,12 +37,15 @@ type l2Write struct {
 	ttl time.Duration
 }
 
+// writeQueueCap bounds the pending-write queue. The enqueue path never
+// blocks on it: when the queue is full the write falls back to a
+// synchronous SET — batching is a throughput optimization, never a reason to
+// drop a cache entry. Derived from the tuned core count (tuning.ScaleByCores)
+// so a fast box that misses often doesn't fall back to synchronous writes
+// far more often than the batching path was meant to allow.
+var writeQueueCap = tuning.ScaleByCores(512, 8192, 262144)
+
 const (
-	// writeQueueCap bounds the pending-write queue. The enqueue path never
-	// blocks on it: when the queue is full the write falls back to a
-	// synchronous SET — batching is a throughput optimization, never a
-	// reason to drop a cache entry.
-	writeQueueCap = 8192
 	// writeBatchSize flushes the writer once this many writes have queued.
 	writeBatchSize = 256
 	// writeFlushInterval is the maximum age of a queued write before the
@@ -79,11 +84,15 @@ type Cache struct {
 	prefetching sync.Map // msgKey -> struct{}: one in-flight refresh per key
 
 	// L2 write batching: Set/SetNegative enqueue their Dragonfly writes and
-	// a single writer goroutine commits them in pipelined batches (see
+	// a pool of writer goroutines commits them in pipelined batches (see
 	// runWriter), so the per-write cost on the miss path is one channel
-	// send instead of a Dragonfly round trip. All nil for the LocalOnly
-	// test cache (no L2, no writer).
-	writes  chan l2Write
+	// send instead of a Dragonfly round trip. writes is sharded by question
+	// hash (writeShard) the same way l1Cache shards reads — writes for a
+	// given key always land on the same shard, preserving per-key ordering,
+	// while different keys parallelize across shards instead of serializing
+	// through one goroutine. All nil for the LocalOnly test cache (no L2,
+	// no writer).
+	writes  []chan l2Write
 	wdone   chan struct{}
 	wwg     sync.WaitGroup
 	wclosed atomic.Bool
@@ -154,22 +163,50 @@ func New(addr, password string, db int, ttl, negativeTTL, serveStale time.Durati
 	return c, nil
 }
 
-// startWriter launches the batched L2 write goroutine. Only called when
-// there is a real L2 (client != nil); the LocalOnly test cache has no
-// writer, and its Set/SetNegative skip the L2 path entirely.
+// writerShardCount is how many parallel L2 write-behind goroutines run.
+// A single writer's throughput is bounded by how fast one goroutine can
+// build and flush batches — roughly writeBatchSize/writeFlushInterval
+// writes/sec, regardless of how large writeQueueCap is raised — so on a big
+// box under heavy miss traffic that ceiling is reached well before Dragonfly
+// or the network has any trouble keeping up. Derived from the tuned core
+// count like the other hot-path pools.
+func writerShardCount() int {
+	return tuning.ScaleByCores(1, 1, 16)
+}
+
+// writeShard picks the writer shard for a question hash — the same masking
+// idea l1Cache.shard uses for reads, so writes for a given key always land
+// on the same shard (preserving per-key write ordering) while different
+// keys parallelize across shards.
+func (c *Cache) writeShard(h uint64) chan l2Write {
+	return c.writes[h%uint64(len(c.writes))]
+}
+
+// startWriter launches the batched L2 writer pool (see writerShardCount).
+// Only called when there is a real L2 (client != nil); the LocalOnly test
+// cache has no writer, and its Set/SetNegative skip the L2 path entirely.
 func (c *Cache) startWriter() {
 	if c.client == nil {
 		return
 	}
-	c.writes = make(chan l2Write, writeQueueCap)
+	n := writerShardCount()
+	c.writes = make([]chan l2Write, n)
+	for i := range c.writes {
+		c.writes[i] = make(chan l2Write, writeQueueCap)
+	}
 	c.wdone = make(chan struct{})
-	c.wwg.Go(c.runWriter)
+	for i := range n {
+		c.wwg.Go(func() { c.runWriter(i) })
+	}
 }
 
-// enqueueL2 queues a write for the batched writer, falling back to a direct
-// synchronous SET when the writer hasn't started, is shutting down, or the
-// queue is full — batching is an optimization and must never lose an entry.
-func (c *Cache) enqueueL2(ctx context.Context, key string, val []byte, ttl time.Duration) {
+// enqueueL2 queues a write for the batched writer pool, falling back to a
+// direct synchronous SET when the writer hasn't started, is shutting down,
+// or the target shard's queue is full — batching is an optimization and
+// must never lose an entry. h is the question hash (already computed by the
+// caller) used to pick the shard; it need not match the key being written
+// (the caller ensures it does).
+func (c *Cache) enqueueL2(ctx context.Context, h uint64, key string, val []byte, ttl time.Duration) {
 	if c.client == nil {
 		return
 	}
@@ -178,19 +215,22 @@ func (c *Cache) enqueueL2(ctx context.Context, key string, val []byte, ttl time.
 		return
 	}
 	select {
-	case c.writes <- l2Write{key: key, val: val, ttl: ttl}:
+	case c.writeShard(h) <- l2Write{key: key, val: val, ttl: ttl}:
 	default:
 		c.client.Set(ctx, key, val, ttl)
 	}
 }
 
-// runWriter drains the write queue, committing batches of writeBatchSize or
-// everything queued every writeFlushInterval, whichever comes first — one
-// pipelined Dragonfly round trip per flush instead of one per write.
-// Close() signals via wdone so the writer commits whatever is still queued
-// before exiting. The writes channel is deliberately never closed: enqueueL2
-// may race Close, and a send on a closed channel would panic.
-func (c *Cache) runWriter() {
+// runWriter drains write shard `shard`, committing batches of writeBatchSize
+// or everything queued every writeFlushInterval, whichever comes first — one
+// pipelined Dragonfly round trip per flush instead of one per write. Each
+// shard runs fully independently: a slow flush on one shard never blocks
+// writes routed to another. Close() signals via wdone so every shard commits
+// whatever is still queued before exiting. The writes channels are
+// deliberately never closed: enqueueL2 may race Close, and a send on a
+// closed channel would panic.
+func (c *Cache) runWriter(shard int) {
+	ch := c.writes[shard]
 	batch := make([]l2Write, 0, writeBatchSize)
 	ticker := time.NewTicker(writeFlushInterval)
 	defer ticker.Stop()
@@ -203,7 +243,7 @@ func (c *Cache) runWriter() {
 	}
 	for {
 		select {
-		case w := <-c.writes:
+		case w := <-ch:
 			batch = append(batch, w)
 			if len(batch) >= writeBatchSize {
 				flush()
@@ -211,10 +251,11 @@ func (c *Cache) runWriter() {
 		case <-ticker.C:
 			flush()
 		case <-c.wdone:
-			// Shutdown: commit everything still queued, then exit.
+			// Shutdown: commit everything still queued on this shard, then
+			// exit. wwg.Wait (Close) blocks until every shard has done this.
 			for {
 				select {
-				case w := <-c.writes:
+				case w := <-ch:
 					batch = append(batch, w)
 					if len(batch) >= writeBatchSize {
 						flush()
@@ -893,7 +934,7 @@ func (c *Cache) Set(ctx context.Context, q dns.Question, m *dns.Msg, capTTL time
 		// every L1 hit can rebase TTLs on the raw bytes without unpacking.
 		c.l1.set(h, false, buf, ttl, now, ttlOffsets(packed))
 	}
-	c.enqueueL2(ctx, c.msgKey(h), buf, ttl)
+	c.enqueueL2(ctx, h, c.msgKey(h), buf, ttl)
 }
 
 // ---- negative answers ----
@@ -932,7 +973,7 @@ func (c *Cache) SetNegative(ctx context.Context, q dns.Question, m *dns.Msg, ttl
 	if c.l1 != nil {
 		c.l1.set(h, true, raw, ttl, now, nil)
 	}
-	c.enqueueL2(ctx, c.negKey(h), raw, ttl)
+	c.enqueueL2(ctx, h, c.negKey(h), raw, ttl)
 }
 
 // GetNegative returns a cached empty response, if any (L1 first, then L2).
