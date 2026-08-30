@@ -734,7 +734,13 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			refused.SetReply(r)
 			refused.Rcode = dns.RcodeRefused
 			h.record(client, qname, q, action, reason, "", start, refused)
-			_ = h.write(w, refused, r, proto)
+			out := refused
+			if r.IsEdns0() != nil {
+				// Prohibited: the block is about who's asking, not what's
+				// being asked — distinct from a domain-blocklist hit below.
+				out = attachEDE(refused, dns.ExtendedErrorCodeProhibited, reason)
+			}
+			_ = h.write(w, out, r, proto)
 			putMsg(refused)
 			return
 		}
@@ -923,6 +929,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 		h.Stats.Blocked.Add(1)
 		h.record(client, qname, q, "blocked", decision.Reason, "", start, blocked)
+		if r.IsEdns0() != nil {
+			blocked = attachEDE(blocked, dns.ExtendedErrorCodeBlocked, decision.Reason)
+		}
 		_ = h.write(w, blocked, r, proto)
 		return
 	}
@@ -1030,7 +1039,11 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			capTTL(m, staleServeTTL)
 			h.Stats.Cached.Add(1)
 			h.record(client, qname, q, "cached", "stale", usedUp, start, m)
-			_ = h.write(w, m, r, proto)
+			out := m
+			if r.IsEdns0() != nil {
+				out = attachEDE(m, dns.ExtendedErrorCodeStaleAnswer, "")
+			}
+			_ = h.write(w, out, r, proto)
 			putMsg(m) // fresh per-read decode, safe once written
 			return
 		}
@@ -1050,7 +1063,11 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 				capTTL(m, staleServeTTL)
 				h.Stats.Cached.Add(1)
 				h.record(client, qname, q, "cached", "stale", usedUp, start, m)
-				_ = h.write(w, m, r, proto)
+				out := m
+				if r.IsEdns0() != nil {
+					out = attachEDE(m, dns.ExtendedErrorCodeStaleAnswer, "")
+				}
+				_ = h.write(w, out, r, proto)
 				putMsg(m) // fresh per-read decode, safe once written
 				return
 			}
@@ -1067,7 +1084,13 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			errStr = err.Error()
 		}
 		h.record(client, qname, q, "error", errStr, usedUp, start, m)
-		_ = h.write(w, m, r, proto)
+		out := m
+		if r.IsEdns0() != nil {
+			// A fresh copy for the client only — m itself may be handed to
+			// the background SetNegative write below unmodified.
+			out = attachEDE(m, dns.ExtendedErrorCodeNetworkError, errStr)
+		}
+		_ = h.write(w, out, r, proto)
 		// Cache the failure briefly (negative_ttl) so a dead upstream or
 		// zone doesn't burn the full timeout on every retry — a failing
 		// domain's retries used to re-pay the whole per-query timeout each
@@ -1130,6 +1153,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 			h.Stats.Blocked.Add(1)
 			h.record(client, qname, q, "blocked", reason, usedUp, start, blocked)
+			if r.IsEdns0() != nil {
+				blocked = attachEDE(blocked, dns.ExtendedErrorCodeBlocked, reason)
+			}
 			_ = h.write(w, blocked, r, proto)
 			return
 		}
@@ -1147,6 +1173,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			h.Stats.Blocked.Add(1)
 			reason := "cname-cloaking:" + owner + "->" + target + ":" + decision.Reason
 			h.record(client, qname, q, "blocked", reason, usedUp, start, blocked)
+			if r.IsEdns0() != nil {
+				blocked = attachEDE(blocked, dns.ExtendedErrorCodeBlocked, reason)
+			}
 			_ = h.write(w, blocked, r, proto)
 			return
 		}
@@ -1367,6 +1396,30 @@ func attachCookie(m *dns.Msg, cookie string) *dns.Msg {
 	}
 	opt.Option = keep
 	opt.Option = append(opt.Option, &dns.EDNS0_COOKIE{Code: dns.EDNS0COOKIE, Cookie: cookie})
+	return c
+}
+
+// attachEDE returns a copy of m carrying an Extended DNS Error option (RFC
+// 8914) with the given info code and human-readable extra text, replacing
+// any existing EDE option. Only meaningful for a client that sent its own
+// OPT record — callers gate on r.IsEdns0() != nil before calling this, the
+// same convention attachCookie's caller uses for the COOKIE option.
+func attachEDE(m *dns.Msg, code uint16, extra string) *dns.Msg {
+	c := m.Copy()
+	opt := c.IsEdns0()
+	if opt == nil {
+		opt = &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
+		opt.SetUDPSize(udpMaxPacketSize)
+		c.Extra = append(c.Extra, opt)
+	}
+	keep := opt.Option[:0]
+	for _, o := range opt.Option {
+		if o.Option() != dns.EDNS0EDE {
+			keep = append(keep, o)
+		}
+	}
+	opt.Option = keep
+	opt.Option = append(opt.Option, &dns.EDNS0_EDE{InfoCode: code, ExtraText: extra})
 	return c
 }
 

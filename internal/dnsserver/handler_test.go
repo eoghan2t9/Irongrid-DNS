@@ -1434,6 +1434,60 @@ func TestHandlerCNAMECloakingProtection(t *testing.T) {
 	})
 }
 
+// TestHandlerBlockedResponseCarriesEDE verifies a blocklisted query answered
+// to a client that advertised EDNS0 carries an Extended DNS Error (RFC 8914)
+// identifying the block, and that a client with no EDNS0 gets no OPT record
+// at all — adding one to a response the client never asked for would be a
+// protocol overreach, the same rule DNS Cookies already follow.
+func TestHandlerBlockedResponseCarriesEDE(t *testing.T) {
+	e := filter.NewEngine()
+	e.SetUserLists([]string{"blocked.example"}, nil)
+	e.Compile()
+	h := NewHandler(e, nil, nil, nil, "nxdomain", 600, 5*time.Second)
+
+	t.Run("EDNS0 client gets an EDE option", func(t *testing.T) {
+		m := new(dns.Msg)
+		m.SetQuestion("blocked.example.", dns.TypeA)
+		m.SetEdns0(1232, false)
+		fw := &fakeWriter{}
+		h.ServeDNS(fw, m)
+
+		if fw.msg == nil || fw.msg.Rcode != dns.RcodeNameError {
+			t.Fatalf("expected NXDOMAIN, got %v", fw.msg)
+		}
+		opt := fw.msg.IsEdns0()
+		if opt == nil {
+			t.Fatal("expected an OPT record on the response")
+		}
+		var ede *dns.EDNS0_EDE
+		for _, o := range opt.Option {
+			if e, ok := o.(*dns.EDNS0_EDE); ok {
+				ede = e
+			}
+		}
+		if ede == nil {
+			t.Fatal("expected an EDE option on the response")
+		}
+		if ede.InfoCode != dns.ExtendedErrorCodeBlocked {
+			t.Fatalf("InfoCode = %d, want ExtendedErrorCodeBlocked", ede.InfoCode)
+		}
+	})
+
+	t.Run("non-EDNS0 client gets no OPT record at all", func(t *testing.T) {
+		m := new(dns.Msg)
+		m.SetQuestion("blocked.example.", dns.TypeA)
+		fw := &fakeWriter{}
+		h.ServeDNS(fw, m)
+
+		if fw.msg == nil || fw.msg.Rcode != dns.RcodeNameError {
+			t.Fatalf("expected NXDOMAIN, got %v", fw.msg)
+		}
+		if fw.msg.IsEdns0() != nil {
+			t.Fatal("a client with no EDNS0 in its query should get no OPT record in the response")
+		}
+	})
+}
+
 // TestRaceUpstreamsAllFail verifies an all-failures case returns promptly
 // instead of stalling until the full timeout.
 func TestRaceUpstreamsAllFail(t *testing.T) {
