@@ -36,22 +36,50 @@ export function restoreCredentials() {
   return credentials
 }
 
-async function request(path, options = {}) {
+// REQUEST_TIMEOUT_MS bounds every request so a stalled backend (a stuck
+// upstream resolve, a hung AXFR) fails fast instead of leaving the caller's
+// promise pending forever.
+const REQUEST_TIMEOUT_MS = 30000
+
+// timedFetch wraps fetch with an AbortController-based timeout. A timeout
+// abort is turned into a distinctly-messaged Error so callers (the stale-
+// connection retry below) can tell "the network hiccuped" from "the server
+// really is stuck" and only retry the former.
+async function timedFetch(path, options, timeoutMs = REQUEST_TIMEOUT_MS) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    return await fetch(path, { ...options, signal: controller.signal })
+  } catch (err) {
+    if (err.name === 'AbortError') throw new Error(`Request timed out after ${timeoutMs / 1000}s`)
+    throw err
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+// fetchWithAuthRetry attaches the Basic auth header (when present) and
+// performs the fetch, retrying once on a connection-level failure. A raw
+// fetch() throw ("Failed to fetch") is most often the browser's pooled
+// HTTP/2 connection going stale while the tab was backgrounded (minimised,
+// laptop sleep, phone screen off); the browser opens a fresh connection on
+// the very next attempt, so one silent retry clears up the vast majority of
+// these instead of surfacing a one-off blip as a hard error. A genuine
+// timeout is not retried — it already waited the full budget once.
+async function fetchWithAuthRetry(path, options = {}) {
   const headers = { ...(options.headers || {}) }
   const auth = authHeader()
   if (auth) headers.Authorization = auth
-  let resp
   try {
-    resp = await fetch(path, { ...options, headers })
-  } catch {
-    // A raw fetch() throw ("Failed to fetch") is a connection-level failure,
-    // not an HTTP error — most often the browser's pooled HTTP/2 connection
-    // going stale while the tab was backgrounded (minimised, laptop sleep,
-    // phone screen off). The browser opens a fresh connection on the very
-    // next attempt, so one silent retry clears up the vast majority of these
-    // instead of surfacing a one-off blip as a hard error.
-    resp = await fetch(path, { ...options, headers })
+    return await timedFetch(path, { ...options, headers })
+  } catch (err) {
+    if (err.message && err.message.startsWith('Request timed out')) throw err
+    return await timedFetch(path, { ...options, headers })
   }
+}
+
+async function request(path, options = {}) {
+  const resp = await fetchWithAuthRetry(path, options)
   if (resp.status === 401) {
     if (onUnauthorized) onUnauthorized()
     throw new Error('unauthorized')
@@ -61,6 +89,24 @@ async function request(path, options = {}) {
     throw new Error(body.error || `HTTP ${resp.status}`)
   }
   return resp.json()
+}
+
+// requestBlob is request()'s counterpart for binary downloads (CSV/zip/cert
+// exports): same auth header, timeout and stale-connection retry, but
+// resolves to a Blob instead of parsed JSON. Shared by every download
+// endpoint below instead of each hand-rolling the same fetch/401/retry
+// sequence.
+async function requestBlob(path, options = {}) {
+  const resp = await fetchWithAuthRetry(path, options)
+  if (resp.status === 401) {
+    if (onUnauthorized) onUnauthorized()
+    throw new Error('unauthorized')
+  }
+  if (!resp.ok) {
+    const body = await resp.json().catch(() => ({}))
+    throw new Error(body.error || `HTTP ${resp.status}`)
+  }
+  return resp.blob()
 }
 
 export const api = {
@@ -194,20 +240,7 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ip }),
     }),
-  abuseExport: async () => {
-    // Raw fetch so we can return a blob for the CSV download (auth header is
-    // attached like request(); after a reload the session cookie covers it).
-    const headers = {}
-    const auth = authHeader()
-    if (auth) headers.Authorization = auth
-    const resp = await fetch('/api/abuse/export', { headers })
-    if (resp.status === 401) {
-      if (onUnauthorized) onUnauthorized()
-      throw new Error('unauthorized')
-    }
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    return resp.blob()
-  },
+  abuseExport: () => requestBlob('/api/abuse/export'),
   tunnelStatus: () => request('/api/tunnel/status'),
   tunnelStart: (body) =>
     request('/api/tunnel/start', {
@@ -227,32 +260,10 @@ export const api = {
       body: JSON.stringify(cfg),
     }),
   reloadConfig: () => request('/api/config/reload', { method: 'POST' }),
-  configBackup: async (passphrase) => {
-    // Raw fetch so we can return a blob for the zip download (auth header is
-    // attached like request(); after a reload the session cookie covers it).
+  configBackup: (passphrase) =>
     // The passphrase (if any) rides in a header, not a query string, so it
     // doesn't end up in server access logs.
-    const headers = {}
-    const auth = authHeader()
-    if (auth) headers.Authorization = auth
-    if (passphrase) headers['X-Backup-Passphrase'] = passphrase
-    let resp
-    try {
-      resp = await fetch('/api/config/backup', { headers })
-    } catch {
-      // Same stale-connection retry as request().
-      resp = await fetch('/api/config/backup', { headers })
-    }
-    if (resp.status === 401) {
-      if (onUnauthorized) onUnauthorized()
-      throw new Error('unauthorized')
-    }
-    if (!resp.ok) {
-      const body = await resp.json().catch(() => ({}))
-      throw new Error(body.error || `HTTP ${resp.status}`)
-    }
-    return resp.blob()
-  },
+    requestBlob('/api/config/backup', passphrase ? { headers: { 'X-Backup-Passphrase': passphrase } } : {}),
   configRestore: (file, passphrase) => {
     // Multipart upload; the browser sets the boundary automatically, so no
     // Content-Type header is sent. passphrase is ignored server-side for a
@@ -280,18 +291,5 @@ export const api = {
       body: JSON.stringify(body),
     }),
   tlsAcmeIssue: () => request('/api/tls/acme/issue', { method: 'POST' }),
-  tlsCertDownload: async () => {
-    // Raw fetch so we can return a blob (the auth header is attached the
-    // same way as request() does; after a reload the session cookie covers it).
-    const headers = {}
-    const auth = authHeader()
-    if (auth) headers.Authorization = auth
-    const resp = await fetch('/api/tls/cert', { headers })
-    if (resp.status === 401) {
-      if (onUnauthorized) onUnauthorized()
-      throw new Error('unauthorized')
-    }
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
-    return resp.blob()
-  },
+  tlsCertDownload: () => requestBlob('/api/tls/cert'),
 }

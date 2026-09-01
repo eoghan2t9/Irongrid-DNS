@@ -36,6 +36,28 @@ const (
 	changelogLimit = 10
 )
 
+// sharedTransport pools TCP/TLS connections across every Check/List/Install
+// call for the life of the process, instead of each call (when
+// Client.HTTPClient is unset, the common case) allocating its own
+// http.Client — and therefore its own throwaway connection pool — that gets
+// GC'd right after. api.github.com is hit repeatedly over the process's
+// life (update checks, changelog fetches), so reusing keep-alive
+// connections saves a TLS handshake each time.
+var sharedTransport = &http.Transport{
+	MaxIdleConns:        20,
+	MaxIdleConnsPerHost: 4,
+	IdleConnTimeout:     90 * time.Second,
+}
+
+// defaultAPIClient, defaultDownloadClient and defaultInstallClient are the
+// fallbacks used when Client.HTTPClient is nil, sharing sharedTransport's
+// connection pool but keeping their own per-call timeouts.
+var (
+	defaultAPIClient      = &http.Client{Transport: sharedTransport, Timeout: 10 * time.Second}
+	defaultDownloadClient = &http.Client{Transport: sharedTransport, Timeout: 5 * time.Minute}
+	defaultInstallClient  = &http.Client{Transport: sharedTransport, Timeout: 30 * time.Second}
+)
+
 // Asset is the subset of a GitHub release asset we care about.
 type Asset struct {
 	Name string `json:"name"`
@@ -169,7 +191,7 @@ func (c *Client) latest(ctx context.Context) (*release, error) {
 func (c *Client) getJSON(ctx context.Context, url string, out any) error {
 	client := c.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = defaultAPIClient
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -375,7 +397,7 @@ func (c *Client) Install(ctx context.Context, executable string) (*InstallResult
 func (c *Client) downloadTo(ctx context.Context, url string, w io.Writer) error {
 	client := c.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Minute}
+		client = defaultDownloadClient
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -410,7 +432,7 @@ func (c *Client) checksumFor(ctx context.Context, rel *release, asset string) (s
 	}
 	client := c.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 30 * time.Second}
+		client = defaultInstallClient
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, sumsURL, nil)
 	if err != nil {

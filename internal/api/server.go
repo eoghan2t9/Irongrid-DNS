@@ -53,6 +53,14 @@ type App struct {
 	// an active lockout).
 	loginGuardOnce sync.Once
 	loginGuard     *LoginGuard
+
+	// apiRateLimiter throttles authenticated /api/ traffic per client IP —
+	// LoginGuard only covers failed login attempts, so nothing previously
+	// bounded how hard an already-authenticated session (or a buggy/stuck
+	// frontend retry loop) could hammer the REST API. Lazily created and
+	// preserved across router rebuilds for the same reason as loginGuard.
+	apiRateLimiterOnce sync.Once
+	apiRateLimiter     *APIRateLimiter
 }
 
 // APIHandler is implemented by the API to reach into the running services.
@@ -70,6 +78,9 @@ func NewRouter(a *App) http.Handler {
 	// REST API (JSON).
 	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {
 		if !a.authorize(w, r) {
+			return
+		}
+		if !a.allowAPIRequest(w, r) {
 			return
 		}
 		a.Handler.HandleAPI(w, r)
@@ -179,6 +190,22 @@ func (a *App) authorize(w http.ResponseWriter, r *http.Request) bool {
 	// built-in HTTP-auth dialog over the page instead of letting the user use
 	// the login form.
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	return false
+}
+
+// allowAPIRequest throttles authenticated /api/ traffic per client IP,
+// writing a 429 with Retry-After and returning false when the client's
+// budget (see apiRateQPS/apiRateBurst) is exhausted. Called only after
+// authorize succeeds — this is insurance against a runaway loop, not an
+// auth check.
+func (a *App) allowAPIRequest(w http.ResponseWriter, r *http.Request) bool {
+	a.apiRateLimiterOnce.Do(func() { a.apiRateLimiter = NewAPIRateLimiter() })
+	client := clientIPFromRequest(r)
+	if a.apiRateLimiter.Allow(client) {
+		return true
+	}
+	w.Header().Set("Retry-After", "1")
+	writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "too many requests"})
 	return false
 }
 

@@ -35,6 +35,28 @@ const (
 	versionFileName = "cloudflared.version"
 )
 
+// sharedTransport pools TCP/TLS connections across every latest()/
+// downloadAndVerify() call for the life of the process, instead of each
+// call (when Client.HTTPClient is unset, the common case) allocating its
+// own http.Client — and therefore its own throwaway connection pool — that
+// gets GC'd right after. api.github.com and the release CDN are hit
+// repeatedly over the process's life, so reusing keep-alive connections
+// saves a TLS handshake on every update check.
+var sharedTransport = &http.Transport{
+	MaxIdleConns:        20,
+	MaxIdleConnsPerHost: 4,
+	IdleConnTimeout:     90 * time.Second,
+}
+
+// defaultAPIClient and defaultDownloadClient are the fallbacks used when
+// Client.HTTPClient is nil, sharing sharedTransport's connection pool but
+// keeping their own per-call timeouts (a release-asset download needs far
+// more time than a small JSON API call).
+var (
+	defaultAPIClient      = &http.Client{Transport: sharedTransport, Timeout: 10 * time.Second}
+	defaultDownloadClient = &http.Client{Transport: sharedTransport, Timeout: 5 * time.Minute}
+)
+
 // Asset is the subset of a GitHub release asset we care about. Digest is a
 // GitHub-computed "sha256:<hex>" content hash, present on modern releases —
 // cloudflared does not publish its own SHA256SUMS.txt, so this is the only
@@ -224,7 +246,7 @@ func (c *Client) latest(ctx context.Context) (*release, error) {
 	}
 	client := c.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 10 * time.Second}
+		client = defaultAPIClient
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -254,7 +276,7 @@ func (c *Client) latest(ctx context.Context) (*release, error) {
 func (c *Client) downloadAndVerify(ctx context.Context, asset Asset, w io.Writer) (string, error) {
 	client := c.HTTPClient
 	if client == nil {
-		client = &http.Client{Timeout: 5 * time.Minute}
+		client = defaultDownloadClient
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, asset.URL, nil)
 	if err != nil {

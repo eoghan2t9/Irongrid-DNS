@@ -15,22 +15,19 @@ export default function Dashboard({ onNavigate }) {
   const [setupConfig, setSetupConfig] = useState(null)
 
   const load = useCallback(async () => {
-    try {
-      setStats(await api.stats())
+    // The three endpoints are independent, so fetch them concurrently
+    // instead of one after another — this was tripling refresh latency on
+    // every 10s poll for no reason. allSettled so one failure (tls/status
+    // are best-effort) never blocks the others from applying.
+    const [statsRes, tlsRes, statusRes] = await Promise.allSettled([api.stats(), api.tlsStatus(), api.status()])
+    if (statsRes.status === 'fulfilled') {
+      setStats(statsRes.value)
       setError('')
-    } catch (e) {
-      setError(e.message)
+    } else {
+      setError(statsRes.reason.message)
     }
-    try {
-      setTls(await api.tlsStatus())
-    } catch {
-      /* optional */
-    }
-    try {
-      setStatus(await api.status())
-    } catch {
-      /* optional */
-    }
+    if (tlsRes.status === 'fulfilled') setTls(tlsRes.value)
+    if (statusRes.status === 'fulfilled') setStatus(statusRes.value)
   }, [])
 
   useEffect(() => {
