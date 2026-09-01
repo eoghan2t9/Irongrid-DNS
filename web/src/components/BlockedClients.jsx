@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
+import { usePolling } from '../hooks/usePolling'
 
 // BlockedClients is a dedicated page for the clients currently blocked —
 // honeypot auto-blocks (persisted, firewall-dropped) and rate-limit
@@ -60,18 +61,8 @@ export default function BlockedClients() {
 
   useEffect(() => {
     load()
-    const t = setInterval(load, 10000)
-    // Refresh promptly when the tab regains visibility instead of waiting
-    // for the next 10s tick.
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') load()
-    }
-    document.addEventListener('visibilitychange', onVisible)
-    return () => {
-      clearInterval(t)
-      document.removeEventListener('visibilitychange', onVisible)
-    }
   }, [load])
+  usePolling(load, 10000)
 
   const act = async (fn) => {
     setError('')

@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { EmptyState } from './ui'
+import { usePolling } from '../hooks/usePolling'
 
 export default function Dhcp() {
   const [data, setData] = useState(null)
@@ -21,10 +22,7 @@ export default function Dhcp() {
 
   // Poll every 10s so a lease table changes on its own (new device boots,
   // lease expires, hostname registers) without a manual refresh.
-  useEffect(() => {
-    const t = setInterval(load, 10000)
-    return () => clearInterval(t)
-  }, [load])
+  usePolling(load, 10000)
 
   const leases = (data && data.leases) || []
   const enabled = !!(data && data.enabled)

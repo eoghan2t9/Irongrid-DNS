@@ -526,6 +526,39 @@ func TestL1FIFOEviction(t *testing.T) {
 	}
 }
 
+// TestL1SecondChanceEviction verifies the CLOCK second-chance behavior
+// evictToCap adds on top of plain FIFO: a read entry must survive an
+// eviction that a colder, more-recently-inserted entry does not, even
+// though it was inserted first. This is exactly the case TestL1FIFOEviction
+// intentionally does NOT cover (nothing is read there, so the second-chance
+// path never triggers and the shard degrades to plain FIFO).
+func TestL1SecondChanceEviction(t *testing.T) {
+	t.Parallel()
+	c := newL1(2, 0) // cap 2 per shard
+	now := time.Now()
+	// h=0, h=l1Shards and h=2*l1Shards all mask to shard 0.
+	hs := []uint64{0, l1Shards, 2 * l1Shards}
+	c.set(hs[0], false, []byte{0}, time.Hour, now, nil) // A, inserted first
+	c.set(hs[1], false, []byte{1}, time.Hour, now, nil) // B, inserted second
+
+	// Read A before the shard is forced to evict — it should earn one
+	// second chance and survive ahead of B, which is never read.
+	if _, _, _, _, ok := c.get(hs[0], false, now); !ok {
+		t.Fatal("A should be cached before the read")
+	}
+	c.set(hs[2], false, []byte{2}, time.Hour, now, nil) // C, forces eviction
+
+	if _, _, _, _, ok := c.get(hs[0], false, now); !ok {
+		t.Fatal("A (read since insertion) should have survived eviction on its second chance")
+	}
+	if _, _, _, _, ok := c.get(hs[1], false, now); ok {
+		t.Fatal("B (never read) should have been evicted ahead of A")
+	}
+	if _, _, _, _, ok := c.get(hs[2], false, now); !ok {
+		t.Fatal("C (just inserted) should still be cached")
+	}
+}
+
 func nxdomainResponse() *dns.Msg {
 	m := emptyResponse()
 	m.Rcode = dns.RcodeNameError

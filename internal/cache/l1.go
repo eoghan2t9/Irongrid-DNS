@@ -2,6 +2,7 @@ package cache
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -42,14 +43,24 @@ type l1Entry struct {
 	ttlOff     []uint32
 	expires    time.Time
 	staleUntil time.Time // expires + staleTTL; serves stale before this
+	// referenced marks the entry as read since it was last given a second
+	// chance by evictToCap (see there) — the CLOCK-algorithm bit that lets
+	// eviction approximate LRU without get() paying for a write lock on
+	// every hit. Entries are stored as pointers (l1Shard.m) specifically so
+	// this field has a stable address for atomic ops; a map value isn't
+	// addressable.
+	referenced atomic.Bool
 }
 
 type l1Shard struct {
 	mu sync.RWMutex
-	m  map[l1Key]l1Entry
-	// queue tracks insertion order so a full shard evicts the oldest-inserted
-	// entry instead of an arbitrary one (map iteration order). Entries that
-	// were deleted/expired linger as dead slots until they reach the head;
+	m  map[l1Key]*l1Entry
+	// queue tracks insertion order so eviction has a deterministic order to
+	// walk instead of arbitrary map iteration order. A full shard's
+	// evictToCap gives a recently-read entry (referenced == true) one
+	// second chance — clearing the bit and requeuing it at the back — before
+	// evicting purely by insertion order; see evictToCap. Entries that were
+	// deleted/expired linger as dead slots until they reach the head;
 	// compact() bounds that growth. Never appended when cap == 0.
 	queue []l1Key
 }
@@ -65,7 +76,7 @@ type l1Cache struct {
 func newL1(capPerShard int, staleTTL time.Duration) *l1Cache {
 	c := &l1Cache{cap: capPerShard, staleTTL: staleTTL}
 	for i := range c.shards {
-		c.shards[i] = &l1Shard{m: make(map[l1Key]l1Entry, 16)}
+		c.shards[i] = &l1Shard{m: make(map[l1Key]*l1Entry, 16)}
 	}
 	return c
 }
@@ -138,6 +149,11 @@ func (c *l1Cache) get(h uint64, neg bool, now time.Time) (raw []byte, remaining 
 	if !ok {
 		return nil, 0, false, nil, false
 	}
+	// Mark the entry as recently used so a second-chance eviction (see
+	// evictToCap) spares it instead of dropping it in strict insertion
+	// order. The atomic store needs no lock beyond the RLock already taken
+	// above, so a cache hit still costs exactly one map lookup.
+	e.referenced.Store(true)
 	if now.Before(e.expires) {
 		return e.raw, e.expires.Sub(now), false, e.ttlOff, true
 	}
@@ -164,7 +180,7 @@ func (c *l1Cache) set(h uint64, neg bool, raw []byte, ttl time.Duration, now tim
 	defer s.mu.Unlock()
 	if c.cap > 0 {
 		if _, exists := s.m[key]; !exists {
-			s.m[key] = l1Entry{raw: raw, ttlOff: ttlOff, expires: now.Add(ttl), staleUntil: now.Add(ttl + c.staleTTL)}
+			s.m[key] = &l1Entry{raw: raw, ttlOff: ttlOff, expires: now.Add(ttl), staleUntil: now.Add(ttl + c.staleTTL)}
 			s.queue = append(s.queue, key)
 			s.evictToCap(c.cap)
 			// Dead queue slots (deleted/expired keys) accumulate as the map
@@ -184,17 +200,37 @@ func (c *l1Cache) set(h uint64, neg bool, raw []byte, ttl time.Duration, now tim
 		// approximation; the L2-hit re-warm path re-sets the same key in
 		// place without churning the queue.
 	}
-	s.m[key] = l1Entry{raw: raw, ttlOff: ttlOff, expires: now.Add(ttl), staleUntil: now.Add(ttl + c.staleTTL)}
+	s.m[key] = &l1Entry{raw: raw, ttlOff: ttlOff, expires: now.Add(ttl), staleUntil: now.Add(ttl + c.staleTTL)}
 }
 
-// evictToCap pops queue entries until the shard map is at or under cap.
-// Dead slots (keys already deleted) are popped without shrinking the map —
-// delete is a no-op for them — so only popping a live entry frees capacity
-// and the loop advances. Called with the shard lock held.
+// evictToCap enforces cap with a CLOCK (second-chance) approximation of
+// LRU: an entry read since its last pass through here (e.referenced, set by
+// get()) is spared once — its bit is cleared and it's requeued at the back
+// — instead of being evicted purely by insertion order. That's what stops a
+// genuinely hot domain inserted long ago from being evicted ahead of a cold
+// one-off inserted a moment later, which strict FIFO could do under memory
+// pressure. get() sets the bit under its existing RLock, so a cache hit
+// still costs exactly one map lookup; only eviction (already under the full
+// shard lock here) pays the extra bookkeeping.
+//
+// Dead slots (keys already deleted) are dropped without ceremony. The loop
+// is guaranteed to terminate: no concurrent get() can set a referenced bit
+// while this call holds the shard lock, so every live entry is evicted or
+// requeued-with-its-bit-cleared within at most two passes over the queue.
+// Called with the shard lock held.
 func (s *l1Shard) evictToCap(cap int) {
 	for len(s.m) > cap && len(s.queue) > 0 {
 		k := s.queue[0]
 		s.queue = s.queue[1:]
+		e, ok := s.m[k]
+		if !ok {
+			continue
+		}
+		if e.referenced.Load() {
+			e.referenced.Store(false)
+			s.queue = append(s.queue, k)
+			continue
+		}
 		delete(s.m, k)
 	}
 }
@@ -224,7 +260,7 @@ func (c *l1Cache) del(h uint64, neg bool) {
 func (c *l1Cache) flush() {
 	for _, s := range c.shards {
 		s.mu.Lock()
-		s.m = make(map[l1Key]l1Entry, 16)
+		s.m = make(map[l1Key]*l1Entry, 16)
 		s.queue = nil
 		s.mu.Unlock()
 	}

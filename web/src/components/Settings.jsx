@@ -8,122 +8,12 @@ import FilteringTab from './settings/FilteringTab'
 import CacheTab from './settings/CacheTab'
 import NetworkTab from './settings/NetworkTab'
 import SystemTab from './settings/SystemTab'
+import { emptyConfig } from './settings/defaultConfig'
 
 // Settings is split into tabbed sub pages — each ./settings/*Tab component
-// is one sub page, rendered below the tab strip in the header card.
-
-const empty = () => ({
-  server: {
-    listen_udp: '',
-    listen_tcp: '',
-    listen_dot: '',
-    listen_doh: '',
-    listen_doh3: '',
-    listen_doq: '',
-    doh_path: '/dns-query',
-    web_listen: '',
-    web_tls: false,
-    web_redirect: false,
-    web_redirect_port: 80,
-    timeout_sec: 5,
-    udp_sockets: 0,
-    udp_workers: 0,
-    padding: false,
-    cookies: false,
-    trusted_proxies: [],
-    xff_hop_limit: 0,
-    doh_asn_header: false,
-  },
-  upstreams: [],
-  upstream_mode: 'race',
-  upstream_routes: [],
-  cache: {
-    addr: '',
-    password: '',
-    db: 0,
-    ttl: '6h',
-    negative_ttl: '1m',
-    l1_entries: 0,
-    serve_stale: '5m',
-    prefetch: true,
-    lookup_timeout: '150ms',
-    failure_ttl: '5s',
-  },
-  recursive: { server_timeout: '' },
-  tls: {
-    cert_file: '',
-    key_file: '',
-    generate_self_signed: true,
-    self_signed_hosts: [],
-    cert_dir: '',
-    acme: {
-      enabled: false,
-      email: '',
-      domains: [],
-      staging: false,
-      http01_port: 80,
-      renew_before_days: 30,
-      dns01: {
-        provider: '',
-        propagation_wait_sec: 60,
-        cloudflare_token: '',
-        digitalocean_token: '',
-        hetzner_token: '',
-        godaddy_key: '',
-        godaddy_secret: '',
-        aws_access_key_id: '',
-        aws_secret_access_key: '',
-      },
-    },
-  },
-  filter: {
-    block_response: 'nxdomain',
-    block_ttl: 600,
-    blocklists: [],
-    whitelist: [],
-    blacklist: [],
-    auto_update: '24h',
-    cname_cloaking_protection: false,
-  },
-  log: { query_log_file: '', retention_days: 30, verbose: true },
-  web: { username: 'admin', password: '' },
-  tunnel: { enabled: false, token: '', config_file: '', quick_tunnel: false, quick_tunnel_url: '', hostname: '' },
-  rewrites: [],
-  client_groups: [],
-  rate_limit: { enabled: false, qps: 20, burst: 40, auto_block: false, block_after: 3, block_for: '10m' },
-  geo_block: {
-    enabled: false,
-    countries: [],
-    allowlist: [],
-    ips: [],
-    honeypots: [],
-    allow_asns: [],
-    block_asns: [],
-    base_url: '',
-    asn_base_url: '',
-    auto_update: '168h',
-    trust_udp: false,
-  },
-  abuse: { abuseipdb_key: '' },
-  dnssec: { enabled: false, require_ad: true },
-  warmer: { enabled: false, interval: '15m', lookback: '24h', max_domains: 5000, concurrency: 8 },
-  dhcp: {
-    enabled: false,
-    interface: '',
-    subnet: '',
-    range_start: '',
-    range_end: '',
-    gateway: '',
-    dns: [],
-    lease_time: '24h',
-    domain: 'lan',
-    static_leases: [],
-    ipv6: false,
-    ipv6_prefix: '',
-    ipv6_range_start: '',
-    ipv6_range_end: '',
-  },
-})
+// is one sub page, rendered below the tab strip in the header card. The
+// default (never-saved) config shape lives in ./settings/defaultConfig —
+// pure static data with no logic to keep near this component.
 
 export default function Settings({ onSessionInvalidated }) {
   const toast = useToast()
@@ -215,7 +105,7 @@ export default function Settings({ onSessionInvalidated }) {
 
   const set = (path, value) => {
     setCfg((prev) => {
-      const next = JSON.parse(JSON.stringify(prev || empty()))
+      const next = JSON.parse(JSON.stringify(prev || emptyConfig()))
       const keys = path.split('.')
       let o = next
       for (let i = 0; i < keys.length - 1; i++) o = o[keys[i]]

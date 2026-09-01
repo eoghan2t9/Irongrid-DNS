@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast-context'
 import { EmptyState } from './ui'
+import { usePolling } from '../hooks/usePolling'
 
 const fmtTime = (iso) => {
   const d = new Date(iso)
@@ -98,22 +99,7 @@ export default function QueryLog() {
     load()
   }, [load])
 
-  useEffect(() => {
-    if (!autoRefresh) return
-    const t = setInterval(load, 5000)
-    // Refresh right away when the tab regains visibility instead of waiting
-    // for the next 5s tick (same pattern as the dashboard): backgrounded
-    // tabs get their timers throttled, so on return we want fresh data
-    // immediately rather than up to 5s of stale rows.
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') load()
-    }
-    document.addEventListener('visibilitychange', onVisible)
-    return () => {
-      clearInterval(t)
-      document.removeEventListener('visibilitychange', onVisible)
-    }
-  }, [autoRefresh, load])
+  usePolling(load, 5000, autoRefresh)
 
   // Back/forward: if the URL's client filter changes (e.g. back from a
   // deep-linked client view to the plain log), re-sync the filter state.

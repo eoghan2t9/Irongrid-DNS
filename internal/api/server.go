@@ -4,6 +4,7 @@ package api
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -66,6 +67,8 @@ type App struct {
 // APIHandler is implemented by the API to reach into the running services.
 type APIHandler interface {
 	HandleAPI(w http.ResponseWriter, r *http.Request)
+	// Metrics renders the Prometheus scrape response for /metrics.
+	Metrics(ctx context.Context, w http.ResponseWriter)
 }
 
 //go:embed static/*
@@ -84,6 +87,18 @@ func NewRouter(a *App) http.Handler {
 			return
 		}
 		a.Handler.HandleAPI(w, r)
+	})
+
+	// Prometheus scrape endpoint — same admin auth as the REST API (a
+	// Prometheus scrape_config's basic_auth covers this cleanly). Anyone
+	// who can already read every counter here via the dashboard's
+	// /api/stats can scrape them here too; this just adds a machine-
+	// readable format for real monitoring.
+	mux.HandleFunc("/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if !a.authorize(w, r) {
+			return
+		}
+		a.Handler.Metrics(r.Context(), w)
 	})
 
 	// Runtime profiling (net/http/pprof), only when explicitly enabled

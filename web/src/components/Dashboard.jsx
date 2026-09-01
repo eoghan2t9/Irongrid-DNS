@@ -1,6 +1,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react'
 import { api } from '../api'
 import { EmptyState, CheckIcon, AlertIcon } from './ui'
+import { usePolling } from '../hooks/usePolling'
 
 const fmt = (n) => (n ?? 0).toLocaleString()
 
@@ -32,20 +33,8 @@ export default function Dashboard({ onNavigate }) {
 
   useEffect(() => {
     load()
-    const t = setInterval(load, 10000)
-    // Refresh right away when the tab regains visibility (e.g. after being
-    // minimised) instead of waiting for the next 10s tick: the pooled
-    // connection can go stale while backgrounded, so this both retries
-    // promptly and clears any leftover error banner without a visible delay.
-    const onVisible = () => {
-      if (document.visibilityState === 'visible') load()
-    }
-    document.addEventListener('visibilitychange', onVisible)
-    return () => {
-      clearInterval(t)
-      document.removeEventListener('visibilitychange', onVisible)
-    }
   }, [load])
+  usePolling(load, 10000)
 
   // One config fetch on mount drives the setup checklist — the config is
   // tiny and the dashboard is the natural place a first-time operator lands.
