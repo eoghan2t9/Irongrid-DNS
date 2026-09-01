@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"sort"
 	"strconv"
@@ -94,7 +95,9 @@ func (h *Handler) Metrics(ctx context.Context, w http.ResponseWriter) {
 	}
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
-	io.WriteString(w, b.String())
+	if _, err := io.WriteString(w, b.String()); err != nil {
+		slog.Error("metrics write failed", "error", err)
+	}
 }
 
 // formatMetricFloat renders v the way the Prometheus text format expects:

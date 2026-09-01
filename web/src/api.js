@@ -51,7 +51,7 @@ async function timedFetch(path, options, timeoutMs = REQUEST_TIMEOUT_MS) {
   try {
     return await fetch(path, { ...options, signal: controller.signal })
   } catch (err) {
-    if (err.name === 'AbortError') throw new Error(`Request timed out after ${timeoutMs / 1000}s`)
+    if (err.name === 'AbortError') throw new Error(`Request timed out after ${timeoutMs / 1000}s`, { cause: err })
     throw err
   } finally {
     clearTimeout(timer)
