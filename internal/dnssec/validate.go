@@ -9,6 +9,7 @@ import (
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 	"github.com/miekg/dns"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -44,6 +45,12 @@ type Validator struct {
 
 	mu    sync.Mutex
 	cache map[string]zoneCacheEntry
+
+	// flight coalesces concurrent zoneKeys calls for the same zone: a
+	// cold-cache burst (many clients resolving the same signed domain at
+	// once) would otherwise spawn one independent DNSKEY/DS chain walk
+	// per query. Same pattern as Handler.flight in internal/dnsserver.
+	flight singleflight.Group
 }
 
 // NewValidator creates a Validator backed by anchors for its root of trust.
@@ -127,14 +134,45 @@ func (v *Validator) Validate(ctx context.Context, up *upstream.Upstream, resp *d
 // anchor. secure=false with err=nil means the walk completed but couldn't
 // establish trust (no DS at the parent, or DS doesn't match any published
 // key) — treated as "insecure", never silently as "trusted".
+//
+// Concurrent calls for the same zone are coalesced via flight: a cold-cache
+// burst (many clients resolving the same signed domain at once) triggers
+// exactly one chain walk, not one per caller.
+type zoneResult struct {
+	keys   []*dns.DNSKEY
+	secure bool
+}
+
 func (v *Validator) zoneKeys(ctx context.Context, up *upstream.Upstream, zone string, depth int) (keys []*dns.DNSKEY, secure bool, err error) {
 	zone = dns.Fqdn(zone)
-	if depth > maxChainDepth {
-		return nil, false, fmt.Errorf("dnssec: chain depth exceeded validating %s", zone)
-	}
-
 	if cached, ok := v.cached(zone); ok {
 		return cached.keys, cached.secure, nil
+	}
+	res, err, _ := v.flight.Do(zone, func() (any, error) {
+		// Re-check: a waiter that joined after the leader already stored
+		// the result should reuse it, not redo the leader's work.
+		if cached, ok := v.cached(zone); ok {
+			return zoneResult{cached.keys, cached.secure}, nil
+		}
+		k, s, ferr := v.fetchZoneKeys(ctx, up, zone, depth)
+		if ferr != nil {
+			return nil, ferr
+		}
+		return zoneResult{k, s}, nil
+	})
+	if err != nil {
+		return nil, false, err
+	}
+	zr := res.(zoneResult)
+	return zr.keys, zr.secure, nil
+}
+
+// fetchZoneKeys does the actual DNSKEY fetch + chain-of-trust walk for
+// zone; only ever called once per zone per cache TTL, via zoneKeys' flight
+// coalescing above.
+func (v *Validator) fetchZoneKeys(ctx context.Context, up *upstream.Upstream, zone string, depth int) (keys []*dns.DNSKEY, secure bool, err error) {
+	if depth > maxChainDepth {
+		return nil, false, fmt.Errorf("dnssec: chain depth exceeded validating %s", zone)
 	}
 
 	dnskeyMsg, err := queryZone(ctx, up, zone, dns.TypeDNSKEY)

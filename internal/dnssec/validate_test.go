@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto"
 	"net"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -115,6 +117,54 @@ func startDNSSECTestUpstream(t *testing.T, z dnssecTestZones) *upstream.Upstream
 			rrset := []dns.RR{ds}
 			m.Answer = append(m.Answer, ds, sign(t, z.root, rrset))
 		case q.Name == "example.test." && q.Qtype == dns.TypeDNSKEY:
+			rrset := []dns.RR{z.leaf.dnsk}
+			m.Answer = append(m.Answer, z.leaf.dnsk, sign(t, z.leaf, rrset))
+		case q.Name == "example.test." && q.Qtype == dns.TypeDS:
+			ds := z.leaf.dnsk.ToDS(dns.SHA256)
+			ds.Hdr = dns.RR_Header{Name: "example.test.", Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: 3600}
+			rrset := []dns.RR{ds}
+			m.Answer = append(m.Answer, ds, sign(t, z.tld, rrset))
+		case q.Name == "example.test." && q.Qtype == dns.TypeA:
+			m.Answer = append(m.Answer, z.aRRset...)
+			m.Answer = append(m.Answer, z.aSig)
+		}
+		_ = w.WriteMsg(m)
+	})
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: mux}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	return &upstream.Upstream{Transport: upstream.UDP, Addr: pc.LocalAddr().String()}
+}
+
+// startDNSSECTestUpstreamCounting is startDNSSECTestUpstream plus a counter
+// of DNSKEY queries received, for asserting singleflight coalescing.
+func startDNSSECTestUpstreamCounting(t *testing.T, z dnssecTestZones, dnskeyQueries *atomic.Int64) *upstream.Upstream {
+	t.Helper()
+	mux := dns.NewServeMux()
+	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+		q := r.Question[0]
+		m := new(dns.Msg)
+		m.SetReply(r)
+		switch {
+		case q.Name == "." && q.Qtype == dns.TypeDNSKEY:
+			dnskeyQueries.Add(1)
+			rrset := []dns.RR{z.root.dnsk}
+			m.Answer = append(m.Answer, z.root.dnsk, sign(t, z.root, rrset))
+		case q.Name == "test." && q.Qtype == dns.TypeDNSKEY:
+			dnskeyQueries.Add(1)
+			rrset := []dns.RR{z.tld.dnsk}
+			m.Answer = append(m.Answer, z.tld.dnsk, sign(t, z.tld, rrset))
+		case q.Name == "test." && q.Qtype == dns.TypeDS:
+			ds := z.tld.dnsk.ToDS(dns.SHA256)
+			ds.Hdr = dns.RR_Header{Name: "test.", Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: 3600}
+			rrset := []dns.RR{ds}
+			m.Answer = append(m.Answer, ds, sign(t, z.root, rrset))
+		case q.Name == "example.test." && q.Qtype == dns.TypeDNSKEY:
+			dnskeyQueries.Add(1)
 			rrset := []dns.RR{z.leaf.dnsk}
 			m.Answer = append(m.Answer, z.leaf.dnsk, sign(t, z.leaf, rrset))
 		case q.Name == "example.test." && q.Qtype == dns.TypeDS:
@@ -264,6 +314,33 @@ func TestZoneCacheAvoidsRepeatedQueries(t *testing.T) {
 	}
 	if _, ok := v.cached("."); !ok {
 		t.Fatal("expected the root to be cached too")
+	}
+}
+
+func TestZoneKeysCoalescesConcurrentCallsForSameZone(t *testing.T) {
+	z := buildDNSSECTestZones(t)
+	var dnskeyQueries atomic.Int64
+	up := startDNSSECTestUpstreamCounting(t, z, &dnskeyQueries)
+	v := NewValidator(testAnchorManager(z.anchor))
+
+	const n = 20
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for range n {
+		go func() {
+			defer wg.Done()
+			_, secure, err := v.zoneKeys(context.Background(), up, "example.test.", 0)
+			if err != nil || !secure {
+				t.Errorf("zoneKeys: secure=%v err=%v", secure, err)
+			}
+		}()
+	}
+	wg.Wait()
+
+	// 3 zones (example.test., test., .) x 1 DNSKEY query each — concurrent
+	// callers for the same zone must share one fetch, not issue n each.
+	if got := dnskeyQueries.Load(); got != 3 {
+		t.Fatalf("DNSKEY queries issued = %d, want exactly 3 (one per zone, coalesced across %d concurrent callers)", got, n)
 	}
 }
 
