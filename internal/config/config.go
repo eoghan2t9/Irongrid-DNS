@@ -5,6 +5,7 @@ package config
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"net"
@@ -46,19 +47,36 @@ type Config struct {
 	TLS            TLSConfig       `yaml:"tls"`
 	Filter         FilterConfig    `yaml:"filter"`
 	Log            LogConfig       `yaml:"log"`
-	Web            WebConfig       `yaml:"web"`
-	Tunnel         TunnelConfig    `yaml:"tunnel"`
-	Rewrites       []RewriteSpec   `yaml:"rewrites"`      // local DNS records (A/AAAA/CNAME)
-	ClientGroups   []ClientGroup   `yaml:"client_groups"` // per-client blocking/upstream policy
-	RateLimit      RateLimitConfig `yaml:"rate_limit"`
-	GeoBlock       GeoBlockConfig  `yaml:"geo_block"`
-	Abuse          AbuseConfig     `yaml:"abuse"`
-	DNSSEC         DNSSECConfig    `yaml:"dnssec"`
-	Warmer         WarmerConfig    `yaml:"warmer"`
+	// Logging controls the application's own log stream (startup, errors,
+	// reloads — everything through slog). Distinct from Log above, which
+	// controls the DNS query log.
+	Logging      LoggingConfig   `yaml:"logging"`
+	Web          WebConfig       `yaml:"web"`
+	Tunnel       TunnelConfig    `yaml:"tunnel"`
+	Rewrites     []RewriteSpec   `yaml:"rewrites"`      // local DNS records (A/AAAA/CNAME)
+	ClientGroups []ClientGroup   `yaml:"client_groups"` // per-client blocking/upstream policy
+	RateLimit    RateLimitConfig `yaml:"rate_limit"`
+	GeoBlock     GeoBlockConfig  `yaml:"geo_block"`
+	Abuse        AbuseConfig     `yaml:"abuse"`
+	DNSSEC       DNSSECConfig    `yaml:"dnssec"`
+	Warmer       WarmerConfig    `yaml:"warmer"`
 	// Recursive tunes the recursive:// upstream transport (the iterative
 	// resolver that walks referrals from the root servers itself).
 	Recursive RecursiveConfig `yaml:"recursive"`
 	DHCP      DHCPConfig      `yaml:"dhcp"`
+	// UpstreamHealth tunes proactive upstream health probing: a canary
+	// query sent to every upstream on a fixed interval, independent of
+	// live client traffic, so the circuit breaker can catch a degrading
+	// upstream before a real client query hits it.
+	UpstreamHealth UpstreamHealthConfig `yaml:"upstream_health"`
+}
+
+// UpstreamHealthConfig controls proactive upstream health probing
+// (upstream_health.enabled). Off by default: an upgrade must never start
+// sending a running deployment's upstreams extra background traffic
+// without an explicit opt-in.
+type UpstreamHealthConfig struct {
+	Enabled bool `yaml:"enabled"`
 }
 
 // DHCPConfig controls the built-in DHCP server: stateful DHCPv4 (RFC 2131)
@@ -321,6 +339,20 @@ type DNSSECConfig struct {
 	// RequireAD, when true, treats an answer without the AD bit as bogus and
 	// returns SERVFAIL instead of passing it through unauthenticated.
 	RequireAD bool `yaml:"require_ad"`
+	// ValidateLocally turns on real local DNSSEC chain-of-trust validation
+	// (RRSIG/DNSKEY/DS verification up to a trust anchor fetched from
+	// IANA) instead of only trusting the upstream's AD bit — catches a
+	// compromised or lying upstream that a plain require_ad check can't.
+	// Opportunistic: a zone with no RRSIG (most of the internet — unsigned)
+	// falls through to the require_ad behavior unchanged, and a validation
+	// that can't complete for an infrastructure reason (a DNSKEY/DS lookup
+	// failing) fails open the same way, rather than blocking resolution
+	// over a transient hiccup unrelated to answer integrity. Off by
+	// default: an upgrade must never start enforcing stricter validation
+	// on a running deployment without an explicit opt-in — and it adds
+	// extra DNSKEY/DS lookups (cached per zone) that only matter once
+	// enabled.
+	ValidateLocally bool `yaml:"validate_locally"`
 }
 
 // ServerConfig controls every network listener.
@@ -414,6 +446,11 @@ type ServerConfig struct {
 	// or a client group's asns); clients the server has no ASN data on get
 	// no header.
 	DoHASNHeader bool `yaml:"doh_asn_header"`
+	// AllowFrom is a query allow-list: bare IPs or CIDRs permitted to query
+	// this server on any listener. Empty (the default) allows every
+	// client, unchanged from prior behavior — this is opt-in hardening for
+	// a server reachable beyond a trusted LAN.
+	AllowFrom []string `yaml:"allow_from"`
 }
 
 // CacheConfig points at the Dragonfly instance that is the authoritative
@@ -540,6 +577,19 @@ type LogConfig struct {
 	BatchSize int `yaml:"batch_size"`
 }
 
+// LoggingConfig controls the application's own log stream (everything
+// logged through slog: startup, config errors, reloads, listener failures).
+// Not to be confused with LogConfig, which controls the DNS query log.
+type LoggingConfig struct {
+	// Level is the minimum severity logged: "debug", "info" (the default,
+	// used for an empty value), "warn", or "error".
+	Level string `yaml:"level"`
+	// JSON switches the log format from human-readable text (default) to
+	// structured JSON — useful for log aggregators (Loki, journald's JSON
+	// export, etc.) that parse each line as a record.
+	JSON bool `yaml:"json"`
+}
+
 // WebConfig controls the management interface auth.
 type WebConfig struct {
 	Username string `yaml:"username"`
@@ -548,6 +598,28 @@ type WebConfig struct {
 	Password string `yaml:"password"`
 	// SessionSecret is used to sign API session cookies. Generated if empty.
 	SessionSecret string `yaml:"session_secret"`
+	// Tokens are named bearer-token credentials for the REST API, additive
+	// to the primary username/password above — a way to hand a specific
+	// integration or household member its own individually revocable
+	// credential (optionally read-only) instead of sharing the main login.
+	// Sent as "Authorization: Bearer <token>". Empty by default.
+	Tokens []APIToken `yaml:"tokens"`
+}
+
+// APIToken is one bearer-token credential for the REST API (see
+// WebConfig.Tokens).
+type APIToken struct {
+	// Name is a human label (e.g. "home-assistant") shown in the dashboard
+	// and logs — tokens are never logged, only their name.
+	Name string `yaml:"name"`
+	// Token is a SHA-256 hex hash (64 lowercase hex chars) of the bearer
+	// token. A value found here that isn't already such a hash is treated
+	// as plaintext and hashed automatically on the next Config.Save, like
+	// WebConfig.Password.
+	Token string `yaml:"token"`
+	// ReadOnly restricts this token to GET/HEAD requests; a write request
+	// (POST/PUT/PATCH/DELETE) bearing a read-only token is refused.
+	ReadOnly bool `yaml:"read_only"`
 }
 
 // TunnelConfig controls the baked-in cloudflared tunnel.
@@ -903,6 +975,11 @@ func (c *Config) validate() error {
 	if c.Log.RetentionDays < 1 {
 		return fmt.Errorf("log.retention_days must be >= 1")
 	}
+	switch strings.ToLower(strings.TrimSpace(c.Logging.Level)) {
+	case "", "debug", "info", "warn", "warning", "error":
+	default:
+		return fmt.Errorf("logging.level must be one of debug, info, warn, error (got %q)", c.Logging.Level)
+	}
 	if c.TLS.ACME.Enabled {
 		if c.TLS.ACME.Email == "" {
 			return fmt.Errorf("tls.acme.email is required when ACME is enabled")
@@ -1181,7 +1258,7 @@ func webPort(addr string) int {
 }
 
 // Save writes the config to path, creating parent directories. Plaintext web
-// passwords are bcrypt-hashed before persisting.
+// passwords and API tokens are hashed before persisting.
 func (c *Config) Save(path string) error {
 	if c.Web.Password != "" && !isBcrypt(c.Web.Password) {
 		// A bcrypt failure must abort the save, not fall through to writing
@@ -1192,6 +1269,12 @@ func (c *Config) Save(path string) error {
 			return fmt.Errorf("hash web password: %w", err)
 		}
 		c.Web.Password = string(hash)
+	}
+	for i, t := range c.Web.Tokens {
+		if t.Token != "" && !isSHA256Hex(t.Token) {
+			sum := sha256.Sum256([]byte(t.Token))
+			c.Web.Tokens[i].Token = hex.EncodeToString(sum[:])
+		}
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -1205,4 +1288,18 @@ func (c *Config) Save(path string) error {
 
 func isBcrypt(s string) bool {
 	return strings.HasPrefix(s, "$2a$") || strings.HasPrefix(s, "$2b$") || strings.HasPrefix(s, "$2y$")
+}
+
+// isSHA256Hex reports whether s looks like a SHA-256 hex digest (64
+// lowercase hex characters) — the stored form of an APIToken.Token.
+func isSHA256Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, r := range s {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f')) {
+			return false
+		}
+	}
+	return true
 }

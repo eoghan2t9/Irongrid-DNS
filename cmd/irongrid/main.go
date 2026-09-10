@@ -29,6 +29,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cfupdate"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dhcp"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnssec"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsserver"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/firewall"
@@ -36,6 +37,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/installer"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/recursive"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/sdnotify"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tunnel"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
@@ -76,17 +78,10 @@ func main() {
 		return
 	}
 
-	// UTC timestamps, matching the previous log.LUTC flag — the box running
-	// this may be in any timezone, but log lines should compare cleanly
-	// across a multi-instance deployment.
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
-			if a.Key == slog.TimeKey {
-				a.Value = slog.StringValue(a.Value.Time().UTC().Format(time.RFC3339))
-			}
-			return a
-		},
-	})))
+	// Default logger (text, info level) until the config loads below and
+	// can supply logging.level / logging.json — early errors (a bad
+	// -config path, an unreadable YAML file) still need somewhere to go.
+	slog.SetDefault(newLogger(config.LoggingConfig{}))
 	slog.Info(version.String())
 
 	// ---- runtime auto-tuning: match GOMAXPROCS/GOGC/GOMEMLIMIT to whatever
@@ -107,6 +102,10 @@ func main() {
 		slog.Error("config load failed", "error", err)
 		os.Exit(1)
 	}
+	// Reconfigure logging from the loaded config (logging.level /
+	// logging.json); everything before this line used the info/text
+	// default set above.
+	slog.SetDefault(newLogger(cfg.Logging))
 	if cfg.Web.Password == "" {
 		cfg.Web.Password = "irongrid"
 		slog.Warn("using default password — change it", "password", cfg.Web.Password, "config_path", *configPath)
@@ -288,6 +287,42 @@ func main() {
 	handler.SetNXGuard(dnsserver.BuildNXGuard(cfg.RateLimit.NXGuard))
 	handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
 	handler.SetCNAMECloakingProtection(cfg.Filter.CNAMECloakingProtection)
+	// ---- DNSSEC local chain-of-trust validation (dnssec.validate_locally) ----
+	// The AnchorManager is always constructed (cheap: pre-seeded with a
+	// bundled default, no network call yet) so a later reload can turn
+	// validation on without a restart; its live IANA fetch + periodic
+	// refresh only start the first time the feature is actually enabled,
+	// so a deployment that never opts in never makes this network call.
+	dnssecAnchors := dnssec.NewAnchorManager("", filepath.Join(*dataDir, "root-anchors.xml"), 0)
+	handler.DNSSECValidator = dnssec.NewValidator(dnssecAnchors)
+	dnssecAnchorsStarted := false
+	startDNSSECAnchors := func() {
+		if dnssecAnchorsStarted {
+			return
+		}
+		dnssecAnchorsStarted = true
+		dnssecAnchors.Refresh(ctx)
+		dnssecAnchors.Start(ctx)
+	}
+	if cfg.DNSSEC.ValidateLocally {
+		startDNSSECAnchors()
+	}
+	handler.SetDNSSECValidateLocally(cfg.DNSSEC.ValidateLocally)
+	// Query ACL (server.allow_from): parsed up front, like upstreams and
+	// routes, so a bad CIDR/IP entry aborts boot instead of silently
+	// leaving the server open.
+	acl, err := dnsserver.BuildACL(cfg.Server.AllowFrom)
+	if err != nil {
+		slog.Error("invalid server.allow_from", "error", err)
+		os.Exit(1)
+	}
+	handler.SetACL(acl)
+	// Proactive upstream health probing (upstream_health.enabled): the
+	// ticker runs for the life of the process and re-reads the enabled
+	// flag from live settings every tick, so a later reload just toggles
+	// it — no restart needed.
+	handler.SetUpstreamHealthCheck(cfg.UpstreamHealth.Enabled)
+	handler.StartUpstreamHealthCheck(ctx)
 	// RFC 7830 response padding and RFC 7873 DNS cookies (server.padding /
 	// server.cookies). Re-applied on every reload below so a dashboard
 	// toggle applies without a restart.
@@ -871,6 +906,12 @@ func main() {
 		// the listeners before swapping any live references, so a bad config
 		// leaves the running server untouched.
 
+		// Logging: cheap and side-effect-only, so applied immediately
+		// regardless of how the rest of the reload turns out — a dashboard
+		// change to logging.level/logging.json should not be held hostage
+		// by an unrelated config problem elsewhere.
+		slog.SetDefault(newLogger(cfg.Logging))
+
 		// 1. Cache: connect to the new endpoint first; keep the old one on
 		//    failure so a bad config never takes the server down.
 		newCache, err := cache.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Cache.TTL, cfg.Cache.NegativeTTL, cfg.Cache.ServeStale, resolveL1Entries(cfg.Cache.L1Entries))
@@ -905,6 +946,11 @@ func main() {
 		if err != nil {
 			_ = newCache.Close()
 			return fmt.Errorf("upstream routes: %w", err)
+		}
+		newACL, err := dnsserver.BuildACL(cfg.Server.AllowFrom)
+		if err != nil {
+			_ = newCache.Close()
+			return fmt.Errorf("server.allow_from: %w", err)
 		}
 		// A reload can introduce recursive:// upstreams when none were
 		// configured at boot (hintsMgr was never created). Start the manager
@@ -973,6 +1019,12 @@ func main() {
 		handler.SetNXGuard(dnsserver.BuildNXGuard(cfg.RateLimit.NXGuard))
 		handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
 		handler.SetCNAMECloakingProtection(cfg.Filter.CNAMECloakingProtection)
+		if cfg.DNSSEC.ValidateLocally {
+			startDNSSECAnchors()
+		}
+		handler.SetDNSSECValidateLocally(cfg.DNSSEC.ValidateLocally)
+		handler.SetACL(newACL)
+		handler.SetUpstreamHealthCheck(cfg.UpstreamHealth.Enabled)
 		handler.SetPadding(cfg.Server.Padding)
 		handler.SetCookies(cfg.Server.Cookies)
 		// DHCP: pool/option/static changes apply immediately (handlers read
@@ -1123,8 +1175,18 @@ func main() {
 		}
 	}
 
+	// ---- systemd readiness + watchdog ----
+	// Every listener above is bound and serving by this point. sdnotify is a
+	// no-op outside of a systemd Type=notify unit, so this is safe to call
+	// unconditionally on any platform/init system.
+	sdnotify.StartWatchdog(ctx)
+	if err := sdnotify.Notify("READY=1"); err != nil {
+		slog.Warn("sd_notify READY failed", "error", err)
+	}
+
 	// ---- wait for shutdown ----
 	<-ctx.Done()
+	_ = sdnotify.Notify("STOPPING=1")
 	slog.Info("shutting down...")
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()

@@ -1120,6 +1120,56 @@ func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 	}
 }
 
+// TestHandlerACLRejectsUnlistedClient verifies server.allow_from: once an
+// ACL is installed, a client outside every allowed network is REFUSED (on a
+// connection-oriented transport) or silently dropped (UDP), while a listed
+// client resolves normally — and an unconfigured (nil) ACL still allows
+// everyone, unchanged from before this feature existed.
+func TestHandlerACLRejectsUnlistedClient(t *testing.T) {
+	addr := startUDPTestServer(t, "1.1.1.1", 0)
+	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
+
+	q := func() *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("example.com.", dns.TypeA)
+		return m
+	}
+
+	// No ACL configured: every client resolves normally.
+	before := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
+	h.ServeDNS(before, q())
+	if before.msg == nil || len(before.msg.Answer) == 0 {
+		t.Fatalf("with no ACL configured, expected a normal answer, got %v", before.msg)
+	}
+
+	acl, err := BuildACL([]string{"192.168.1.0/24"})
+	if err != nil {
+		t.Fatalf("BuildACL: %v", err)
+	}
+	h.SetACL(acl)
+
+	// TCP: an unlisted client is REFUSED, not silently dropped.
+	tcpClient := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
+	h.ServeDNSWithProto(tcpClient, q(), "tcp")
+	if tcpClient.msg == nil || tcpClient.msg.Rcode != dns.RcodeRefused {
+		t.Fatalf("ACL-rejected TCP client: expected REFUSED, got %v", tcpClient.msg)
+	}
+
+	// UDP: an unlisted client gets no answer at all (no amplification).
+	udpClient := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
+	h.ServeDNS(udpClient, q())
+	if udpClient.msg != nil {
+		t.Fatalf("ACL-rejected UDP client: expected a silent drop, got %v", udpClient.msg)
+	}
+
+	// A client inside the allowed network still resolves.
+	allowed := &fakeWriter{ip: net.ParseIP("192.168.1.42")}
+	h.ServeDNS(allowed, q())
+	if allowed.msg == nil || len(allowed.msg.Answer) == 0 {
+		t.Fatalf("ACL-allowed client: expected a normal answer, got %v", allowed.msg)
+	}
+}
+
 // TestHandlerAllowlistedClientNotHoneypotBlocked verifies the end-to-end
 // guarantee behind the allowlist: an allowlisted client that queries a
 // honeypot domain over a trusted transport is refused (honeypots are never

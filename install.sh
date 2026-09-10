@@ -606,12 +606,16 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 ExecStart=$DEST/irongrid -config $CONFIG_ABS -data $DATA_ABS
 WorkingDirectory=$DATA_ABS
 # WorkingDirectory resolves relative paths in the config (data/certs, data/querylog.db)
 Restart=on-failure
 RestartSec=3
+TimeoutStartSec=30
+WatchdogSec=30
+OOMScoreAdjust=-500
 NoNewPrivileges=true
 ProtectSystem=full
 PrivateTmp=true

@@ -249,6 +249,67 @@ func TestValidateXFFHopLimit(t *testing.T) {
 	}
 }
 
+func TestSaveHashesPlaintextAPITokens(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	c := validBase()
+	c.Web.Tokens = []APIToken{
+		{Name: "already-hashed", Token: strings.Repeat("a", 64), ReadOnly: false},
+		{Name: "plaintext", Token: "super-secret-plaintext-token", ReadOnly: true},
+	}
+	path := dir + "/irongrid.yaml"
+	if err := c.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if c.Web.Tokens[0].Token != strings.Repeat("a", 64) {
+		t.Errorf("already-hashed token should be left untouched, got %q", c.Web.Tokens[0].Token)
+	}
+	if c.Web.Tokens[1].Token == "super-secret-plaintext-token" {
+		t.Error("plaintext token should have been hashed by Save")
+	}
+	if !isSHA256Hex(c.Web.Tokens[1].Token) {
+		t.Errorf("hashed token %q is not a SHA-256 hex digest", c.Web.Tokens[1].Token)
+	}
+}
+
+func TestIsSHA256Hex(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		s    string
+		want bool
+	}{
+		{strings.Repeat("a", 64), true},
+		{strings.Repeat("0123456789abcdef", 4), true},
+		{strings.Repeat("A", 64), false}, // uppercase hex not accepted
+		{strings.Repeat("a", 63), false}, // too short
+		{strings.Repeat("a", 65), false}, // too long
+		{"", false},
+		{"not-hex-at-all-but-64-characters-long-so-length-check-passes!!", false},
+	}
+	for _, tt := range tests {
+		if got := isSHA256Hex(tt.s); got != tt.want {
+			t.Errorf("isSHA256Hex(%q) = %v, want %v", tt.s, got, tt.want)
+		}
+	}
+}
+
+func TestValidateLoggingLevel(t *testing.T) {
+	t.Parallel()
+	for _, level := range []string{"", "debug", "info", "warn", "warning", "error", "ERROR", "  debug  "} {
+		c := validBase()
+		c.Logging.Level = level
+		if err := c.Validate(); err != nil {
+			t.Errorf("logging.level %q rejected: %v", level, err)
+		}
+	}
+	c := validBase()
+	c.Logging.Level = "verbose"
+	err := c.Validate()
+	if err == nil || !strings.Contains(err.Error(), "logging.level") {
+		t.Fatalf("err = %v, want invalid logging.level error", err)
+	}
+}
+
 func TestValidateDNS01Cloudflare(t *testing.T) {
 	t.Parallel()
 	c := validBase()

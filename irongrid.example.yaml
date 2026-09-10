@@ -76,6 +76,12 @@ server:
                                  # IP (only when it matches a configured ASN
                                  # list — geo_block or a client group) — handy
                                  # for verifying which ISP a client resolves as
+  # allow_from:                  # query allow-list (bare IPs or CIDRs): an
+  #   - "192.168.1.0/24"         # unlisted client is REFUSED on every listener.
+  #   - "10.0.0.5"               # Empty/omitted (the default) allows everyone,
+                                 # unchanged from prior behavior — opt-in
+                                 # hardening for a server reachable beyond a
+                                 # trusted LAN.
 
 # Upstream DNS servers to forward to (udp, tcp, tls, https, quic supported).
 upstreams:
@@ -112,6 +118,15 @@ upstreams:
 #   - domain: "corp.example.com"
 #     upstreams:
 #       - "tls://10.0.0.2:853"
+
+# Proactive upstream health probing: sends a lightweight canary query to
+# every upstream every 20s, independent of live client traffic, feeding the
+# same circuit breaker real queries do — so a degrading upstream is caught
+# before a client hits it, and a recovered one closes its circuit sooner.
+# Off by default (upgrading a running deployment must not silently start
+# sending its upstreams extra background traffic).
+# upstream_health:
+#   enabled: true
 
 # How multiple upstreams are queried for each resolution (global; also covers
 # client-group upstream overrides):
@@ -253,11 +268,26 @@ log:
   verbose: true
   # batch_size: 256            # entries per query-log stream flush (0 = default)
 
+# Application logging (startup, errors, reloads — distinct from the query
+# log above). Uncomment to change from the defaults (info level, text format).
+# logging:
+#   level: "info"              # debug | info | warn | error
+#   json: false                # true for structured JSON output (log aggregators)
+
 web:
   username: "admin"
   # Plaintext passwords are hashed automatically on first save.
   password: "change-me"
   # session_secret: ""          # auto-generated if empty
+  # API tokens: named bearer-token credentials for the REST API, additive
+  # to the login above — hand a specific integration or household member
+  # its own individually revocable credential instead of the shared login.
+  # Sent as "Authorization: Bearer <token>". Plaintext values are hashed
+  # automatically on first save, like the password. Uncomment to add one:
+  # tokens:
+  #   - name: "home-assistant"
+  #     token: "generate-a-long-random-string-here"
+  #     read_only: true          # restricted to GET/HEAD requests
 
 tunnel:
   enabled: false               # start the baked-in cloudflared on boot?
@@ -371,13 +401,21 @@ abuse:
                               # IP per 15 min. The CSV export and ⓘ ASN
                               # lookups (free RIPEstat) need no key.
 
-# DNSSEC: Irongrid is a forwarding resolver — like Pi-hole, AdGuard Home and
-# dnsmasq, it trusts an upstream that already validates rather than building
-# its own root-of-trust chain validator. Enabling this sets the DO bit on
-# upstream queries and (with require_ad) rejects answers the upstream didn't
-# mark authenticated. Only meaningful with an ENCRYPTED upstream (tls://,
-# https:// or quic://) — over plain udp/tcp the AD bit can be stripped or
-# forged in transit.
+# DNSSEC: Irongrid is a forwarding resolver. Enabling this sets the DO bit on
+# upstream queries. require_ad rejects an answer the upstream didn't mark
+# authenticated (AD bit) — only meaningful with an ENCRYPTED upstream (tls://,
+# https:// or quic://), since plain udp/tcp lets the AD bit be stripped or
+# forged in transit. validate_locally goes further: real local chain-of-trust
+# validation (RRSIG/DNSKEY/DS verified up to a trust anchor fetched from IANA)
+# instead of only trusting the upstream's AD bit — catches a compromised or
+# lying upstream that require_ad alone can't. Opportunistic (a zone with no
+# RRSIG — most of the internet — falls through to require_ad unchanged) and
+# fails open on an infrastructure hiccup (a DNSKEY/DS lookup failing) rather
+# than blocking resolution over something unrelated to answer integrity.
+# Off by default: it adds extra DNSKEY/DS lookups (cached per zone, so only
+# the first query to a new zone/TLD pays the cost) and a periodic fetch of
+# IANA's root-anchors.xml — real cost only once opted into.
 dnssec:
   enabled: false
   require_ad: true
+  # validate_locally: true

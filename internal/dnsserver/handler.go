@@ -26,6 +26,7 @@ import (
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnssec"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
@@ -107,6 +108,12 @@ type Handler struct {
 	// DHCPHosts resolves locally-assigned client hostnames (set at boot;
 	// never swapped — the DHCP server lives for the process).
 	DHCPHosts DHCPHostResolver
+	// DNSSECValidator performs opportunistic local DNSSEC chain-of-trust
+	// validation (set at boot; never swapped — it owns its own long-lived
+	// per-zone key cache). Whether it's actually consulted per query is
+	// the hot-swappable dnssec.validate_locally setting; see
+	// SetDNSSECValidateLocally and handlerSettings.DNSSECValidateLocally.
+	DNSSECValidator *dnssec.Validator
 
 	// settings is the immutable snapshot of every hot-swappable knob the
 	// request path reads (see handlerSettings). serve() loads it with one
@@ -186,6 +193,15 @@ type handlerSettings struct {
 	NXGuard      *NXGuard         // nil disables the NXDOMAIN flood guard
 	Geo          *geoip.Blocker   // nil disables geo-blocking
 	IPBanner     *geoip.Banner    // nil disables IP/honeypot blocking
+	// ACL is the server.allow_from query allow-list; nil permits every
+	// client (the default, backward-compatible behavior).
+	ACL *ACL
+	// UpstreamHealthCheck gates proactive upstream health probing
+	// (upstream_health.enabled); see StartUpstreamHealthCheck.
+	UpstreamHealthCheck bool
+	// DNSSECValidateLocally gates whether Handler.DNSSECValidator is
+	// actually consulted per query (dnssec.validate_locally).
+	DNSSECValidateLocally bool
 	// TrustUDP opt-in: when true, a honeypot hit over plain UDP auto-blocks
 	// its source address too. Off by default — a UDP source can be spoofed,
 	// so enabling this lets a spoofing attacker permanently block an
@@ -493,6 +509,33 @@ func (h *Handler) SetIPBanner(b *geoip.Banner) {
 	h.swapSettings(&ns, nil)
 }
 
+// SetACL hot-swaps the query allow-list (server.allow_from); nil permits
+// every client.
+func (h *Handler) SetACL(a *ACL) {
+	ns := *h.settings.Load()
+	ns.ACL = a
+	h.swapSettings(&ns, nil)
+}
+
+// SetDNSSECValidateLocally hot-swaps whether Handler.DNSSECValidator is
+// actually consulted per query (dnssec.validate_locally). A no-op when
+// DNSSECValidator is nil (not constructed at boot), regardless of the flag.
+func (h *Handler) SetDNSSECValidateLocally(enabled bool) {
+	ns := *h.settings.Load()
+	ns.DNSSECValidateLocally = enabled
+	h.swapSettings(&ns, nil)
+}
+
+// SetUpstreamHealthCheck hot-swaps whether proactive upstream health
+// probing (upstream_health.enabled) actually does anything; the probe
+// ticker itself runs for the life of the process (see
+// StartUpstreamHealthCheck) and just no-ops on every tick while disabled.
+func (h *Handler) SetUpstreamHealthCheck(enabled bool) {
+	ns := *h.settings.Load()
+	ns.UpstreamHealthCheck = enabled
+	h.swapSettings(&ns, nil)
+}
+
 // SetTrustUDP hot-swaps the opt-in that lets plain-UDP honeypot hits
 // auto-block their source (see TrustUDP's doc comment on the struct).
 func (h *Handler) SetTrustUDP(on bool) {
@@ -602,10 +645,12 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	nxGuard := s.NXGuard
 	geo := s.Geo
 	ipbanner := s.IPBanner
+	acl := s.ACL
 	trustUDP := s.TrustUDP
 	honeypotUDPBlock := s.HoneypotUDPBlock
 	dnssecEnabled := s.DNSSECEnabled
 	dnssecRequireAD := s.DNSSECRequireAD
+	dnssecValidateLocally := s.DNSSECValidateLocally
 	cnameCloakingEnabled := s.CNAMECloakingProtection
 	cookiesOn := h.Cookies.Load()
 
@@ -615,6 +660,24 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		m.Rcode = dns.RcodeFormatError
 		_ = h.write(w, m, r, proto)
 		putMsg(m)
+		return
+	}
+
+	// 0.05 Query ACL (server.allow_from): an unlisted client is REFUSED
+	//    before any other work — including the rate limiter and NXGuard —
+	//    so an unauthorized client can never consume those budgets either.
+	//    A nil ACL (the default, nothing configured) allows every client,
+	//    unchanged from prior behavior.
+	if acl != nil && client != "" && !acl.Allowed(client) {
+		h.Stats.Errors.Add(1)
+		if proto == "udp" {
+			return
+		}
+		refused := getMsg()
+		refused.SetReply(r)
+		refused.Rcode = dns.RcodeRefused
+		_ = h.write(w, refused, r, proto)
+		putMsg(refused)
 		return
 	}
 
@@ -1017,6 +1080,15 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	}
 	upstreamQuery.Extra = extra
 	upstreamQuery.SetEdns0(ednsUDPSize, dnssecEnabled)
+	// Fresh transaction ID per upstream hop (crypto/rand-backed, dns.Id()):
+	// forwarding the client's own ID unchanged means an off-path attacker
+	// who already knows/guesses the client's ID (weak stub resolvers exist)
+	// gets it for free against the upstream hop too. Meaningful mainly for
+	// a plain UDP/TCP upstream — DoT/DoH/DoQ already can't be blindly
+	// spoofed. The response's ID is remapped back to the client's own
+	// before it's ever written out (see the resp.Id reset below), so this
+	// is invisible to the client.
+	upstreamQuery.Id = dns.Id()
 	var (
 		resp   *dns.Msg
 		usedUp string
@@ -1130,18 +1202,61 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		return
 	}
 
-	// 6. DNSSEC enforcement: reject an answer the upstream didn't mark
-	//    authenticated instead of passing it through unvalidated. Only
-	//    meaningful over an encrypted upstream transport (DoT/DoH/DoQ),
-	//    where the AD bit can't be stripped or forged in flight.
-	if dnssecEnabled && dnssecRequireAD && !resp.AuthenticatedData {
-		h.Stats.Errors.Add(1)
-		m := newReply(r)
-		m.Rcode = dns.RcodeServerFailure
-		h.record(client, qname, q, "error", "dnssec: upstream did not authenticate the answer", usedUp, start, m)
-		_ = h.write(w, m, r, proto)
-		putMsg(m)
-		return
+	// 6. DNSSEC enforcement.
+	if dnssecEnabled {
+		// 6a. Local chain-of-trust validation (dnssec.validate_locally):
+		//    real cryptographic verification up to a trust anchor, not
+		//    just trusting the upstream's AD bit — catches a compromised
+		//    or lying upstream that sets AD=1 on a tampered answer, which
+		//    the plain AD-bit check below can never detect. Only acts on
+		//    a signed answer (the upstream returned RRSIG because the DO
+		//    bit was set); an unsigned zone — the vast majority of the
+		//    internet — falls straight through to 6b unchanged.
+		if dnssecValidateLocally && h.DNSSECValidator != nil {
+			if up := upstreamByName(upstreams, usedUp); up != nil {
+				vctx, vcancel := context.WithTimeout(context.Background(), dnssecValidateTimeout)
+				secure, signed, verr := h.DNSSECValidator.Validate(vctx, up, resp)
+				vcancel()
+				switch {
+				case verr != nil:
+					// Couldn't complete the check (a DNSKEY/DS lookup
+					// failed or timed out) — an infrastructure hiccup,
+					// not evidence the answer is bad. Fail open to 6b.
+					slog.Debug("dnssec: local validation incomplete, falling back to AD-bit trust", "qname", qname, "error", verr)
+				case signed && !secure:
+					// A real cryptographic mismatch, or a chain that
+					// doesn't reach a trust anchor — reject outright,
+					// regardless of what the upstream's own AD bit says.
+					h.Stats.Errors.Add(1)
+					m := newReply(r)
+					m.Rcode = dns.RcodeServerFailure
+					h.record(client, qname, q, "error", "dnssec: local chain-of-trust validation failed", usedUp, start, m)
+					_ = h.write(w, m, r, proto)
+					putMsg(m)
+					return
+				case signed && secure:
+					// Locally verified: this is a stronger guarantee than
+					// the upstream's AD bit, so trust it even if the
+					// upstream (oddly) didn't set AD itself.
+					resp.AuthenticatedData = true
+				}
+			}
+		}
+		// 6b. AD-bit trust: reject an answer the upstream didn't mark
+		//    authenticated instead of passing it through unvalidated. Only
+		//    meaningful over an encrypted upstream transport (DoT/DoH/DoQ),
+		//    where the AD bit can't be stripped or forged in flight. Also
+		//    the fallback path when 6a validated nothing (unsigned zone)
+		//    or couldn't complete (infrastructure error).
+		if dnssecRequireAD && !resp.AuthenticatedData {
+			h.Stats.Errors.Add(1)
+			m := newReply(r)
+			m.Rcode = dns.RcodeServerFailure
+			h.record(client, qname, q, "error", "dnssec: upstream did not authenticate the answer", usedUp, start, m)
+			_ = h.write(w, m, r, proto)
+			putMsg(m)
+			return
+		}
 	}
 
 	// 7. IP-based blocking: if the blocklists contain IP rules, check the
@@ -1182,6 +1297,11 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		}
 	}
 
+	// resp carries the fresh per-hop ID set on upstreamQuery above (not the
+	// client's own r.Id) — restore it before this ever reaches the client
+	// or the query log; caching doesn't care (writeRaw patches the ID on
+	// every cache-hit read regardless of what was cached).
+	resp.Id = r.Id
 	// resp is deliberately never put into msgPool: when caching is on it's
 	// handed unmodified into the background goroutine below, which keeps
 	// reading/mutating/Pack()-ing it after serve() has already returned —

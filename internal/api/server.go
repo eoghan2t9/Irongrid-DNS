@@ -175,6 +175,17 @@ func (a *App) authorize(w http.ResponseWriter, r *http.Request) bool {
 	if a.validSession(r, username, secret) {
 		return true
 	}
+	// API tokens (web.tokens) are independent of the session/Basic-auth
+	// flow below: no loginGuard lockout interaction (a wrong high-entropy
+	// token isn't a guessable-password attack), and a read-only token is
+	// scoped to GET/HEAD only.
+	if tokenOK, readOnly := a.validToken(r); tokenOK {
+		if readOnly && r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "read-only API token cannot make a "+r.Method+" request", http.StatusForbidden)
+			return false
+		}
+		return true
+	}
 
 	a.loginGuardOnce.Do(func() { a.loginGuard = NewLoginGuard() })
 	client := clientIPFromRequest(r)
@@ -303,6 +314,50 @@ func passwordMatches(plain, stored string) bool {
 		return bcrypt.CompareHashAndPassword([]byte(stored), []byte(plain)) == nil
 	}
 	return subtle.ConstantTimeCompare([]byte(plain), []byte(stored)) == 1
+}
+
+// tokenMatches compares a presented bearer token against a stored value
+// that is either a SHA-256 hex hash (config.isSHA256Hex's form) or
+// plaintext (hashed lazily on the next config save, like passwordMatches).
+// Bcrypt is deliberately not used here: API tokens are long random strings,
+// not human-chosen passwords, so a fast constant-time hash comparison is
+// the appropriate (and standard) choice — bcrypt's slowness defends against
+// guessing a low-entropy secret, which doesn't apply here.
+func tokenMatches(presented, stored string) bool {
+	if stored == "" || presented == "" {
+		return false
+	}
+	if len(stored) == sha256.Size*2 {
+		sum := sha256.Sum256([]byte(presented))
+		return subtle.ConstantTimeCompare([]byte(hex.EncodeToString(sum[:])), []byte(stored)) == 1
+	}
+	return subtle.ConstantTimeCompare([]byte(presented), []byte(stored)) == 1
+}
+
+// validToken checks the request's "Authorization: Bearer <token>" header
+// against the configured API tokens (web.tokens), independent of the
+// primary username/password. Returns whether a token matched and, if so,
+// whether it's read-only.
+func (a *App) validToken(r *http.Request) (ok, readOnly bool) {
+	const prefix = "Bearer "
+	authz := r.Header.Get("Authorization")
+	if !strings.HasPrefix(authz, prefix) {
+		return false, false
+	}
+	presented := strings.TrimSpace(authz[len(prefix):])
+	if presented == "" {
+		return false, false
+	}
+	if a.Mu != nil {
+		a.Mu.Lock()
+		defer a.Mu.Unlock()
+	}
+	for _, t := range a.Config.Web.Tokens {
+		if tokenMatches(presented, t.Token) {
+			return true, t.ReadOnly
+		}
+	}
+	return false, false
 }
 
 func logRequests(next http.Handler) http.Handler {

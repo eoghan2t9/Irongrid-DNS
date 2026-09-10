@@ -184,12 +184,22 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
 ExecStart=%s -config %s -data %s
 WorkingDirectory=%s
 # WorkingDirectory resolves relative paths in the config (data/certs, data/querylog.db)
 Restart=on-failure
 RestartSec=3
+TimeoutStartSec=30
+# Watchdog: irongrid pings systemd every ~15s once started; if the process
+# hangs (deadlock, stuck goroutine) without crashing, systemd restarts it
+# after this long instead of leaving a wedged process silently serving stale
+# answers or refusing all connections.
+WatchdogSec=30
+# Deprioritize this unit for the OOM killer: it's the box's DNS resolver, so
+# an OOM event should reclaim memory elsewhere first.
+OOMScoreAdjust=-500
 # Hardening
 NoNewPrivileges=true
 ProtectSystem=full
