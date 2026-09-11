@@ -604,6 +604,20 @@ func main() {
 		}()
 		return nil
 	}
+	// VPN split-tunnel profiles/routes: this is what actually applies a
+	// dashboard save (PUT /api/config -> applyPayload), unlike the
+	// reconcile call in Reload below, which only fires on a full listener
+	// restart (POST /api/config/reload). Async for the same reason as
+	// RebuildGeo above — (re)connecting a profile is a network round trip.
+	apiHandler.RebuildVPN = func(c *config.Config) error {
+		go func() {
+			profiles, routes, creds := vpnReconcileArgs(c.VPN)
+			if err := vpnMgr.Reconcile(ctx, profiles, routes, creds); err != nil {
+				slog.Error("vpn: reconcile failed", "error", err)
+			}
+		}()
+		return nil
+	}
 
 	// Auto-refresh keeps country data fresh without a manual refresh: the
 	// ipverse/rir-ip aggregates change roughly weekly, so the default cadence

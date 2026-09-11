@@ -39,6 +39,44 @@ type configPayload struct {
 	Warmer         warmerPayload          `json:"warmer"`
 	Recursive      recursivePayload       `json:"recursive"`
 	DHCP           dhcpPayload            `json:"dhcp"`
+	VPN            vpnPayload             `json:"vpn"`
+}
+
+// vpnPayload is the JSON shape for domain-based split-tunnel VPN routing
+// (see config.VPNConfig). Provider credentials round-trip in plaintext like
+// the tunnel token and cache password above — there is no partial-update
+// convention here (unlike the web login password), so the dashboard must
+// always submit the full provider block back on every save.
+type vpnPayload struct {
+	Enabled   bool                `json:"enabled"`
+	Providers vpnProvidersPayload `json:"providers"`
+	Profiles  []vpnProfilePayload `json:"profiles"`
+	Routes    []vpnRoutePayload   `json:"routes"`
+}
+
+type vpnProvidersPayload struct {
+	NordVPN vpnNordVPNCredsPayload `json:"nordvpn"`
+	PIA     vpnPIACredsPayload     `json:"pia"`
+}
+
+type vpnNordVPNCredsPayload struct {
+	Token string `json:"token"`
+}
+
+type vpnPIACredsPayload struct {
+	Username string `json:"username"`
+	Password string `json:"password"`
+}
+
+type vpnProfilePayload struct {
+	ID       string `json:"id"`
+	Provider string `json:"provider"`
+	Region   string `json:"region"`
+}
+
+type vpnRoutePayload struct {
+	Profile string   `json:"profile"`
+	Domains []string `json:"domains"`
 }
 
 // dhcpPayload is the JSON shape for the built-in DHCP server settings.
@@ -414,6 +452,30 @@ func payloadFromConfig(c *config.Config) configPayload {
 			QuickTunnelURL: c.Tunnel.QuickTunnelURL,
 			Hostname:       c.Tunnel.Hostname,
 		},
+		VPN: vpnPayload{
+			Enabled: c.VPN.Enabled,
+			Providers: vpnProvidersPayload{
+				NordVPN: vpnNordVPNCredsPayload{Token: c.VPN.Providers.NordVPN.Token},
+				PIA: vpnPIACredsPayload{
+					Username: c.VPN.Providers.PIA.Username,
+					Password: c.VPN.Providers.PIA.Password,
+				},
+			},
+			Profiles: func() []vpnProfilePayload {
+				profiles := make([]vpnProfilePayload, 0, len(c.VPN.Profiles))
+				for _, p := range c.VPN.Profiles {
+					profiles = append(profiles, vpnProfilePayload{ID: p.ID, Provider: p.Provider, Region: p.Region})
+				}
+				return profiles
+			}(),
+			Routes: func() []vpnRoutePayload {
+				routes := make([]vpnRoutePayload, 0, len(c.VPN.Routes))
+				for _, rt := range c.VPN.Routes {
+					routes = append(routes, vpnRoutePayload{Profile: rt.Profile, Domains: rt.Domains})
+				}
+				return routes
+			}(),
+		},
 	}
 	for _, bl := range c.Filter.Blocklists {
 		p.Filter.Blocklists = append(p.Filter.Blocklists, blocklistPayload{
@@ -729,6 +791,22 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			IPv6RangeStart: p.DHCP.IPv6RangeStart,
 			IPv6RangeEnd:   p.DHCP.IPv6RangeEnd,
 		},
+		VPN: config.VPNConfig{
+			Enabled: p.VPN.Enabled,
+			Providers: config.VPNProviders{
+				NordVPN: config.NordVPNCreds{Token: p.VPN.Providers.NordVPN.Token},
+				PIA: config.PIACreds{
+					Username: p.VPN.Providers.PIA.Username,
+					Password: p.VPN.Providers.PIA.Password,
+				},
+			},
+		},
+	}
+	for _, prof := range p.VPN.Profiles {
+		cfg.VPN.Profiles = append(cfg.VPN.Profiles, config.VPNProfile{ID: prof.ID, Provider: prof.Provider, Region: prof.Region})
+	}
+	for _, rt := range p.VPN.Routes {
+		cfg.VPN.Routes = append(cfg.VPN.Routes, config.VPNRoute{Profile: rt.Profile, Domains: rt.Domains})
 	}
 	for _, rw := range p.Rewrites {
 		cfg.Rewrites = append(cfg.Rewrites, config.RewriteSpec{Domain: rw.Domain, Type: rw.Type, Value: rw.Value, TTL: rw.TTL})
@@ -894,6 +972,13 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	// replaced the moment the fresh one lands).
 	if h.RebuildClientGroups != nil {
 		_ = h.RebuildClientGroups(cfg)
+	}
+	// VPN split-tunnel profiles/routes reconcile the same way: no listener
+	// rebind needed, but (re)connecting a profile can involve a slow round
+	// trip to the vendor's API, so it runs asynchronously rather than
+	// holding up this save.
+	if h.RebuildVPN != nil {
+		_ = h.RebuildVPN(cfg)
 	}
 	return restart, nil
 }

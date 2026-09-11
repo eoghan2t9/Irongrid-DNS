@@ -94,6 +94,12 @@ type Handler struct {
 	GroupASN            atomic.Pointer[geoip.ASNTable]
 	RebuildClientGroups func(cfg *config.Config) error
 
+	// RebuildVPN reconciles the domain-based split-tunnel VPN manager
+	// (internal/vpn.Manager) against a freshly saved config — connecting
+	// new/changed profiles and tearing down removed ones. Wired up by main;
+	// nil when unavailable (tests).
+	RebuildVPN func(cfg *config.Config) error
+
 	// Warmer is the proactive cache warmer; nil when not wired (tests).
 	Warmer *dnsserver.Warmer
 
