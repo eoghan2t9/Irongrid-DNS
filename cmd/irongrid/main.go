@@ -46,6 +46,15 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/web"
 )
 
+// vpnRelay is the VPN Smart-DNS proxy relay's current listeners (nil when
+// vpn.proxy.enabled is false or unset). Guarded by vpnRelayMu since
+// applyVPNProxy runs both at boot and, asynchronously, on every config
+// reload via RebuildVPN.
+var (
+	vpnRelayMu sync.Mutex
+	vpnRelay   *vpn.Relay
+)
+
 func main() {
 	// Use a private FlagSet: cloudflared's embedded packages register flags
 	// on the global command line, which would panic on redefinition.
@@ -450,6 +459,13 @@ func main() {
 			slog.Error("vpn: reconcile failed", "error", err)
 		}
 	}()
+	// The Smart-DNS proxy relay (config.VPNProxyConfig): makes Proxy-enabled
+	// routes work for clients that only use this server for DNS, not just
+	// ones whose IP traffic already passes through this host. Public-IP
+	// detection is cheap and local; the relay's listeners only bind when
+	// vpn.proxy.enabled is true.
+	applyVPNPublicIP(vpnMgr, cfg.VPN.Proxy)
+	applyVPNProxy(vpnMgr, cfg.VPN.Proxy, cfg.Server.WebListen)
 
 	// ---- REST API + web UI ----
 	var webFS fs.FS
@@ -615,6 +631,8 @@ func main() {
 			if err := vpnMgr.Reconcile(ctx, profiles, routes, creds); err != nil {
 				slog.Error("vpn: reconcile failed", "error", err)
 			}
+			applyVPNPublicIP(vpnMgr, c.VPN.Proxy)
+			applyVPNProxy(vpnMgr, c.VPN.Proxy, c.Server.WebListen)
 		}()
 		return nil
 	}
@@ -1232,6 +1250,11 @@ func main() {
 	defer cancel()
 	dnsMgr.Shutdown(shutdownCtx)
 	tunnelMgr.Stop()
+	vpnRelayMu.Lock()
+	if vpnRelay != nil {
+		vpnRelay.Stop()
+	}
+	vpnRelayMu.Unlock()
 	vpnMgr.Close()
 	webMu.Lock()
 	currentWeb := webSrv
@@ -1333,7 +1356,7 @@ func vpnReconcileArgs(v config.VPNConfig) ([]vpn.ProfileSpec, []vpn.RouteSpec, v
 	}
 	routes := make([]vpn.RouteSpec, 0, len(v.Routes))
 	for _, rt := range v.Routes {
-		routes = append(routes, vpn.RouteSpec{Profile: rt.Profile, Domains: rt.Domains})
+		routes = append(routes, vpn.RouteSpec{Profile: rt.Profile, Domains: rt.Domains, Proxy: rt.Proxy})
 	}
 	creds := vpn.Credentials{
 		NordVPNToken: v.Providers.NordVPN.Token,
@@ -1341,6 +1364,88 @@ func vpnReconcileArgs(v config.VPNConfig) ([]vpn.ProfileSpec, []vpn.RouteSpec, v
 		PIAPassword:  v.Providers.PIA.Password,
 	}
 	return profiles, routes, creds
+}
+
+// detectPublicIP finds this host's outbound-facing address via the
+// well-known "dial UDP, never send anything, read LocalAddr" trick — no
+// packet is actually sent (UDP connect just picks a route/local address),
+// so this costs nothing and needs no external service.
+func detectPublicIP() net.IP {
+	conn, err := net.Dial("udp", "8.8.8.8:80")
+	if err != nil {
+		return nil
+	}
+	defer conn.Close()
+	addr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok {
+		return nil
+	}
+	return addr.IP
+}
+
+// applyVPNPublicIP resolves vpn.proxy.public_ip (explicit override, or
+// auto-detected when empty) and installs it on mgr — the address
+// ProxyAnswer hands out for Proxy-enabled routes. Safe to call at boot and
+// again on every config reload.
+func applyVPNPublicIP(mgr *vpn.Manager, pc config.VPNProxyConfig) {
+	var ip net.IP
+	if pc.PublicIP != "" {
+		ip = net.ParseIP(pc.PublicIP)
+		if ip == nil {
+			slog.Error("vpn.proxy.public_ip is not a valid IP address", "value", pc.PublicIP)
+		}
+	}
+	if ip == nil {
+		ip = detectPublicIP()
+	}
+	mgr.SetPublicIP(ip)
+	switch {
+	case ip != nil:
+		slog.Info("vpn: proxy relay public IP set", "ip", ip)
+	case pc.Enabled:
+		slog.Warn("vpn: could not determine a public IP for the proxy relay — Proxy-enabled routes will not resolve until vpn.proxy.public_ip is set explicitly")
+	}
+}
+
+// applyVPNProxy (re)starts the SNI/Host relay listeners to match pc,
+// stopping whatever was running first — safe to call at boot and again on
+// every config reload; a no-op restart (identical config) still briefly
+// bounces the listeners, which is an accepted tradeoff for keeping this
+// simple (proxy reconfiguration is a rare, deliberate action, unlike the
+// DNS listeners' hot-restart path).
+func applyVPNProxy(mgr *vpn.Manager, pc config.VPNProxyConfig, webListen string) {
+	vpnRelayMu.Lock()
+	defer vpnRelayMu.Unlock()
+	if vpnRelay != nil {
+		vpnRelay.Stop()
+		vpnRelay = nil
+	}
+	if !pc.Enabled {
+		return
+	}
+	listen := pc.Listen
+	if listen == "" {
+		listen = ":443"
+	}
+	fallback := pc.Fallback
+	if fallback == "" {
+		fallback = webListen
+	}
+	if fallback == "" || fallback == listen {
+		slog.Error("vpn.proxy: fallback must be set to a different address than listen (server.web_listen is empty or the same as vpn.proxy.listen) — the relay was not started", "listen", listen, "fallback", fallback)
+		return
+	}
+	relay, err := vpn.NewRelay(mgr, fallback, "udp://1.1.1.1:53")
+	if err != nil {
+		slog.Error("vpn.proxy: relay init failed", "error", err)
+		return
+	}
+	if err := relay.Start(listen, pc.ListenHTTP); err != nil {
+		slog.Error("vpn.proxy: relay start failed", "error", err)
+		return
+	}
+	vpnRelay = relay
+	slog.Info("vpn: proxy relay started", "listen", listen, "listen_http", pc.ListenHTTP, "fallback", fallback)
 }
 
 func buildDHCPRuntime(c config.DHCPConfig) dhcp.Config {

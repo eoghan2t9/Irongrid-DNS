@@ -26,6 +26,9 @@ type ProfileSpec struct {
 type RouteSpec struct {
 	Profile string
 	Domains []string
+	// Proxy mirrors config.VPNRoute.Proxy — see that doc comment and
+	// VPNProxyConfig. Checked by ProxyAnswer, used by the Relay.
+	Proxy bool
 }
 
 // Credentials holds every provider's account credentials. Only the fields
@@ -48,6 +51,7 @@ type activeProfile struct {
 type route struct {
 	profile string
 	domains []string
+	proxy   bool
 }
 
 // snapshot is the atomically-swapped state Observe reads on the DNS hot
@@ -78,6 +82,11 @@ type Manager struct {
 	active map[string]*activeProfile // profile id -> state; guarded by mu
 
 	snap atomic.Pointer[snapshot]
+
+	// publicIP is the address ProxyAnswer hands out for a Proxy-enabled
+	// route's domains — set via SetPublicIP, read atomically since it can
+	// be looked up from the DNS hot path.
+	publicIP atomic.Pointer[net.IP]
 
 	work    chan workItem
 	workers sync.WaitGroup
@@ -221,7 +230,7 @@ func (m *Manager) Reconcile(ctx context.Context, profiles []ProfileSpec, routes 
 
 	compiled := make([]route, 0, len(routes))
 	for _, rt := range routes {
-		compiled = append(compiled, route{profile: rt.Profile, domains: rt.Domains})
+		compiled = append(compiled, route{profile: rt.Profile, domains: rt.Domains, proxy: rt.Proxy})
 	}
 	m.snap.Store(&snapshot{routes: compiled, names: nameByID})
 
@@ -299,6 +308,77 @@ type ProfileStatus struct {
 	Iface    string    `json:"iface"`
 	Endpoint string    `json:"endpoint"`
 	UpSince  time.Time `json:"up_since"`
+}
+
+// SetPublicIP sets the address ProxyAnswer hands out for Proxy-enabled
+// routes. Safe to call anytime, including concurrently with ProxyAnswer.
+func (m *Manager) SetPublicIP(ip net.IP) {
+	m.publicIP.Store(&ip)
+}
+
+// ProxyAnswer is the DNS hot-path hook for the Smart-DNS-style relay (see
+// config.VPNProxyConfig): called with the query name for every lookup, it
+// returns this server's own public IP — for the caller to answer with
+// directly, instead of resolving the real address — when name matches a
+// Proxy-enabled route whose profile is currently connected. It does one
+// atomic load and a route match, exactly like Observe, so it is safe to
+// call on every query even when the feature is unused (the common case
+// simply finds no proxy routes and returns immediately).
+func (m *Manager) ProxyAnswer(name string) (net.IP, bool) {
+	snap := m.snap.Load()
+	if snap == nil || len(snap.routes) == 0 {
+		return nil, false
+	}
+	rt := matchRoute(snap.routes, name)
+	if rt == nil || !rt.proxy {
+		return nil, false
+	}
+	if _, ok := snap.names[rt.profile]; !ok {
+		return nil, false // profile defined but not currently connected
+	}
+	ipPtr := m.publicIP.Load()
+	if ipPtr == nil || *ipPtr == nil {
+		return nil, false // proxy enabled but no public IP configured/detected yet
+	}
+	return *ipPtr, true
+}
+
+// MatchProxyRoute is the Relay's counterpart to ProxyAnswer: given a
+// hostname sniffed from a live connection (TLS SNI or an HTTP Host
+// header), it returns the id of the currently-connected profile whose
+// Proxy-enabled route matches, or ok=false if nothing matches — including
+// when the matching route exists but its profile isn't connected right
+// now, so the Relay never routes through a dead tunnel.
+func (m *Manager) MatchProxyRoute(hostname string) (profileID string, ok bool) {
+	snap := m.snap.Load()
+	if snap == nil || len(snap.routes) == 0 {
+		return "", false
+	}
+	rt := matchRoute(snap.routes, hostname)
+	if rt == nil || !rt.proxy {
+		return "", false
+	}
+	if _, connected := snap.names[rt.profile]; !connected {
+		return "", false
+	}
+	return rt.profile, true
+}
+
+// EnsureRouted adds ip to profileID's nftables destination set so outbound
+// connections this process makes to it — including the Relay's outbound
+// dial for a proxied connection — get policy-routed through that profile's
+// WireGuard tunnel, exactly like an IP observed from a DNS answer. Unlike
+// Observe, this is synchronous: the caller (the Relay, before dialing out)
+// needs the routing rule to exist before the first packet goes out, not
+// merely queued for eventual application.
+func (m *Manager) EnsureRouted(profileID string, ip net.IP, ttl time.Duration) error {
+	m.mu.Lock()
+	ap, ok := m.active[profileID]
+	m.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("vpn: profile %q is not currently connected", profileID)
+	}
+	return addDestination(m.runner, ap.names, ip, ttl)
 }
 
 // Status returns a snapshot of every currently-connected profile, sorted by

@@ -227,6 +227,82 @@ func TestObserve_RoutesMatchedDomainIPs(t *testing.T) {
 	}
 }
 
+func TestProxyAnswer_ReturnsPublicIPOnlyForConnectedProxyRoute(t *testing.T) {
+	m, _ := newTestManager(t)
+	orig := providerFactory
+	providerFactory = func(kind string, creds Credentials) (Provider, error) {
+		return &stubProvider{name: kind, peer: PeerConfig{PrivateKey: "cHJpdg==", PeerPublicKey: "cHVi", Endpoint: "1.2.3.4:51820"}}, nil
+	}
+	t.Cleanup(func() { providerFactory = orig })
+	m.SetPublicIP(net.ParseIP("203.0.113.5"))
+
+	profiles := []ProfileSpec{
+		{ID: "proxied", Provider: "pia", Region: "uk_london"},
+		{ID: "marking-only", Provider: "pia", Region: "us_new_york_city"},
+	}
+	routes := []RouteSpec{
+		{Profile: "proxied", Domains: []string{"imgur.com"}, Proxy: true},
+		{Profile: "marking-only", Domains: []string{"example.com"}, Proxy: false},
+	}
+	if err := m.Reconcile(context.Background(), profiles, routes, Credentials{}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	if ip, ok := m.ProxyAnswer("www.imgur.com"); !ok || !ip.Equal(net.ParseIP("203.0.113.5")) {
+		t.Errorf("ProxyAnswer(www.imgur.com) = %v, %v; want 203.0.113.5, true", ip, ok)
+	}
+	if _, ok := m.ProxyAnswer("example.com"); ok {
+		t.Error("ProxyAnswer(example.com) should be false — that route has Proxy:false")
+	}
+	if _, ok := m.ProxyAnswer("unrelated.org"); ok {
+		t.Error("ProxyAnswer(unrelated.org) should be false — no matching route")
+	}
+}
+
+func TestProxyAnswer_FalseWhenProfileNotConnected(t *testing.T) {
+	m, _ := newTestManager(t)
+	orig := providerFactory
+	providerFactory = func(kind string, creds Credentials) (Provider, error) {
+		return &stubProvider{err: errFake}, nil
+	}
+	t.Cleanup(func() { providerFactory = orig })
+	m.SetPublicIP(net.ParseIP("203.0.113.5"))
+
+	profiles := []ProfileSpec{{ID: "proxied", Provider: "pia", Region: "uk_london"}}
+	routes := []RouteSpec{{Profile: "proxied", Domains: []string{"imgur.com"}, Proxy: true}}
+	// Reconcile returns an error (the profile fails to connect via the
+	// stub's forced error) but must not panic — ProxyAnswer must then
+	// report no match rather than pointing traffic at a dead tunnel.
+	_ = m.Reconcile(context.Background(), profiles, routes, Credentials{})
+
+	if _, ok := m.ProxyAnswer("imgur.com"); ok {
+		t.Error("ProxyAnswer should be false when the matching profile failed to connect")
+	}
+}
+
+func TestMatchProxyRoute_MirrorsProxyAnswer(t *testing.T) {
+	m, _ := newTestManager(t)
+	orig := providerFactory
+	providerFactory = func(kind string, creds Credentials) (Provider, error) {
+		return &stubProvider{name: kind, peer: PeerConfig{PrivateKey: "cHJpdg==", PeerPublicKey: "cHVi", Endpoint: "1.2.3.4:51820"}}, nil
+	}
+	t.Cleanup(func() { providerFactory = orig })
+
+	profiles := []ProfileSpec{{ID: "proxied", Provider: "nordvpn", Region: "gb"}}
+	routes := []RouteSpec{{Profile: "proxied", Domains: []string{"imgur.com"}, Proxy: true}}
+	if err := m.Reconcile(context.Background(), profiles, routes, Credentials{}); err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	id, ok := m.MatchProxyRoute("i.imgur.com")
+	if !ok || id != "proxied" {
+		t.Errorf("MatchProxyRoute(i.imgur.com) = %q, %v; want proxied, true", id, ok)
+	}
+	if _, ok := m.MatchProxyRoute("other.com"); ok {
+		t.Error("MatchProxyRoute(other.com) should be false")
+	}
+}
+
 func TestObserve_UnmatchedDomainDoesNothing(t *testing.T) {
 	m, r := newTestManager(t)
 	orig := providerFactory

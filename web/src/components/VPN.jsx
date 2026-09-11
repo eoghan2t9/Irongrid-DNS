@@ -9,6 +9,7 @@ const emptyVPN = () => ({
   providers: { nordvpn: { token: '' }, pia: { username: '', password: '' } },
   profiles: [],
   routes: [],
+  proxy: { enabled: false, listen: '', listen_http: '', fallback: '', public_ip: '' },
 })
 
 // VPN is a dedicated page for domain-based split-tunnel VPN routing:
@@ -71,6 +72,10 @@ export default function VPN() {
     }))
     setDirty(true)
   }
+  const patchProxy = (p) => {
+    setVpnState((prev) => ({ ...prev, proxy: { ...prev.proxy, ...p } }))
+    setDirty(true)
+  }
 
   const setProfile = (i, p) => {
     setVpnState((prev) => ({ ...prev, profiles: prev.profiles.map((x, idx) => (idx === i ? { ...x, ...p } : x)) }))
@@ -90,7 +95,10 @@ export default function VPN() {
     setDirty(true)
   }
   const addRoute = () => {
-    setVpnState((prev) => ({ ...prev, routes: [...prev.routes, { profile: prev.profiles[0]?.id || '', domains: [] }] }))
+    setVpnState((prev) => ({
+      ...prev,
+      routes: [...prev.routes, { profile: prev.profiles[0]?.id || '', domains: [], proxy: false }],
+    }))
     setDirty(true)
   }
   const removeRoute = (i) => {
@@ -245,6 +253,72 @@ export default function VPN() {
 
       <div className="card">
         <div className="row-between">
+          <h3 style={{ margin: 0 }}>Smart DNS proxy</h3>
+        </div>
+        <p className="dim small">
+          Makes a "Proxy relay" route (see below) work for any device that merely uses this server for DNS — no VPN
+          app or client config needed. Instead of the real address, Proxy-enabled domains resolve to this server's
+          own IP; a relay here then forwards each connection through the matching profile's tunnel using TLS SNI
+          (HTTPS, port 443) or the Host header (plain HTTP, port 80) to know where it's actually going. Anything that
+          doesn't match a Proxy-enabled route is forwarded unchanged to Fallback — it never relays anywhere else.
+        </p>
+        <div className="form-grid">
+          <label className="field">
+            <span className="field-label">Enabled</span>
+            <label className="switch">
+              <input
+                type="checkbox"
+                checked={!!vpn.proxy.enabled}
+                onChange={(e) => patchProxy({ enabled: e.target.checked })}
+              />
+              <span className="slider" />
+            </label>
+          </label>
+          {field(
+            'Listen (TLS/SNI)',
+            'where real clients actually connect for HTTPS — default ":443"',
+            <input
+              className="input mono"
+              placeholder=":443"
+              value={vpn.proxy.listen || ''}
+              onChange={(e) => patchProxy({ listen: e.target.value })}
+            />,
+          )}
+          {field(
+            'Listen (plain HTTP)',
+            'optional — handles non-HTTPS sites too; empty disables it',
+            <input
+              className="input mono"
+              placeholder=":80 (optional)"
+              value={vpn.proxy.listen_http || ''}
+              onChange={(e) => patchProxy({ listen_http: e.target.value })}
+            />,
+          )}
+          {field(
+            'Fallback',
+            'where unmatched connections go — required when Listen shares a port with the dashboard (":443"); point this at a loopback address the dashboard is moved to, e.g. "127.0.0.1:8443"',
+            <input
+              className="input mono"
+              placeholder="127.0.0.1:8443"
+              value={vpn.proxy.fallback || ''}
+              onChange={(e) => patchProxy({ fallback: e.target.value })}
+            />,
+          )}
+          {field(
+            'Public IP override',
+            'empty auto-detects this host’s outbound address',
+            <input
+              className="input mono"
+              placeholder="auto-detected"
+              value={vpn.proxy.public_ip || ''}
+              onChange={(e) => patchProxy({ public_ip: e.target.value })}
+            />,
+          )}
+        </div>
+      </div>
+
+      <div className="card">
+        <div className="row-between">
           <h3 style={{ margin: 0 }}>Profiles</h3>
         </div>
         <p className="dim small">
@@ -322,6 +396,16 @@ export default function VPN() {
                   </option>
                 ))}
               </select>
+              <label className="switch" title="Relay via the Smart DNS proxy (no VPN client needed on the device)">
+                <input
+                  type="checkbox"
+                  checked={!!rt.proxy}
+                  onChange={(e) => setRoute(i, { proxy: e.target.checked })}
+                  aria-label={`Proxy relay for route ${i + 1}`}
+                />
+                <span className="slider" />
+              </label>
+              <span className="dim small">Proxy relay</span>
               <button
                 className="btn small danger"
                 type="button"
@@ -338,6 +422,12 @@ export default function VPN() {
                 <LineListField value={rt.domains} onChange={(v) => setRoute(i, { domains: v })} rows={3} />,
               )}
             </div>
+            {rt.proxy && !vpn.proxy.enabled && (
+              <p className="info-banner" style={{ marginTop: 8 }}>
+                This route has Proxy relay on, but the Smart DNS proxy itself is disabled above — enable it for this
+                to actually work for devices that don't route their traffic through this server.
+              </p>
+            )}
           </div>
         ))}
         <div className="quick-actions" style={{ marginTop: 12 }}>

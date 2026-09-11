@@ -230,6 +230,45 @@ type VPNConfig struct {
 	// profile's tunnel. Matching is the same exact-or-subdomain,
 	// longest-match rule as upstream_routes.
 	Routes []VPNRoute `yaml:"routes"`
+	// Proxy is the SNI/Host-based relay that makes Proxy-enabled routes work
+	// for clients whose IP traffic never passes through this host — see
+	// VPNProxyConfig.
+	Proxy VPNProxyConfig `yaml:"proxy"`
+}
+
+// VPNProxyConfig is a relay that makes domain-based VPN routing work for ANY
+// client that merely uses this server for DNS — not only clients whose IP
+// traffic already passes through this host (the plain vpn.routes case,
+// which only works if this box is your gateway/router). For a route with
+// Proxy: true, DNS answers for its domains point at this server's own
+// public IP instead of the real one; a TCP listener on Listen (typically
+// ":443") and, optionally, ListenHTTP (":80") then relay each connection
+// through the matching profile's WireGuard tunnel to the real destination —
+// identified via the TLS SNI (HTTPS) or Host header (plain HTTP), the same
+// technique commercial "Smart DNS" unblocking services use, without any
+// app or VPN client on the end device. A connection whose SNI/Host doesn't
+// match a Proxy-enabled route's domain is forwarded unchanged to Fallback
+// (typically wherever the dashboard/DoH already listens) — the relay never
+// forwards anywhere else, so it cannot be abused as an open proxy for
+// arbitrary destinations.
+type VPNProxyConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Listen is the TLS/SNI relay address (typically ":443", since that's
+	// where a normal HTTPS client actually connects). "" defaults to ":443".
+	Listen string `yaml:"listen"`
+	// ListenHTTP is the plain-HTTP (Host header) relay address, typically
+	// ":80". "" disables the HTTP relay (HTTPS-only sites still work).
+	ListenHTTP string `yaml:"listen_http"`
+	// Fallback is where a connection whose SNI/Host doesn't match any
+	// Proxy-enabled route is forwarded — normally the dashboard/DoH
+	// listener. "" defaults to server.web_listen. When Listen shares a port
+	// with server.web_listen (the common case, ":443"), Fallback MUST point
+	// at a different address (e.g. a loopback port) or the two listeners
+	// would conflict — see the example config.
+	Fallback string `yaml:"fallback"`
+	// PublicIP is the address returned for a Proxy-enabled route's domains.
+	// "" auto-detects this host's outbound-facing address.
+	PublicIP string `yaml:"public_ip"`
 }
 
 // VPNProviders holds account credentials for the supported VPN vendors.
@@ -269,6 +308,12 @@ type VPNProfile struct {
 type VPNRoute struct {
 	Profile string   `yaml:"profile"`
 	Domains []string `yaml:"domains"`
+	// Proxy additionally makes this route's domains work for clients whose
+	// IP traffic never passes through this host — see VPNProxyConfig. Off
+	// by default: it changes what DNS answer these domains get (this
+	// server's own IP instead of the real one), which only makes sense
+	// when vpn.proxy.enabled is also true.
+	Proxy bool `yaml:"proxy"`
 }
 
 // RateLimitConfig throttles queries per source IP to protect against abuse

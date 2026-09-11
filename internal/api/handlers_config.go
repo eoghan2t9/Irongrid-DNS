@@ -52,6 +52,17 @@ type vpnPayload struct {
 	Providers vpnProvidersPayload `json:"providers"`
 	Profiles  []vpnProfilePayload `json:"profiles"`
 	Routes    []vpnRoutePayload   `json:"routes"`
+	Proxy     vpnProxyPayload     `json:"proxy"`
+}
+
+// vpnProxyPayload is the JSON shape for the Smart-DNS proxy relay (see
+// config.VPNProxyConfig).
+type vpnProxyPayload struct {
+	Enabled    bool   `json:"enabled"`
+	Listen     string `json:"listen"`
+	ListenHTTP string `json:"listen_http"`
+	Fallback   string `json:"fallback"`
+	PublicIP   string `json:"public_ip"`
 }
 
 type vpnProvidersPayload struct {
@@ -77,6 +88,7 @@ type vpnProfilePayload struct {
 type vpnRoutePayload struct {
 	Profile string   `json:"profile"`
 	Domains []string `json:"domains"`
+	Proxy   bool     `json:"proxy"`
 }
 
 // dhcpPayload is the JSON shape for the built-in DHCP server settings.
@@ -471,10 +483,17 @@ func payloadFromConfig(c *config.Config) configPayload {
 			Routes: func() []vpnRoutePayload {
 				routes := make([]vpnRoutePayload, 0, len(c.VPN.Routes))
 				for _, rt := range c.VPN.Routes {
-					routes = append(routes, vpnRoutePayload{Profile: rt.Profile, Domains: rt.Domains})
+					routes = append(routes, vpnRoutePayload{Profile: rt.Profile, Domains: rt.Domains, Proxy: rt.Proxy})
 				}
 				return routes
 			}(),
+			Proxy: vpnProxyPayload{
+				Enabled:    c.VPN.Proxy.Enabled,
+				Listen:     c.VPN.Proxy.Listen,
+				ListenHTTP: c.VPN.Proxy.ListenHTTP,
+				Fallback:   c.VPN.Proxy.Fallback,
+				PublicIP:   c.VPN.Proxy.PublicIP,
+			},
 		},
 	}
 	for _, bl := range c.Filter.Blocklists {
@@ -800,13 +819,20 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 					Password: p.VPN.Providers.PIA.Password,
 				},
 			},
+			Proxy: config.VPNProxyConfig{
+				Enabled:    p.VPN.Proxy.Enabled,
+				Listen:     p.VPN.Proxy.Listen,
+				ListenHTTP: p.VPN.Proxy.ListenHTTP,
+				Fallback:   p.VPN.Proxy.Fallback,
+				PublicIP:   p.VPN.Proxy.PublicIP,
+			},
 		},
 	}
 	for _, prof := range p.VPN.Profiles {
 		cfg.VPN.Profiles = append(cfg.VPN.Profiles, config.VPNProfile{ID: prof.ID, Provider: prof.Provider, Region: prof.Region})
 	}
 	for _, rt := range p.VPN.Routes {
-		cfg.VPN.Routes = append(cfg.VPN.Routes, config.VPNRoute{Profile: rt.Profile, Domains: rt.Domains})
+		cfg.VPN.Routes = append(cfg.VPN.Routes, config.VPNRoute{Profile: rt.Profile, Domains: rt.Domains, Proxy: rt.Proxy})
 	}
 	for _, rw := range p.Rewrites {
 		cfg.Rewrites = append(cfg.Rewrites, config.RewriteSpec{Domain: rw.Domain, Type: rw.Type, Value: rw.Value, TTL: rw.TTL})

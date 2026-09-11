@@ -916,6 +916,21 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		}
 	}
 
+	// 1.4 Domain-based VPN "Smart DNS" proxy routes: a Proxy-enabled
+	//     vpn.routes domain whose profile is currently connected answers
+	//     with this server's own IP instead of the real one, so the
+	//     client's connection lands on the SNI/Host relay (internal/vpn's
+	//     Relay) instead — see config.VPNProxyConfig. Checked before DHCP
+	//     hostnames since it's an explicit routing decision, same rank as
+	//     the local-DNS-records check just above.
+	if ans := h.tryProxyAnswer(r, q); ans != nil {
+		h.Stats.Allowed.Add(1)
+		h.record(client, qname, q, "rewrite", "vpn-proxy", "", start, ans)
+		_ = h.write(w, ans, r, proto)
+		putMsg(ans)
+		return
+	}
+
 	// 1.5 DHCP-assigned hostnames: a client the DHCP server registered (its
 	//     hostname from DHCPREQUEST, optionally under the configured domain)
 	//     resolves locally — the address is authoritative while the lease is

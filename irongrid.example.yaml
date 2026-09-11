@@ -328,6 +328,34 @@ vpn:
       domains:
         - "bbc.co.uk"
         - "bbci.co.uk"
+      # proxy: true            # see vpn.proxy below — makes this route work
+                                # for devices that only use this server for
+                                # DNS, not just ones whose IP traffic already
+                                # passes through this host
+  # Smart DNS proxy: makes a Proxy-enabled route (above) work for ANY device
+  # that merely uses this server for DNS — no VPN app or client config
+  # needed anywhere. Instead of the real address, a Proxy-enabled route's
+  # domains resolve to this server's own IP; the relay below then forwards
+  # each connection through the matching profile's tunnel, reading the
+  # destination from the TLS SNI (HTTPS) or Host header (plain HTTP) — the
+  # same technique commercial "Smart DNS" unblocking services use. A
+  # connection that doesn't match a Proxy-enabled route is forwarded
+  # unchanged to `fallback` — it never relays anywhere else, so it can't
+  # become an open proxy for arbitrary destinations.
+  #
+  # `listen` (typically ":443") is where real clients actually connect, so
+  # if the dashboard/DoH also want :443 (server.web_listen / web_tls
+  # above), move THEM to a loopback port and point `fallback` at it — the
+  # relay then transparently forwards anything that isn't a proxied domain
+  # there, so the dashboard keeps working exactly as before behind one
+  # extra local hop.
+  proxy:
+    enabled: false
+    listen: ":443"            # "" defaults to ":443"
+    listen_http: ""           # e.g. ":80" — optional, handles plain-HTTP sites too
+    fallback: ""               # e.g. "127.0.0.1:8443" — required if listen
+                                # shares a port with server.web_listen
+    public_ip: ""              # "" auto-detects this host's outbound address
 
 tunnel:
   enabled: false               # start the baked-in cloudflared on boot?
