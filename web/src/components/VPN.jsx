@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from 'react'
 import { api } from '../api'
 import { useToast } from '../toast-context'
 import { LineListField, XIcon } from './ui'
+import { PIA_REGIONS, NORDVPN_COUNTRIES } from '../vpnRegions'
 
 const emptyVPN = () => ({
   enabled: false,
@@ -275,6 +276,7 @@ export default function VPN() {
               </select>
               <input
                 className="input mono"
+                list={p.provider === 'nordvpn' ? 'nordvpn-countries' : 'pia-regions'}
                 placeholder={p.provider === 'nordvpn' ? 'country code, e.g. gb' : 'PIA region, e.g. uk_london'}
                 value={p.region || ''}
                 onChange={(e) => setProfile(i, { region: e.target.value })}
@@ -344,6 +346,21 @@ export default function VPN() {
           </button>
         </div>
       </div>
+
+      <datalist id="pia-regions">
+        {PIA_REGIONS.map((r) => (
+          <option key={r.id} value={r.id}>
+            {r.name}
+          </option>
+        ))}
+      </datalist>
+      <datalist id="nordvpn-countries">
+        {NORDVPN_COUNTRIES.map((c) => (
+          <option key={c.code} value={c.code}>
+            {c.name}
+          </option>
+        ))}
+      </datalist>
     </div>
   )
 }

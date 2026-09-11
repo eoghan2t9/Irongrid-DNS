@@ -54,7 +54,14 @@ describe('VPN connection status', () => {
       ]),
     )
     api.vpnStatus.mockResolvedValue([
-      { id: 'uk-iplayer', provider: 'pia', region: 'uk_london', iface: 'igvpn0', endpoint: '1.2.3.4:51820', up_since: new Date().toISOString() },
+      {
+        id: 'uk-iplayer',
+        provider: 'pia',
+        region: 'uk_london',
+        iface: 'igvpn0',
+        endpoint: '1.2.3.4:51820',
+        up_since: new Date().toISOString(),
+      },
     ])
 
     renderVPN()
@@ -66,7 +73,14 @@ describe('VPN connection status', () => {
   it('shows an allowed badge when every configured profile is connected', async () => {
     api.config.mockResolvedValue(baseConfig([{ id: 'uk-iplayer', provider: 'pia', region: 'uk_london' }]))
     api.vpnStatus.mockResolvedValue([
-      { id: 'uk-iplayer', provider: 'pia', region: 'uk_london', iface: 'igvpn0', endpoint: '1.2.3.4:51820', up_since: new Date().toISOString() },
+      {
+        id: 'uk-iplayer',
+        provider: 'pia',
+        region: 'uk_london',
+        iface: 'igvpn0',
+        endpoint: '1.2.3.4:51820',
+        up_since: new Date().toISOString(),
+      },
     ])
 
     renderVPN()
