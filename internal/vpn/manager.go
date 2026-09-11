@@ -96,7 +96,7 @@ func NewManager() *Manager {
 	m.snap.Store(&snapshot{})
 	const workerCount = 2
 	m.workers.Add(workerCount)
-	for i := 0; i < workerCount; i++ {
+	for range workerCount {
 		go m.worker()
 	}
 	return m

@@ -41,7 +41,7 @@ func TestNotifySendsToSocket(t *testing.T) {
 
 func TestStartWatchdogNoopWithoutEnv(t *testing.T) {
 	t.Setenv("WATCHDOG_USEC", "")
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	StartWatchdog(ctx) // must not panic or start a goroutine that outlives the test
 }
@@ -58,7 +58,7 @@ func TestStartWatchdogPingsSocket(t *testing.T) {
 	t.Setenv("WATCHDOG_USEC", "100000") // 100ms -> pings every 50ms
 	t.Setenv("WATCHDOG_PID", "")        // unset: applies to this process
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	StartWatchdog(ctx)
 
@@ -85,7 +85,7 @@ func TestStartWatchdogSkippedForOtherPID(t *testing.T) {
 	t.Setenv("WATCHDOG_USEC", "100000")
 	t.Setenv("WATCHDOG_PID", "1") // never our own PID in a test process
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	StartWatchdog(ctx)
 

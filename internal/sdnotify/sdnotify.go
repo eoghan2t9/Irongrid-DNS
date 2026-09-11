@@ -21,6 +21,10 @@ func Notify(state string) error {
 	if addr == "" {
 		return nil
 	}
+	//nolint:gosec // G704 SSRF: addr is $NOTIFY_SOCKET, set by systemd itself
+	// (the service manager that launched this process), not by any request
+	// or user input — and it's a unix domain socket path, not a network
+	// address, so there's no SSRF surface here at all.
 	conn, err := net.Dial("unixgram", addr)
 	if err != nil {
 		return err

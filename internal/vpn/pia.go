@@ -70,7 +70,9 @@ iyd1Fzx0yujuiXDROLhISLQDRjVVAvawrAtLZWYK31bY7KlezPlQnl/D9Asxe85l
 
 const (
 	piaServerListURL = "https://serverlist.piaservers.net/vpninfo/servers/v6"
-	piaTokenURL      = "https://www.privateinternetaccess.com/api/client/v2/token"
+	//nolint:gosec // G101: this is PIA's public token-issuance endpoint URL,
+	// not a credential — the pattern matcher just sees the word "token".
+	piaTokenURL = "https://www.privateinternetaccess.com/api/client/v2/token"
 )
 
 // PIA talks to Private Internet Access's officially published WireGuard
