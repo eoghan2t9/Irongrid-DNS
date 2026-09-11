@@ -289,6 +289,46 @@ web:
   #     token: "generate-a-long-random-string-here"
   #     read_only: true          # restricted to GET/HEAD requests
 
+# Domain-based split-tunnel VPN routing: the resolved answers for selected
+# domains are routed through a dedicated WireGuard tunnel to a NordVPN or
+# PIA server instead of the host's normal default route, while every other
+# domain is unaffected — e.g. sending only bbc.co.uk/bbci.co.uk through a UK
+# server so iPlayer works while traveling, with everything else on the
+# normal path. Also useful as a general privacy split-tunnel: route
+# sensitive domains through a VPN region without putting all your traffic
+# through it.
+#
+# Requires: Linux, root or CAP_NET_ADMIN (creates WireGuard interfaces and
+# policy-routing rules), and the `ip`, `wg` (wireguard-tools) and `nft`
+# binaries on PATH. This server must be your network's gateway (or at least
+# in the forwarding path) for other LAN devices' traffic to be affected —
+# routing only ever changes for traffic that reaches this host.
+#
+# NordVPN's endpoints here are not a published public API — they're the
+# same ones NordVPN's own open-source Linux client
+# (github.com/NordSecurity/nordvpn-linux) uses, so they can change without
+# notice. PIA's are officially published (github.com/pia-foss/manual-connections).
+vpn:
+  enabled: false
+  providers:
+    nordvpn:
+      token: ""             # nordvpn.com -> Account -> "Set up NordVPN manually"
+    pia:
+      username: ""          # your regular PIA account login
+      password: ""
+  profiles:
+    - id: "uk-streaming"
+      provider: "pia"       # "nordvpn" or "pia"
+      region: "uk_london"   # PIA region id, or a NordVPN ISO country code like "gb"
+    # - id: "privacy"
+    #   provider: "nordvpn"
+    #   region: "us"
+  routes:
+    - profile: "uk-streaming"
+      domains:
+        - "bbc.co.uk"
+        - "bbci.co.uk"
+
 tunnel:
   enabled: false               # start the baked-in cloudflared on boot?
   token: ""                    # named tunnel token (Cloudflare Zero Trust)

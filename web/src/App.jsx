@@ -14,6 +14,7 @@ const Lists = lazy(() => import('./components/Lists'))
 const Rewrites = lazy(() => import('./components/Rewrites'))
 const Tools = lazy(() => import('./components/Tools'))
 const ClientGroups = lazy(() => import('./components/ClientGroups'))
+const VPN = lazy(() => import('./components/VPN'))
 const Tunnel = lazy(() => import('./components/Tunnel'))
 const Dhcp = lazy(() => import('./components/Dhcp'))
 const Settings = lazy(() => import('./components/Settings'))
@@ -150,6 +151,19 @@ const NAV = [
         <path d="M2.5 20c0-3.3 3-5.5 6.5-5.5s6.5 2.2 6.5 5.5" />
         <circle cx="17" cy="8.5" r="2.2" />
         <path d="M15.7 13.3c2.3.5 4.1 2.2 4.1 4.7" />
+      </>,
+    ),
+  },
+  {
+    id: 'vpn',
+    label: 'VPN Routing',
+    section: 'Network',
+    desc: 'Route specific domains through a NordVPN/PIA server — e.g. iPlayer via a UK server while traveling',
+    keywords: ['vpn', 'wireguard', 'nordvpn', 'pia', 'split tunnel', 'smart dns', 'iplayer', 'geo'],
+    icon: navSvg(
+      <>
+        <rect x="3" y="6" width="18" height="12" rx="2" />
+        <path d="M7 10.5h6M7 13.5h3" />
       </>,
     ),
   },
@@ -691,6 +705,7 @@ export default function App() {
                 {view === 'rewrites' && <Rewrites />}
                 {view === 'tools' && <Tools />}
                 {view === 'client-groups' && <ClientGroups />}
+                {view === 'vpn' && <VPN />}
                 {view === 'tls' && <Tls />}
                 {view === 'tunnel' && <Tunnel />}
                 {view === 'dhcp' && <Dhcp />}

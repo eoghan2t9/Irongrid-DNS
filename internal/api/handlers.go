@@ -24,6 +24,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/recursive"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tunnel"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/vpn"
 )
 
 // Handler implements the REST endpoints. It is created by main and injected
@@ -67,6 +68,7 @@ type Handler struct {
 	DNS        *dnsserver.Handler
 	DNSManager *dnsserver.Manager // listener manager; reports bound UDP/DoQ socket counts
 	Tunnel     *tunnel.Manager
+	VPN        *vpn.Manager
 	Upstreams  []*upstream.Upstream
 	// Hints is the authoritative root-hints manager for recursive://
 	// upstreams; nil when no recursive upstream is configured.
@@ -188,6 +190,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.tunnelLog(w)
 	case len(parts) == 2 && parts[0] == "tunnel" && parts[1] == "cloudflared-update" && r.Method == http.MethodPost:
 		h.installCloudflaredUpdate(ctx, w)
+	case len(parts) == 2 && parts[0] == "vpn" && parts[1] == "status" && r.Method == http.MethodGet:
+		h.vpnStatus(w)
 	case len(parts) == 1 && parts[0] == "config" && r.Method == http.MethodGet:
 		h.getConfig(w)
 	case len(parts) == 1 && parts[0] == "config" && r.Method == http.MethodPut:

@@ -50,16 +50,22 @@ type Config struct {
 	// Logging controls the application's own log stream (startup, errors,
 	// reloads — everything through slog). Distinct from Log above, which
 	// controls the DNS query log.
-	Logging      LoggingConfig   `yaml:"logging"`
-	Web          WebConfig       `yaml:"web"`
-	Tunnel       TunnelConfig    `yaml:"tunnel"`
-	Rewrites     []RewriteSpec   `yaml:"rewrites"`      // local DNS records (A/AAAA/CNAME)
-	ClientGroups []ClientGroup   `yaml:"client_groups"` // per-client blocking/upstream policy
-	RateLimit    RateLimitConfig `yaml:"rate_limit"`
-	GeoBlock     GeoBlockConfig  `yaml:"geo_block"`
-	Abuse        AbuseConfig     `yaml:"abuse"`
-	DNSSEC       DNSSECConfig    `yaml:"dnssec"`
-	Warmer       WarmerConfig    `yaml:"warmer"`
+	Logging      LoggingConfig `yaml:"logging"`
+	Web          WebConfig     `yaml:"web"`
+	Tunnel       TunnelConfig  `yaml:"tunnel"`
+	Rewrites     []RewriteSpec `yaml:"rewrites"`      // local DNS records (A/AAAA/CNAME)
+	ClientGroups []ClientGroup `yaml:"client_groups"` // per-client blocking/upstream policy
+	// VPN configures domain-based split-tunnel routing: the resolved answers
+	// for selected domains are routed out through a dedicated WireGuard
+	// tunnel to a NordVPN or PIA server instead of the host's normal default
+	// route (e.g. sending only bbc.co.uk through a UK server so iPlayer
+	// works while traveling, with everything else unaffected).
+	VPN       VPNConfig       `yaml:"vpn"`
+	RateLimit RateLimitConfig `yaml:"rate_limit"`
+	GeoBlock  GeoBlockConfig  `yaml:"geo_block"`
+	Abuse     AbuseConfig     `yaml:"abuse"`
+	DNSSEC    DNSSECConfig    `yaml:"dnssec"`
+	Warmer    WarmerConfig    `yaml:"warmer"`
 	// Recursive tunes the recursive:// upstream transport (the iterative
 	// resolver that walks referrals from the root servers itself).
 	Recursive RecursiveConfig `yaml:"recursive"`
@@ -206,6 +212,63 @@ type ClientGroup struct {
 	// Upstreams overrides the global forwarders for this group. Empty uses
 	// the global Upstreams list.
 	Upstreams []string `yaml:"upstreams"`
+}
+
+// VPNConfig is domain-based split-tunnel VPN routing. Selected domains'
+// resolved answers are routed through a dedicated WireGuard tunnel to a
+// NordVPN or PIA server instead of the host's normal default route, while
+// every other domain is unaffected. Requires root/CAP_NET_ADMIN (creates
+// WireGuard interfaces and policy-routing rules) plus the `ip`, `wg` and
+// `nft` binaries; Linux only.
+type VPNConfig struct {
+	Enabled   bool         `yaml:"enabled"`
+	Providers VPNProviders `yaml:"providers"`
+	// Profiles are individual WireGuard tunnels to a specific provider
+	// region/server. Multiple routes can share one profile.
+	Profiles []VPNProfile `yaml:"profiles"`
+	// Routes sends a set of domains (and their subdomains) through one
+	// profile's tunnel. Matching is the same exact-or-subdomain,
+	// longest-match rule as upstream_routes.
+	Routes []VPNRoute `yaml:"routes"`
+}
+
+// VPNProviders holds account credentials for the supported VPN vendors.
+// Only the providers actually referenced by a profile need to be filled in.
+type VPNProviders struct {
+	NordVPN NordVPNCreds `yaml:"nordvpn"`
+	PIA     PIACreds     `yaml:"pia"`
+}
+
+// NordVPNCreds authenticates against NordVPN's account API to fetch the
+// account's NordLynx (WireGuard) private key. Generate a token at
+// nordvpn.com -> Account -> "Set up NordVPN manually" — the same token
+// `nordvpn login --token` uses.
+type NordVPNCreds struct {
+	Token string `yaml:"token"`
+}
+
+// PIACreds authenticates against PIA's published WireGuard connection API
+// (github.com/pia-foss/manual-connections) using a regular PIA account
+// login, not a separate token.
+type PIACreds struct {
+	Username string `yaml:"username"`
+	Password string `yaml:"password"`
+}
+
+// VPNProfile is one WireGuard tunnel to a specific provider region/server.
+type VPNProfile struct {
+	ID       string `yaml:"id"`
+	Provider string `yaml:"provider"` // "nordvpn" or "pia"
+	// Region is provider-specific: a NordVPN country code (e.g. "gb") or a
+	// PIA region id (e.g. "uk_london" — see PIA's region list).
+	Region string `yaml:"region"`
+}
+
+// VPNRoute sends every listed domain's resolved answers through Profile's
+// tunnel instead of the host's default route.
+type VPNRoute struct {
+	Profile string   `yaml:"profile"`
+	Domains []string `yaml:"domains"`
 }
 
 // RateLimitConfig throttles queries per source IP to protect against abuse
@@ -819,6 +882,9 @@ func (c *Config) validate() error {
 			return fmt.Errorf("upstream_routes[%d] (%s): empty upstream entry", i, dom)
 		}
 	}
+	if err := c.validateVPN(); err != nil {
+		return err
+	}
 	if c.Cache.Addr == "" {
 		return fmt.Errorf("cache.addr is required (Dragonfly endpoint)")
 	}
@@ -1182,6 +1248,71 @@ func (c *Config) validate() error {
 	// fire (mirrors the rate_limit.auto_block coupling above).
 	if c.GeoBlock.HoneypotUDPBlock > 0 && !c.RateLimit.Enabled {
 		return fmt.Errorf("geo_block.honeypot_udp_block requires rate_limit.enabled (the bounded UDP honeypot block runs on the rate limiter)")
+	}
+	return nil
+}
+
+// validateVPN normalizes and checks the vpn config: profile IDs must be
+// unique and reference a supported provider, and every route must name an
+// existing profile and at least one domain. Route domains are lowercased
+// and de-dotted in place, matching normalizeDomain's use elsewhere.
+func (c *Config) validateVPN() error {
+	v := &c.VPN
+	if !v.Enabled && len(v.Profiles) == 0 && len(v.Routes) == 0 {
+		return nil
+	}
+	profileIDs := make(map[string]bool, len(v.Profiles))
+	for i, p := range v.Profiles {
+		if p.ID == "" {
+			return fmt.Errorf("vpn.profiles[%d]: id is required", i)
+		}
+		if profileIDs[p.ID] {
+			return fmt.Errorf("vpn.profiles[%d]: duplicate profile id %q", i, p.ID)
+		}
+		profileIDs[p.ID] = true
+		switch p.Provider {
+		case "nordvpn", "pia":
+		default:
+			return fmt.Errorf("vpn.profiles[%d] (%s): unsupported provider %q (supported: nordvpn, pia)", i, p.ID, p.Provider)
+		}
+		if p.Region == "" {
+			return fmt.Errorf("vpn.profiles[%d] (%s): region is required", i, p.ID)
+		}
+	}
+	for i, rt := range v.Routes {
+		if rt.Profile == "" {
+			return fmt.Errorf("vpn.routes[%d]: profile is required", i)
+		}
+		if !profileIDs[rt.Profile] {
+			return fmt.Errorf("vpn.routes[%d]: profile %q is not defined in vpn.profiles", i, rt.Profile)
+		}
+		if len(rt.Domains) == 0 {
+			return fmt.Errorf("vpn.routes[%d] (%s): at least one domain is required", i, rt.Profile)
+		}
+		for j, d := range rt.Domains {
+			dom := normalizeDomain(d)
+			if dom == "" {
+				return fmt.Errorf("vpn.routes[%d] (%s): domain[%d] is invalid", i, rt.Profile, j)
+			}
+			v.Routes[i].Domains[j] = dom
+		}
+	}
+	if v.Enabled {
+		usesNord, usesPIA := false, false
+		for _, p := range v.Profiles {
+			if p.Provider == "nordvpn" {
+				usesNord = true
+			}
+			if p.Provider == "pia" {
+				usesPIA = true
+			}
+		}
+		if usesNord && v.Providers.NordVPN.Token == "" {
+			return fmt.Errorf("vpn: a profile uses provider \"nordvpn\" but vpn.providers.nordvpn.token is empty")
+		}
+		if usesPIA && (v.Providers.PIA.Username == "" || v.Providers.PIA.Password == "") {
+			return fmt.Errorf("vpn: a profile uses provider \"pia\" but vpn.providers.pia.username/password are empty")
+		}
 	}
 	return nil
 }

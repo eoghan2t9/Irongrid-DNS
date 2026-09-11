@@ -22,6 +22,8 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/vpn"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
@@ -133,6 +135,11 @@ type Handler struct {
 	Padding atomic.Bool
 	// Cookies enables server DNS cookies (RFC 7873). Set via SetCookies.
 	Cookies atomic.Bool
+	// vpnRouter is the optional domain-based VPN split-tunnel manager; nil
+	// (the default) disables the hook entirely. Set via SetVPNRouter. Its
+	// Observe method is called directly from write() on every response, so
+	// it must never block — see internal/vpn's Manager doc comment.
+	vpnRouter atomic.Pointer[vpn.Manager]
 	// cookieSecret is the HMAC key for server cookies, generated once at
 	// construction and never mutated — a reader never races a writer.
 	cookieSecret []byte
@@ -1606,6 +1613,7 @@ func padMessage(m *dns.Msg, block int) *dns.Msg {
 // path caches resp right after the write, and a padded or cookie-laden
 // answer must not be stored for every other client.
 func (h *Handler) write(w dns.ResponseWriter, m *dns.Msg, r *dns.Msg, proto string) error {
+	h.observeVPN(r, m)
 	m.Compress = true
 	// Fast path: pack the response once into a pooled buffer and hand the
 	// bytes straight to the transport. This is the every-query path — the

@@ -242,6 +242,7 @@ export const api = {
     }),
   abuseExport: () => requestBlob('/api/abuse/export'),
   tunnelStatus: () => request('/api/tunnel/status'),
+  vpnStatus: () => request('/api/vpn/status'),
   tunnelStart: (body) =>
     request('/api/tunnel/start', {
       method: 'POST',

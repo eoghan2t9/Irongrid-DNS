@@ -42,6 +42,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tunnel"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/version"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/vpn"
 	"github.com/eoghan2t9/Irongrid-DNS/web"
 )
 
@@ -436,6 +437,20 @@ func main() {
 	// ---- cloudflared tunnel (managed subprocess; binary auto-installed below) ----
 	tunnelMgr := tunnel.NewManager(*dataDir)
 
+	// ---- VPN split-tunnel routing (domain-based, WireGuard via NordVPN/PIA) ----
+	vpnMgr := vpn.NewManager()
+	handler.SetVPNRouter(vpnMgr)
+	// Bringing up tunnels means a network round trip to the vendor's
+	// account API per profile (plus shelling out to ip/wg/nft) — reconcile
+	// in the background so a slow or unreachable VPN provider never delays
+	// the DNS server itself starting to serve queries.
+	go func() {
+		profiles, routes, creds := vpnReconcileArgs(cfg.VPN)
+		if err := vpnMgr.Reconcile(ctx, profiles, routes, creds); err != nil {
+			slog.Error("vpn: reconcile failed", "error", err)
+		}
+	}()
+
 	// ---- REST API + web UI ----
 	var webFS fs.FS
 	if web.HasFrontend() {
@@ -462,6 +477,7 @@ func main() {
 		DNS:        handler,
 		DNSManager: dnsMgr,
 		Tunnel:     tunnelMgr,
+		VPN:        vpnMgr,
 		Upstreams:  upstreams,
 		Hints:      hintsMgr,
 		Catalog:    catalog.Default(),
@@ -1060,6 +1076,16 @@ func main() {
 		if apiHandler.RebuildGeo != nil {
 			_ = apiHandler.RebuildGeo(cfg.GeoBlock)
 		}
+		// VPN split-tunnel profiles/routes: reconciled asynchronously, like
+		// geo blocking above — (re)connecting a profile can involve a slow
+		// round trip to the vendor's API and must not hold up the rest of
+		// this reload.
+		go func() {
+			profiles, routes, creds := vpnReconcileArgs(cfg.VPN)
+			if err := vpnMgr.Reconcile(ctx, profiles, routes, creds); err != nil {
+				slog.Error("vpn: reconcile failed", "error", err)
+			}
+		}()
 		apiHandler.Cache = newCache
 		apiHandler.Upstreams = newUps
 		oldCache := dfly
@@ -1192,6 +1218,7 @@ func main() {
 	defer cancel()
 	dnsMgr.Shutdown(shutdownCtx)
 	tunnelMgr.Stop()
+	vpnMgr.Close()
 	webMu.Lock()
 	currentWeb := webSrv
 	webMu.Unlock()
@@ -1276,6 +1303,30 @@ func routeSpecs(routes []config.UpstreamRoute) []dnsserver.RouteSpec {
 		specs = append(specs, dnsserver.RouteSpec{Domain: rt.Domain, Upstreams: rt.Upstreams})
 	}
 	return specs
+}
+
+// vpnReconcileArgs converts config.VPNConfig into the vpn package's own
+// input types for Manager.Reconcile. A disabled vpn.enabled reconciles with
+// no profiles/routes at all — Reconcile then tears down whatever was
+// previously connected, same as flipping the feature off in the dashboard.
+func vpnReconcileArgs(v config.VPNConfig) ([]vpn.ProfileSpec, []vpn.RouteSpec, vpn.Credentials) {
+	if !v.Enabled {
+		return nil, nil, vpn.Credentials{}
+	}
+	profiles := make([]vpn.ProfileSpec, 0, len(v.Profiles))
+	for _, p := range v.Profiles {
+		profiles = append(profiles, vpn.ProfileSpec{ID: p.ID, Provider: p.Provider, Region: p.Region})
+	}
+	routes := make([]vpn.RouteSpec, 0, len(v.Routes))
+	for _, rt := range v.Routes {
+		routes = append(routes, vpn.RouteSpec{Profile: rt.Profile, Domains: rt.Domains})
+	}
+	creds := vpn.Credentials{
+		NordVPNToken: v.Providers.NordVPN.Token,
+		PIAUsername:  v.Providers.PIA.Username,
+		PIAPassword:  v.Providers.PIA.Password,
+	}
+	return profiles, routes, creds
 }
 
 func buildDHCPRuntime(c config.DHCPConfig) dhcp.Config {
