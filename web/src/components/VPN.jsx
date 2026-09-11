@@ -121,7 +121,18 @@ export default function VPN() {
     <div className="stack">
       <div className="card">
         <div className="row-between">
-          <h3 style={{ margin: 0 }}>VPN split-tunnel routing</h3>
+          <h3 style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 10 }}>
+            VPN split-tunnel routing
+            {vpn.enabled && vpn.profiles.length > 0 && (
+              <span
+                className={`badge ${
+                  status.length === 0 ? 'badge-error' : status.length === vpn.profiles.length ? 'badge-allowed' : 'badge-warn'
+                }`}
+              >
+                {status.length}/{vpn.profiles.length} connected
+              </span>
+            )}
+          </h3>
           <div className="row">
             {dirty && <span className="dim small">unsaved changes</span>}
             <button className="btn primary" onClick={save} disabled={saving || !dirty}>
@@ -218,8 +229,15 @@ export default function VPN() {
         </div>
         <p className="dim small">One WireGuard tunnel to a specific provider region/server. Multiple routes can share a profile.</p>
         {vpn.profiles.length === 0 && <div className="empty">No profiles yet.</div>}
-        {vpn.profiles.map((p, i) => (
+        {vpn.profiles.map((p, i) => {
+          const live = status.find((s) => s.id === p.id)
+          return (
           <div className="list-row" key={i}>
+            <span
+              className={`dot ${live ? 'ok' : 'bad'}`}
+              title={live ? `Connected — ${live.endpoint}` : 'Not connected'}
+              style={{ flexShrink: 0 }}
+            />
             <input
               className="input"
               placeholder="id (e.g. uk-streaming)"
@@ -240,7 +258,8 @@ export default function VPN() {
               <XIcon size={12} />
             </button>
           </div>
-        ))}
+          )
+        })}
         <div className="quick-actions" style={{ marginTop: 12 }}>
           <button className="btn small" type="button" onClick={addProfile}>
             + Add profile

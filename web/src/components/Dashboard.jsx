@@ -9,6 +9,7 @@ export default function Dashboard({ onNavigate }) {
   const [stats, setStats] = useState(null)
   const [tls, setTls] = useState(null)
   const [status, setStatus] = useState(null)
+  const [vpn, setVpn] = useState(null)
   const [error, setError] = useState('')
   // Beginner checklist state: what the operator has already configured on
   // this box. Derived from the live config (not defaults) so an already-set
@@ -20,7 +21,12 @@ export default function Dashboard({ onNavigate }) {
     // instead of one after another — this was tripling refresh latency on
     // every 10s poll for no reason. allSettled so one failure (tls/status
     // are best-effort) never blocks the others from applying.
-    const [statsRes, tlsRes, statusRes] = await Promise.allSettled([api.stats(), api.tlsStatus(), api.status()])
+    const [statsRes, tlsRes, statusRes, vpnRes] = await Promise.allSettled([
+      api.stats(),
+      api.tlsStatus(),
+      api.status(),
+      api.vpnStatus(),
+    ])
     if (statsRes.status === 'fulfilled') {
       setStats(statsRes.value)
       setError('')
@@ -29,6 +35,7 @@ export default function Dashboard({ onNavigate }) {
     }
     if (tlsRes.status === 'fulfilled') setTls(tlsRes.value)
     if (statusRes.status === 'fulfilled') setStatus(statusRes.value)
+    if (vpnRes.status === 'fulfilled') setVpn(vpnRes.value)
   }, [])
 
   useEffect(() => {
@@ -135,6 +142,8 @@ export default function Dashboard({ onNavigate }) {
       <WarmerCard warmer={stats.warmer} onWarmed={load} />
 
       <RootHintsCard status={status} />
+
+      <VPNCard connected={vpn} config={setupConfig} onNavigate={onNavigate} />
 
       <TuningCard status={status} />
 
@@ -908,6 +917,54 @@ function RootHintsCard({ status }) {
           <span>{rh.last_error}</span>
         </div>
       )}
+    </div>
+  )
+}
+
+// VPNCard shows domain-based split-tunnel VPN connection status: hidden
+// entirely when the feature isn't configured, otherwise one row per
+// configured profile with a connected/not-connected dot, cross-referencing
+// the desired profile list (config) against who's actually up (connected,
+// from /api/vpn/status).
+function VPNCard({ connected, config, onNavigate }) {
+  const vpnCfg = config?.vpn
+  if (!vpnCfg?.enabled || !(vpnCfg.profiles || []).length) return null
+  const connectedByID = new Map((connected || []).map((p) => [p.id, p]))
+  const profiles = vpnCfg.profiles
+  const upCount = profiles.filter((p) => connectedByID.has(p.id)).length
+  const badge = upCount === 0 ? 'badge-error' : upCount === profiles.length ? 'badge-allowed' : 'badge-warn'
+  return (
+    <div className="card">
+      <div className="row-between">
+        <h3 style={{ margin: 0 }}>VPN routing</h3>
+        <span className={`badge ${badge}`}>
+          {upCount}/{profiles.length} connected
+        </span>
+      </div>
+      <div className="kv-grid" style={{ marginTop: 8 }}>
+        {profiles.map((p) => {
+          const live = connectedByID.get(p.id)
+          return (
+            <div className="kv-row" key={p.id}>
+              <span className="kv-label" style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+                <span className={`dot ${live ? 'ok' : 'bad'}`} />
+                {p.id}
+              </span>
+              <span className="kv-value">
+                {live
+                  ? `connected via ${live.provider} (${live.region}) — ${live.endpoint}`
+                  : `not connected — ${p.provider} (${p.region})`}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+      <div className="card-hint" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <span>Domains routed through connected profiles use their tunnel; everything else is unaffected.</span>
+        <button className="btn small" type="button" onClick={() => onNavigate('vpn')}>
+          Manage
+        </button>
+      </div>
     </div>
   )
 }
