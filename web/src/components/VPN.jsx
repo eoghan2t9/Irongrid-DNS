@@ -165,8 +165,8 @@ export default function VPN() {
         </div>
         {vpn.enabled && vpn.profiles.length === 0 && (
           <p className="info-banner" style={{ marginTop: 12 }}>
-            Enabled, but no profile is configured yet — provider credentials alone don't connect anything. Add a
-            profile below (id, provider, region), then a route pointing at it, and save.
+            Enabled, but no profile is configured yet — provider credentials alone don't connect anything. Add a profile
+            below (id, provider, region), then a route pointing at it, and save.
           </p>
         )}
         {vpn.enabled && vpn.profiles.length > 0 && vpn.routes.length === 0 && (

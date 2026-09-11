@@ -86,4 +86,23 @@ describe('VPN connection status', () => {
     await waitFor(() => expect(api.config).toHaveBeenCalled())
     expect(screen.queryByText(/connected$/)).not.toBeInTheDocument()
   })
+
+  it('shows a "no profile configured" hint when enabled with zero profiles', async () => {
+    api.config.mockResolvedValue(baseConfig([]))
+    api.vpnStatus.mockResolvedValue([])
+
+    renderVPN()
+
+    expect(await screen.findByText(/no profile is configured yet/)).toBeInTheDocument()
+  })
+
+  it('shows a "no routes yet" hint when a profile exists but no route does', async () => {
+    api.config.mockResolvedValue(baseConfig([{ id: 'uk-iplayer', provider: 'pia', region: 'uk_london' }]))
+    api.vpnStatus.mockResolvedValue([])
+
+    renderVPN()
+
+    expect(await screen.findByText(/even once a profile connects/)).toBeInTheDocument()
+    expect(screen.queryByText(/no profile is configured yet/)).not.toBeInTheDocument()
+  })
 })

@@ -926,7 +926,10 @@ function RootHintsCard({ status }) {
 // configured profile with a connected/not-connected dot, cross-referencing
 // the desired profile list (config) against who's actually up (connected,
 // from /api/vpn/status).
-function VPNCard({ connected, config, onNavigate }) {
+// Exported (unlike the other Dashboard-local cards) so it can be unit
+// tested directly without mounting the whole Dashboard — see
+// Dashboard.test.jsx.
+export function VPNCard({ connected, config, onNavigate }) {
   const vpnCfg = config?.vpn
   if (!vpnCfg?.enabled) return null
   const profiles = vpnCfg.profiles || []
@@ -938,7 +941,9 @@ function VPNCard({ connected, config, onNavigate }) {
           <span className="badge badge-warn">no profile configured</span>
         </div>
         <div className="card-hint" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-          <span>VPN is enabled but no profile has been added yet — provider credentials alone don't connect anything.</span>
+          <span>
+            VPN is enabled but no profile has been added yet — provider credentials alone don't connect anything.
+          </span>
           <button className="btn small" type="button" onClick={() => onNavigate('vpn')}>
             Add a profile
           </button>
