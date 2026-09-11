@@ -64,7 +64,10 @@ export default function VPN() {
     setDirty(true)
   }
   const patchProvider = (provider, p) => {
-    setVpnState((prev) => ({ ...prev, providers: { ...prev.providers, [provider]: { ...prev.providers[provider], ...p } } }))
+    setVpnState((prev) => ({
+      ...prev,
+      providers: { ...prev.providers, [provider]: { ...prev.providers[provider], ...p } },
+    }))
     setDirty(true)
   }
 
@@ -126,7 +129,11 @@ export default function VPN() {
             {vpn.enabled && vpn.profiles.length > 0 && (
               <span
                 className={`badge ${
-                  status.length === 0 ? 'badge-error' : status.length === vpn.profiles.length ? 'badge-allowed' : 'badge-warn'
+                  status.length === 0
+                    ? 'badge-error'
+                    : status.length === vpn.profiles.length
+                      ? 'badge-allowed'
+                      : 'badge-warn'
                 }`}
               >
                 {status.length}/{vpn.profiles.length} connected
@@ -141,11 +148,11 @@ export default function VPN() {
           </div>
         </div>
         <p className="dim small">
-          Route specific domains through a dedicated WireGuard tunnel to a NordVPN or PIA server instead of your
-          normal connection — e.g. only bbc.co.uk/bbci.co.uk through a UK server so iPlayer works while traveling,
-          with everything else unaffected. Requires this box to be your network's gateway (or at least in the
-          forwarding path) and root/CAP_NET_ADMIN, plus the <span className="mono">ip</span>,{' '}
-          <span className="mono">wg</span> and <span className="mono">nft</span> binaries. Linux only.
+          Route specific domains through a dedicated WireGuard tunnel to a NordVPN or PIA server instead of your normal
+          connection — e.g. only bbc.co.uk/bbci.co.uk through a UK server so iPlayer works while traveling, with
+          everything else unaffected. Requires this box to be your network's gateway (or at least in the forwarding
+          path) and root/CAP_NET_ADMIN, plus the <span className="mono">ip</span>, <span className="mono">wg</span> and{' '}
+          <span className="mono">nft</span> binaries. Linux only.
         </p>
         <div className="form-grid">
           <label className="field">
@@ -156,6 +163,18 @@ export default function VPN() {
             </label>
           </label>
         </div>
+        {vpn.enabled && vpn.profiles.length === 0 && (
+          <p className="info-banner" style={{ marginTop: 12 }}>
+            Enabled, but no profile is configured yet — provider credentials alone don't connect anything. Add a
+            profile below (id, provider, region), then a route pointing at it, and save.
+          </p>
+        )}
+        {vpn.enabled && vpn.profiles.length > 0 && vpn.routes.length === 0 && (
+          <p className="info-banner" style={{ marginTop: 12 }}>
+            No routes yet — even once a profile connects, no domains will be sent through it until you add a route
+            below.
+          </p>
+        )}
       </div>
 
       {status.length > 0 && (
@@ -227,37 +246,48 @@ export default function VPN() {
         <div className="row-between">
           <h3 style={{ margin: 0 }}>Profiles</h3>
         </div>
-        <p className="dim small">One WireGuard tunnel to a specific provider region/server. Multiple routes can share a profile.</p>
+        <p className="dim small">
+          One WireGuard tunnel to a specific provider region/server. Multiple routes can share a profile.
+        </p>
         {vpn.profiles.length === 0 && <div className="empty">No profiles yet.</div>}
         {vpn.profiles.map((p, i) => {
           const live = status.find((s) => s.id === p.id)
           return (
-          <div className="list-row" key={i}>
-            <span
-              className={`dot ${live ? 'ok' : 'bad'}`}
-              title={live ? `Connected — ${live.endpoint}` : 'Not connected'}
-              style={{ flexShrink: 0 }}
-            />
-            <input
-              className="input"
-              placeholder="id (e.g. uk-streaming)"
-              value={p.id || ''}
-              onChange={(e) => setProfile(i, { id: e.target.value })}
-            />
-            <select className="input" value={p.provider || 'pia'} onChange={(e) => setProfile(i, { provider: e.target.value })}>
-              <option value="pia">PIA</option>
-              <option value="nordvpn">NordVPN</option>
-            </select>
-            <input
-              className="input mono"
-              placeholder={p.provider === 'nordvpn' ? 'country code, e.g. gb' : 'PIA region, e.g. uk_london'}
-              value={p.region || ''}
-              onChange={(e) => setProfile(i, { region: e.target.value })}
-            />
-            <button className="btn small danger" type="button" onClick={() => removeProfile(i)} aria-label={`Remove profile ${p.id || i + 1}`}>
-              <XIcon size={12} />
-            </button>
-          </div>
+            <div className="list-row" key={i}>
+              <span
+                className={`dot ${live ? 'ok' : 'bad'}`}
+                title={live ? `Connected — ${live.endpoint}` : 'Not connected'}
+                style={{ flexShrink: 0 }}
+              />
+              <input
+                className="input"
+                placeholder="id (e.g. uk-streaming)"
+                value={p.id || ''}
+                onChange={(e) => setProfile(i, { id: e.target.value })}
+              />
+              <select
+                className="input"
+                value={p.provider || 'pia'}
+                onChange={(e) => setProfile(i, { provider: e.target.value })}
+              >
+                <option value="pia">PIA</option>
+                <option value="nordvpn">NordVPN</option>
+              </select>
+              <input
+                className="input mono"
+                placeholder={p.provider === 'nordvpn' ? 'country code, e.g. gb' : 'PIA region, e.g. uk_london'}
+                value={p.region || ''}
+                onChange={(e) => setProfile(i, { region: e.target.value })}
+              />
+              <button
+                className="btn small danger"
+                type="button"
+                onClick={() => removeProfile(i)}
+                aria-label={`Remove profile ${p.id || i + 1}`}
+              >
+                <XIcon size={12} />
+              </button>
+            </div>
           )
         })}
         <div className="quick-actions" style={{ marginTop: 12 }}>
@@ -272,11 +302,17 @@ export default function VPN() {
           <h3 style={{ margin: 0 }}>Routes</h3>
         </div>
         <p className="dim small">Every domain listed (and its subdomains) routes through its profile's tunnel.</p>
-        {vpn.routes.length === 0 && <div className="empty">No routes yet — no traffic is redirected even if a profile is connected.</div>}
+        {vpn.routes.length === 0 && (
+          <div className="empty">No routes yet — no traffic is redirected even if a profile is connected.</div>
+        )}
         {vpn.routes.map((rt, i) => (
           <div className="blocklist-row" key={i}>
             <div className="list-row">
-              <select className="input" value={rt.profile || ''} onChange={(e) => setRoute(i, { profile: e.target.value })}>
+              <select
+                className="input"
+                value={rt.profile || ''}
+                onChange={(e) => setRoute(i, { profile: e.target.value })}
+              >
                 <option value="">select a profile…</option>
                 {vpn.profiles.map((p) => (
                   <option key={p.id} value={p.id}>
@@ -284,7 +320,12 @@ export default function VPN() {
                   </option>
                 ))}
               </select>
-              <button className="btn small danger" type="button" onClick={() => removeRoute(i)} aria-label={`Remove route ${i + 1}`}>
+              <button
+                className="btn small danger"
+                type="button"
+                onClick={() => removeRoute(i)}
+                aria-label={`Remove route ${i + 1}`}
+              >
                 <XIcon size={12} />
               </button>
             </div>

@@ -928,9 +928,25 @@ function RootHintsCard({ status }) {
 // from /api/vpn/status).
 function VPNCard({ connected, config, onNavigate }) {
   const vpnCfg = config?.vpn
-  if (!vpnCfg?.enabled || !(vpnCfg.profiles || []).length) return null
+  if (!vpnCfg?.enabled) return null
+  const profiles = vpnCfg.profiles || []
+  if (profiles.length === 0) {
+    return (
+      <div className="card">
+        <div className="row-between">
+          <h3 style={{ margin: 0 }}>VPN routing</h3>
+          <span className="badge badge-warn">no profile configured</span>
+        </div>
+        <div className="card-hint" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <span>VPN is enabled but no profile has been added yet — provider credentials alone don't connect anything.</span>
+          <button className="btn small" type="button" onClick={() => onNavigate('vpn')}>
+            Add a profile
+          </button>
+        </div>
+      </div>
+    )
+  }
   const connectedByID = new Map((connected || []).map((p) => [p.id, p]))
-  const profiles = vpnCfg.profiles
   const upCount = profiles.filter((p) => connectedByID.has(p.id)).length
   const badge = upCount === 0 ? 'badge-error' : upCount === profiles.length ? 'badge-allowed' : 'badge-warn'
   return (
