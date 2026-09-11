@@ -189,30 +189,32 @@ export default function VPN() {
       {status.length > 0 && (
         <div className="card">
           <h3>Connected tunnels</h3>
-          <table className="table">
-            <thead>
-              <tr>
-                <th>Profile</th>
-                <th>Provider</th>
-                <th>Region</th>
-                <th>Interface</th>
-                <th>Endpoint</th>
-                <th>Up since</th>
-              </tr>
-            </thead>
-            <tbody>
-              {status.map((s) => (
-                <tr key={s.id}>
-                  <td className="mono">{s.id}</td>
-                  <td>{s.provider}</td>
-                  <td>{s.region}</td>
-                  <td className="mono">{s.iface}</td>
-                  <td className="mono">{s.endpoint}</td>
-                  <td>{s.up_since ? new Date(s.up_since).toLocaleString() : ''}</td>
+          <div className="table-scroll">
+            <table className="table">
+              <thead>
+                <tr>
+                  <th>Profile</th>
+                  <th>Provider</th>
+                  <th>Region</th>
+                  <th>Interface</th>
+                  <th>Endpoint</th>
+                  <th>Up since</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {status.map((s) => (
+                  <tr key={s.id}>
+                    <td className="mono">{s.id}</td>
+                    <td>{s.provider}</td>
+                    <td>{s.region}</td>
+                    <td className="mono">{s.iface}</td>
+                    <td className="mono">{s.endpoint}</td>
+                    <td>{s.up_since ? new Date(s.up_since).toLocaleString() : ''}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
@@ -256,11 +258,11 @@ export default function VPN() {
           <h3 style={{ margin: 0 }}>Smart DNS proxy</h3>
         </div>
         <p className="dim small">
-          Makes a "Proxy relay" route (see below) work for any device that merely uses this server for DNS — no VPN
-          app or client config needed. Instead of the real address, Proxy-enabled domains resolve to this server's
-          own IP; a relay here then forwards each connection through the matching profile's tunnel using TLS SNI
-          (HTTPS, port 443) or the Host header (plain HTTP, port 80) to know where it's actually going. Anything that
-          doesn't match a Proxy-enabled route is forwarded unchanged to Fallback — it never relays anywhere else.
+          Makes a "Proxy relay" route (see below) work for any device that merely uses this server for DNS — no VPN app
+          or client config needed. Instead of the real address, Proxy-enabled domains resolve to this server's own IP; a
+          relay here then forwards each connection through the matching profile's tunnel using TLS SNI (HTTPS, port 443)
+          or the Host header (plain HTTP, port 80) to know where it's actually going. Anything that doesn't match a
+          Proxy-enabled route is forwarded unchanged to Fallback — it never relays anywhere else.
         </p>
         <div className="form-grid">
           <label className="field">
@@ -424,8 +426,8 @@ export default function VPN() {
             </div>
             {rt.proxy && !vpn.proxy.enabled && (
               <p className="info-banner" style={{ marginTop: 8 }}>
-                This route has Proxy relay on, but the Smart DNS proxy itself is disabled above — enable it for this
-                to actually work for devices that don't route their traffic through this server.
+                This route has Proxy relay on, but the Smart DNS proxy itself is disabled above — enable it for this to
+                actually work for devices that don't route their traffic through this server.
               </p>
             )}
           </div>
