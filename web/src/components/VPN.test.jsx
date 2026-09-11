@@ -120,3 +120,48 @@ describe('VPN connection status', () => {
     expect(screen.queryByText(/no profile is configured yet/)).not.toBeInTheDocument()
   })
 })
+
+describe('VPN Smart DNS proxy UI', () => {
+  it('shows a warning when a route has Proxy relay on but the proxy itself is disabled', async () => {
+    api.config.mockResolvedValue({
+      vpn: {
+        enabled: true,
+        providers: { nordvpn: { token: '' }, pia: { username: '', password: '' } },
+        profiles: [{ id: 'uk-iplayer', provider: 'pia', region: 'uk_london' }],
+        routes: [{ profile: 'uk-iplayer', domains: ['imgur.com'], proxy: true }],
+        proxy: { enabled: false, listen: '', listen_http: '', fallback: '', public_ip: '' },
+      },
+    })
+    api.vpnStatus.mockResolvedValue([])
+
+    render(
+      <ToastProvider>
+        <VPN />
+      </ToastProvider>,
+    )
+
+    expect(await screen.findByText(/Smart DNS proxy itself is disabled/)).toBeInTheDocument()
+  })
+
+  it('does not warn once the proxy is enabled', async () => {
+    api.config.mockResolvedValue({
+      vpn: {
+        enabled: true,
+        providers: { nordvpn: { token: '' }, pia: { username: '', password: '' } },
+        profiles: [{ id: 'uk-iplayer', provider: 'pia', region: 'uk_london' }],
+        routes: [{ profile: 'uk-iplayer', domains: ['imgur.com'], proxy: true }],
+        proxy: { enabled: true, listen: ':443', listen_http: '', fallback: '127.0.0.1:8443', public_ip: '' },
+      },
+    })
+    api.vpnStatus.mockResolvedValue([])
+
+    render(
+      <ToastProvider>
+        <VPN />
+      </ToastProvider>,
+    )
+
+    await screen.findByText('imgur.com')
+    expect(screen.queryByText(/Smart DNS proxy itself is disabled/)).not.toBeInTheDocument()
+  })
+})
