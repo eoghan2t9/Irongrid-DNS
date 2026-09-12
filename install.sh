@@ -23,6 +23,9 @@
 #   --no-wizard         skip the interactive setup wizard (TUI)
 #   --skip-verify       skip checksum verification (not recommended)
 #   --skip-dragonfly    do not install/start Dragonfly
+#   --configure-resolver point this host's own DNS resolver at Irongrid
+#                        (Linux only, off by default — most installs serve
+#                        other devices on the network rather than the host)
 #   --no-v3             always install the baseline build, even if this CPU
 #                        supports the faster GOAMD64=v3 build
 #   -h, --help          show this help
@@ -48,6 +51,7 @@ SKIP_DRAGONFLY=0
 INSTALL_SERVICE=1
 SKIP_WIZARD=0
 NO_V3=0
+CONFIGURE_RESOLVER=0
 
 die() { echo "error: $*" >&2; exit 1; }
 need() { command -v "$1" >/dev/null 2>&1 || die "required tool missing: $1"; }
@@ -75,6 +79,9 @@ Options:
   --no-wizard         skip the interactive setup wizard (TUI)
   --skip-verify       skip checksum verification (not recommended)
   --skip-dragonfly    do not install/start Dragonfly
+  --configure-resolver point this host's own DNS resolver at Irongrid
+                       (Linux only, off by default — most installs serve
+                       other devices on the network rather than the host)
   --no-v3             always install the baseline build, even if this CPU
                        supports the faster GOAMD64=v3 build
   -h, --help          show this help
@@ -95,6 +102,7 @@ while [ $# -gt 0 ]; do
     --no-wizard) SKIP_WIZARD=1; shift ;;
     --skip-verify) SKIP_VERIFY=1; shift ;;
     --skip-dragonfly) SKIP_DRAGONFLY=1; shift ;;
+    --configure-resolver) CONFIGURE_RESOLVER=1; shift ;;
     --no-v3) NO_V3=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "unknown option: $1 (run with --help)" ;;
@@ -685,6 +693,158 @@ EOF
   fi
 }
 
+CONFIGURE_RESOLVER_DONE=0
+
+# ---- optional: point this host's own resolver at Irongrid ----
+# Off by default (opt in with --configure-resolver): most installs run
+# Irongrid to serve *other* devices on the network (like Pi-hole), not to
+# replace the host's own resolver, so this should never be a surprise side
+# effect of a routine install. Linux only, and assumes the default DNS port
+# 53. Every file this touches is backed up first, and it automatically rolls
+# back if the post-change resolution check fails — a broken host resolver is
+# worse than skipping the feature.
+configure_host_resolver() {
+  [ "$CONFIGURE_RESOLVER" -eq 1 ] || return 0
+  if [ "$OS" != linux ]; then
+    echo "!! --configure-resolver is only implemented for Linux — skipping"
+    echo "   point this machine's DNS resolver at 127.0.0.1 manually"
+    return 0
+  fi
+  if ! has_root; then
+    echo "!! --configure-resolver needs root — skipping (re-run as root/sudo)"
+    return 0
+  fi
+
+  echo "==> configuring this host to use Irongrid (127.0.0.1) as its DNS resolver ..."
+
+  RESOLVER_METHOD=""
+  if command -v netplan >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 && ls /etc/netplan/*.yaml >/dev/null 2>&1; then
+    configure_resolver_netplan && RESOLVER_METHOD=netplan
+  elif command -v nmcli >/dev/null 2>&1 && systemctl is-active NetworkManager >/dev/null 2>&1; then
+    configure_resolver_networkmanager && RESOLVER_METHOD=networkmanager
+  else
+    echo "!! could not detect netplan or NetworkManager on this host"
+    echo "   point its DNS resolver at 127.0.0.1 manually (edit /etc/resolv.conf"
+    echo "   or your distro's network config, then re-check with: resolvectl status)"
+    return 0
+  fi
+  [ -n "$RESOLVER_METHOD" ] || return 0
+
+  # Give the change a moment to settle, then prove it actually resolves
+  # before declaring success — never leave a host with a broken resolver.
+  sleep 1
+  if getent hosts example.com >/dev/null 2>&1; then
+    CONFIGURE_RESOLVER_DONE=1
+    echo "==> host resolver now points at Irongrid and resolution works"
+  else
+    echo "!! resolution check failed after switching resolver — rolling back"
+    case "$RESOLVER_METHOD" in
+      netplan) rollback_resolver_netplan ;;
+      networkmanager) rollback_resolver_networkmanager ;;
+    esac
+  fi
+}
+
+NETPLAN_RESOLVER_FILES=()
+
+configure_resolver_netplan() {
+  if ! run_root python3 -c "import yaml" >/dev/null 2>&1; then
+    echo "!! python3 'yaml' module not available — cannot safely edit netplan config, skipping"
+    return 1
+  fi
+
+  local f stamp
+  stamp="$(date +%s)"
+  for f in /etc/netplan/*.yaml; do
+    run_root cp "$f" "$f.bak-irongrid-$stamp" || return 1
+    NETPLAN_RESOLVER_FILES+=("$f")
+  done
+
+  local py="$TMP/irongrid-netplan-resolver.py"
+  cat >"$py" <<'PYEOF'
+import sys
+import yaml
+
+dns_addr = sys.argv[1]
+paths = sys.argv[2:]
+for path in paths:
+    with open(path) as fh:
+        doc = yaml.safe_load(fh) or {}
+    net = doc.get("network") or {}
+    touched = False
+    for section in ("ethernets", "bonds", "vlans", "bridges"):
+        devs = net.get(section) or {}
+        for name, cfg in devs.items():
+            if not isinstance(cfg, dict):
+                continue
+            if not (cfg.get("dhcp4") or cfg.get("dhcp6") or "nameservers" in cfg or "addresses" in cfg):
+                continue
+            cfg["nameservers"] = {"addresses": [dns_addr]}
+            if cfg.get("dhcp4"):
+                cfg.setdefault("dhcp4-overrides", {})["use-dns"] = False
+            if cfg.get("dhcp6"):
+                cfg.setdefault("dhcp6-overrides", {})["use-dns"] = False
+            touched = True
+    if touched:
+        with open(path, "w") as fh:
+            yaml.safe_dump(doc, fh, default_flow_style=False, sort_keys=False)
+PYEOF
+
+  if ! run_root python3 "$py" 127.0.0.1 /etc/netplan/*.yaml; then
+    echo "!! failed to update netplan config — restoring backups"
+    rollback_resolver_netplan
+    return 1
+  fi
+  if ! run_root netplan generate; then
+    echo "!! netplan generate rejected the updated config — restoring backups"
+    rollback_resolver_netplan
+    return 1
+  fi
+  if ! run_root netplan apply; then
+    echo "!! netplan apply failed — restoring backups"
+    rollback_resolver_netplan
+    return 1
+  fi
+  return 0
+}
+
+rollback_resolver_netplan() {
+  local f latest
+  for f in "${NETPLAN_RESOLVER_FILES[@]}"; do
+    latest="$(ls -t "$f".bak-irongrid-* 2>/dev/null | head -1)" || true
+    [ -n "$latest" ] && run_root cp "$latest" "$f"
+  done
+  run_root netplan apply >/dev/null 2>&1 || true
+}
+
+NM_RESOLVER_CONN=""
+NM_RESOLVER_PREV_DNS=""
+NM_RESOLVER_PREV_IGNORE=""
+
+configure_resolver_networkmanager() {
+  NM_RESOLVER_CONN="$(nmcli -t -f NAME connection show --active 2>/dev/null | head -1)" || true
+  if [ -z "$NM_RESOLVER_CONN" ]; then
+    echo "!! no active NetworkManager connection found — skipping"
+    return 1
+  fi
+  NM_RESOLVER_PREV_DNS="$(nmcli -g ipv4.dns connection show "$NM_RESOLVER_CONN" 2>/dev/null)" || true
+  NM_RESOLVER_PREV_IGNORE="$(nmcli -g ipv4.ignore-auto-dns connection show "$NM_RESOLVER_CONN" 2>/dev/null)" || true
+  if ! run_root nmcli connection modify "$NM_RESOLVER_CONN" ipv4.dns "127.0.0.1" ipv4.ignore-auto-dns yes; then
+    return 1
+  fi
+  if ! run_root nmcli connection up "$NM_RESOLVER_CONN" >/dev/null 2>&1; then
+    rollback_resolver_networkmanager
+    return 1
+  fi
+  return 0
+}
+
+rollback_resolver_networkmanager() {
+  [ -n "$NM_RESOLVER_CONN" ] || return 0
+  run_root nmcli connection modify "$NM_RESOLVER_CONN" ipv4.dns "$NM_RESOLVER_PREV_DNS" ipv4.ignore-auto-dns "${NM_RESOLVER_PREV_IGNORE:-default}"
+  run_root nmcli connection up "$NM_RESOLVER_CONN" >/dev/null 2>&1 || true
+}
+
 # Kernel socket tuning is a host-level change, independent of whether the
 # wizard or the script's own steps install the startup service — run it in
 # both paths (the function self-guards on OS and root availability).
@@ -778,6 +938,8 @@ if [ "$WIZARD_WILL_RUN" -eq 1 ] && port_answers_redis 6379; then
   DFLY_STARTED=1
 fi
 
+configure_host_resolver
+
 echo
 echo "Next steps:"
 if [ "$DFLY_STARTED" -eq 1 ]; then
@@ -789,6 +951,13 @@ if [ -f "$CONFIG_ABS" ]; then
   echo "  ✓ Config: $CONFIG_ABS"
 else
   echo "  ! Config not written yet - run the wizard: $DEST/irongrid${EXT} install"
+fi
+if [ "$CONFIGURE_RESOLVER" -eq 1 ]; then
+  if [ "$CONFIGURE_RESOLVER_DONE" -eq 1 ]; then
+    echo "  ✓ This host's DNS resolver now points at Irongrid (127.0.0.1)"
+  else
+    echo "  ! Host resolver was not switched to Irongrid — see notes above"
+  fi
 fi
 echo "  1. If the service above is not running, start it:"
 echo "       $DEST/irongrid -config $CONFIG_ABS -data $DATA_ABS"
