@@ -338,6 +338,12 @@ type RateLimitConfig struct {
 	// flood spread over many sources or churned IPv6 privacy addresses can't
 	// dodge it. Off by default; independent of rate_limit.enabled.
 	NXGuard NXGuardConfig `yaml:"nxdomain_guard"`
+	// RepeatQuery throttles a client that resolves the *same* domain over
+	// and over at a rapid pace — the signature of this resolver being used
+	// to flood/DDoS that domain (or its authoritative infrastructure)
+	// rather than normal browsing, which moves between many names. Off by
+	// default; independent of rate_limit.enabled.
+	RepeatQuery RepeatQueryConfig `yaml:"repeat_query_guard"`
 }
 
 // NXGuardConfig tunes the NXDOMAIN flood guard (rate_limit.nxdomain_guard).
@@ -351,6 +357,32 @@ type NXGuardConfig struct {
 	Window time.Duration `yaml:"window"`
 	// BlockFor is how long a tripped prefix is refused; default 10m.
 	BlockFor time.Duration `yaml:"block_for"`
+}
+
+// RepeatQueryConfig tunes the repeat-query flood guard
+// (rate_limit.repeat_query_guard): a client that queries the same domain
+// Threshold times within Window is treated as flooding that domain and its
+// source is blocked, the same fail-closed cooldown NXGuard uses but keyed
+// on the exact client IP and tripped by the query itself, not its response.
+type RepeatQueryConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Threshold is how many queries for the same domain a client may send
+	// within Window before it is treated as a flood; default 50.
+	Threshold int `yaml:"threshold"`
+	// Window is how long a same-domain streak may accumulate toward
+	// Threshold; default 10s.
+	Window time.Duration `yaml:"window"`
+	// BlockFor is how long a tripped client is refused, for a client whose
+	// source is trusted — a real handshake (TCP/DoT/DoH/DoQ) or the
+	// server.geo_block.trust_udp opt-in; default 10m.
+	BlockFor time.Duration `yaml:"block_for"`
+	// UDPBlockFor bounds the block applied to a plain-UDP source instead:
+	// a query's source IP is trivially spoofable over UDP, so an untrusted
+	// plain-UDP source only ever earns this bounded window (mirroring
+	// geo_block.honeypot_udp_block) rather than the full BlockFor. Zero
+	// disables blocking untrusted UDP sources entirely — they are still
+	// counted, just never blocked. Default 0 (disabled).
+	UDPBlockFor time.Duration `yaml:"udp_block_for"`
 }
 
 // GeoBlockConfig blocks queries by the country of the client's source IP.
@@ -814,6 +846,18 @@ func Default() *Config {
 				Window:    30 * time.Second,
 				BlockFor:  10 * time.Minute,
 			},
+			// Repeat-query flood guard: off by default, with sane values
+			// ready to flip on (50 queries for the same domain within 10s
+			// -> 10m refusal for a trusted source; untrusted plain-UDP
+			// sources are counted but never blocked until udp_block_for is
+			// set).
+			RepeatQuery: RepeatQueryConfig{
+				Enabled:     false,
+				Threshold:   50,
+				Window:      10 * time.Second,
+				BlockFor:    10 * time.Minute,
+				UDPBlockFor: 0,
+			},
 		},
 		GeoBlock: GeoBlockConfig{
 			AutoUpdate: 168 * time.Hour,
@@ -1232,6 +1276,20 @@ func (c *Config) validate() error {
 		}
 		if c.RateLimit.NXGuard.BlockFor <= 0 {
 			return fmt.Errorf("rate_limit.nxdomain_guard.block_for must be positive when enabled")
+		}
+	}
+	if c.RateLimit.RepeatQuery.Enabled {
+		if c.RateLimit.RepeatQuery.Threshold < 2 {
+			return fmt.Errorf("rate_limit.repeat_query_guard.threshold must be >= 2 when enabled")
+		}
+		if c.RateLimit.RepeatQuery.Window <= 0 {
+			return fmt.Errorf("rate_limit.repeat_query_guard.window must be positive when enabled")
+		}
+		if c.RateLimit.RepeatQuery.BlockFor <= 0 {
+			return fmt.Errorf("rate_limit.repeat_query_guard.block_for must be positive when enabled")
+		}
+		if c.RateLimit.RepeatQuery.UDPBlockFor < 0 {
+			return fmt.Errorf("rate_limit.repeat_query_guard.udp_block_for must not be negative")
 		}
 	}
 	for i, cc := range c.GeoBlock.Countries {

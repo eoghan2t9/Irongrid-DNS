@@ -415,6 +415,48 @@ func TestValidateNXGuard(t *testing.T) {
 	}
 }
 
+func TestValidateRepeatQueryGuard(t *testing.T) {
+	t.Parallel()
+	c := validBase()
+	c.RateLimit = RateLimitConfig{
+		Enabled: false, // the repeat-query guard is independent of the token bucket
+		RepeatQuery: RepeatQueryConfig{
+			Enabled: true, Threshold: 50, Window: 10 * time.Second, BlockFor: 10 * time.Minute,
+		},
+	}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid repeat_query_guard config rejected: %v", err)
+	}
+	c.RateLimit.RepeatQuery.Threshold = 1
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "threshold") {
+		t.Fatalf("err = %v, want repeat_query_guard.threshold error", err)
+	}
+	c = validBase()
+	c.RateLimit.RepeatQuery = RepeatQueryConfig{Enabled: true, Threshold: 10, Window: 0, BlockFor: time.Minute}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "window") {
+		t.Fatalf("err = %v, want repeat_query_guard.window error", err)
+	}
+	c = validBase()
+	c.RateLimit.RepeatQuery = RepeatQueryConfig{Enabled: true, Threshold: 10, Window: time.Minute, BlockFor: 0}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "block_for") {
+		t.Fatalf("err = %v, want repeat_query_guard.block_for error", err)
+	}
+	c = validBase()
+	c.RateLimit.RepeatQuery = RepeatQueryConfig{
+		Enabled: true, Threshold: 10, Window: time.Minute, BlockFor: time.Minute, UDPBlockFor: -1,
+	}
+	if err := c.Validate(); err == nil || !strings.Contains(err.Error(), "udp_block_for") {
+		t.Fatalf("err = %v, want repeat_query_guard.udp_block_for error", err)
+	}
+	// Disabled guard with zeroed values must pass (the defaults are applied
+	// at construction, not validation).
+	c = validBase()
+	c.RateLimit.RepeatQuery = RepeatQueryConfig{}
+	if err := c.Validate(); err != nil {
+		t.Fatalf("disabled repeat_query_guard rejected: %v", err)
+	}
+}
+
 func TestValidateConnCaps(t *testing.T) {
 	t.Parallel()
 	c := validBase()

@@ -47,6 +47,15 @@ func BuildNXGuard(g config.NXGuardConfig) *NXGuard {
 	return NewNXGuard(g.Threshold, g.Window, g.BlockFor)
 }
 
+// BuildRepeatGuard returns the repeat-query flood guard for g, or nil when
+// disabled (nil is the Handler's "no guard" state).
+func BuildRepeatGuard(g config.RepeatQueryConfig) *RepeatGuard {
+	if !g.Enabled {
+		return nil
+	}
+	return NewRepeatGuard(g.Threshold, g.Window)
+}
+
 // BuildClientRouter compiles cfg.ClientGroups into a ClientRouter: each
 // enabled group gets its own filter.Engine, built from the same cached
 // blocklist content the global engine uses (lists.GetContent avoids

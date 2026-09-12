@@ -295,6 +295,9 @@ func main() {
 	handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists, groupASN))
 	handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
 	handler.SetNXGuard(dnsserver.BuildNXGuard(cfg.RateLimit.NXGuard))
+	handler.SetRepeatGuard(dnsserver.BuildRepeatGuard(cfg.RateLimit.RepeatQuery))
+	handler.SetRepeatQueryBlockFor(cfg.RateLimit.RepeatQuery.BlockFor)
+	handler.SetRepeatQueryUDPBlockFor(cfg.RateLimit.RepeatQuery.UDPBlockFor)
 	handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
 	handler.SetCNAMECloakingProtection(cfg.Filter.CNAMECloakingProtection)
 	// ---- DNSSEC local chain-of-trust validation (dnssec.validate_locally) ----
@@ -1065,6 +1068,9 @@ func main() {
 		handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists, groupASN))
 		handler.SetRateLimiter(dnsserver.BuildRateLimiter(cfg.RateLimit))
 		handler.SetNXGuard(dnsserver.BuildNXGuard(cfg.RateLimit.NXGuard))
+		handler.SetRepeatGuard(dnsserver.BuildRepeatGuard(cfg.RateLimit.RepeatQuery))
+		handler.SetRepeatQueryBlockFor(cfg.RateLimit.RepeatQuery.BlockFor)
+		handler.SetRepeatQueryUDPBlockFor(cfg.RateLimit.RepeatQuery.UDPBlockFor)
 		handler.SetDNSSEC(cfg.DNSSEC.Enabled, cfg.DNSSEC.RequireAD)
 		handler.SetCNAMECloakingProtection(cfg.Filter.CNAMECloakingProtection)
 		if cfg.DNSSEC.ValidateLocally {

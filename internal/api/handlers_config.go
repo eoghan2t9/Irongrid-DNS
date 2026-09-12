@@ -161,13 +161,14 @@ type clientGroupPayload struct {
 }
 
 type rateLimitPayload struct {
-	Enabled    bool           `json:"enabled"`
-	QPS        int            `json:"qps"`
-	Burst      int            `json:"burst"`
-	AutoBlock  bool           `json:"auto_block"`
-	BlockAfter int            `json:"block_after"`
-	BlockFor   string         `json:"block_for"` // duration string
-	NXGuard    nxGuardPayload `json:"nxdomain_guard"`
+	Enabled     bool               `json:"enabled"`
+	QPS         int                `json:"qps"`
+	Burst       int                `json:"burst"`
+	AutoBlock   bool               `json:"auto_block"`
+	BlockAfter  int                `json:"block_after"`
+	BlockFor    string             `json:"block_for"` // duration string
+	NXGuard     nxGuardPayload     `json:"nxdomain_guard"`
+	RepeatQuery repeatQueryPayload `json:"repeat_query_guard"`
 }
 
 // nxGuardPayload is the NXDOMAIN flood guard block of the rate-limit
@@ -177,6 +178,17 @@ type nxGuardPayload struct {
 	Threshold int    `json:"threshold"`
 	Window    string `json:"window"`    // duration string
 	BlockFor  string `json:"block_for"` // duration string
+}
+
+// repeatQueryPayload is the repeat-query flood guard block of the
+// rate-limit settings (rate_limit.repeat_query_guard). Durations are human
+// strings; UDPBlockFor "" means untrusted UDP sources are never blocked.
+type repeatQueryPayload struct {
+	Enabled     bool   `json:"enabled"`
+	Threshold   int    `json:"threshold"`
+	Window      string `json:"window"`        // duration string
+	BlockFor    string `json:"block_for"`     // duration string
+	UDPBlockFor string `json:"udp_block_for"` // duration string, "" = disabled
 }
 
 type geoBlockPayload struct {
@@ -525,6 +537,13 @@ func payloadFromConfig(c *config.Config) configPayload {
 			Window:    durationOrEmpty(c.RateLimit.NXGuard.Window),
 			BlockFor:  durationOrEmpty(c.RateLimit.NXGuard.BlockFor),
 		},
+		RepeatQuery: repeatQueryPayload{
+			Enabled:     c.RateLimit.RepeatQuery.Enabled,
+			Threshold:   c.RateLimit.RepeatQuery.Threshold,
+			Window:      durationOrEmpty(c.RateLimit.RepeatQuery.Window),
+			BlockFor:    durationOrEmpty(c.RateLimit.RepeatQuery.BlockFor),
+			UDPBlockFor: durationOrEmpty(c.RateLimit.RepeatQuery.UDPBlockFor),
+		},
 	}
 	p.GeoBlock = geoBlockPayload{
 		Enabled:          c.GeoBlock.Enabled,
@@ -620,6 +639,18 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	nxBlockFor, err := parseDur(p.RateLimit.NXGuard.BlockFor)
 	if err != nil {
 		return nil, fmt.Errorf("rate_limit.nxdomain_guard.block_for: %w", err)
+	}
+	rqWindow, err := parseDur(p.RateLimit.RepeatQuery.Window)
+	if err != nil {
+		return nil, fmt.Errorf("rate_limit.repeat_query_guard.window: %w", err)
+	}
+	rqBlockFor, err := parseDur(p.RateLimit.RepeatQuery.BlockFor)
+	if err != nil {
+		return nil, fmt.Errorf("rate_limit.repeat_query_guard.block_for: %w", err)
+	}
+	rqUDPBlockFor, err := parseDur(p.RateLimit.RepeatQuery.UDPBlockFor)
+	if err != nil {
+		return nil, fmt.Errorf("rate_limit.repeat_query_guard.udp_block_for: %w", err)
 	}
 	geoAutoUpdate, err := parseDur(p.GeoBlock.AutoUpdate)
 	if err != nil {
@@ -763,6 +794,13 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 				Threshold: p.RateLimit.NXGuard.Threshold,
 				Window:    nxWindow,
 				BlockFor:  nxBlockFor,
+			},
+			RepeatQuery: config.RepeatQueryConfig{
+				Enabled:     p.RateLimit.RepeatQuery.Enabled,
+				Threshold:   p.RateLimit.RepeatQuery.Threshold,
+				Window:      rqWindow,
+				BlockFor:    rqBlockFor,
+				UDPBlockFor: rqUDPBlockFor,
 			},
 		},
 		GeoBlock: config.GeoBlockConfig{

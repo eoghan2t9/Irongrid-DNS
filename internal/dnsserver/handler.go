@@ -198,6 +198,7 @@ type handlerSettings struct {
 	ClientRouter *ClientRouter    // per-client policy; never nil, may be empty
 	RateLimiter  *RateLimiter     // nil disables rate limiting
 	NXGuard      *NXGuard         // nil disables the NXDOMAIN flood guard
+	RepeatGuard  *RepeatGuard     // nil disables the repeat-query flood guard
 	Geo          *geoip.Blocker   // nil disables geo-blocking
 	IPBanner     *geoip.Banner    // nil disables IP/honeypot blocking
 	// ACL is the server.allow_from query allow-list; nil permits every
@@ -223,8 +224,19 @@ type handlerSettings struct {
 	// packet can then only block a victim for the window, never forever.
 	// Does nothing unless a rate limiter is installed.
 	HoneypotUDPBlock time.Duration
-	DNSSECEnabled    bool
-	DNSSECRequireAD  bool
+	// RepeatQueryBlockFor is how long a client that trips the repeat-query
+	// flood guard (RepeatGuard) is blocked when its source is trusted — a
+	// real handshake (TCP/DoT/DoH/DoQ) or the TrustUDP opt-in. Does nothing
+	// unless RepeatGuard is installed.
+	RepeatQueryBlockFor time.Duration
+	// RepeatQueryUDPBlockFor is the bounded middle ground for a plain-UDP
+	// source that trips the repeat-query flood guard: blocked for this
+	// window instead of RepeatQueryBlockFor, mirroring HoneypotUDPBlock's
+	// rationale (a spoofed source must only ever earn a bounded block).
+	// Zero means an untrusted UDP source is never blocked by this guard.
+	RepeatQueryUDPBlockFor time.Duration
+	DNSSECEnabled          bool
+	DNSSECRequireAD        bool
 	// CNAMECloakingProtection checks every CNAME hop in an upstream answer
 	// against the filter engine, not just the originally queried name. Set
 	// via SetCNAMECloakingProtection.
@@ -501,6 +513,29 @@ func (h *Handler) SetNXGuard(g *NXGuard) {
 	h.swapSettings(&ns, nil)
 }
 
+// SetRepeatGuard hot-swaps the repeat-query flood guard; nil disables it.
+func (h *Handler) SetRepeatGuard(g *RepeatGuard) {
+	ns := *h.settings.Load()
+	ns.RepeatGuard = g
+	h.swapSettings(&ns, nil)
+}
+
+// SetRepeatQueryBlockFor hot-swaps how long a trusted-source repeat-query
+// flood trip is blocked (see RepeatQueryBlockFor's doc comment).
+func (h *Handler) SetRepeatQueryBlockFor(d time.Duration) {
+	ns := *h.settings.Load()
+	ns.RepeatQueryBlockFor = d
+	h.swapSettings(&ns, nil)
+}
+
+// SetRepeatQueryUDPBlockFor hot-swaps the bounded UDP repeat-query-flood
+// block window (see RepeatQueryUDPBlockFor's doc comment); <= 0 disables it.
+func (h *Handler) SetRepeatQueryUDPBlockFor(d time.Duration) {
+	ns := *h.settings.Load()
+	ns.RepeatQueryUDPBlockFor = d
+	h.swapSettings(&ns, nil)
+}
+
 // SetGeo hot-swaps the geo blocker; nil disables geo-blocking.
 func (h *Handler) SetGeo(g *geoip.Blocker) {
 	ns := *h.settings.Load()
@@ -650,6 +685,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	clientRouter := s.ClientRouter
 	rateLimiter := s.RateLimiter
 	nxGuard := s.NXGuard
+	repeatGuard := s.RepeatGuard
+	repeatQueryBlockFor := s.RepeatQueryBlockFor
+	repeatQueryUDPBlockFor := s.RepeatQueryUDPBlockFor
 	geo := s.Geo
 	ipbanner := s.IPBanner
 	acl := s.ACL
@@ -768,9 +806,54 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		putMsg(refused)
 		return
 	}
+	// 0.15 Repeat-query flood guard: a client currently blocked for
+	//    hammering one domain is refused the same way as a rate-limited or
+	//    NXDOMAIN-flooding client.
+	if repeatGuard != nil && !repeatGuard.Allow(client) {
+		h.Stats.Errors.Add(1)
+		if proto == "udp" {
+			return
+		}
+		refused := getMsg()
+		refused.SetReply(r)
+		refused.Rcode = dns.RcodeRefused
+		_ = h.write(w, refused, r, proto)
+		putMsg(refused)
+		return
+	}
 
 	q := r.Question[0]
 	qname := dnsname.CanonicalDomain(q.Name)
+
+	// 0.52 Repeat-query flood detection: a client resolving the *same*
+	//    domain over and over at a rapid pace looks like it's using this
+	//    resolver to flood/DDoS that domain rather than browsing normally —
+	//    ordinary browsing moves between many names, so only a same-domain
+	//    streak trips this. The triggering query itself is answered
+	//    normally; only *subsequent* queries are refused, via the Allow
+	//    check above. A query's source is spoofable over plain UDP, so a
+	//    verified transport (or the trust_udp opt-in) earns the configured
+	//    RepeatQueryBlockFor while a plain-UDP source only ever earns the
+	//    bounded RepeatQueryUDPBlockFor (0 disables blocking it at all) —
+	//    the same trust tiering the honeypot path uses. Also mirrored into
+	//    the rate limiter (when installed) purely so the block shows up on
+	//    the dashboard's existing blocked-clients list.
+	if repeatGuard != nil && client != "" && repeatGuard.NoteQuery(client, qname) {
+		trusted := proto == "tcp" || proto == "dot" || proto == "doh" || proto == "doq"
+		var blockDur time.Duration
+		switch {
+		case trusted || trustUDP:
+			blockDur = repeatQueryBlockFor
+		case repeatQueryUDPBlockFor > 0:
+			blockDur = repeatQueryUDPBlockFor
+		}
+		if blockDur > 0 {
+			repeatGuard.ForceBlock(client, blockDur)
+			if rateLimiter != nil {
+				rateLimiter.ForceBlock(client, blockDur)
+			}
+		}
+	}
 
 	// 0.5 Client blocking: a geo-blocked country (source-IP country in the
 	//    blocked set), a block-listed ASN's client, or a banner-blocked

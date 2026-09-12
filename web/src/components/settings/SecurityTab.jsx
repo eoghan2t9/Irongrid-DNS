@@ -30,6 +30,25 @@ export default function SecurityTab({ f }) {
           {number('NXDOMAINs before blocking (per prefix)', 'rate_limit.nxdomain_guard.threshold')}
           {text('Counting window', 'rate_limit.nxdomain_guard.window', 'e.g. 30s, 1m', '30s')}
           {text('Flood cooldown', 'rate_limit.nxdomain_guard.block_for', 'e.g. 10m, 1h', '10m')}
+          {toggle('Repeat-query flood guard', 'rate_limit.repeat_query_guard.enabled')}
+          {number('Same-domain queries before blocking', 'rate_limit.repeat_query_guard.threshold')}
+          {text('Counting window', 'rate_limit.repeat_query_guard.window', 'e.g. 10s, 30s', '10s')}
+          {text('Flood cooldown (trusted source)', 'rate_limit.repeat_query_guard.block_for', 'e.g. 10m, 1h', '10m')}
+          {field(
+            'Auto-block UDP repeat-query sources (bounded)',
+            'a query’s source is spoofable over plain UDP, so an untrusted plain-UDP source that trips this guard only earns this bounded window instead of the full flood cooldown above (the same trust tiering as the honeypot UDP block below) — or enable trust_udp below for the full cooldown. Needs rate limiting enabled to show on the dashboard.',
+            <select
+              className="input"
+              value={deepGet('rate_limit.repeat_query_guard.udp_block_for', '') || ''}
+              onChange={(e) => set('rate_limit.repeat_query_guard.udp_block_for', e.target.value)}
+            >
+              <option value="">Disabled</option>
+              <option value="5m">5 minutes</option>
+              <option value="10m">10 minutes</option>
+              <option value="30m">30 minutes</option>
+              <option value="1h">1 hour</option>
+            </select>,
+          )}
         </div>
         <p className="dim small" style={{ marginTop: 8 }}>
           The <strong>NXDOMAIN flood guard</strong> throttles random-subdomain ("water torture") attacks: it counts
@@ -37,6 +56,13 @@ export default function SecurityTab({ f }) {
           produces the threshold within the counting window, for the cooldown. Unlike per-IP rate limiting, a flood
           spread over many sources or churned IPv6 privacy addresses can't dodge it. Works independently of rate
           limiting. Off by default.
+        </p>
+        <p className="dim small" style={{ marginTop: 8 }}>
+          The <strong>repeat-query flood guard</strong> catches a client resolving the <em>same</em> domain over and
+          over at a rapid pace — the signature of this resolver being used to flood or DDoS that domain rather than
+          normal browsing, which moves between many names. It tracks each client's current same-domain streak and blocks
+          the client once it crosses the threshold within the counting window; a different domain always resets the
+          streak, so ordinary browsing never trips it. Works independently of rate limiting. Off by default.
         </p>
         <h4 style={{ margin: '16px 0 10px' }}>Currently blocked clients</h4>
         {f.blocked.length === 0 ? (
