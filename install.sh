@@ -287,7 +287,7 @@ VERSION_OUT="$("$DEST/irongrid${EXT}" -version 2>/dev/null || true)"
 # Linux gets a native binary + systemd service. macOS/Windows have no native
 # Dragonfly build, so a Docker container is used when Docker is available.
 DFLY_STARTED=0
-# Auto-compute Dragonfly flags from system specs: 25%% of host RAM for
+# Auto-compute Dragonfly flags from system specs: 25% of host RAM for
 # maxmemory (clamped to 256mb-32gb), proactor_threads = min(CPUs, 8) floor 2.
 # Dragonfly requires >= 256MiB per proactor thread at startup.
 detect_dragonfly_flags() {
@@ -307,7 +307,7 @@ detect_dragonfly_flags() {
   fi
   [ -z "$mem_bytes" ] || [ "$mem_bytes" -eq 0 ] && mem_bytes=$((512 * 1024 * 1024))
 
-  # 25%% of host RAM, clamped to 256 MiB - 32 GiB
+  # 25% of host RAM, clamped to 256 MiB - 32 GiB
   mem_pct=$((mem_bytes / 4))
   [ "$mem_pct" -lt $((256 * 1024 * 1024)) ] && mem_pct=$((256 * 1024 * 1024))
   [ "$mem_pct" -gt $((32 * 1024 * 1024 * 1024)) ] && mem_pct=$((32 * 1024 * 1024 * 1024))
@@ -317,7 +317,7 @@ detect_dragonfly_flags() {
   [ "$mem_pct" -lt "$min_for_threads" ] && mem_pct=$min_for_threads
 
   # Format as "512mb" / "2gb"
-  if [ $((mem_pct %% (1024 * 1024 * 1024))) -eq 0 ]; then
+  if [ $((mem_pct % (1024 * 1024 * 1024))) -eq 0 ]; then
     maxmem="$((mem_pct / (1024 * 1024 * 1024)))gb"
   else
     maxmem="$((mem_pct / (1024 * 1024)))mb"
