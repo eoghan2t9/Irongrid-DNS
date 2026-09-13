@@ -3,6 +3,7 @@ package recursive
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -33,8 +34,16 @@ const (
 	// nameserver during a referral walk; SetDefaultServerTimeout can
 	// override it for every resolver (see serverTimeout).
 	perServerTimeout = 3 * time.Second
-	minDelegationTTL = 60 * time.Second
-	maxDelegationTTL = 24 * time.Hour
+	// minCNAMEFollowBudget is the minimum time chaseCNAME guarantees the
+	// nested resolve of a CNAME target, even when the parent query's
+	// context deadline is nearly exhausted by the walk that produced the
+	// CNAME itself — otherwise a slow multi-hop referral walk for the
+	// alias leaves the target's own (independent, from-scratch) walk too
+	// little budget to ever succeed, and its error gets swallowed below,
+	// silently returning a CNAME with no address records.
+	minCNAMEFollowBudget = 2 * time.Second
+	minDelegationTTL     = 60 * time.Second
+	maxDelegationTTL     = 24 * time.Hour
 	// ednsUDPSize is the UDP payload size advertised on queries to
 	// nameservers (see dnsserver.ednsUDPSize for the reasoning).
 	ednsUDPSize = 1232
@@ -315,10 +324,29 @@ func (r *Resolver) chaseCNAME(ctx context.Context, q dns.Question, resp *dns.Msg
 	if target == "" {
 		return resp, nil
 	}
-	follow, err := r.resolve(ctx, dns.Question{Name: target, Qtype: q.Qtype, Qclass: q.Qclass}, cnameDepth+1, nsDepth)
+	// The alias's own referral walk may already have spent most of ctx's
+	// deadline; the target's walk is an entirely independent, from-scratch
+	// resolution (possibly through a different set of root/TLD/authoritative
+	// servers) and deserves its own minimum budget rather than whatever
+	// scraps are left — otherwise it starves and its error below gets
+	// swallowed, silently handing the client a CNAME with no address
+	// records instead of the answer.
+	followCtx := ctx
+	if dl, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(dl); remaining < minCNAMEFollowBudget {
+			var cancel context.CancelFunc
+			followCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), minCNAMEFollowBudget)
+			defer cancel()
+		}
+	}
+	follow, err := r.resolve(followCtx, dns.Question{Name: target, Qtype: q.Qtype, Qclass: q.Qclass}, cnameDepth+1, nsDepth)
 	if err != nil {
 		// Return the CNAME hop we do have rather than failing the whole
-		// query over a downstream failure resolving its target.
+		// query over a downstream failure resolving its target — but log
+		// it, since a client silently getting an alias with no address is
+		// otherwise indistinguishable from an addressless CNAME being the
+		// correct answer.
+		slog.Warn("recursive: CNAME target resolution failed, returning alias only", "name", q.Name, "target", target, "error", err)
 		return resp, nil
 	}
 	merged := resp.Copy()

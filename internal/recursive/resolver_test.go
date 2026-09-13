@@ -408,6 +408,45 @@ func TestResolveChasesCNAME(t *testing.T) {
 	}
 }
 
+// TestChaseCNAMEGetsOwnBudgetWhenParentContextExhausted verifies chaseCNAME
+// doesn't starve the CNAME target's own (independent, from-scratch) walk on
+// whatever's left of a parent context that the alias's own referral walk
+// already exhausted — otherwise the nested resolve fails immediately on the
+// expired deadline, its error is swallowed, and the client silently gets a
+// CNAME with no address records.
+func TestChaseCNAMEGetsOwnBudgetWhenParentContextExhausted(t *testing.T) {
+	t.Parallel()
+	rootAddr, _, nsPort := buildChain(t)
+	r := newTestResolver(rootAddr, nsPort)
+
+	// A response carrying only the CNAME hop, as if the authoritative
+	// server answered the alias without its target's own records —
+	// chaseCNAME must resolve the target itself.
+	cnameRR, _ := dns.NewRR("www.example.com. 300 IN CNAME example.com.")
+	resp := new(dns.Msg)
+	resp.Answer = []dns.RR{cnameRR}
+	q := dns.Question{Name: "www.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+
+	// Simulate the alias's own referral walk having already exhausted the
+	// query's overall deadline by the time the CNAME hop is in hand.
+	expiredCtx, cancel := context.WithDeadline(t.Context(), time.Now().Add(-time.Hour))
+	defer cancel()
+
+	merged, err := r.chaseCNAME(expiredCtx, q, resp, 0, 0)
+	if err != nil {
+		t.Fatalf("chaseCNAME: %v", err)
+	}
+	var sawA bool
+	for _, rr := range merged.Answer {
+		if _, ok := rr.(*dns.A); ok {
+			sawA = true
+		}
+	}
+	if !sawA {
+		t.Fatalf("expected chaseCNAME to still resolve the CNAME target despite an exhausted parent context, got %v", merged.Answer)
+	}
+}
+
 func TestResolveNXDOMAIN(t *testing.T) {
 	t.Parallel()
 	rootAddr, _, nsPort := buildChain(t)
