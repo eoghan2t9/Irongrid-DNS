@@ -138,7 +138,12 @@ func main() {
 	// If Dragonfly was started with outdated flags (e.g. the old hardcoded
 	// 512mb/2 threads), this restarts it with the correct auto-detected values.
 	// Best-effort: failures are logged but never prevent irongrid from starting.
-	tuning.ValidateDragonfly(cfg.Cache.Addr)
+	// Async: a needed restart polls for Dragonfly to come back up for up to
+	// 30s (see waitForDragonfly), which previously stalled every listener
+	// below it behind that wait. dfly already tolerates a Dragonfly restart
+	// happening while queries are in flight (reconnect on next command), so
+	// there's no reason boot needs to wait for this one specifically either.
+	go tuning.ValidateDragonfly(cfg.Cache.Addr)
 
 	// ---- authoritative root hints for recursive upstreams ----
 	// recursive:// upstreams walk referrals from the root servers; seed them
