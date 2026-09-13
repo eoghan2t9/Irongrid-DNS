@@ -193,10 +193,19 @@ jobs:
             fix=$(sec fix)
             docs=$(sec docs)
             chore=$(sec chore)
+            # Anything not matching a type: subject convention above still
+            # needs to appear somewhere — otherwise a release built entirely
+            # from plain, unprefixed commit messages (as most of this repo's
+            # history is) silently produces an empty changelog body.
+            other=$(git log --pretty=format:'%h|%s' "$RANGE" | awk -F'|' '{
+              s = tolower($2)
+              if (s !~ /^(feat|fix|docs|chore)/) print "- " $1 " " $2
+            }')
             [ -n "$feat" ] && { echo "### ✨ Features"; echo "$feat"; echo ""; }
             [ -n "$fix" ] && { echo "### 🐛 Fixes"; echo "$fix"; echo ""; }
             [ -n "$docs" ] && { echo "### 📚 Docs"; echo "$docs"; echo ""; }
             [ -n "$chore" ] && { echo "### 🔧 Chores"; echo "$chore"; echo ""; }
+            [ -n "$other" ] && { echo "### 🔨 Other Changes"; echo "$other"; echo ""; }
             echo "**Full Changelog**: $COMPARE_URL"
           } > CHANGELOG.md
           echo "--- changelog preview ---"
