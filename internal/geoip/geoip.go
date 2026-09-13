@@ -21,7 +21,14 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 )
+
+// fetchConcurrency bounds how many countries Refresh downloads at once (each
+// costs two requests, ipv4 + ipv6). A dashboard or auto-update refresh
+// previously fetched every enabled country one at a time.
+const fetchConcurrency = 8
 
 // DefaultBaseURL is where per-country CIDR lists come from. ipverse/rir-ip
 // aggregates the RIPE/ARIN/APNIC/LACNIC/AFRINIC delegated files into one
@@ -269,31 +276,37 @@ func (m *Manager) Refresh(ctx context.Context, countries, allowlist []string) (*
 	m.refreshMu.Lock()
 	defer m.refreshMu.Unlock()
 	b := NewBlocker()
-	var firstErr error
+	// Concurrent, bounded: each country is two independent HTTP fetches
+	// (ipv4 + ipv6), so there's no reason to pay for them one at a time. A
+	// single country's failure doesn't stop the rest — same as the old
+	// sequential loop — errgroup.Group's zero value (no WithContext) doesn't
+	// cancel siblings on the first error. AddTable and setStatus both take
+	// their own lock, so concurrent calls across countries are safe; b is
+	// otherwise untouched by any other goroutine until this call returns.
+	var g errgroup.Group
+	g.SetLimit(fetchConcurrency)
 	for _, code := range countries {
 		cc := strings.ToUpper(strings.TrimSpace(code))
 		if cc == "" {
 			continue
 		}
-		v4, v6, err := m.fetchCountry(ctx, cc)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
+		g.Go(func() error {
+			v4, v6, err := m.fetchCountry(ctx, cc)
+			if err != nil {
+				m.setStatus(cc, CountryStatus{Code: cc, Error: err.Error()})
+				return err
 			}
-			m.setStatus(cc, CountryStatus{Code: cc, Error: err.Error()})
-			continue
-		}
-		t, err := LoadTable(v4, v6)
-		if err != nil {
-			if firstErr == nil {
-				firstErr = err
+			t, err := LoadTable(v4, v6)
+			if err != nil {
+				m.setStatus(cc, CountryStatus{Code: cc, Error: err.Error()})
+				return err
 			}
-			m.setStatus(cc, CountryStatus{Code: cc, Error: err.Error()})
-			continue
-		}
-		b.AddTable(cc, t)
-		m.setStatus(cc, CountryStatus{Code: cc, IPv4Ranges: len(t.v4), IPv6Ranges: len(t.v6), LastFetch: time.Now()})
+			b.AddTable(cc, t)
+			m.setStatus(cc, CountryStatus{Code: cc, IPv4Ranges: len(t.v4), IPv6Ranges: len(t.v6), LastFetch: time.Now()})
+			return nil
+		})
 	}
+	firstErr := g.Wait()
 	if err := b.SetConfig(countries, allowlist); err != nil {
 		return b, err
 	}

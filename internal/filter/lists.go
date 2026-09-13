@@ -11,8 +11,15 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"golang.org/x/sync/singleflight"
 )
+
+// fetchConcurrency bounds how many lists (or countries, in the geoip
+// package's equivalent) FetchAll downloads at once. A dashboard refresh or
+// the auto-update ticker previously fetched every enabled list one at a
+// time — sequential HTTP round trips that added up fast with many lists.
+const fetchConcurrency = 8
 
 // ListManager owns the blocklist sources, their cached content, and the
 // periodic refresh loop.
@@ -147,16 +154,21 @@ func (m *ListManager) FetchAll(ctx context.Context) error {
 	}
 	m.mu.Unlock()
 
-	var firstErr error
+	// Concurrent, bounded: each list is an independent HTTP fetch (fetchRemote
+	// already coalesces duplicate URLs via singleflight), so there's no
+	// reason to pay for them one at a time. A single list's failure doesn't
+	// stop the rest — same as the old sequential loop — errgroup.Group's
+	// zero value (no WithContext) doesn't cancel siblings on the first error.
+	var g errgroup.Group
+	g.SetLimit(fetchConcurrency)
 	for _, s := range specs {
 		if !s.Enabled {
 			continue
 		}
-		if err := m.FetchOne(ctx, s.ID); err != nil && firstErr == nil {
-			firstErr = err
-		}
+		id := s.ID
+		g.Go(func() error { return m.FetchOne(ctx, id) })
 	}
-	return firstErr
+	return g.Wait()
 }
 
 // FetchOne refreshes a single list from its URL (or file).
