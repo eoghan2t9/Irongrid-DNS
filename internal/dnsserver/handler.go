@@ -679,7 +679,6 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	blockResp := s.BlockResponse
 	blockTTL := s.BlockTTL
 	timeout := s.Timeout
-	failureTTL := s.FailureTTL
 	cch := s.Cache
 	rewriter := s.Rewriter
 	clientRouter := s.ClientRouter
@@ -694,9 +693,6 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	trustUDP := s.TrustUDP
 	honeypotUDPBlock := s.HoneypotUDPBlock
 	dnssecEnabled := s.DNSSECEnabled
-	dnssecRequireAD := s.DNSSECRequireAD
-	dnssecValidateLocally := s.DNSSECValidateLocally
-	cnameCloakingEnabled := s.CNAMECloakingProtection
 	cookiesOn := h.Cookies.Load()
 
 	if r == nil || len(r.Question) == 0 {
@@ -1167,7 +1163,6 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	// dead server can't burn its full timeout on every query; a single
 	// upstream in cooldown fails fast into serve-stale/SERVFAIL below.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 	upstreamQuery := r.Copy()
 	// Replace the client's EDNS OPT rather than layering a second one on:
 	// miekg/dns's SetEdns0 appends, and a query carrying two OPT records is
@@ -1194,12 +1189,113 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	// before it's ever written out (see the resp.Id reset below), so this
 	// is invisible to the client.
 	upstreamQuery.Id = dns.Id()
-	var (
+
+	// Resolve on its own goroutine so a stale cache entry (RFC 8767) can
+	// race it below instead of always waiting the full timeout out —
+	// resolveUpstreams itself is unchanged, still governed by ctx's
+	// deadline either way.
+	type resolveOutcome struct {
 		resp   *dns.Msg
 		usedUp string
 		err    error
-	)
-	resp, usedUp, err = h.resolveUpstreams(ctx, r, q, upstreams, upstreamMode, upstreamQuery)
+	}
+	resCh := make(chan resolveOutcome, 1)
+	go func() {
+		resp, usedUp, err := h.resolveUpstreams(ctx, r, q, upstreams, upstreamMode, upstreamQuery)
+		resCh <- resolveOutcome{resp, usedUp, err}
+	}()
+
+	// Serve-stale race: a client shouldn't wait nearly as long for a
+	// resolution attempt as it would with no cache at all when a
+	// perfectly-serviceable (if expired) answer already sits in cache —
+	// that defeats the resiliency RFC 8767 exists for. If the upstream
+	// hasn't answered within staleGrace, serve the stale answer now and
+	// let the resolution above keep running: finishResolve still applies
+	// to whatever it eventually returns (DNSSEC/blocking/caching), just
+	// without writing to the client a second time (skipWrite) — so the
+	// cache still benefits from a fresh answer, or a genuine failure still
+	// gets logged, even though the client already has its response. Only
+	// engaged when a stale entry actually exists, so the overwhelmingly
+	// common case (no stale answer available) never allocates the timer
+	// or takes this branch at all.
+	if len(stale.Raw) > 0 {
+		timer := time.NewTimer(staleGrace(timeout))
+		select {
+		case out := <-resCh:
+			timer.Stop()
+			cancel()
+			h.finishResolve(w, r, q, client, qname, proto, start, out.resp, out.usedUp, out.err, stale, s, engine, domainWhitelisted, false)
+			return
+		case <-timer.C:
+			if m := stale.Msg(); m != nil {
+				m.Id = r.Id
+				capTTL(m, staleServeTTL)
+				h.Stats.Cached.Add(1)
+				h.record(client, qname, q, "cached", "stale", "", start, m)
+				out := m
+				if r.IsEdns0() != nil {
+					out = attachEDE(m, dns.ExtendedErrorCodeStaleAnswer, "")
+				}
+				_ = h.write(w, out, r, proto)
+				putMsg(m) // fresh per-read decode, safe once written
+			}
+			go func() {
+				defer recoverPanic("background stale-race resolve")
+				defer cancel()
+				out := <-resCh
+				h.finishResolve(w, r, q, client, qname, proto, start, out.resp, out.usedUp, out.err, stale, s, engine, domainWhitelisted, true)
+			}()
+			return
+		}
+	}
+	defer cancel()
+	out := <-resCh
+	h.finishResolve(w, r, q, client, qname, proto, start, out.resp, out.usedUp, out.err, stale, s, engine, domainWhitelisted, false)
+}
+
+// staleGrace bounds how long serve() waits for a fresh upstream answer
+// before falling back to an available stale cache entry: half the
+// configured upstream timeout, capped at 2s, so a slow-or-down upstream
+// can't make a client wait nearly as long as if no stale answer existed at
+// all. Config validation enforces timeout >= 1s, so this is never below
+// 500ms.
+func staleGrace(timeout time.Duration) time.Duration {
+	g := timeout / 2
+	if g > 2*time.Second {
+		g = 2 * time.Second
+	}
+	return g
+}
+
+// finishResolve is serve()'s continuation once an upstream resolution
+// outcome (resp/usedUp/err) is available: NXDOMAIN flood counting,
+// serve-stale on failure, DNSSEC enforcement, IP/CNAME-cloaking blocking,
+// the client write, and the background cache write. Runs synchronously
+// from serve() in the common case. When the serve-stale race above already
+// wrote a fast stale answer to the client, it instead runs from its own
+// goroutine (own panic recovery — serve()'s top-level recover only covers
+// serve()'s own goroutine) with skipWrite set: every write below becomes a
+// no-op, but Stats/query-log and the cache write still run, so the cache
+// benefits from whatever the resolution found and the log reflects it —
+// meaning one client query can produce two log entries/stats increments in
+// the raced case (a deliberate trade-off, not a bug: the alternative is a
+// log that doesn't show a background refresh happened at all).
+func (h *Handler) finishResolve(
+	w dns.ResponseWriter, r *dns.Msg, q dns.Question, client, qname, proto string, start time.Time,
+	resp *dns.Msg, usedUp string, err error, stale cache.LookupResult,
+	s *handlerSettings, engine *filter.Engine, domainWhitelisted, skipWrite bool,
+) {
+	upstreams := s.Upstreams
+	blockResp := s.BlockResponse
+	blockTTL := s.BlockTTL
+	failureTTL := s.FailureTTL
+	cch := s.Cache
+	nxGuard := s.NXGuard
+	dnssecEnabled := s.DNSSECEnabled
+	dnssecRequireAD := s.DNSSECRequireAD
+	dnssecValidateLocally := s.DNSSECValidateLocally
+	cnameCloakingEnabled := s.CNAMECloakingProtection
+
 	// NXDOMAIN flood guard: an upstream NXDOMAIN is the flood's signature
 	// (random subdomains under a victim domain), so it's counted here — the
 	// guard's Allow check at the top of serve() then refuses the prefix once
@@ -1221,7 +1317,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			if r.IsEdns0() != nil {
 				out = attachEDE(m, dns.ExtendedErrorCodeStaleAnswer, "")
 			}
-			_ = h.write(w, out, r, proto)
+			if !skipWrite {
+				_ = h.write(w, out, r, proto)
+			}
 			putMsg(m) // fresh per-read decode, safe once written
 			return
 		}
@@ -1245,7 +1343,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 				if r.IsEdns0() != nil {
 					out = attachEDE(m, dns.ExtendedErrorCodeStaleAnswer, "")
 				}
-				_ = h.write(w, out, r, proto)
+				if !skipWrite {
+					_ = h.write(w, out, r, proto)
+				}
 				putMsg(m) // fresh per-read decode, safe once written
 				return
 			}
@@ -1268,7 +1368,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			// the background SetNegative write below unmodified.
 			out = attachEDE(m, dns.ExtendedErrorCodeNetworkError, errStr)
 		}
-		_ = h.write(w, out, r, proto)
+		if !skipWrite {
+			_ = h.write(w, out, r, proto)
+		}
 		// Cache the failure briefly (negative_ttl) so a dead upstream or
 		// zone doesn't burn the full timeout on every retry — a failing
 		// domain's retries used to re-pay the whole per-query timeout each
@@ -1336,7 +1438,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 					m := newReply(r)
 					m.Rcode = dns.RcodeServerFailure
 					h.record(client, qname, q, "error", "dnssec: local chain-of-trust validation failed", usedUp, start, m)
-					_ = h.write(w, m, r, proto)
+					if !skipWrite {
+						_ = h.write(w, m, r, proto)
+					}
 					putMsg(m)
 					return
 				case signed && secure:
@@ -1358,7 +1462,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			m := newReply(r)
 			m.Rcode = dns.RcodeServerFailure
 			h.record(client, qname, q, "error", "dnssec: upstream did not authenticate the answer", usedUp, start, m)
-			_ = h.write(w, m, r, proto)
+			if !skipWrite {
+				_ = h.write(w, m, r, proto)
+			}
 			putMsg(m)
 			return
 		}
@@ -1377,7 +1483,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			if r.IsEdns0() != nil {
 				blocked = attachEDE(blocked, dns.ExtendedErrorCodeBlocked, reason)
 			}
-			_ = h.write(w, blocked, r, proto)
+			if !skipWrite {
+				_ = h.write(w, blocked, r, proto)
+			}
 			return
 		}
 	}
@@ -1397,7 +1505,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			if r.IsEdns0() != nil {
 				blocked = attachEDE(blocked, dns.ExtendedErrorCodeBlocked, reason)
 			}
-			_ = h.write(w, blocked, r, proto)
+			if !skipWrite {
+				_ = h.write(w, blocked, r, proto)
+			}
 			return
 		}
 	}
@@ -1413,7 +1523,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	// recycling it here would race that goroutine. See msgpool.go.
 	h.Stats.Allowed.Add(1)
 	h.record(client, qname, q, "allowed", "", usedUp, start, resp)
-	_ = h.write(w, resp, r, proto)
+	if !skipWrite {
+		_ = h.write(w, resp, r, proto)
+	}
 
 	// 8. Cache the result (positive or negative) in the background. Caching
 	//    only ever helps *future* queries, so there's no reason to make this

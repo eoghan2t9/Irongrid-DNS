@@ -1727,6 +1727,122 @@ func TestHandlerServeStale(t *testing.T) {
 	}
 }
 
+// TestHandlerServeStaleRaceServesFastWhenUpstreamSlow verifies the RFC 8767
+// serve-stale race: when a fresh resolution is slower than staleGrace but a
+// stale cache entry exists, the client gets the stale answer promptly
+// instead of waiting out the full per-query timeout — the bug found live in
+// production (a domain repeatedly taking ~5s on a "cached"/"stale" response
+// because re-resolution was always awaited to completion first). The slow
+// resolution must still land in the cache once it completes.
+func TestHandlerServeStaleRaceServesFastWhenUpstreamSlow(t *testing.T) {
+	fastAddr := startUDPTestServer(t, "1.1.1.1", 0)
+	c := cache.NewLocalOnly(100*time.Millisecond, time.Minute, 512, 5*time.Second)
+	timeout := 5 * time.Second // matches this project's real-world default; staleGrace(timeout) = 2s
+	h := NewHandler(filter.NewEngine(), c, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: fastAddr},
+	}, nil, "nxdomain", 600, timeout)
+
+	q := func() *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("slow-race.example.com.", dns.TypeA)
+		return m
+	}
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, q())
+	if fw.msg == nil || len(fw.msg.Answer) == 0 {
+		t.Fatalf("expected a fresh answer, got %v", fw.msg)
+	}
+
+	// Let the entry expire into its serve-stale window, then point at an
+	// upstream that eventually answers with a DIFFERENT IP, but only after
+	// staleGrace(timeout)=2s has already elapsed (comfortably inside the 5s
+	// timeout, so the resolution succeeds — just too slowly for this client
+	// to wait on).
+	time.Sleep(150 * time.Millisecond)
+	slowAddr := startUDPTestServer(t, "2.2.2.2", 2500*time.Millisecond)
+	h.SetUpstreams([]*upstream.Upstream{{Transport: upstream.UDP, Addr: slowAddr}})
+
+	start := time.Now()
+	fw2 := &fakeWriter{}
+	h.ServeDNS(fw2, q())
+	elapsed := time.Since(start)
+	if fw2.msg == nil || len(fw2.msg.Answer) == 0 {
+		t.Fatalf("expected a stale answer, got %v", fw2.msg)
+	}
+	if a, ok := fw2.msg.Answer[0].(*dns.A); !ok || !a.A.Equal(net.ParseIP("1.1.1.1")) {
+		t.Fatalf("stale answer = %v, want 1.1.1.1 (the original cached IP)", fw2.msg.Answer[0])
+	}
+	if elapsed < 1900*time.Millisecond || elapsed > 2400*time.Millisecond {
+		t.Fatalf("stale answer took %s, want roughly staleGrace(5s)=2s — too fast means grace wasn't applied, too slow means it waited on the upstream", elapsed)
+	}
+
+	// The slow resolution keeps running in the background: once it lands,
+	// the cache should hold the fresh 2.2.2.2 answer (not the stale one).
+	question := q().Question[0]
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		if res := c.Lookup(question); res.Msg() != nil && !res.Stale {
+			if a, ok := res.Msg().Answer[0].(*dns.A); ok && a.A.Equal(net.ParseIP("2.2.2.2")) {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("cache never picked up the backgrounded refresh's fresh answer")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// "Log both": the fast stale serve plus the background refresh's own
+	// outcome should each have counted once.
+	if got := h.Stats.Cached.Load(); got < 1 {
+		t.Errorf("Stats.Cached = %d, want at least 1 (the fast stale serve)", got)
+	}
+	if got := h.Stats.Allowed.Load(); got < 1 {
+		t.Errorf("Stats.Allowed = %d, want at least 1 (the backgrounded refresh's own success)", got)
+	}
+}
+
+// TestHandlerServeStaleRaceUsesFreshAnswerWhenUpstreamFast verifies that the
+// serve-stale race is a no-op when the upstream answers well within
+// staleGrace: the client gets the fresh answer, not the stale one, and the
+// race adds no observable delay.
+func TestHandlerServeStaleRaceUsesFreshAnswerWhenUpstreamFast(t *testing.T) {
+	fastAddr := startUDPTestServer(t, "1.1.1.1", 0)
+	c := cache.NewLocalOnly(100*time.Millisecond, time.Minute, 512, 5*time.Second)
+	h := NewHandler(filter.NewEngine(), c, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: fastAddr},
+	}, nil, "nxdomain", 600, 5*time.Second)
+
+	q := func() *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("fast-race.example.com.", dns.TypeA)
+		return m
+	}
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, q())
+	if fw.msg == nil || len(fw.msg.Answer) == 0 {
+		t.Fatalf("expected a fresh answer, got %v", fw.msg)
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	freshAddr := startUDPTestServer(t, "3.3.3.3", 10*time.Millisecond)
+	h.SetUpstreams([]*upstream.Upstream{{Transport: upstream.UDP, Addr: freshAddr}})
+
+	start := time.Now()
+	fw2 := &fakeWriter{}
+	h.ServeDNS(fw2, q())
+	elapsed := time.Since(start)
+	if fw2.msg == nil || len(fw2.msg.Answer) == 0 {
+		t.Fatalf("expected a fresh answer, got %v", fw2.msg)
+	}
+	if a, ok := fw2.msg.Answer[0].(*dns.A); !ok || !a.A.Equal(net.ParseIP("3.3.3.3")) {
+		t.Fatalf("answer = %v, want the fresh 3.3.3.3 — a fast upstream must win the race, not the stale entry", fw2.msg.Answer[0])
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Fatalf("took %s to answer a 10ms upstream — the stale-race machinery added unexpected latency", elapsed)
+	}
+}
+
 // TestHandlerFailureNegativelyCached verifies that a resolution failure with
 // no cached data (upstream unreachable, no serve-stale entry) is negatively
 // cached: the retry within the negative TTL answers instantly from cache
