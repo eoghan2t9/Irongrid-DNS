@@ -265,6 +265,77 @@ func TestCloseFlushesAllWriterShards(t *testing.T) {
 	}
 }
 
+func TestPingUntilReadySucceedsImmediately(t *testing.T) {
+	t.Parallel()
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	start := time.Now()
+	if err := pingUntilReady(client, 5*time.Second); err != nil {
+		t.Fatalf("pingUntilReady: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("took %v to succeed against a healthy server — should return on the first ping", elapsed)
+	}
+}
+
+func TestPingUntilReadyRetriesOnLoading(t *testing.T) {
+	t.Parallel()
+	mr := miniredis.RunT(t)
+	mr.SetError("LOADING Redis is loading the dataset in memory")
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	go func() {
+		time.Sleep(600 * time.Millisecond)
+		mr.SetError("")
+	}()
+
+	start := time.Now()
+	if err := pingUntilReady(client, 5*time.Second); err != nil {
+		t.Fatalf("pingUntilReady: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed < 600*time.Millisecond {
+		t.Errorf("succeeded after %v — expected it to keep retrying until the LOADING error cleared", elapsed)
+	}
+}
+
+func TestPingUntilReadyFailsFastOnNonLoadingError(t *testing.T) {
+	t.Parallel()
+	mr := miniredis.RunT(t)
+	mr.SetError("NOAUTH Authentication required")
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	start := time.Now()
+	err := pingUntilReady(client, 5*time.Second)
+	if err == nil || !strings.Contains(err.Error(), "NOAUTH") {
+		t.Fatalf("pingUntilReady: got %v, want a NOAUTH error", err)
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("took %v to fail on a non-LOADING error — should give up on the first ping instead of retrying for the full budget", elapsed)
+	}
+}
+
+func TestPingUntilReadyGivesUpAfterBudget(t *testing.T) {
+	t.Parallel()
+	mr := miniredis.RunT(t)
+	mr.SetError("LOADING Redis is loading the dataset in memory")
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	start := time.Now()
+	err := pingUntilReady(client, 700*time.Millisecond)
+	elapsed := time.Since(start)
+	if err == nil || !strings.Contains(err.Error(), "LOADING") {
+		t.Fatalf("pingUntilReady: got %v, want a LOADING error once the budget is exhausted", err)
+	}
+	if elapsed < 700*time.Millisecond || elapsed > 3*time.Second {
+		t.Errorf("gave up after %v — expected roughly the 700ms budget, not immediately and not much longer", elapsed)
+	}
+}
+
 // BenchmarkCacheSetThroughput exercises the full miss-path write: L1 set
 // plus enqueuing onto the L2 batched-writer channel (see writeQueueCap and
 // Cache.runWriter), backed by a real miniredis instance so the writer

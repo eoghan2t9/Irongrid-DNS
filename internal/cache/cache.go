@@ -135,14 +135,14 @@ func New(addr, password string, db int, ttl, negativeTTL, serveStale time.Durati
 		WriteTimeout: 5 * time.Second,
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := client.Ping(ctx).Err(); err != nil {
+	if err := pingUntilReady(client, pingLoadingBudget); err != nil {
 		return nil, fmt.Errorf("dragonfly cache unreachable at %s: %w", addr, err)
 	}
 
 	// Sanity check that the connected server is actually Dragonfly or Redis.
-	info, err := client.Info(ctx, "server").Result()
+	infoCtx, infoCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	info, err := client.Info(infoCtx, "server").Result()
+	infoCancel()
 	if err != nil {
 		return nil, fmt.Errorf("dragonfly cache info failed: %w", err)
 	}
@@ -161,6 +161,32 @@ func New(addr, password string, db int, ttl, negativeTTL, serveStale time.Durati
 	}
 	c.startWriter()
 	return c, nil
+}
+
+// pingLoadingBudget bounds how long New retries a Dragonfly instance that
+// reports it is still loading its dataset from disk — a normal, transient
+// state right after Dragonfly itself starts (e.g. both processes launched
+// together at boot). Any other ping failure (wrong address, auth, refused
+// connection) still fails immediately below.
+const pingLoadingBudget = 20 * time.Second
+
+// pingUntilReady pings client, retrying on a "LOADING" response for up to
+// budget before giving up. Any non-LOADING error returns immediately.
+func pingUntilReady(client *redis.Client, budget time.Duration) error {
+	deadline := time.Now().Add(budget)
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		err := client.Ping(ctx).Err()
+		cancel()
+		if err == nil {
+			return nil
+		}
+		if !strings.Contains(err.Error(), "LOADING") || time.Now().After(deadline) {
+			return err
+		}
+		slog.Warn("dragonfly still loading dataset, retrying", "error", err)
+		time.Sleep(500 * time.Millisecond)
+	}
 }
 
 // writerShardCount is how many parallel L2 write-behind goroutines run.

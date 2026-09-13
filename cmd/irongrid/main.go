@@ -203,11 +203,16 @@ func main() {
 	lists.ReloadAll()
 	lists.StartRefresh(ctx)
 
-	if err := lists.FetchAll(ctx); err != nil {
-		slog.Warn("initial blocklist fetch partially failed, using cached content", "error", err)
-	} else {
-		lists.ReloadAll()
-	}
+	// Async: the engine above is already compiled and serving from
+	// LoadCached()+ReloadAll(), so this network refresh no longer needs to
+	// hold up boot (same reasoning as the geo_block fetch above).
+	go func() {
+		if err := lists.FetchAll(ctx); err != nil {
+			slog.Warn("initial blocklist fetch partially failed, using cached content", "error", err)
+		} else {
+			lists.ReloadAll()
+		}
+	}()
 
 	// ---- query log (Dragonfly stream, same tier as the DNS cache) ----
 	ql, err := querylog.New(cfg.Cache.Addr, cfg.Cache.Password, cfg.Cache.DB, cfg.Log.RetentionDays, cfg.Log.BatchSize)
@@ -596,9 +601,16 @@ func main() {
 		// refresh that partially failed is reported as such.
 		return errors.Join(err, asnErr)
 	}
-	if err := buildGeo(cfg.GeoBlock); err != nil {
-		slog.Warn("initial geo load partially failed, using cached data", "error", err)
-	}
+	// Async, same as RebuildGeo below: a 9-country geo_block config downloads
+	// 18 URLs sequentially (~8-13s observed) and previously blocked the
+	// dashboard/API listener (and everything sequenced after it) behind that
+	// fetch. DNS itself already started above without waiting on this, so
+	// there's no new gap here — just no longer holding up the dashboard too.
+	go func() {
+		if err := buildGeo(cfg.GeoBlock); err != nil {
+			slog.Warn("initial geo load partially failed, using cached data", "error", err)
+		}
+	}()
 	// The config-save and refresh-button paths must never stall on a
 	// country-data download (multi-country fetches can take seconds), so
 	// RebuildGeo runs the rebuild off the request path; the DNS handler
