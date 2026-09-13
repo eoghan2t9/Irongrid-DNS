@@ -877,6 +877,16 @@ make web      # install deps and rebuild the React dashboard
 make build    # rebuild the binary with the dashboard embedded
 ```
 
+> **Deploying manually?** Always run `make web` before `make build` (or just
+> `make all`). `make build` intentionally reuses whatever is already sitting
+> in `web/dist` — it embeds it via `go:embed` at compile time — so a bare
+> `make build` on a checkout with a stale or partially-rebuilt `web/dist`
+> will silently ship a broken dashboard (chunk-hash mismatches surface as
+> "This view failed to load" on nearly every page). The tagged-release
+> workflow in `.github/workflows/release.yml` isn't affected — it always
+> builds a fresh `web/dist` in its own job and hands it to the release job
+> as an artifact before compiling.
+
 Frontend checks run separately from `web/`:
 
 ```bash
