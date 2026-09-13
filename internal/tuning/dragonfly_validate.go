@@ -25,9 +25,9 @@ type DragonflyState struct {
 // irongrid's own systemd hardening (ProtectSystem=full) makes /etc
 // read-only inside its sandbox, so it never had real write access here —
 // and extending that access would let a compromised irongrid rewrite what
-// Dragonfly runs as root on its next restart. Apply the suggested flags by
-// hand: edit dragonfly.service's ExecStart, then
-// `systemctl daemon-reload && systemctl restart dragonfly`.
+// Dragonfly runs as root on its next restart. install.sh runs unsandboxed
+// as root and re-applies the corrected flags (see its resync_dragonfly_flags)
+// when re-run, so that's the supported fix for a host resize.
 //
 // Best-effort: an inspection failure is logged but never prevents irongrid
 // from starting.
@@ -63,7 +63,7 @@ func ValidateDragonfly(addr string) {
 		"current_threads", state.ThreadCount,
 		"new_maxmemory", want.MaxMemory,
 		"new_threads", want.ProactorThreads,
-		"action_required", "edit dragonfly.service's ExecStart, then: systemctl daemon-reload && systemctl restart dragonfly")
+		"action_required", "re-run install.sh — it detects and corrects a Dragonfly config drift on an already-running instance")
 }
 
 // inspectDragonfly queries a running Dragonfly instance for its current config

@@ -364,9 +364,18 @@ install_dragonfly() {
   [ "$SKIP_DRAGONFLY" -eq 1 ] && { echo "==> Dragonfly skipped (--skip-dragonfly)"; return 0; }
   # If a Redis-compatible server already answers on 6379 (servers often run
   # Redis/KeyDB/Dragonfly already), just use it — never leave a crash-looping
-  # unit fighting over the port.
+  # unit fighting over the port. If it's our own Dragonfly unit specifically,
+  # also check whether its maxmemory/proactor_threads still match this host's
+  # current CPU/RAM (e.g. the box was resized since install) and correct them
+  # — irongrid itself can never do this at runtime (see ValidateDragonfly's
+  # doc comment: its own systemd hardening sandboxes it away from /etc), so
+  # re-running this installer is the supported way to pick up a resize.
   if port_answers_redis 6379; then
-    echo "==> a Redis-compatible server already answers on 127.0.0.1:6379 — using it"
+    if has_root && systemd_available && is_our_dragonfly_unit; then
+      resync_dragonfly_flags
+    else
+      echo "==> a Redis-compatible server already answers on 127.0.0.1:6379 — using it"
+    fi
     DFLY_STARTED=1
     return 0
   fi
@@ -483,6 +492,46 @@ wait_for_dragonfly() {
   done
   echo "!! Dragonfly did not answer PING on 127.0.0.1:6379 — check its logs"
   return 1
+}
+
+# 0 (true) if /etc/systemd/system/dragonfly.service exists and is the unit
+# this installer writes (matched by its Description=), not some unrelated
+# Redis/KeyDB/Dragonfly service an operator already had running on 6379.
+is_our_dragonfly_unit() {
+  [ -f /etc/systemd/system/dragonfly.service ] || return 1
+  grep -q "DragonflyDB - Redis-compatible cache for Irongrid DNS" /etc/systemd/system/dragonfly.service 2>/dev/null
+}
+
+# Re-detects this host's current CPU/RAM and, if our dragonfly.service's
+# maxmemory/proactor_threads have drifted from what that now computes to
+# (e.g. the VM was resized since install), rewrites ExecStart and restarts.
+# A no-op when the flags already match.
+resync_dragonfly_flags() {
+  local unit=/etc/systemd/system/dragonfly.service
+  local cur_exec cur_maxmem cur_threads
+
+  cur_exec="$(grep '^ExecStart=' "$unit" | head -1)"
+  cur_maxmem="$(printf '%s\n' "$cur_exec" | grep -oE -- '--maxmemory=[^ ]+' | cut -d= -f2)"
+  cur_threads="$(printf '%s\n' "$cur_exec" | grep -oE -- '--proactor_threads=[^ ]+' | cut -d= -f2)"
+
+  detect_dragonfly_flags
+  if [ "$cur_maxmem" = "$DFLY_MAXMEM" ] && [ "$cur_threads" = "$DFLY_THREADS" ]; then
+    echo "==> Dragonfly already running with correct flags (maxmemory=$DFLY_MAXMEM proactor_threads=$DFLY_THREADS)"
+    return 0
+  fi
+
+  echo "==> Dragonfly config outdated for this host — updating: maxmemory=${cur_maxmem:-?} -> $DFLY_MAXMEM, proactor_threads=${cur_threads:-?} -> $DFLY_THREADS"
+  run_root sed -i \
+    -e "s/--maxmemory=[^ ]*/--maxmemory=$DFLY_MAXMEM/" \
+    -e "s/--proactor_threads=[^ ]*/--proactor_threads=$DFLY_THREADS/" \
+    "$unit"
+  run_root systemctl daemon-reload
+  run_root systemctl restart dragonfly
+  if wait_for_dragonfly; then
+    echo "==> Dragonfly restarted with corrected flags"
+  else
+    echo "!! Dragonfly did not come back up after the flag update — check: systemctl status dragonfly"
+  fi
 }
 
 if [ "$WIZARD_WILL_RUN" -eq 1 ]; then
