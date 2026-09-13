@@ -1260,11 +1260,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 // all. Config validation enforces timeout >= 1s, so this is never below
 // 500ms.
 func staleGrace(timeout time.Duration) time.Duration {
-	g := timeout / 2
-	if g > 2*time.Second {
-		g = 2 * time.Second
-	}
-	return g
+	return min(timeout/2, 2*time.Second)
 }
 
 // finishResolve is serve()'s continuation once an upstream resolution

@@ -2,6 +2,7 @@ package dnssec
 
 import (
 	"context"
+	"slices"
 	"strings"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
@@ -97,12 +98,7 @@ func (v *Validator) verifyDenialRR(ctx context.Context, up *upstream.Upstream, r
 // bitmapHasType reports whether t is present in an NSEC/NSEC3 type bitmap
 // (miekg/dns decodes the wire bitmap into a plain list of present types).
 func bitmapHasType(bitmap []uint16, t uint16) bool {
-	for _, bt := range bitmap {
-		if bt == t {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(bitmap, t)
 }
 
 // proveNSEC applies RFC 4035 §5.4's NSEC denial-of-existence proof.
