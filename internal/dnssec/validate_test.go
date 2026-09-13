@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -341,6 +342,261 @@ func TestZoneKeysCoalescesConcurrentCallsForSameZone(t *testing.T) {
 	// callers for the same zone must share one fetch, not issue n each.
 	if got := dnskeyQueries.Load(); got != 3 {
 		t.Fatalf("DNSKEY queries issued = %d, want exactly 3 (one per zone, coalesced across %d concurrent callers)", got, n)
+	}
+}
+
+// --- NSEC/NSEC3 denial-of-existence tests -------------------------------
+//
+// The record shapes below mirror live captures taken from real signed
+// zones during development (not invented from the RFC text alone):
+//   - Classic two-NSEC NXDOMAIN proof: isc.org (algorithm 13).
+//   - Classic NSEC3 NXDOMAIN proof: verisign.com and iana.org (algorithms
+//     8 and 13 respectively).
+//   - Single-record "compact denial of existence" NSEC synthesis (owner ==
+//     qname, Next Domain Name one label longer): cloudflare.com and
+//     ietf.org — both increasingly common in production, which is why
+//     nsecCovers treats the owner side as inclusive.
+// Kept self-signed with a fresh key (via the existing buildDNSSECTestZones
+// harness) rather than replayed verbatim, since real RRSIGs expire within
+// days and a committed test must keep passing indefinitely.
+
+func nsecRR(t *testing.T, k zoneKey, owner, next string, types ...uint16) (*dns.NSEC, *dns.RRSIG) {
+	t.Helper()
+	n := &dns.NSEC{
+		Hdr:        dns.RR_Header{Name: owner, Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: 300},
+		NextDomain: next,
+		TypeBitMap: types,
+	}
+	return n, sign(t, k, []dns.RR{n})
+}
+
+func TestValidateDenialNSECProvesNXDOMAIN(t *testing.T) {
+	z := buildDNSSECTestZones(t)
+	up := startDNSSECTestUpstream(t, z)
+	v := NewValidator(testAnchorManager(z.anchor))
+
+	// Classic two-record proof (mirrors the real isc.org capture): one
+	// NSEC covers the queried name itself, a second covers the wildcard at
+	// the zone apex (the closest encloser, since nothing more specific
+	// exists) — proving neither an exact match nor a wildcard could answer.
+	coverQname, coverQnameSig := nsecRR(t, z.leaf, "a.example.test.", "z.example.test.", dns.TypeA)
+	coverWildcard, coverWildcardSig := nsecRR(t, z.leaf, "example.test.", "0.example.test.", dns.TypeSOA, dns.TypeNS, dns.TypeNSEC)
+
+	resp := new(dns.Msg)
+	resp.Rcode = dns.RcodeNameError
+	resp.Question = []dns.Question{{Name: "missing.example.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+	resp.Ns = []dns.RR{coverQname, coverQnameSig, coverWildcard, coverWildcardSig}
+
+	secure, signed, err := v.Validate(context.Background(), up, resp)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !signed {
+		t.Fatal("expected signed=true — NSEC records with RRSIG are present")
+	}
+	if !secure {
+		t.Fatal("expected secure=true — a genuine two-NSEC NXDOMAIN proof")
+	}
+}
+
+func TestValidateDenialNSECCompactDenialSynthesis(t *testing.T) {
+	z := buildDNSSECTestZones(t)
+	up := startDNSSECTestUpstream(t, z)
+	v := NewValidator(testAnchorManager(z.anchor))
+
+	qname := "missing.example.test."
+	// Mirrors the live cloudflare.com/ietf.org capture's shape: owner ==
+	// qname, Next Domain Name is qname with one extra leftmost label (the
+	// real capture uses a NUL-byte label so nothing can sort between them;
+	// canonicalLess's tail case only cares about the label *count*
+	// difference, not that label's content, so any extra label exercises
+	// the same inclusive-owner-side logic without the escaping ambiguity
+	// of representing a literal NUL byte in a Go source string).
+	n, sig := nsecRR(t, z.leaf, qname, "min."+qname, dns.TypeRRSIG, dns.TypeNSEC)
+
+	resp := new(dns.Msg)
+	resp.Rcode = dns.RcodeNameError
+	resp.Question = []dns.Question{{Name: qname, Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+	resp.Ns = []dns.RR{n, sig}
+
+	secure, signed, err := v.Validate(context.Background(), up, resp)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !signed {
+		t.Fatal("expected signed=true")
+	}
+	if !secure {
+		t.Fatal("expected secure=true — compact-denial NSEC synthesis must validate, not just classic two-record proofs")
+	}
+}
+
+func TestValidateDenialNSECProvesNODATA(t *testing.T) {
+	z := buildDNSSECTestZones(t)
+	up := startDNSSECTestUpstream(t, z)
+	v := NewValidator(testAnchorManager(z.anchor))
+
+	// example.test. exists (has an A record per the shared test zone) but
+	// this NSEC proves it has no AAAA.
+	n, sig := nsecRR(t, z.leaf, "example.test.", "z.example.test.", dns.TypeA, dns.TypeRRSIG, dns.TypeNSEC)
+
+	resp := new(dns.Msg)
+	resp.Rcode = dns.RcodeSuccess
+	resp.Question = []dns.Question{{Name: "example.test.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}}
+	resp.Ns = []dns.RR{n, sig}
+
+	secure, signed, err := v.Validate(context.Background(), up, resp)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !signed || !secure {
+		t.Fatalf("expected signed=true, secure=true for a genuine NODATA proof, got signed=%v secure=%v", signed, secure)
+	}
+}
+
+func TestValidateDenialNSECRejectsNonCoveringProof(t *testing.T) {
+	z := buildDNSSECTestZones(t)
+	up := startDNSSECTestUpstream(t, z)
+	v := NewValidator(testAnchorManager(z.anchor))
+
+	// Both NSEC records are validly signed, but neither actually covers
+	// the queried name — a forged/mismatched proof that must not validate
+	// just because the signatures happen to be real.
+	n1, sig1 := nsecRR(t, z.leaf, "a.example.test.", "b.example.test.", dns.TypeA)
+	n2, sig2 := nsecRR(t, z.leaf, "c.example.test.", "d.example.test.", dns.TypeA)
+
+	resp := new(dns.Msg)
+	resp.Rcode = dns.RcodeNameError
+	resp.Question = []dns.Question{{Name: "nowhere-near.example.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+	resp.Ns = []dns.RR{n1, sig1, n2, sig2}
+
+	secure, signed, err := v.Validate(context.Background(), up, resp)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !signed {
+		t.Fatal("expected signed=true — the RRSIGs are real")
+	}
+	if secure {
+		t.Fatal("a non-covering NSEC set must never validate as secure, no matter how validly it's signed")
+	}
+}
+
+// nsec3Hash is dns.HashName with this test's fixed algorithm/iterations/no
+// salt, used both to build owner names and to derive covering brackets.
+func nsec3Hash(name string) string {
+	return dns.HashName(name, dns.SHA1, 0, "")
+}
+
+// base32hexAlphabet mirrors RFC 4648 §7 (no padding), as used by NSEC3 owner
+// and Next Hashed Owner Name text encoding.
+const base32hexAlphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUV"
+
+// bumpBase32Hex returns s with its last character shifted by delta
+// positions in the base32hex alphabet — a test-only way to construct an
+// NSEC3 owner/next hash that's deterministically just below or above a
+// known hash value, bracketing it without needing a real multi-name zone.
+func bumpBase32Hex(t *testing.T, s string, delta int) string {
+	t.Helper()
+	if delta != 1 && delta != -1 {
+		t.Fatalf("bumpBase32Hex: delta must be +1 or -1, got %d", delta)
+	}
+	b := []byte(s)
+	for i := len(b) - 1; i >= 0; i-- {
+		idx := strings.IndexByte(base32hexAlphabet, b[i])
+		if idx < 0 {
+			t.Fatalf("bumpBase32Hex: %q not in base32hex alphabet", string(b[i]))
+		}
+		idx += delta
+		if idx >= 0 && idx < len(base32hexAlphabet) {
+			b[i] = base32hexAlphabet[idx]
+			return string(b)
+		}
+		// This position wrapped — same as manual base-32 increment/decrement,
+		// carry into the next position left.
+		if delta > 0 {
+			b[i] = base32hexAlphabet[0]
+		} else {
+			b[i] = base32hexAlphabet[len(base32hexAlphabet)-1]
+		}
+	}
+	t.Fatalf("bumpBase32Hex: overflowed entire string %q", s)
+	return ""
+}
+
+func nsec3RR(t *testing.T, k zoneKey, zone, ownerHash, nextHash string, types ...uint16) (*dns.NSEC3, *dns.RRSIG) {
+	t.Helper()
+	n := &dns.NSEC3{
+		Hdr:        dns.RR_Header{Name: ownerHash + "." + zone, Rrtype: dns.TypeNSEC3, Class: dns.ClassINET, Ttl: 300},
+		Hash:       dns.SHA1,
+		Flags:      0,
+		Iterations: 0,
+		SaltLength: 0,
+		Salt:       "",
+		HashLength: uint8(len(nextHash)),
+		NextDomain: nextHash,
+		TypeBitMap: types,
+	}
+	return n, sign(t, k, []dns.RR{n})
+}
+
+func TestValidateDenialNSEC3ProvesNXDOMAIN(t *testing.T) {
+	z := buildDNSSECTestZones(t)
+	up := startDNSSECTestUpstream(t, z)
+	v := NewValidator(testAnchorManager(z.anchor))
+
+	qname := "missing.example.test."
+	hQname := nsec3Hash(qname)
+	// One NSEC3 covering qname's hash (no exact match)...
+	coverQname, coverQnameSig := nsec3RR(t, z.leaf, "example.test.",
+		bumpBase32Hex(t, hQname, -1), bumpBase32Hex(t, hQname, 1), dns.TypeA)
+
+	// ...and one whose owner hash exactly matches the zone apex (the
+	// closest encloser) and whose next-hash covers the wildcard's hash —
+	// proving no wildcard could answer either. Owner must be hApex exactly
+	// (so Match succeeds); NSEC3.Cover's own wrap-around handling covers
+	// hWildcard correctly whether it sorts above or below hApex, so no
+	// manual branching on their relative order is needed.
+	hApex := nsec3Hash("example.test.")
+	hWildcard := nsec3Hash("*.example.test.")
+	ceRR, ceSig := nsec3RR(t, z.leaf, "example.test.", hApex, bumpBase32Hex(t, hWildcard, 1), dns.TypeSOA, dns.TypeNS)
+
+	resp := new(dns.Msg)
+	resp.Rcode = dns.RcodeNameError
+	resp.Question = []dns.Question{{Name: qname, Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+	resp.Ns = []dns.RR{coverQname, coverQnameSig, ceRR, ceSig}
+
+	secure, signed, err := v.Validate(context.Background(), up, resp)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !signed {
+		t.Fatal("expected signed=true")
+	}
+	if !secure {
+		t.Fatalf("expected secure=true — a genuine NSEC3 NXDOMAIN proof (hQname=%s hApex=%s hWildcard=%s)", hQname, hApex, hWildcard)
+	}
+}
+
+func TestValidateDenialNSEC3ProvesNODATA(t *testing.T) {
+	z := buildDNSSECTestZones(t)
+	up := startDNSSECTestUpstream(t, z)
+	v := NewValidator(testAnchorManager(z.anchor))
+
+	hOwner := nsec3Hash("example.test.")
+	n, sig := nsec3RR(t, z.leaf, "example.test.", hOwner, bumpBase32Hex(t, hOwner, 1), dns.TypeA, dns.TypeRRSIG, dns.TypeNSEC3)
+
+	resp := new(dns.Msg)
+	resp.Rcode = dns.RcodeSuccess
+	resp.Question = []dns.Question{{Name: "example.test.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}}
+	resp.Ns = []dns.RR{n, sig}
+
+	secure, signed, err := v.Validate(context.Background(), up, resp)
+	if err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+	if !signed || !secure {
+		t.Fatalf("expected signed=true, secure=true for a genuine NSEC3 NODATA proof, got signed=%v secure=%v", signed, secure)
 	}
 }
 

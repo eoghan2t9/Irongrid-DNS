@@ -99,6 +99,12 @@ func (v *Validator) Validate(ctx context.Context, up *upstream.Upstream, resp *d
 		byType[rr.Header().Rrtype] = append(byType[rr.Header().Rrtype], rr)
 	}
 	if len(sigs) == 0 {
+		// No signed data in the Answer — either genuinely unsigned, or a
+		// negative response (NXDOMAIN/NODATA), whose proof (if any) lives
+		// in the Authority section via NSEC/NSEC3 instead of here.
+		if len(resp.Answer) == 0 && (resp.Rcode == dns.RcodeNameError || resp.Rcode == dns.RcodeSuccess) {
+			return v.validateDenial(ctx, up, resp)
+		}
 		return false, false, nil
 	}
 
