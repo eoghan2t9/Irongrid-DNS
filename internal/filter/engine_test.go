@@ -180,3 +180,32 @@ func TestWhitelistAlwaysWins(t *testing.T) {
 		t.Errorf("whitelisted domain must never be blocked, got %v (%s)", d.Action, d.Reason)
 	}
 }
+
+// TestManualBlacklistOverridesWhitelist verifies the one case
+// TestWhitelistAlwaysWins deliberately doesn't cover: a downloaded
+// blocklist can never override the whitelist, but the manual blacklist —
+// an explicit, operator-added block — must, so an operator can override a
+// curated device whitelist (e.g. IoT vendor domains) for one specific
+// domain without having to remove the whole whitelist entry.
+func TestManualBlacklistOverridesWhitelist(t *testing.T) {
+	t.Parallel()
+	e := NewEngine()
+	e.SetUserLists([]string{"bad.iot.example."}, []string{"iot.example"})
+	e.Compile()
+
+	cases := []struct {
+		qname   string
+		blocked bool
+	}{
+		{"iot.example.", false},        // whitelisted, not blacklisted
+		{"other.iot.example.", false},  // whitelist subtree, not blacklisted
+		{"bad.iot.example.", true},     // whitelist subtree, but explicitly blacklisted
+		{"sub.bad.iot.example.", true}, // blacklist subtree (plain entries cover their own subtree, same as whitelist)
+	}
+	for _, c := range cases {
+		d := e.DecideDomain(c.qname)
+		if (d.Action == Block) != c.blocked {
+			t.Errorf("DecideDomain(%q) = %v (%s), want blocked=%v", c.qname, d.Action, d.Reason, c.blocked)
+		}
+	}
+}

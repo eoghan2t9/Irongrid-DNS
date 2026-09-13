@@ -35,8 +35,8 @@ export default function FilteringTab({ f }) {
             <option value="168h">Weekly</option>
           </select>,
         )}
-        {textarea('Whitelist (always allow)', 'filter.whitelist')}
-        {textarea('Blacklist (always block)', 'filter.blacklist')}
+        {textarea('Whitelist (exempt from downloaded blocklists)', 'filter.whitelist')}
+        {textarea('Blacklist (always block, overrides the whitelist)', 'filter.blacklist')}
       </div>
       <p className="dim small">
         <strong>CNAME cloaking protection</strong> checks every CNAME a query resolves through, not just the name you

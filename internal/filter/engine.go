@@ -26,7 +26,7 @@ const (
 type Decision struct {
 	Action Action
 	// Reason explains why: "whitelist:<domain>", "blocklist:<listID>",
-	// "blacklist", "ip-blocklist" or "" when allowed.
+	// "blacklist:<domain>", "ip-blocklist" or "" when allowed.
 	Reason string
 	// ListName is the friendly name of the list that matched, for the UI.
 	ListName string
@@ -52,6 +52,16 @@ type ruleSet struct {
 	domainList   map[string]string
 	listNames    map[string]string
 
+	// userBlockExact / userBlockDomains hold only the manual blacklist's
+	// entries, kept apart from blockExact/blockDomains (downloaded-list
+	// entries only) so DecideDomain can let an explicit manual block win
+	// over the whitelist — e.g. a curated device whitelist meant to
+	// protect against the downloaded blocklists' false positives, not
+	// against a domain the operator has specifically chosen to block —
+	// while a downloaded blocklist's entries never do.
+	userBlockExact   map[string]struct{}
+	userBlockDomains map[string]struct{}
+
 	totalBlockedDomains int
 	totalIPRules        int
 	userWhitelistLen    int
@@ -59,14 +69,16 @@ type ruleSet struct {
 }
 
 var emptyRuleSet = &ruleSet{
-	blockDomains: map[string]struct{}{},
-	blockExact:   map[string]struct{}{},
-	blockIPs:     map[string]struct{}{},
-	allowDomains: map[string]struct{}{},
-	allowExact:   map[string]struct{}{},
-	allowIPs:     map[string]struct{}{},
-	domainList:   map[string]string{},
-	listNames:    map[string]string{},
+	blockDomains:     map[string]struct{}{},
+	blockExact:       map[string]struct{}{},
+	blockIPs:         map[string]struct{}{},
+	allowDomains:     map[string]struct{}{},
+	allowExact:       map[string]struct{}{},
+	allowIPs:         map[string]struct{}{},
+	domainList:       map[string]string{},
+	listNames:        map[string]string{},
+	userBlockExact:   map[string]struct{}{},
+	userBlockDomains: map[string]struct{}{},
 }
 
 // Engine holds the compiled rule sets. The mutable fields below (the
@@ -113,6 +125,13 @@ type Engine struct {
 	userBlacklist []string
 	userWhitelist []string
 
+	// userBlockExact / userBlockDomains mirror blockExact/blockDomains but
+	// are populated from userBlacklist only (see Compile), kept separate
+	// so DecideDomain can let them override the whitelist while a
+	// downloaded blocklist's entries never do.
+	userBlockExact   map[string]struct{}
+	userBlockDomains map[string]struct{}
+
 	totalBlockedDomains int
 	totalIPRules        int
 
@@ -129,14 +148,16 @@ type Engine struct {
 // NewEngine returns an empty engine.
 func NewEngine() *Engine {
 	e := &Engine{
-		blockDomains: map[string]struct{}{},
-		blockExact:   map[string]struct{}{},
-		blockIPs:     map[string]struct{}{},
-		allowDomains: map[string]struct{}{},
-		allowExact:   map[string]struct{}{},
-		allowIPs:     map[string]struct{}{},
-		domainList:   map[string]string{},
-		listNames:    map[string]string{},
+		blockDomains:     map[string]struct{}{},
+		blockExact:       map[string]struct{}{},
+		blockIPs:         map[string]struct{}{},
+		allowDomains:     map[string]struct{}{},
+		allowExact:       map[string]struct{}{},
+		allowIPs:         map[string]struct{}{},
+		domainList:       map[string]string{},
+		listNames:        map[string]string{},
+		userBlockExact:   map[string]struct{}{},
+		userBlockDomains: map[string]struct{}{},
 	}
 	e.rs.Store(emptyRuleSet)
 	return e
@@ -161,6 +182,8 @@ func (e *Engine) Reset() {
 	e.userAllowRegex = nil
 	e.domainList = map[string]string{}
 	e.listNames = map[string]string{}
+	e.userBlockExact = map[string]struct{}{}
+	e.userBlockDomains = map[string]struct{}{}
 	e.totalBlockedDomains = 0
 	e.totalIPRules = 0
 	e.hasIPRules.Store(false)
@@ -185,6 +208,8 @@ func (e *Engine) publishLocked() {
 		allowRegex:          e.allowRegex,
 		domainList:          maps.Clone(e.domainList),
 		listNames:           maps.Clone(e.listNames),
+		userBlockExact:      maps.Clone(e.userBlockExact),
+		userBlockDomains:    maps.Clone(e.userBlockDomains),
 		totalBlockedDomains: e.totalBlockedDomains,
 		totalIPRules:        e.totalIPRules,
 		userWhitelistLen:    len(e.userWhitelist),
@@ -290,12 +315,21 @@ func (e *Engine) Compile() {
 			delete(e.blockExact, domain)
 		}
 	}
+	// Manual blacklist entries are kept in their own sets rather than
+	// merged into blockExact/blockDomains, so DecideDomain can let them
+	// override the whitelist above — unlike a downloaded blocklist's
+	// entries, which the whitelist loop above already stripped out.
+	// Rebuilt fresh each call, same as blockRegex/allowRegex, so a
+	// repeated Compile without an intervening Reset doesn't retain an
+	// entry removed from userBlacklist since the last call.
+	e.userBlockExact = map[string]struct{}{}
+	e.userBlockDomains = map[string]struct{}{}
 	for _, d := range e.userBlacklist {
 		domain, exact, _, _ := splitRule(d)
 		if exact {
-			e.blockExact[domain] = struct{}{}
+			e.userBlockExact[domain] = struct{}{}
 		} else {
-			e.blockDomains[domain] = struct{}{}
+			e.userBlockDomains[domain] = struct{}{}
 		}
 	}
 	e.syncIPFlag()
@@ -328,6 +362,27 @@ func (e *Engine) DecideDomain(qname string) Decision {
 	// treated as a subtree rule. -1 for a single-label qname makes both
 	// loops below a no-op, correctly limiting it to the exact-match checks.
 	lastDot := strings.LastIndexByte(qname, '.')
+
+	// Manual blacklist (exact first, then subtree), ahead of the whitelist
+	// below: an explicit, operator-added block is a stronger signal than a
+	// whitelist entry — e.g. a curated device whitelist meant only to
+	// protect against the downloaded blocklists' false positives, not
+	// against a domain the operator has specifically decided to block.
+	if _, ok := rs.userBlockExact[qname]; ok {
+		return Decision{Action: Block, Reason: "blacklist:" + qname}
+	}
+	if _, ok := rs.userBlockDomains[qname]; ok {
+		return Decision{Action: Block, Reason: "blacklist:" + qname}
+	}
+	for i := range lastDot {
+		if qname[i] != '.' {
+			continue
+		}
+		parent := qname[i+1:]
+		if _, ok := rs.userBlockDomains[parent]; ok {
+			return Decision{Action: Block, Reason: "blacklist:" + parent}
+		}
+	}
 
 	// Whitelist (exact first, then subtree). Walks ancestor domains with map
 	// lookups — same shape as the blocklist walk below — instead of scanning
