@@ -53,6 +53,13 @@ type fakeZone struct {
 	delegateAddr   string
 	childName      string
 	delegateNoGlue bool
+
+	// onQuery, when set, is called with every question this level receives
+	// before it answers — lets a test observe exactly what QNAME/QTYPE
+	// reached each level (e.g. to verify minimization sent a truncated
+	// name, not the full qname). nil is a no-op; existing tests are
+	// unaffected.
+	onQuery func(name string, qtype uint16)
 }
 
 func (z *fakeZone) allDelegates() []delegateEntry {
@@ -82,6 +89,9 @@ func startFakeServer(t *testing.T, listenAddr string, z *fakeZone) (string, func
 		m := new(dns.Msg)
 		m.SetReply(r)
 		name := strings.ToLower(q.Name)
+		if z.onQuery != nil {
+			z.onQuery(name, q.Qtype)
+		}
 
 		if rrs, ok := z.answers[name]; ok {
 			m.Authoritative = true
@@ -177,6 +187,151 @@ func newTestResolver(rootAddr, nsPort string) *Resolver {
 	r := New([]string{rootAddr})
 	r.nsPort = nsPort
 	return r
+}
+
+// TestResolveQNameMinimization verifies RFC 7816/9156 QNAME minimization is
+// actually active: the root must only ever see "com." (not the full
+// "www.example.com."), and the TLD must only ever see "example.com." (not
+// "www.example.com." either) — each hop reveals only the label it needs to
+// find the next delegation, never the full queried name, until the
+// authoritative server that actually needs to know it.
+func TestResolveQNameMinimization(t *testing.T) {
+	t.Parallel()
+	nsPort := freePort(t)
+
+	authRR, _ := dns.NewRR("example.com. 300 IN A 93.184.216.34")
+	cnameRR, _ := dns.NewRR("www.example.com. 300 IN CNAME example.com.")
+	authZone := &fakeZone{name: "example.com.", answers: map[string][]dns.RR{
+		"example.com.":     {authRR},
+		"www.example.com.": {cnameRR, authRR},
+	}}
+	authAddr, _ := startFakeServer(t, "127.0.0.23:"+nsPort, authZone)
+
+	var mu sync.Mutex
+	var tldQueries, rootQueries []string
+	record := func(dst *[]string) func(name string, qtype uint16) {
+		return func(name string, qtype uint16) {
+			mu.Lock()
+			*dst = append(*dst, name+" "+dns.TypeToString[qtype])
+			mu.Unlock()
+		}
+	}
+
+	tldZone := &fakeZone{
+		name:           "com.",
+		answers:        map[string][]dns.RR{},
+		delegateSuffix: "example.com.",
+		delegateNS:     "ns1.example.com.",
+		delegateAddr:   authAddr,
+		childName:      "example.com.",
+		onQuery:        record(&tldQueries),
+	}
+	tldAddr, _ := startFakeServer(t, "127.0.0.22:"+nsPort, tldZone)
+
+	rootZone := &fakeZone{
+		name:           ".",
+		answers:        map[string][]dns.RR{},
+		delegateSuffix: "com.",
+		delegateNS:     "a.gtld-servers.invalid.",
+		delegateAddr:   tldAddr,
+		childName:      "com.",
+		onQuery:        record(&rootQueries),
+	}
+	rootAddr, _ := startFakeServer(t, "127.0.0.21:"+nsPort, rootZone)
+
+	r := newTestResolver(rootAddr, nsPort)
+	m := new(dns.Msg)
+	m.SetQuestion("www.example.com.", dns.TypeA)
+	resp, err := r.Resolve(t.Context(), m)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(resp.Answer) != 2 {
+		t.Fatalf("answers = %d, want 2 (CNAME + A): %v", len(resp.Answer), resp.Answer)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(rootQueries) != 1 || rootQueries[0] != "com. NS" {
+		t.Errorf("root queries = %v, want exactly [\"com. NS\"] — the root must never see more than the next label, let alone the full qname", rootQueries)
+	}
+	if len(tldQueries) != 1 || tldQueries[0] != "example.com. NS" {
+		t.Errorf("TLD queries = %v, want exactly [\"example.com. NS\"] — the TLD must never see the full qname \"www.example.com.\"", tldQueries)
+	}
+}
+
+// TestResolveQNameMinimizationFallsBackOnUnexpectedResponse verifies the RFC
+// 9156 safety net: a server that mishandles a minimized synthetic NS query
+// (answers NXDOMAIN for a label that has no NS records of its own, even
+// though the real name resolves fine) must not break the whole resolution —
+// the walk must fall back to asking the full qname at the same server
+// instead of propagating a bogus NXDOMAIN.
+func TestResolveQNameMinimizationFallsBackOnUnexpectedResponse(t *testing.T) {
+	t.Parallel()
+	nsPort := freePort(t)
+
+	authRR, _ := dns.NewRR("www.example.com. 300 IN A 93.184.216.34")
+	authZone := &fakeZone{name: "example.com.", answers: map[string][]dns.RR{
+		"www.example.com.": {authRR},
+	}}
+	authAddr, _ := startFakeServer(t, "127.0.0.33:"+nsPort, authZone)
+
+	// A deliberately non-compliant TLD: NXDOMAINs the minimized synthetic
+	// "example.com. NS" query (a real-world failure mode some
+	// authoritative servers exhibit for labels with no NS of their own),
+	// but answers any other query with a proper referral to the
+	// authoritative server.
+	tldAddr := "127.0.0.32:" + nsPort
+	pc, err := net.ListenPacket("udp", tldAddr)
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		q := r.Question[0]
+		name := strings.ToLower(q.Name)
+		m := new(dns.Msg)
+		m.SetReply(r)
+		if name == "example.com." && q.Qtype == dns.TypeNS {
+			m.Authoritative = true
+			m.Rcode = dns.RcodeNameError
+			soa, _ := dns.NewRR("com. 300 IN SOA ns.invalid. admin.invalid. 1 3600 900 604800 300")
+			m.Ns = []dns.RR{soa}
+			_ = w.WriteMsg(m)
+			return
+		}
+		nsRR, _ := dns.NewRR("example.com. 300 IN NS ns1.example.com.")
+		host, _, _ := net.SplitHostPort(authAddr)
+		glue, _ := dns.NewRR("ns1.example.com. 300 IN A " + host)
+		m.Ns = []dns.RR{nsRR}
+		m.Extra = []dns.RR{glue}
+		_ = w.WriteMsg(m)
+	})}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+
+	rootZone := &fakeZone{
+		name:           ".",
+		answers:        map[string][]dns.RR{},
+		delegateSuffix: "com.",
+		delegateNS:     "a.gtld-servers.invalid.",
+		delegateAddr:   tldAddr,
+		childName:      "com.",
+	}
+	rootAddr, _ := startFakeServer(t, "127.0.0.31:"+nsPort, rootZone)
+
+	r := newTestResolver(rootAddr, nsPort)
+	m := new(dns.Msg)
+	m.SetQuestion("www.example.com.", dns.TypeA)
+	resp, err := r.Resolve(t.Context(), m)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if len(resp.Answer) != 1 {
+		t.Fatalf("expected 1 answer despite the TLD's bogus NXDOMAIN on the minimized query, got %v", resp.Answer)
+	}
+	if a, ok := resp.Answer[0].(*dns.A); !ok || a.A.String() != "93.184.216.34" {
+		t.Fatalf("unexpected answer: %v", resp.Answer[0])
+	}
 }
 
 func TestResolveWalksRootToAuthoritative(t *testing.T) {

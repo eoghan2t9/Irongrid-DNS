@@ -184,41 +184,102 @@ func (r *Resolver) resolve(ctx context.Context, q dns.Question, cnameDepth, nsDe
 
 	zone, servers := r.bestDelegation(q.Name)
 	visited := map[string]bool{zone: true}
+	// full disables QNAME minimization for the rest of this walk once a
+	// minimized query gets an untrustworthy response (see the fallback
+	// case below) — RFC 9156 requires this: some authoritative servers
+	// mishandle a synthetic NS query for a label with no real delegation,
+	// and a minimized query's NXDOMAIN/SERVFAIL must never be trusted as
+	// an answer about the real qname.
+	full := false
 
 	for range maxHops {
-		resp, err := r.queryServers(ctx, servers, q)
+		// QNAME minimization (RFC 7816, relaxed by RFC 9156): reveal only
+		// the labels needed to find the next delegation, not the full
+		// qname, to every server that doesn't need to know more — ask for
+		// NS of one label deeper than the current zone, escalating to the
+		// real question only on the final hop (next == q.Name) or once
+		// minimization has been abandoned for this walk.
+		askQ := q
+		minimized := false
+		if !full {
+			if next, ok := nextMinimizedLabel(zone, q.Name); ok && !strings.EqualFold(next, q.Name) {
+				askQ = dns.Question{Name: next, Qtype: dns.TypeNS, Qclass: q.Qclass}
+				minimized = true
+			}
+		}
+
+		resp, err := r.queryServers(ctx, servers, askQ)
 		if err != nil {
 			return nil, err
 		}
 
-		if isFinal(resp) {
-			return r.chaseCNAME(ctx, q, resp, cnameDepth, nsDepth)
+		nextZone, nsRecords, ttl, hasNS := parseReferral(resp)
+		if hasNS {
+			nextServers := r.resolveNameservers(ctx, nsRecords, nsDepth)
+			if len(nextServers) == 0 {
+				return nil, fmt.Errorf("recursive: zone %s delegated with no resolvable nameservers", nextZone)
+			}
+			if visited[nextZone] {
+				// Referral loop (a misbehaving server re-delegating to a
+				// zone already visited this walk) — return the
+				// best-effort answer rather than spinning.
+				return resp, nil
+			}
+			visited[nextZone] = true
+			r.cacheDelegation(nextZone, nextServers, ttl)
+			zone, servers = nextZone, nextServers
+			continue
 		}
 
-		nextZone, nsRecords, ttl, hasNS := parseReferral(resp)
-		if !hasNS {
-			// No NS records at all in Authority and not otherwise final
-			// (isFinal already covers the AA/answer/NXDOMAIN cases) —
-			// there's nothing more this walk can do with it.
+		// No delegation in this response.
+		if !minimized {
+			// The real question (minimization reached its final hop
+			// naturally, or is disabled/abandoned for this walk) —
+			// resolve exactly as before minimization existed.
+			if isFinal(resp) {
+				return r.chaseCNAME(ctx, q, resp, cnameDepth, nsDepth)
+			}
 			return resp, nil
 		}
-		nextServers := r.resolveNameservers(ctx, nsRecords, nsDepth)
-		if len(nextServers) == 0 {
-			return nil, fmt.Errorf("recursive: zone %s delegated with no resolvable nameservers", nextZone)
+		if resp.Rcode == dns.RcodeSuccess {
+			// The synthetic NS query got a plain NOERROR/NODATA: this
+			// zone is authoritative this deep too, just with no
+			// delegation at this exact label (common — most labels on
+			// the path to a name aren't themselves delegation points).
+			// Record it and step to the next label at the same servers.
+			zone = askQ.Name
+			continue
 		}
-		if visited[nextZone] {
-			// Referral loop (a misbehaving server re-delegating to a zone
-			// already visited this walk) — return the best-effort answer
-			// rather than spinning.
-			return resp, nil
-		}
-		visited[nextZone] = true
-		r.cacheDelegation(nextZone, nextServers, ttl)
-		// zone is only read via the visited map above; only servers feeds the
-		// next hop (staticcheck ineffassign).
-		servers = nextServers
+		// RFC 9156: anything else (NXDOMAIN, SERVFAIL, ...) answering a
+		// minimized query is not trustworthy as an answer about the real
+		// qname. Fall back to the full name at the current servers
+		// instead of failing the walk or misinterpreting a spurious
+		// NXDOMAIN as "this domain doesn't exist".
+		full = true
 	}
 	return nil, fmt.Errorf("recursive: exceeded %d referral hops resolving %s", maxHops, q.Name)
+}
+
+// nextMinimizedLabel returns qname truncated to exactly one label deeper
+// than zone (e.g. zone="com.", qname="www.example.com." -> "example.com."),
+// the next query QNAME minimization (RFC 7816/9156) should ask for. ok is
+// false when zone already equals qname (nothing left to minimize) or zone
+// isn't an ancestor of qname with fewer labels (defensive: bestDelegation's
+// own walk always returns a true ancestor, so this should never happen in
+// practice — falling back to the unminimized qname is always safe).
+func nextMinimizedLabel(zone, qname string) (next string, ok bool) {
+	zone = strings.ToLower(dns.Fqdn(zone))
+	qname = strings.ToLower(dns.Fqdn(qname))
+	if zone == qname {
+		return "", false
+	}
+	qLabels := dns.SplitDomainName(qname)
+	zLabels := dns.SplitDomainName(zone)
+	if len(zLabels) >= len(qLabels) {
+		return "", false
+	}
+	keep := qLabels[len(qLabels)-len(zLabels)-1:]
+	return dns.Fqdn(strings.Join(keep, ".")), true
 }
 
 // isFinal reports whether resp answers the query (positively or as an
