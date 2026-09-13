@@ -135,14 +135,10 @@ func main() {
 	slog.Info("Dragonfly caching enabled", "positive_ttl", cfg.Cache.TTL, "negative_ttl", cfg.Cache.NegativeTTL)
 
 	// ---- validate Dragonfly config against system specs ----
-	// If Dragonfly was started with outdated flags (e.g. the old hardcoded
-	// 512mb/2 threads), this restarts it with the correct auto-detected values.
-	// Best-effort: failures are logged but never prevent irongrid from starting.
-	// Async: a needed restart polls for Dragonfly to come back up for up to
-	// 30s (see waitForDragonfly), which previously stalled every listener
-	// below it behind that wait. dfly already tolerates a Dragonfly restart
-	// happening while queries are in flight (reconnect on next command), so
-	// there's no reason boot needs to wait for this one specifically either.
+	// Warns (never rewrites or restarts Dragonfly — see ValidateDragonfly's
+	// doc comment) if its maxmemory/proactor_threads don't match what this
+	// host's resources call for, e.g. after a resize. Async since it shells
+	// out to python3 for a Redis INFO call; no reason boot should wait on it.
 	go tuning.ValidateDragonfly(cfg.Cache.Addr)
 
 	// ---- authoritative root hints for recursive upstreams ----
