@@ -172,6 +172,18 @@ export default function SystemTab({ f }) {
           <button className="btn" onClick={f.flush}>
             Flush DNS cache (Dragonfly)
           </button>
+          <button
+            className="btn"
+            onClick={f.warmNow}
+            disabled={!f.cfg.warmer?.enabled}
+            title={
+              f.cfg.warmer?.enabled
+                ? 'Run a cache-warming pass now — handy right after a flush'
+                : 'Enable the cache warmer under Settings → Cache & log first'
+            }
+          >
+            Warm now
+          </button>
           <button className="btn" onClick={f.refreshLists}>
             Refresh blocklists
           </button>

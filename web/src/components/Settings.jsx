@@ -273,6 +273,19 @@ export default function Settings({ onSessionInvalidated }) {
     }
   }
 
+  // warmNow kicks an immediate cache-warming pass — handy right after a
+  // flush so the cache doesn't sit cold until the next scheduled interval.
+  // Requires the warmer to be enabled (Settings → Cache & log); the backend
+  // returns a clear error otherwise, surfaced here via toast.
+  const warmNow = async () => {
+    try {
+      await api.warmCache()
+      toast('Cache warming started')
+    } catch (e) {
+      toast('Warm failed: ' + e.message, 'error')
+    }
+  }
+
   const refreshLists = () =>
     api
       .refreshLists()
@@ -583,6 +596,7 @@ export default function Settings({ onSessionInvalidated }) {
     backupErr,
     restoreMsg,
     flush,
+    warmNow,
     refreshLists,
   }
 
