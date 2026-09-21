@@ -1491,8 +1491,13 @@ func (h *Handler) finishResolve(
 	//    Walk every CNAME hop in the answer (a classic upstream's raw chain,
 	//    or the recursive resolver's own already-merged chaseCNAME result)
 	//    and block if any target matches the blocklist/whitelist rules, not
-	//    just the originally queried name.
-	if cnameCloakingEnabled {
+	//    just the originally queried name. Gated on !domainWhitelisted like
+	//    the IP-based block above: an operator who explicitly whitelisted
+	//    the queried name has already made the call that it's trusted, so a
+	//    CDN it happens to route through (which may independently appear on
+	//    a blocklist for unrelated third-party traffic) must not override
+	//    that decision.
+	if cnameCloakingEnabled && !domainWhitelisted {
 		if owner, target, decision := cnameCloakCheck(engine, resp); decision.Action == filter.Block {
 			blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 			h.Stats.Blocked.Add(1)

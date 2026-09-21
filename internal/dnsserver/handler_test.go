@@ -1482,6 +1482,28 @@ func TestHandlerCNAMECloakingProtection(t *testing.T) {
 			t.Fatalf("expected the CNAME+A answer to pass through when no hop is blocklisted, got %v", fw.msg)
 		}
 	})
+
+	t.Run("whitelisted owner is not blocked even when the CNAME target is blocklisted", func(t *testing.T) {
+		addr := startCNAMETestServer(t, owner, target, "203.0.113.5")
+		e := filter.NewEngine()
+		// The owner name itself is explicitly whitelisted by the operator;
+		// the target it happens to CNAME through is independently
+		// blocklisted (e.g. a shared CDN also used by trackers). The
+		// operator's explicit whitelist decision on the owner must win.
+		e.SetUserLists([]string{"tracker.ads.net"}, []string{"sub.example.com"})
+		e.Compile()
+		h := NewHandler(e, nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: addr}}, nil, "nxdomain", 600, 5*time.Second)
+		h.SetCNAMECloakingProtection(true)
+
+		m := new(dns.Msg)
+		m.SetQuestion(owner, dns.TypeA)
+		fw := &fakeWriter{}
+		h.ServeDNS(fw, m)
+
+		if fw.msg == nil || len(fw.msg.Answer) == 0 {
+			t.Fatalf("expected the CNAME+A answer to pass through for a whitelisted owner, got %v", fw.msg)
+		}
+	})
 }
 
 // TestHandlerBlockedResponseCarriesEDE verifies a blocklisted query answered
