@@ -57,9 +57,19 @@ func splitRule(raw string) (domain string, exactOnly bool, isException bool, ok 
 	// Adblock domain markers.
 	if after, ok0 := strings.CutPrefix(line, "||"); ok0 {
 		line = after
-		// Strip modifiers after ^ or $.
+		// Strip modifiers after ^ or $, but reject rules scoped with
+		// $domain= — a DNS-level blocker has no notion of the page that
+		// initiated the request, so blindly discarding the scope and
+		// blocking the pattern everywhere would silently over-block
+		// sites/CDNs the rule was never meant to affect (e.g. a shared
+		// CDN meant to be blocked only when embedded by one specific
+		// tracker page).
 		if i := strings.IndexAny(line, "^$"); i >= 0 {
+			modifiers := line[i:]
 			line = line[:i]
+			if hasDomainModifier(modifiers) {
+				return "", false, false, false
+			}
 		}
 	} else if strings.HasPrefix(line, "|") {
 		// "|http://..." style rules are not domain rules; ignore.
@@ -86,6 +96,23 @@ func splitRule(raw string) (domain string, exactOnly bool, isException bool, ok 
 		return "", false, false, false
 	}
 	return domain, exactOnly, isException, true
+}
+
+// hasDomainModifier reports whether an Adblock rule's modifier suffix (the
+// text from the first ^ or $ onward, e.g. "^$domain=example.com") scopes
+// the rule to specific referring page(s) via $domain=. Such rules can't be
+// evaluated correctly by a DNS-level blocker, which never sees the page
+// that initiated the query, so they must be rejected rather than applied
+// as an unconditional block on the bare domain.
+func hasDomainModifier(modifiers string) bool {
+	for _, part := range strings.Split(modifiers, "$") {
+		for _, opt := range strings.Split(part, ",") {
+			if strings.HasPrefix(strings.TrimPrefix(opt, "~"), "domain=") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // RegexRule is a compiled AdGuard-style /pattern/flags blocklist rule. The
