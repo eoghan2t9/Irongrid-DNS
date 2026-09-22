@@ -5,7 +5,7 @@ go 1.27
 require (
 	github.com/ProtonMail/go-crypto v1.4.1
 	github.com/alicebob/miniredis/v2 v2.39.0
-	github.com/andybalholm/brotli v1.2.3
+	github.com/andybalholm/brotli v1.2.4
 	github.com/charmbracelet/huh v1.0.0
 	github.com/creack/pty v1.1.24
 	github.com/go-acme/lego/v4 v4.35.2
@@ -13,7 +13,7 @@ require (
 	github.com/insomniacslk/dhcp v0.0.0-20260901064844-234b97448fae
 	github.com/klauspost/cpuid/v2 v2.4.0
 	github.com/miekg/dns v1.1.73
-	github.com/quic-go/quic-go v0.62.0
+	github.com/quic-go/quic-go v0.63.0
 	github.com/redis/go-redis/v9 v9.22.0
 	golang.org/x/crypto v0.57.0
 	golang.org/x/net v0.59.0
