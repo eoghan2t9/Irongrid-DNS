@@ -416,13 +416,6 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	}
 }
 
-// SetTLS replaces the TLS config used by the DoT/DoH/DoQ listeners.
-func (m *Manager) SetTLS(conf *tls.Config) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.tlsConf = conf
-}
-
 // Restart stops every current listener and starts fresh ones with the given
 // addresses and TLS config. It is used by the config-reload flow so listener
 // changes apply without killing the process. Returns a bind error if any hard
