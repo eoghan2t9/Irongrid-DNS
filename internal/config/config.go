@@ -744,6 +744,28 @@ type WebConfig struct {
 	// credential (optionally read-only) instead of sharing the main login.
 	// Sent as "Authorization: Bearer <token>". Empty by default.
 	Tokens []APIToken `yaml:"tokens"`
+	// Users are the dashboard/API login accounts (replaces the single
+	// Username/Password pair above as the live auth source — see Load's
+	// migration, which turns an existing Username/Password into the sole
+	// admin Users entry on first load after upgrade). Username/Password
+	// stay in this struct only as that migration input.
+	Users []WebUser `yaml:"users"`
+}
+
+// WebUser is one dashboard/API login account. Role gates write access:
+// "admin" can do everything including managing other users; "viewer" is
+// restricted to GET/HEAD requests, exactly like a read-only APIToken.
+type WebUser struct {
+	// ID is a stable identifier independent of Username, so renaming a
+	// user's login name is an edit, not a delete-and-recreate (which would
+	// otherwise wrongly demand a new password on every rename).
+	ID       string `yaml:"id"`
+	Username string `yaml:"username"`
+	// Password is a bcrypt hash. A plaintext value found here is hashed
+	// automatically on the next Config.Save, like WebConfig.Password.
+	Password string `yaml:"password"`
+	// Role is "admin" or "viewer".
+	Role string `yaml:"role"`
 }
 
 // APIToken is one bearer-token credential for the REST API (see
@@ -899,6 +921,21 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
+	// Migrate a pre-multi-user config's single admin login into Users on
+	// first load after upgrade: the existing account becomes the sole
+	// admin, unchanged, with no action needed. Only fires once — once
+	// Users is non-empty (whether from this migration or from real
+	// multi-user config), it's the live auth source and this is a no-op.
+	if len(cfg.Web.Users) == 0 && cfg.Web.Username != "" && cfg.Web.Password != "" {
+		id, err := randomHex(8)
+		if err != nil {
+			return nil, fmt.Errorf("generate web user id: %w", err)
+		}
+		cfg.Web.Users = []WebUser{{ID: id, Username: cfg.Web.Username, Password: cfg.Web.Password, Role: "admin"}}
+		if err := cfg.Save(path); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: could not persist migrated web user (%v); will re-migrate on next load\n", err)
+		}
+	}
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -933,6 +970,11 @@ func randomHex(n int) (string, error) {
 // thereby invalidate every previously issued session cookie at once.
 func NewSessionSecret() (string, error) {
 	return randomHex(32)
+}
+
+// NewWebUserID returns a fresh random identifier for a new WebUser.
+func NewWebUserID() (string, error) {
+	return randomHex(8)
 }
 
 // Validate checks the configuration for required fields. It is used by the
@@ -1200,7 +1242,36 @@ func (c *Config) validate() error {
 			return fmt.Errorf("server.doh_path is required when web_listen shares the DoH port")
 		}
 	}
-	if c.Web.Username == "" {
+	seenUserID := map[string]bool{}
+	seenUsername := map[string]bool{}
+	admins := 0
+	for i, u := range c.Web.Users {
+		if u.ID == "" {
+			return fmt.Errorf("web.users[%d]: id is required", i)
+		}
+		if seenUserID[u.ID] {
+			return fmt.Errorf("web.users[%d]: duplicate id %q", i, u.ID)
+		}
+		seenUserID[u.ID] = true
+		if u.Username == "" {
+			return fmt.Errorf("web.users[%d] (%s): username is required", i, u.ID)
+		}
+		if seenUsername[u.Username] {
+			return fmt.Errorf("web.users[%d]: duplicate username %q", i, u.Username)
+		}
+		seenUsername[u.Username] = true
+		switch u.Role {
+		case "admin":
+			admins++
+		case "viewer":
+		default:
+			return fmt.Errorf("web.users[%d] (%s): role must be admin or viewer, got %q", i, u.Username, u.Role)
+		}
+	}
+	if len(c.Web.Users) > 0 && admins == 0 {
+		return fmt.Errorf("web.users: at least one admin is required")
+	}
+	if len(c.Web.Users) == 0 && c.Web.Username == "" {
 		return fmt.Errorf("web.username is required")
 	}
 	for i, rw := range c.Rewrites {
@@ -1508,6 +1579,15 @@ func (c *Config) Save(path string) error {
 		if t.Token != "" && !isSHA256Hex(t.Token) {
 			sum := sha256.Sum256([]byte(t.Token))
 			c.Web.Tokens[i].Token = hex.EncodeToString(sum[:])
+		}
+	}
+	for i, u := range c.Web.Users {
+		if u.Password != "" && !isBcrypt(u.Password) {
+			hash, err := bcrypt.GenerateFromPassword([]byte(u.Password), bcrypt.DefaultCost)
+			if err != nil {
+				return fmt.Errorf("hash web user %q password: %w", u.Username, err)
+			}
+			c.Web.Users[i].Password = string(hash)
 		}
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

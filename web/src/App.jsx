@@ -1,5 +1,13 @@
 import React, { useEffect, useState, useCallback, useMemo, useRef, lazy, Suspense } from 'react'
-import { api, setAuthHandler, setCredentials, restoreCredentials, hasCredentials, clearCredentials } from './api'
+import {
+  api,
+  setAuthHandler,
+  setCredentials,
+  restoreCredentials,
+  hasCredentials,
+  clearCredentials,
+  currentUsername,
+} from './api'
 import { Kbd, Logo, MenuIcon, XIcon } from './components/ui'
 // Dashboard and UpdateChecker stay in the initial bundle: Dashboard is the
 // landing view (the first paint needs it eagerly) and UpdateChecker is tiny
@@ -18,6 +26,7 @@ const VPN = lazy(() => import('./components/VPN'))
 const Tunnel = lazy(() => import('./components/Tunnel'))
 const Dhcp = lazy(() => import('./components/Dhcp'))
 const Settings = lazy(() => import('./components/Settings'))
+const Users = lazy(() => import('./components/Users'))
 const Tls = lazy(() => import('./components/Tls'))
 const Changelog = lazy(() => import('./components/Changelog'))
 
@@ -217,6 +226,20 @@ const NAV = [
       <>
         <circle cx="12" cy="12" r="9" />
         <polyline points="12 7 12 12 15.5 14" />
+      </>,
+    ),
+  },
+  {
+    id: 'users',
+    label: 'Users',
+    section: 'System',
+    desc: 'Dashboard and API accounts — admins and read-only viewers',
+    keywords: ['accounts', 'login', 'password', 'roles', 'admin', 'viewer', 'permissions'],
+    icon: navSvg(
+      <>
+        <circle cx="9" cy="8" r="3.2" />
+        <path d="M3 20c0-3.3 2.7-5.8 6-5.8s6 2.5 6 5.8" />
+        <path d="M17 8h4M19 6v4" />
       </>,
     ),
   },
@@ -710,7 +733,10 @@ export default function App() {
                 {view === 'tunnel' && <Tunnel />}
                 {view === 'dhcp' && <Dhcp />}
                 {view === 'changelog' && <Changelog />}
-                {view === 'settings' && <Settings onSessionInvalidated={handleSessionInvalidated} />}
+                {view === 'users' && (
+                  <Users currentUsername={currentUsername()} onSessionInvalidated={handleSessionInvalidated} />
+                )}
+                {view === 'settings' && <Settings />}
               </div>
             </Suspense>
           </ViewErrorBoundary>

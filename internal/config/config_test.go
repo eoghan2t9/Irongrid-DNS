@@ -906,3 +906,117 @@ func TestValidateUpstreamRoutesRejectBadDomain(t *testing.T) {
 		t.Fatal("route with an invalid domain accepted")
 	}
 }
+
+// TestLoadMigratesSingleAdminToUsers verifies that a pre-multi-user config
+// (only the legacy web.username/web.password set, no web.users) is migrated
+// on Load into a single admin Users entry — the "current account becomes the
+// main admin" upgrade path.
+func TestLoadMigratesSingleAdminToUsers(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := dir + "/irongrid.yaml"
+	c := validBase()
+	c.Web.Username = "admin"
+	c.Web.Password = "super-secret-plaintext"
+	if err := c.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(loaded.Web.Users) != 1 {
+		t.Fatalf("Users after migration = %d entries, want 1", len(loaded.Web.Users))
+	}
+	u := loaded.Web.Users[0]
+	if u.Username != "admin" {
+		t.Errorf("migrated username = %q, want admin", u.Username)
+	}
+	if u.Role != "admin" {
+		t.Errorf("migrated role = %q, want admin", u.Role)
+	}
+	if u.ID == "" {
+		t.Error("migrated user has no id")
+	}
+	if !isBcrypt(u.Password) {
+		t.Errorf("migrated password %q is not a bcrypt hash", u.Password)
+	}
+
+	// Migration is persisted: reloading must not create a second user.
+	reloaded, err := Load(path)
+	if err != nil {
+		t.Fatalf("second Load: %v", err)
+	}
+	if len(reloaded.Web.Users) != 1 {
+		t.Fatalf("Users after second load = %d entries, want 1 (migration must not repeat)", len(reloaded.Web.Users))
+	}
+}
+
+func TestSaveHashesPlaintextUserPasswords(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	c := validBase()
+	c.Web.Users = []WebUser{
+		{ID: "1", Username: "already-hashed", Password: "$2a$10$" + strings.Repeat("a", 53), Role: "admin"},
+		{ID: "2", Username: "plaintext", Password: "super-secret-plaintext-password", Role: "viewer"},
+	}
+	path := dir + "/irongrid.yaml"
+	if err := c.Save(path); err != nil {
+		t.Fatalf("Save: %v", err)
+	}
+	if c.Web.Users[0].Password != "$2a$10$"+strings.Repeat("a", 53) {
+		t.Errorf("already-hashed password should be left untouched, got %q", c.Web.Users[0].Password)
+	}
+	if c.Web.Users[1].Password == "super-secret-plaintext-password" {
+		t.Error("plaintext password should have been hashed by Save")
+	}
+	if !isBcrypt(c.Web.Users[1].Password) {
+		t.Errorf("hashed password %q is not a bcrypt hash", c.Web.Users[1].Password)
+	}
+}
+
+func TestValidateWebUsersDuplicateUsername(t *testing.T) {
+	t.Parallel()
+	c := validBase()
+	c.Web.Users = []WebUser{
+		{ID: "1", Username: "dup", Password: "x", Role: "admin"},
+		{ID: "2", Username: "dup", Password: "x", Role: "viewer"},
+	}
+	if err := c.Validate(); err == nil {
+		t.Fatal("duplicate username accepted")
+	}
+}
+
+func TestValidateWebUsersDuplicateID(t *testing.T) {
+	t.Parallel()
+	c := validBase()
+	c.Web.Users = []WebUser{
+		{ID: "same", Username: "a", Password: "x", Role: "admin"},
+		{ID: "same", Username: "b", Password: "x", Role: "viewer"},
+	}
+	if err := c.Validate(); err == nil {
+		t.Fatal("duplicate id accepted")
+	}
+}
+
+func TestValidateWebUsersInvalidRole(t *testing.T) {
+	t.Parallel()
+	c := validBase()
+	c.Web.Users = []WebUser{{ID: "1", Username: "a", Password: "x", Role: "superuser"}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("invalid role accepted")
+	}
+}
+
+// TestValidateWebUsersRequiresAdmin is the critical safety invariant: a
+// Users list with no admin (e.g. the last admin demoted or removed) must be
+// rejected so the box is never left without one.
+func TestValidateWebUsersRequiresAdmin(t *testing.T) {
+	t.Parallel()
+	c := validBase()
+	c.Web.Users = []WebUser{{ID: "1", Username: "a", Password: "x", Role: "viewer"}}
+	if err := c.Validate(); err == nil {
+		t.Fatal("Users list with zero admins accepted")
+	}
+}

@@ -270,17 +270,6 @@ func (h *Handler) logout(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "logged out"})
 }
 
-// sessionSecretFor returns the session secret to persist when applying a
-// config: the existing secret unless a new plaintext password was supplied,
-// in which case a fresh secret is generated so all previously issued session
-// cookies stop validating (session rotation).
-func sessionSecretFor(newPassword, currentSecret string) (string, error) {
-	if newPassword == "" {
-		return currentSecret, nil
-	}
-	return config.NewSessionSecret()
-}
-
 func contains(list []string, s string) bool {
 	return slices.Contains(list, s)
 }

@@ -158,21 +158,37 @@ const sessionLifetime = 30 * 24 * time.Hour
 // authSnapshot copies the auth-relevant config fields under the shared mutex
 // (when set) so every check in a single request sees one consistent snapshot,
 // even while a config apply is rotating the session secret mid-request.
-func (a *App) authSnapshot() (username, password, secret string, secure bool) {
+func (a *App) authSnapshot() (users []config.WebUser, secret string, secure bool) {
 	if a.Mu != nil {
 		a.Mu.Lock()
 		defer a.Mu.Unlock()
 	}
 	cfg := a.Config
-	return cfg.Web.Username, cfg.Web.Password, cfg.Web.SessionSecret, cfg.Server.WebTLS
+	return cfg.Web.Users, cfg.Web.SessionSecret, cfg.Server.WebTLS
+}
+
+// userByUsername finds the user with the given username in users, or nil.
+func userByUsername(users []config.WebUser, username string) *config.WebUser {
+	for i, u := range users {
+		if u.Username == username {
+			return &users[i]
+		}
+	}
+	return nil
 }
 
 // authorize allows requests carrying a valid signed session cookie (login
 // persists across reloads) or valid HTTP Basic credentials. A successful
-// Basic login also issues the session cookie for the next request.
+// Basic login also issues the session cookie for the next request. A
+// "viewer" role user is scoped to GET/HEAD only, exactly like a read-only
+// APIToken.
 func (a *App) authorize(w http.ResponseWriter, r *http.Request) bool {
-	username, password, secret, secure := a.authSnapshot()
-	if a.validSession(r, username, secret) {
+	users, secret, secure := a.authSnapshot()
+	if u := a.validSession(r, users, secret); u != nil {
+		if u.Role == "viewer" && r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.Error(w, "viewer account cannot make a "+r.Method+" request", http.StatusForbidden)
+			return false
+		}
 		return true
 	}
 	// API tokens (web.tokens) are independent of the session/Basic-auth
@@ -198,10 +214,16 @@ func (a *App) authorize(w http.ResponseWriter, r *http.Request) bool {
 	}
 
 	user, pass, ok := r.BasicAuth()
-	if ok && user == username && passwordMatches(pass, password) {
-		a.loginGuard.RecordSuccess(client)
-		a.issueSessionWith(w, user, secret, secure)
-		return true
+	if ok {
+		if u := userByUsername(users, user); u != nil && passwordMatches(pass, u.Password) {
+			a.loginGuard.RecordSuccess(client)
+			a.issueSessionWith(w, user, secret, secure)
+			if u.Role == "viewer" && r.Method != http.MethodGet && r.Method != http.MethodHead {
+				http.Error(w, "viewer account cannot make a "+r.Method+" request", http.StatusForbidden)
+				return false
+			}
+			return true
+		}
 	}
 	// Only count requests that actually presented credentials — background
 	// polling from a tab whose session expired sends no Authorization
@@ -239,7 +261,7 @@ func (a *App) allowAPIRequest(w http.ResponseWriter, r *http.Request) bool {
 // The payload ("user.exp") is base64url-encoded so usernames containing dots
 // can't break the "payload.sig" split.
 func (a *App) issueSession(w http.ResponseWriter, user string) {
-	_, _, secret, secure := a.authSnapshot()
+	_, secret, secure := a.authSnapshot()
 	a.issueSessionWith(w, user, secret, secure)
 }
 
@@ -269,39 +291,42 @@ func (a *App) issueSessionWith(w http.ResponseWriter, user, secret string, secur
 }
 
 // validSession reports whether the request carries a valid, unexpired login
-// cookie for the configured user.
-func (a *App) validSession(r *http.Request, username, secret string) bool {
+// cookie, and if so returns the current WebUser it names — looked up fresh
+// against users on every call, so a role change or account deletion takes
+// effect on the very next request without needing to reissue or invalidate
+// the cookie itself.
+func (a *App) validSession(r *http.Request, users []config.WebUser, secret string) *config.WebUser {
 	c, err := r.Cookie(sessionCookie)
 	if err != nil {
-		return false
+		return nil
 	}
 	if secret == "" {
-		return false
+		return nil
 	}
 	payload, sig, ok := strings.Cut(c.Value, ".")
 	if !ok {
-		return false
+		return nil
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(payload)
 	if err != nil {
-		return false
+		return nil
 	}
 	// The payload is "<user>.<exp>"; usernames may themselves contain dots,
 	// so split on the last dot (the expiry is always the final field).
 	user, expStr, ok := strings.CutLast(string(raw), ".")
 	if !ok {
-		return false
+		return nil
 	}
 	exp, err := strconv.ParseInt(expStr, 10, 64)
 	if err != nil || time.Now().Unix() > exp {
-		return false
+		return nil
 	}
 	mac := hmac.New(sha256.New, []byte(secret))
 	mac.Write([]byte(payload))
 	if !hmac.Equal([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil)))) {
-		return false
+		return nil
 	}
-	return user == username
+	return userByUsername(users, user)
 }
 
 // passwordMatches compares a plaintext password against a stored value that

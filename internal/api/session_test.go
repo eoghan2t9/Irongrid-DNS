@@ -8,14 +8,14 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 )
 
-// testApp returns an App wired with a valid config for auth tests.
+// testApp returns an App wired with a valid config (one admin user) for auth
+// tests.
 func testApp(t *testing.T) *App {
 	t.Helper()
 	return &App{
 		Config: &config.Config{
 			Web: config.WebConfig{
-				Username:      "admin",
-				Password:      "secret123",
+				Users:         []config.WebUser{{ID: "u1", Username: "admin", Password: "secret123", Role: "admin"}},
 				SessionSecret: "0123456789abcdef0123456789abcdef",
 			},
 		},
@@ -95,7 +95,7 @@ func TestSessionCookieRejectsUnauthenticated(t *testing.T) {
 func TestSessionCookieDottedUsername(t *testing.T) {
 	t.Parallel()
 	a := testApp(t)
-	a.Config.Web.Username = "john.doe"
+	a.Config.Web.Users[0].Username = "john.doe"
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	req.SetBasicAuth("john.doe", "secret123")
@@ -116,43 +116,6 @@ func TestSessionCookieDottedUsername(t *testing.T) {
 	rr2 := httptest.NewRecorder()
 	if !a.authorize(rr2, req2) {
 		t.Fatal("reload with dotted-username session cookie rejected")
-	}
-}
-
-// TestSessionSecretRotation verifies the session-rotation rule: the secret is
-// kept when no new password is supplied, but rotated to a fresh value whenever
-// a new plaintext password is — invalidating every previously issued cookie.
-func TestSessionSecretRotation(t *testing.T) {
-	t.Parallel()
-	const current = "0123456789abcdef0123456789abcdef"
-
-	// No new password: keep the current secret (existing sessions survive).
-	same, err := sessionSecretFor("", current)
-	if err != nil {
-		t.Fatalf("sessionSecretFor(\"\") error: %v", err)
-	}
-	if same != current {
-		t.Fatalf("expected existing secret to be kept, got %q", same)
-	}
-
-	// New password: the secret must rotate (and never equal the old one).
-	rotated, err := sessionSecretFor("newpass123", current)
-	if err != nil {
-		t.Fatalf("sessionSecretFor(new password) error: %v", err)
-	}
-	if rotated == "" {
-		t.Fatal("rotated secret is empty")
-	}
-	if rotated == current {
-		t.Fatal("session secret was not rotated on password change")
-	}
-	// Two consecutive rotations must produce different secrets.
-	rotated2, err := sessionSecretFor("anotherpass", rotated)
-	if err != nil {
-		t.Fatalf("second rotation error: %v", err)
-	}
-	if rotated2 == rotated {
-		t.Fatal("second rotation produced the same secret")
 	}
 }
 
@@ -178,6 +141,98 @@ func TestLogoutClearsSessionCookie(t *testing.T) {
 	}
 	if sess.MaxAge != -1 {
 		t.Errorf("logout cookie MaxAge = %d, want -1", sess.MaxAge)
+	}
+}
+
+// testAppWithViewer returns an App with one admin and one viewer user.
+func testAppWithViewer(t *testing.T) *App {
+	t.Helper()
+	a := testApp(t)
+	a.Config.Web.Users = append(a.Config.Web.Users, config.WebUser{ID: "u2", Username: "readonly", Password: "viewpass", Role: "viewer"})
+	return a
+}
+
+// TestAuthorizeViewerAllowsGet verifies a viewer-role user can read via Basic
+// auth, mirroring the equivalent read-only-APIToken test.
+func TestAuthorizeViewerAllowsGet(t *testing.T) {
+	t.Parallel()
+	a := testAppWithViewer(t)
+	req := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	req.SetBasicAuth("readonly", "viewpass")
+	rr := httptest.NewRecorder()
+	if !a.authorize(rr, req) {
+		t.Fatalf("viewer login should authorize a GET, got status %d", rr.Code)
+	}
+}
+
+// TestAuthorizeViewerRejectsWrite verifies a viewer-role user is refused any
+// non-GET/HEAD request with 403, exactly like a read-only APIToken.
+func TestAuthorizeViewerRejectsWrite(t *testing.T) {
+	t.Parallel()
+	a := testAppWithViewer(t)
+	for _, method := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
+		req := httptest.NewRequest(method, "/api/config", nil)
+		req.SetBasicAuth("readonly", "viewpass")
+		rr := httptest.NewRecorder()
+		if a.authorize(rr, req) {
+			t.Fatalf("viewer login should not authorize %s", method)
+		}
+		if rr.Code != http.StatusForbidden {
+			t.Errorf("%s as viewer: status = %d, want %d", method, rr.Code, http.StatusForbidden)
+		}
+	}
+}
+
+// TestAuthorizeViewerSessionCookieRejectsWrite verifies the same restriction
+// applies to a session cookie (not just Basic auth), and that a viewer's
+// existing session cookie still authorizes reads.
+func TestAuthorizeViewerSessionCookieRejectsWrite(t *testing.T) {
+	t.Parallel()
+	a := testAppWithViewer(t)
+	sessValue := validCookie(t, a, "readonly")
+
+	getReq := httptest.NewRequest(http.MethodGet, "/api/status", nil)
+	getReq.AddCookie(&http.Cookie{Name: sessionCookie, Value: sessValue})
+	if !a.authorize(httptest.NewRecorder(), getReq) {
+		t.Fatal("viewer session cookie should authorize a GET")
+	}
+
+	postReq := httptest.NewRequest(http.MethodPost, "/api/config", nil)
+	postReq.AddCookie(&http.Cookie{Name: sessionCookie, Value: sessValue})
+	rr := httptest.NewRecorder()
+	if a.authorize(rr, postReq) {
+		t.Fatal("viewer session cookie should not authorize a POST")
+	}
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("viewer POST via session cookie: status = %d, want %d", rr.Code, http.StatusForbidden)
+	}
+}
+
+// TestAuthorizeRoleChangeTakesEffectImmediately verifies that a role change
+// (or removal) is reflected on the very next request without needing to
+// reissue the session cookie — validSession looks up the user fresh each
+// time rather than trusting a role baked into the cookie payload.
+func TestAuthorizeRoleChangeTakesEffectImmediately(t *testing.T) {
+	t.Parallel()
+	a := testApp(t)
+	sessValue := validCookie(t, a, "admin")
+
+	postReq := httptest.NewRequest(http.MethodPost, "/api/config", nil)
+	postReq.AddCookie(&http.Cookie{Name: sessionCookie, Value: sessValue})
+	if !a.authorize(httptest.NewRecorder(), postReq) {
+		t.Fatal("admin session should authorize a POST before demotion")
+	}
+
+	// Demote the same account to viewer — no new login, same cookie.
+	a.Config.Web.Users[0].Role = "viewer"
+	postReq2 := httptest.NewRequest(http.MethodPost, "/api/config", nil)
+	postReq2.AddCookie(&http.Cookie{Name: sessionCookie, Value: sessValue})
+	rr := httptest.NewRecorder()
+	if a.authorize(rr, postReq2) {
+		t.Fatal("demoted account's existing session should no longer authorize a POST")
+	}
+	if rr.Code != http.StatusForbidden {
+		t.Errorf("demoted-account POST: status = %d, want %d", rr.Code, http.StatusForbidden)
 	}
 }
 

@@ -15,10 +15,9 @@ import { emptyConfig } from './settings/defaultConfig'
 // default (never-saved) config shape lives in ./settings/defaultConfig —
 // pure static data with no logic to keep near this component.
 
-export default function Settings({ onSessionInvalidated }) {
+export default function Settings() {
   const toast = useToast()
   const [cfg, setCfg] = useState(null)
-  const [initialUser, setInitialUser] = useState('')
   const [dirty, setDirty] = useState(false)
   const [saving, setSaving] = useState(false)
   const [restartNeeded, setRestartNeeded] = useState([])
@@ -69,7 +68,6 @@ export default function Settings({ onSessionInvalidated }) {
     try {
       const c = await api.config()
       setCfg(c)
-      setInitialUser((c.web && c.web.username) || '')
     } catch {
       /* ignore */
     }
@@ -145,24 +143,7 @@ export default function Settings({ onSessionInvalidated }) {
   const save = async () => {
     setSaving(true)
     try {
-      // A non-empty password field means "change the password" — the server
-      // then rotates the session secret, invalidating every session cookie
-      // including this one. Changing the username invalidates them too (each
-      // cookie is bound to the username). Either way the next API call would
-      // 401, so hand it to the app: sign out locally and prompt to sign in
-      // with the updated credentials.
-      const passwordChanged = !!(cfg.web && cfg.web.password)
-      const usernameChanged = !!(initialUser && cfg.web && cfg.web.username && cfg.web.username !== initialUser)
-      const credsChanged = passwordChanged || usernameChanged
       const r = await api.saveConfig(cfg)
-      if (credsChanged && onSessionInvalidated) {
-        onSessionInvalidated(
-          passwordChanged
-            ? 'Password changed — all sessions were signed out. Sign in with your new password.'
-            : 'Username changed — all sessions were signed out. Sign in with your updated credentials.',
-        )
-        return
-      }
       const restart = r.restart_required || []
       setRestartNeeded(restart)
       toast(

@@ -33,31 +33,13 @@ const DownloadIcon = (
   </svg>
 )
 
-// SystemTab is the "System" sub page of Settings: web credentials, backup &
-// restore, the DNS diagnostic and the cache/maintenance actions — the
-// one-off operational tools that don't belong on a feature tab.
+// SystemTab is the "System" sub page of Settings: backup & restore, the DNS
+// diagnostic and the cache/maintenance actions — the one-off operational
+// tools that don't belong on a feature tab. Web account management moved to
+// its own Users page.
 export default function SystemTab({ f }) {
-  const { field, text } = f
   return (
     <>
-      <div className="card">
-        <h3>Web credentials</h3>
-        <div className="form-grid">
-          {text('Username', 'web.username')}
-          {field(
-            'Password',
-            'leave blank to keep the current password; changing it signs out every device (including this one)',
-            <input
-              className="input"
-              type="password"
-              value={f.cfg.web.password}
-              onChange={(e) => f.set('web.password', e.target.value)}
-              autoComplete="new-password"
-            />,
-          )}
-        </div>
-      </div>
-
       <div className="card">
         <h3>Backup &amp; restore</h3>
         <p className="dim small" style={{ marginTop: -6 }}>

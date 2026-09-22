@@ -341,8 +341,17 @@ type logPayload struct {
 }
 
 type webPayload struct {
+	Users []userPayload `json:"users"`
+}
+
+// userPayload is one dashboard/API login account (config.WebUser). Password
+// is plaintext; empty keeps the existing hash on an edit (matched by ID) and
+// is required when creating a new user (empty/unknown ID).
+type userPayload struct {
+	ID       string `json:"id"`
 	Username string `json:"username"`
-	Password string `json:"password"` // plaintext; empty keeps the existing hash
+	Password string `json:"password"`
+	Role     string `json:"role"`
 }
 
 type tunnelPayload struct {
@@ -467,7 +476,7 @@ func payloadFromConfig(c *config.Config) configPayload {
 			Verbose:       c.Log.Verbose,
 			BatchSize:     c.Log.BatchSize,
 		},
-		Web: webPayload{Username: c.Web.Username},
+		Web: webPayload{},
 		Tunnel: tunnelPayload{
 			Enabled:        c.Tunnel.Enabled,
 			Token:          c.Tunnel.Token,
@@ -516,6 +525,12 @@ func payloadFromConfig(c *config.Config) configPayload {
 	p.Rewrites = make([]rewritePayload, 0, len(c.Rewrites))
 	for _, rw := range c.Rewrites {
 		p.Rewrites = append(p.Rewrites, rewritePayload{Domain: rw.Domain, Type: rw.Type, Value: rw.Value, TTL: rw.TTL})
+	}
+	p.Web.Users = make([]userPayload, 0, len(c.Web.Users))
+	for _, u := range c.Web.Users {
+		// Password is never returned — same convention the old single
+		// web.password field used ("empty keeps the existing hash").
+		p.Web.Users = append(p.Web.Users, userPayload{ID: u.ID, Username: u.Username, Role: u.Role})
 	}
 	p.ClientGroups = make([]clientGroupPayload, 0, len(c.ClientGroups))
 	for _, g := range c.ClientGroups {
@@ -584,6 +599,50 @@ func payloadFromConfig(c *config.Config) configPayload {
 		})
 	}
 	return p
+}
+
+// resolveWebUsers merges incoming user payloads against the existing Users
+// list: a payload entry whose id matches an existing user is an edit (an
+// empty password keeps the existing hash, like the old single web.password
+// field's "empty keeps the existing hash" convention); an empty or unknown
+// id is a new user, which requires a non-empty password and gets a freshly
+// minted id (never trusting one supplied by the client).
+func resolveWebUsers(existing []config.WebUser, incoming []userPayload) ([]config.WebUser, error) {
+	existingByID := make(map[string]config.WebUser, len(existing))
+	for _, u := range existing {
+		existingByID[u.ID] = u
+	}
+	users := make([]config.WebUser, 0, len(incoming))
+	for i, u := range incoming {
+		password := u.Password
+		id := u.ID
+		if old, ok := existingByID[id]; id != "" && ok {
+			if password == "" {
+				password = old.Password
+			}
+		} else {
+			if password == "" {
+				return nil, fmt.Errorf("web.users[%d] (%s): password is required for a new user", i, u.Username)
+			}
+			newID, err := config.NewWebUserID()
+			if err != nil {
+				return nil, fmt.Errorf("generate web user id: %w", err)
+			}
+			id = newID
+		}
+		users = append(users, config.WebUser{ID: id, Username: u.Username, Password: password, Role: u.Role})
+	}
+	return users, nil
+}
+
+// rotateSecretIfUsersChanged returns a fresh session secret when the Users
+// list actually changed (any add/edit/delete/role change), or the existing
+// secret unchanged otherwise.
+func rotateSecretIfUsersChanged(oldUsers, newUsers []config.WebUser, oldSecret string) (string, error) {
+	if reflect.DeepEqual(oldUsers, newUsers) {
+		return oldSecret, nil
+	}
+	return config.NewSessionSecret()
 }
 
 // applyPayload validates a submitted config, live-applies the hot parts and
@@ -770,10 +829,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			Verbose:       p.Log.Verbose,
 			BatchSize:     p.Log.BatchSize,
 		},
-		Web: config.WebConfig{
-			Username: p.Web.Username,
-			Password: p.Web.Password,
-		},
+		Web: config.WebConfig{},
 		Tunnel: config.TunnelConfig{
 			Enabled:        p.Tunnel.Enabled,
 			Token:          p.Tunnel.Token,
@@ -891,22 +947,26 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			MAC: sl.MAC, DUID: sl.DUID, IP: sl.IP, Hostname: sl.Hostname,
 		})
 	}
-
-	// Keep the existing password hash unless a new plaintext password was
-	// provided (it is bcrypt-hashed by Config.Save). Changing the password
-	// rotates the session secret so every previously issued session cookie —
-	// including the one authorizing this very request — becomes invalid at
-	// once (session rotation on password change).
-	if cfg.Web.Password == "" {
-		cfg.Web.Password = h.Cfg.Web.Password
-		cfg.Web.SessionSecret = h.Cfg.Web.SessionSecret
-	} else {
-		sec, err := sessionSecretFor(cfg.Web.Password, h.Cfg.Web.SessionSecret)
-		if err != nil {
-			return nil, fmt.Errorf("rotate session secret: %w", err)
-		}
-		cfg.Web.SessionSecret = sec
+	users, err := resolveWebUsers(h.Cfg.Web.Users, p.Web.Users)
+	if err != nil {
+		return nil, err
 	}
+	cfg.Web.Users = users
+
+	// Rotate the session secret whenever the Users list actually changed
+	// (any add/edit/delete/role change) — every previously issued session
+	// cookie, including the one authorizing this very request if it was the
+	// caller's own account that changed, becomes invalid at once. A save
+	// that doesn't touch Users keeps the existing secret so other sessions
+	// are unaffected. This mirrors the single-admin password-change
+	// behavior it replaces, extended to the whole account list; it is
+	// intentionally coarse (any user's change signs out every user) rather
+	// than building per-user session versioning.
+	secret, err := rotateSecretIfUsersChanged(h.Cfg.Web.Users, cfg.Web.Users, h.Cfg.Web.SessionSecret)
+	if err != nil {
+		return nil, fmt.Errorf("rotate session secret: %w", err)
+	}
+	cfg.Web.SessionSecret = secret
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err

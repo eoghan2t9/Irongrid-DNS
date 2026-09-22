@@ -36,6 +36,14 @@ export function restoreCredentials() {
   return credentials
 }
 
+// currentUsername returns the logged-in username (persisted independently of
+// the in-memory password, see setCredentials), or '' when signed out. Used
+// by the Users page to tell "you changed your own account" from "you changed
+// someone else's".
+export function currentUsername() {
+  return localStorage.getItem('irongrid_user') || ''
+}
+
 // REQUEST_TIMEOUT_MS bounds every request so a stalled backend (a stuck
 // upstream resolve, a hung AXFR) fails fast instead of leaving the caller's
 // promise pending forever.
