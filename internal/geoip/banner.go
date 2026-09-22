@@ -20,7 +20,7 @@ import (
 // and LookupHoneypot on the hot path while the API lists and unblocks.
 type Banner struct {
 	mu        sync.RWMutex
-	nets      []*net.IPNet    // everything currently blocked (configured + auto)
+	table     *Table          // O(log n) range table over everything currently blocked (configured + auto)
 	raw       map[string]bool // canonical raw forms (List / firewall / persistence)
 	auto      map[string]bool // raw entries added at runtime (unblockable)
 	honeypots map[string]bool // lowercase honeypot domains, no trailing dot
@@ -68,6 +68,9 @@ func NewBanner(path string, allowlist, ips, honeypots []string) *Banner {
 		}
 	}
 	b.loadAuto()
+	b.mu.Lock()
+	b.rebuildTableLocked()
+	b.mu.Unlock()
 	return b
 }
 
@@ -102,7 +105,32 @@ func (b *Banner) addRaw(e string, runtime bool) {
 	if runtime {
 		b.auto[e] = true
 	}
-	b.nets = append(b.nets, n)
+}
+
+// rebuildTableLocked rebuilds the block table from the raw entry set after
+// any mutation; caller holds the lock. Table.Contains is O(log n) against
+// sorted, merged ranges — BlockedAs runs on every query, and a linear scan
+// over one *net.IPNet per blocked entry (each re-deriving ip.To4() on every
+// comparison) dominated CPU time under load once the block list grew past a
+// handful of entries.
+func (b *Banner) rebuildTableLocked() {
+	nets := make([]*net.IPNet, 0, len(b.raw))
+	for e := range b.raw {
+		_, n, err := net.ParseCIDR(e)
+		if err != nil {
+			if p := net.ParseIP(e); p != nil {
+				bits := 32
+				if p.To4() == nil {
+					bits = 128
+				}
+				n = &net.IPNet{IP: p, Mask: net.CIDRMask(bits, bits)}
+			}
+		}
+		if n != nil {
+			nets = append(nets, n)
+		}
+	}
+	b.table = NewTableFromIPNets(nets)
 }
 
 // addAllow parses and records an allowlist entry (IP or CIDR), skipping
@@ -188,10 +216,8 @@ func (b *Banner) BlockedAs(clientIP string) (blocked bool, source string) {
 	if b.allowed(ip) {
 		return false, ""
 	}
-	for _, n := range b.nets {
-		if n.Contains(ip) {
-			return true, "ip"
-		}
+	if b.table != nil && b.table.Contains(ip) {
+		return true, "ip"
 	}
 	if b.asnBlocked(ip) {
 		return true, "asn"
@@ -255,6 +281,7 @@ func (b *Banner) Block(ip string) error {
 		return nil
 	}
 	b.addRaw(raw, true)
+	b.rebuildTableLocked()
 	entries := b.autoListLocked()
 	b.mu.Unlock()
 	if err := b.persist(entries); err != nil {
@@ -298,23 +325,7 @@ func (b *Banner) Unblock(ip string) error {
 	}
 	delete(b.auto, raw)
 	delete(b.raw, raw)
-	// Rebuild nets from the remaining raw entries.
-	b.nets = b.nets[:0]
-	for e := range b.raw {
-		_, n, err := net.ParseCIDR(e)
-		if err != nil {
-			if p := net.ParseIP(e); p != nil {
-				bits := 32
-				if p.To4() == nil {
-					bits = 128
-				}
-				n = &net.IPNet{IP: p, Mask: net.CIDRMask(bits, bits)}
-			}
-		}
-		if n != nil {
-			b.nets = append(b.nets, n)
-		}
-	}
+	b.rebuildTableLocked()
 	entries := b.autoListLocked()
 	b.mu.Unlock()
 	// Persist outside the lock, like Block: a disk write must never stall
@@ -382,23 +393,7 @@ func (b *Banner) pruneAutoLocked() {
 	if !changed {
 		return
 	}
-	// Rebuild nets from the remaining raw entries (configured IPs included).
-	b.nets = b.nets[:0]
-	for e := range b.raw {
-		_, n, err := net.ParseCIDR(e)
-		if err != nil {
-			if p := net.ParseIP(e); p != nil {
-				bits := 32
-				if p.To4() == nil {
-					bits = 128
-				}
-				n = &net.IPNet{IP: p, Mask: net.CIDRMask(bits, bits)}
-			}
-		}
-		if n != nil {
-			b.nets = append(b.nets, n)
-		}
-	}
+	b.rebuildTableLocked()
 }
 
 // persist rewrites the auto-blocked entries file. A write failure is

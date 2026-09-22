@@ -144,6 +144,36 @@ func addOne128(a [16]byte) [16]byte {
 	return a
 }
 
+// NewTableFromIPNets builds a range table directly from parsed net.IPNet
+// entries rather than text lines, for blocklists assembled from individually
+// parsed CIDR/IP strings (e.g. Banner's block list) that still want
+// Table's O(log n) Contains instead of a linear net.IPNet scan.
+func NewTableFromIPNets(nets []*net.IPNet) *Table {
+	t := &Table{}
+	for _, n := range nets {
+		if n == nil {
+			continue
+		}
+		ones, bits := n.Mask.Size()
+		switch bits {
+		case 32:
+			addr, ok := netip.AddrFromSlice(n.IP.To4())
+			if !ok {
+				continue
+			}
+			t.v4 = append(t.v4, v4Range(netip.PrefixFrom(addr, ones).Masked()))
+		case 128:
+			addr, ok := netip.AddrFromSlice(n.IP.To16())
+			if !ok {
+				continue
+			}
+			t.v6 = append(t.v6, v6Range(netip.PrefixFrom(addr, ones).Masked()))
+		}
+	}
+	t.sortMerge()
+	return t
+}
+
 // Contains reports whether ip falls inside any range of the table.
 func (t *Table) Contains(ip net.IP) bool {
 	if v4 := ip.To4(); v4 != nil {
