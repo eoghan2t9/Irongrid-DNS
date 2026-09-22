@@ -105,8 +105,8 @@ func splitRule(raw string) (domain string, exactOnly bool, isException bool, ok 
 // that initiated the query, so they must be rejected rather than applied
 // as an unconditional block on the bare domain.
 func hasDomainModifier(modifiers string) bool {
-	for _, part := range strings.Split(modifiers, "$") {
-		for _, opt := range strings.Split(part, ",") {
+	for part := range strings.SplitSeq(modifiers, "$") {
+		for opt := range strings.SplitSeq(part, ",") {
 			if strings.HasPrefix(strings.TrimPrefix(opt, "~"), "domain=") {
 				return true
 			}
