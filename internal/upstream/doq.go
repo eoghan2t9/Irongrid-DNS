@@ -56,12 +56,21 @@ func (u *Upstream) getQUICConn(ctx context.Context) (*quic.Conn, error) {
 	u.quicMu.Lock()
 	defer u.quicMu.Unlock()
 	if u.quicConn != nil && u.quicConn.Context().Err() == nil {
+		u.poolHits.Add(1)
 		return u.quicConn, nil
 	}
+	u.poolMisses.Add(1)
 	quicConf := &quic.Config{
 		MaxIdleTimeout:       30 * time.Second,
 		KeepAlivePeriod:      15 * time.Second,
 		HandshakeIdleTimeout: 8 * time.Second,
+		// This is the outbound (client) side of a DoQ upstream connection:
+		// Allow0RTT lets a fresh dial after the persistent connection above
+		// was dropped (idle timeout, upstream restart) reuse a saved session
+		// ticket and send the first query without waiting a full round trip
+		// for the handshake — one less round trip on the query path whenever
+		// this happens.
+		Allow0RTT: true,
 	}
 	// RFC 9250 requires the "doq" ALPN token on both endpoints.
 	qTLS := u.tlsConf.Clone()

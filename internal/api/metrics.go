@@ -84,6 +84,7 @@ func (h *Handler) Metrics(ctx context.Context, w http.ResponseWriter) {
 	ups := h.DNS.UpstreamHealth()
 	fmt.Fprintf(&b, "# HELP irongrid_upstream_available Whether the upstream's circuit breaker is currently closed (1) or open/cooling down (0).\n# TYPE irongrid_upstream_available gauge\n")
 	fmt.Fprintf(&b, "# HELP irongrid_upstream_consecutive_fails Consecutive failures currently driving the upstream's circuit breaker.\n# TYPE irongrid_upstream_consecutive_fails gauge\n")
+	fmt.Fprintf(&b, "# HELP irongrid_upstream_pool_reuse_total Queries that reused a warm pooled/persistent connection (hit) vs paid for a fresh dial (miss), by transport. Always 0 for doh and recursive.\n# TYPE irongrid_upstream_pool_reuse_total counter\n")
 	for _, u := range ups {
 		avail := 0
 		if u.Available {
@@ -92,6 +93,8 @@ func (h *Handler) Metrics(ctx context.Context, w http.ResponseWriter) {
 		labels := fmt.Sprintf("name=%s,transport=%s", promLabelValue(u.Name), promLabelValue(u.Transport))
 		fmt.Fprintf(&b, "irongrid_upstream_available{%s} %d\n", labels, avail)
 		fmt.Fprintf(&b, "irongrid_upstream_consecutive_fails{%s} %d\n", labels, u.Fails)
+		fmt.Fprintf(&b, "irongrid_upstream_pool_reuse_total{%s,result=\"hit\"} %d\n", labels, u.PoolHits)
+		fmt.Fprintf(&b, "irongrid_upstream_pool_reuse_total{%s,result=\"miss\"} %d\n", labels, u.PoolMisses)
 	}
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")

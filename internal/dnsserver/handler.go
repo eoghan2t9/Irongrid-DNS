@@ -2567,6 +2567,13 @@ type UpstreamHealth struct {
 	// Recursive reports whether this upstream resolves iteratively from the
 	// root servers rather than forwarding.
 	Recursive bool `json:"recursive"`
+	// PoolHits/PoolMisses count how often a query reused a warm pooled or
+	// persistent connection (TCP/DoT/UDP/DoQ) versus paid for a fresh dial,
+	// since restart. Always zero for DoH (its connection pooling is Go's
+	// own http.Transport, which doesn't expose per-request reuse counts)
+	// and Recursive (no persistent upstream connection to reuse).
+	PoolHits   int64 `json:"pool_hits"`
+	PoolMisses int64 `json:"pool_misses"`
 }
 
 // UpstreamHealth snapshots the current upstream set's circuit state.
@@ -2574,6 +2581,7 @@ func (h *Handler) UpstreamHealth() []UpstreamHealth {
 	ups := h.settings.Load().Upstreams
 	out := make([]UpstreamHealth, 0, len(ups))
 	for _, u := range ups {
+		hits, misses := u.PoolStats()
 		out = append(out, UpstreamHealth{
 			Name:          u.Name(),
 			Transport:     string(u.Transport),
@@ -2581,6 +2589,8 @@ func (h *Handler) UpstreamHealth() []UpstreamHealth {
 			Available:     u.Available(),
 			CooldownUntil: u.CooldownUntil(),
 			Recursive:     u.Transport == upstream.Recursive,
+			PoolHits:      hits,
+			PoolMisses:    misses,
 		})
 	}
 	return out

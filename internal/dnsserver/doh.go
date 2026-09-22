@@ -150,6 +150,10 @@ func (m *Manager) startDoH3(addr, path string) error {
 		MaxIdleTimeout:       60 * time.Second,
 		KeepAlivePeriod:      20 * time.Second,
 		HandshakeIdleTimeout: 8 * time.Second,
+		// See the identical comment in doq_server.go's startDoQ: 0-RTT saves
+		// a full round trip for a returning DoH3 client, and a replayed
+		// early-data DNS query is harmless (at most answered twice).
+		Allow0RTT: true,
 	}
 	// Same tuned, SO_REUSEPORT-bound sockets as the DoQ listener: the kernel
 	// hashes each QUIC connection to one socket while receive processing

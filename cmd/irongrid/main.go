@@ -1,3 +1,10 @@
+// The directive below forces Go's own pure-Go DNS resolver for every
+// outbound lookup this process makes on its own behalf — blocklist URL
+// fetches, ACME DNS-01 provider APIs, VPN provider APIs, the update
+// checker — skipping the cgo/libc resolver path entirely. It has no effect
+// on the DNS *server* itself, which never resolves through net.Lookup*.
+//
+//go:debug netdns=go
 package main
 
 import (

@@ -63,6 +63,13 @@ func LoadOrGenerate(certFile, keyFile, certDir string, hosts []string) (*tls.Con
 	return &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
+		// Preferring X25519 over the P-curves skips a comparatively
+		// expensive ECDH computation on every TLS 1.2/1.3 handshake (DoT/
+		// DoH/DoH3/dashboard — DoQ's TLS 1.3 handshake benefits too) without
+		// dropping compatibility: X25519 support is effectively universal
+		// among DoT/DoH clients, and P-256 remains available as a fallback
+		// for anything that doesn't offer it.
+		CurvePreferences: []tls.CurveID{tls.X25519, tls.CurveP256},
 	}, nil
 }
 

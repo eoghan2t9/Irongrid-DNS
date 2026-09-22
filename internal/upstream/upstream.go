@@ -122,6 +122,16 @@ type Upstream struct {
 	fails         atomic.Int64
 	cooldownUntil atomic.Int64
 
+	// poolHits/poolMisses count how often a query reused a warm pooled
+	// connection (TCP/DoT connPool, UDP udpPool, or the DoQ persistent
+	// quicConn) versus had to pay for a fresh dial — the connection-
+	// observability metric exposed via Metrics(): a low hit rate on a busy
+	// upstream means the pooling isn't actually saving the handshake/dial
+	// cost it exists to save, which a single aggregate latency number can't
+	// distinguish from the upstream itself just being slow.
+	poolHits   atomic.Int64
+	poolMisses atomic.Int64
+
 	// Reusable transport clients. dns.Client is safe for concurrent use
 	// (each Exchange dials its own connection), so one per transport avoids
 	// allocating a fresh client on every query. nil for transports that
@@ -557,8 +567,10 @@ func (u *Upstream) getConn() *dns.Conn {
 				pc.conn.Close()
 				continue
 			}
+			u.poolHits.Add(1)
 			return pc.conn
 		default:
+			u.poolMisses.Add(1)
 			return nil
 		}
 	}
@@ -587,8 +599,10 @@ func (u *Upstream) udpGetConn() *dns.Conn {
 				pc.conn.Close()
 				continue
 			}
+			u.poolHits.Add(1)
 			return pc.conn
 		default:
+			u.poolMisses.Add(1)
 			return nil
 		}
 	}
@@ -734,6 +748,12 @@ func (u *Upstream) queryDoQ(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 
 // Fails returns the consecutive failure counter (reset on every success).
 func (u *Upstream) Fails() int64 { return u.fails.Load() }
+
+// PoolStats returns how many queries reused a warm pooled/persistent
+// connection versus paid for a fresh dial, since restart.
+func (u *Upstream) PoolStats() (hits, misses int64) {
+	return u.poolHits.Load(), u.poolMisses.Load()
+}
 
 // CooldownUntil returns when an open circuit re-arms, or nil when the
 // circuit is closed (no cooldown scheduled). Exposed for the dashboard's

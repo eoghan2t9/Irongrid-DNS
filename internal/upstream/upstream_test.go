@@ -316,6 +316,13 @@ func TestDoTUpstreamReusesConnection(t *testing.T) {
 	if got := accepted.Load(); got != 1 {
 		t.Fatalf("server accepted %d TLS connections for 3 sequential queries, want 1 (pooled reuse, avoiding a repeat handshake)", got)
 	}
+	// The connection-observability counters (PoolStats) must agree with the
+	// server's own accept count: the first query's pool.getConn() finds it
+	// empty (a miss, dial follows), the next two find the pooled connection
+	// this test just confirmed the server only accepted once.
+	if hits, misses := u.PoolStats(); hits != 2 || misses != 1 {
+		t.Fatalf("PoolStats() = (hits=%d, misses=%d), want (2, 1)", hits, misses)
+	}
 }
 
 func TestDoQUpstreamReusesConnection(t *testing.T) {
@@ -334,6 +341,9 @@ func TestDoQUpstreamReusesConnection(t *testing.T) {
 	}
 	if got := accepted.Load(); got != 1 {
 		t.Fatalf("server accepted %d QUIC connections for 3 sequential queries, want 1 (one connection, one stream per query)", got)
+	}
+	if hits, misses := u.PoolStats(); hits != 2 || misses != 1 {
+		t.Fatalf("PoolStats() = (hits=%d, misses=%d), want (2, 1)", hits, misses)
 	}
 }
 

@@ -22,6 +22,13 @@ func (m *Manager) startDoQ(addr string) error {
 		MaxIdleTimeout:       60 * time.Second,
 		KeepAlivePeriod:      20 * time.Second,
 		HandshakeIdleTimeout: 8 * time.Second,
+		// 0-RTT lets a returning client (one we issued a session ticket to)
+		// send its query in the very first flight instead of waiting a full
+		// round trip for the handshake to finish — the exact cost DoQ exists
+		// to avoid. Safe for DNS specifically: unlike a payment or mutating
+		// API, replaying a 0-RTT query at most causes it to be answered
+		// twice, which is already possible over plain UDP.
+		Allow0RTT: true,
 	}
 	// Listen on our own UDP sockets so the kernel receive/send buffers are
 	// raised (quic.ListenAddr dials its own socket with the OS defaults).

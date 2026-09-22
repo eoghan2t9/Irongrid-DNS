@@ -1,8 +1,10 @@
 package cert
 
 import (
+	"crypto/tls"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +54,28 @@ func TestGenerateECDSA(t *testing.T) {
 	// The generated pair must load as a valid TLS pair.
 	if _, err := LoadOrGenerate("", "", dir, nil); err != nil {
 		t.Errorf("LoadOrGenerate on generated cert: %v", err)
+	}
+}
+
+// TestLoadOrGeneratePrefersX25519 verifies the DoT/DoH/DoH3/dashboard TLS
+// config prefers the cheaper X25519 curve over the P-curves (a faster
+// handshake), while keeping P-256 available for clients that don't offer
+// X25519.
+func TestLoadOrGeneratePrefersX25519(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	if _, err := Generate(dir, []string{"dns.example.com"}, "ecdsa", 0, 30); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	conf, err := LoadOrGenerate("", "", dir, nil)
+	if err != nil {
+		t.Fatalf("LoadOrGenerate: %v", err)
+	}
+	if len(conf.CurvePreferences) == 0 || conf.CurvePreferences[0] != tls.X25519 {
+		t.Fatalf("CurvePreferences = %v, want X25519 first", conf.CurvePreferences)
+	}
+	if !slices.Contains(conf.CurvePreferences, tls.CurveP256) {
+		t.Fatalf("CurvePreferences = %v, want CurveP256 kept as a fallback", conf.CurvePreferences)
 	}
 }
 
