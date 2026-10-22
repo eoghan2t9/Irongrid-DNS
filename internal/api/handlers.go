@@ -216,6 +216,12 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.updateChangelog(ctx, w)
 	case len(parts) == 2 && parts[0] == "update" && parts[1] == "install" && r.Method == http.MethodPost:
 		h.installUpdate(ctx, w)
+	case len(parts) == 1 && parts[0] == "updates" && r.Method == http.MethodGet:
+		h.getUpdates(ctx, w)
+	case len(parts) == 3 && parts[0] == "updates" && parts[1] == "dragonfly" && parts[2] == "install" && r.Method == http.MethodPost:
+		h.installDragonflyUpdate(ctx, w)
+	case len(parts) == 3 && parts[0] == "updates" && parts[1] == "dragonfly" && parts[2] == "restart" && r.Method == http.MethodPost:
+		h.restartDragonflyHandler(ctx, w)
 	case len(parts) == 1 && parts[0] == "tls" && r.Method == http.MethodGet:
 		h.getTLS(w)
 	case len(parts) == 2 && parts[0] == "tls" && parts[1] == "generate" && r.Method == http.MethodPost:

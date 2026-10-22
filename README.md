@@ -769,6 +769,9 @@ GET  /api/dhcp/leases       live DHCPv4/v6 leases + static reservations (built-i
 GET  /api/diag/dns?name=…   resolve through your upstreams
 GET  /api/update/check      check GitHub Releases for a newer version + changelog
 GET  /api/update/changelog  changelog for the newest release
+GET  /api/updates           update status for Irongrid, Dragonfly and cloudflared
+POST /api/updates/dragonfly/install  verify + install the latest Dragonfly, then restart it
+POST /api/updates/dragonfly/restart  restart Dragonfly to apply an already-installed binary
 POST /api/update/install    download + install the newest release (native installs)
 GET  /api/tls               current certificate details (subject, SANs, expiry, fingerprint)
 POST /api/tls/generate      generate a self-signed cert (hosts, key type/bits, validity) and apply it

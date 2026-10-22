@@ -413,6 +413,45 @@ func (c *Cache) L2Stats(ctx context.Context) (L2Stats, error) {
 	return s, nil
 }
 
+// ServerVersion returns the release tag of the running L2 server (e.g.
+// "v2.0.2" for Dragonfly), parsed from INFO's dragonfly_version/redis_version
+// field, or "" when it reports neither. It reflects the process that is
+// actually running, which differs from the binary on disk after an update
+// that has not been restarted yet.
+func (c *Cache) ServerVersion(ctx context.Context) (string, error) {
+	if c.client == nil {
+		return "", fmt.Errorf("no L2 cache")
+	}
+	info, err := c.client.Info(ctx, "server").Result()
+	if err != nil {
+		return "", err
+	}
+	var redisVer string
+	for line := range strings.SplitSeq(info, "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), ":")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "dragonfly_version":
+			// "df-v2.0.2" -> "v2.0.2"
+			return strings.TrimPrefix(v, "df-"), nil
+		case "redis_version":
+			redisVer = v
+		}
+	}
+	return redisVer, nil
+}
+
+// Snapshot asks the L2 server to write its dataset to disk now, so a restart
+// (for example after a binary update) reloads a current copy.
+func (c *Cache) Snapshot(ctx context.Context) error {
+	if c.client == nil {
+		return fmt.Errorf("no L2 cache")
+	}
+	return c.client.Save(ctx).Err()
+}
+
 // L1Counters returns the in-process cache layer's hit/miss counts since
 // process start (both zero when the L1 layer is disabled).
 func (c *Cache) L1Counters() (hits, misses int64) {
