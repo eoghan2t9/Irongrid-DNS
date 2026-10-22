@@ -161,6 +161,13 @@ func (h *Handler) resolveHostname(ctx context.Context, ip string) string {
 // upstreams (with resolveAny's public fallback) and returns the first PTR
 // answer, minus its trailing dot.
 func lookupPTR(ctx context.Context, h *Handler, ip string) string {
+	// Devices holding a DHCP lease are named from the lease table first;
+	// LAN addresses rarely have a PTR record upstream.
+	if h.DHCP != nil {
+		if name, ok := h.DHCP.LookupPTR(ip); ok {
+			return name
+		}
+	}
 	rev, err := dns.ReverseAddr(ip)
 	if err != nil {
 		return ""
