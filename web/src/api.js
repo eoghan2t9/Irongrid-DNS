@@ -286,6 +286,12 @@ export const api = {
   updateCheck: () => request('/api/update/check'),
   updateChangelog: () => request('/api/update/changelog'),
   updateInstall: () => request('/api/update/install', { method: 'POST' }),
+  // Combined update status for every external tool (Irongrid, Dragonfly,
+  // cloudflared). Irongrid and cloudflared install through updateInstall and
+  // tunnelCheckCloudflaredUpdate; Dragonfly has its own endpoints.
+  updates: () => request('/api/updates'),
+  updatesDragonflyInstall: () => request('/api/updates/dragonfly/install', { method: 'POST' }),
+  updatesDragonflyRestart: () => request('/api/updates/dragonfly/restart', { method: 'POST' }),
   tlsStatus: () => request('/api/tls'),
   tlsGenerate: (body) =>
     request('/api/tls/generate', {

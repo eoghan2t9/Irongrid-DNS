@@ -29,6 +29,7 @@ const Settings = lazy(() => import('./components/Settings'))
 const Users = lazy(() => import('./components/Users'))
 const Tls = lazy(() => import('./components/Tls'))
 const Changelog = lazy(() => import('./components/Changelog'))
+const Updates = lazy(() => import('./components/Updates'))
 
 // navSvg wraps every nav icon in the same stroke-only SVG shell (matching
 // the logout icon below) so they inherit color via currentColor — no glyph
@@ -213,6 +214,20 @@ const NAV = [
       <>
         <line x1="6" y1="18" x2="18" y2="6" />
         <polyline points="9 6 18 6 18 15" />
+      </>,
+    ),
+  },
+  {
+    id: 'updates',
+    label: 'Updates',
+    section: 'System',
+    desc: 'Check and install updates for Irongrid, Dragonfly and cloudflared',
+    keywords: ['upgrade', 'version', 'dragonfly', 'cloudflared', 'redis', 'cache', 'install', 'outdated'],
+    icon: navSvg(
+      <>
+        <path d="M12 3v12" />
+        <polyline points="7 10 12 15 17 10" />
+        <path d="M5 20h14" />
       </>,
     ),
   },
@@ -733,6 +748,7 @@ export default function App() {
                 {view === 'tunnel' && <Tunnel />}
                 {view === 'dhcp' && <Dhcp />}
                 {view === 'changelog' && <Changelog />}
+                {view === 'updates' && <Updates />}
                 {view === 'users' && (
                   <Users currentUsername={currentUsername()} onSessionInvalidated={handleSessionInvalidated} />
                 )}
