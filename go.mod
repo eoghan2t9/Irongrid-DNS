@@ -3,23 +3,23 @@ module github.com/eoghan2t9/Irongrid-DNS
 go 1.27
 
 require (
-	github.com/ProtonMail/go-crypto v1.4.1
-	github.com/alicebob/miniredis/v2 v2.39.0
-	github.com/andybalholm/brotli v1.2.4
+	github.com/ProtonMail/go-crypto v1.5.2
+	github.com/alicebob/miniredis/v2 v2.40.0
+	github.com/andybalholm/brotli v1.2.6
 	github.com/charmbracelet/huh v1.0.0
 	github.com/creack/pty v1.1.24
 	github.com/go-acme/lego/v4 v4.35.2
 	github.com/goccy/go-yaml v1.19.2
-	github.com/insomniacslk/dhcp v0.0.0-20260901064844-234b97448fae
-	github.com/klauspost/cpuid/v2 v2.4.0
+	github.com/insomniacslk/dhcp v0.0.0-20261014062924-c6bb46ad3f3a
+	github.com/klauspost/cpuid/v2 v2.4.1
 	github.com/miekg/dns v1.1.73
 	github.com/quic-go/quic-go v0.63.0
-	github.com/redis/go-redis/v9 v9.22.0
-	golang.org/x/crypto v0.57.0
-	golang.org/x/net v0.60.0
-	golang.org/x/sync v0.23.0
-	golang.org/x/sys v0.48.0
-	golang.org/x/term v0.46.0
+	github.com/redis/go-redis/v9 v9.23.0
+	golang.org/x/crypto v0.58.0
+	golang.org/x/net v0.61.0
+	golang.org/x/sync v0.24.0
+	golang.org/x/sys v0.49.0
+	golang.org/x/term v0.47.0
 )
 
 require (
@@ -73,13 +73,13 @@ require (
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
 	github.com/xo/terminfo v1.0.0 // indirect
 	github.com/yuin/gopher-lua v1.1.2 // indirect
-	go.uber.org/atomic v1.11.0 // indirect
+	go.uber.org/atomic v1.12.0 // indirect
 	go.uber.org/mock v0.6.0 // indirect
 	golang.org/x/mod v0.41.0 // indirect
 	golang.org/x/oauth2 v0.36.0 // indirect
-	golang.org/x/telemetry v0.0.0-20260824150023-1f5465a7b7fb // indirect
-	golang.org/x/text v0.42.0 // indirect
-	golang.org/x/tools v0.49.0 // indirect
+	golang.org/x/telemetry v0.0.0-20260924152758-ed294f943157 // indirect
+	golang.org/x/text v0.43.0 // indirect
+	golang.org/x/tools v0.51.0 // indirect
 	golang.org/x/vuln v1.7.0 // indirect
 )
 
