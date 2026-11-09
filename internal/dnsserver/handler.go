@@ -645,7 +645,17 @@ func (h *Handler) SetCookies(on bool) {
 }
 
 func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) {
-	w = &statsResponseWriter{ResponseWriter: w, writeErrors: &h.Stats.WriteErrors}
+	sw := getStatsWriter(w, &h.Stats.WriteErrors)
+	w = sw
+	// retained is set when a goroutine outlives serve() still holding w; the
+	// wrapper must then not be recycled. Registered before the recover defer
+	// below so it runs after it (which still writes through w).
+	retained := false
+	defer func() {
+		if !retained {
+			putStatsWriter(sw)
+		}
+	}()
 	// Every listener (UDP/TCP/DoT/DoH/DoH3/DoQ) funnels into this one
 	// function in this one process — an unrecovered panic anywhere in the
 	// pipeline below (filter engine, cache, upstream, DHCP host lookups, …)
@@ -1239,6 +1249,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 				_ = h.write(w, out, r, proto)
 				putMsg(m) // fresh per-read decode, safe once written
 			}
+			retained = true // this goroutine keeps using w after serve() returns
 			go func() {
 				defer recoverPanic("background stale-race resolve")
 				defer cancel()
@@ -1571,6 +1582,27 @@ func (h *Handler) finishResolve(
 type statsResponseWriter struct {
 	dns.ResponseWriter
 	writeErrors *atomic.Int64
+}
+
+// statsWriterPool recycles the per-query statsResponseWriter wrapper: serve()
+// used to heap-allocate one for every query. The wrapper is request-scoped
+// like the dns.ResponseWriter it wraps, so it is released when serve() returns
+// — except on the serve-stale race path, where a background goroutine keeps
+// using it (see serve), which simply leaves it to the GC.
+var statsWriterPool = sync.Pool{
+	New: func() any { return new(statsResponseWriter) },
+}
+
+func getStatsWriter(w dns.ResponseWriter, errs *atomic.Int64) *statsResponseWriter {
+	sw := statsWriterPool.Get().(*statsResponseWriter)
+	sw.ResponseWriter, sw.writeErrors = w, errs
+	return sw
+}
+
+func putStatsWriter(sw *statsResponseWriter) {
+	// Clear the references so an idle pooled wrapper never pins a connection.
+	sw.ResponseWriter, sw.writeErrors = nil, nil
+	statsWriterPool.Put(sw)
 }
 
 func (w *statsResponseWriter) WriteMsg(m *dns.Msg) error {
