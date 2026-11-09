@@ -247,6 +247,74 @@ func TestAddIPRemoveIPIptables(t *testing.T) {
 	}
 }
 
+// TestAddIPBeforeApplyIsQueued reproduces the boot race: a honeypot hit calls
+// AddIP while country data is still downloading, before Apply created the
+// sets. It must not hit the firewall (the set doesn't exist, which used to
+// log "firewall add blocked client failed") and must be installed by the
+// next Apply instead of being lost.
+func TestAddIPBeforeApplyIsQueued(t *testing.T) {
+	t.Parallel()
+	f := &fakeRunner{available: map[string]bool{"nft": true}}
+	m := NewWithRunner(f)
+	if err := m.AddIP("92.255.104.7"); err != nil {
+		t.Fatalf("AddIP before Apply must queue, got error: %v", err)
+	}
+	if len(f.cmds) != 0 {
+		t.Fatalf("AddIP before Apply ran firewall commands: %v", f.cmds)
+	}
+	if _, err := m.Apply(nil, nil, nil, t.TempDir()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if !strings.Contains(strings.Join(f.cmds, "\n"), "92.255.104.7") {
+		t.Errorf("queued IP missing from applied rules: %v", f.cmds)
+	}
+	// Once applied, AddIP goes straight to the set again.
+	if err := m.AddIP("198.51.100.7"); err != nil {
+		t.Fatalf("AddIP after Apply: %v", err)
+	}
+	if got := f.last(); got != "nft add element inet irongrid geo_v4 { 198.51.100.7 }" {
+		t.Errorf("post-Apply add = %q", got)
+	}
+}
+
+// TestRemoveIPDropsQueuedEntry: unblocking an IP that is still queued must
+// stop the next Apply from installing it.
+func TestRemoveIPDropsQueuedEntry(t *testing.T) {
+	t.Parallel()
+	f := &fakeRunner{available: map[string]bool{"nft": true}}
+	m := NewWithRunner(f)
+	_ = m.AddIP("92.255.104.7")
+	_ = m.RemoveIP("92.255.104.7")
+	n := len(f.cmds) // RemoveIP's own best-effort delete is before this point
+	if _, err := m.Apply(nil, nil, nil, t.TempDir()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if strings.Contains(strings.Join(f.cmds[n:], "\n"), "92.255.104.7") {
+		t.Errorf("unblocked IP was still installed: %v", f.cmds[n:])
+	}
+}
+
+// TestClearResetsApplied: after Clear the sets are gone, so AddIP must queue
+// again rather than fail against a missing table.
+func TestClearResetsApplied(t *testing.T) {
+	t.Parallel()
+	f := &fakeRunner{available: map[string]bool{"nft": true}}
+	m := NewWithRunner(f)
+	if _, err := m.Apply(nil, nil, nil, t.TempDir()); err != nil {
+		t.Fatalf("Apply: %v", err)
+	}
+	if err := m.Clear(); err != nil {
+		t.Fatalf("Clear: %v", err)
+	}
+	n := len(f.cmds)
+	if err := m.AddIP("198.51.100.7"); err != nil {
+		t.Fatalf("AddIP after Clear: %v", err)
+	}
+	if len(f.cmds) != n {
+		t.Errorf("AddIP after Clear touched the firewall: %v", f.cmds[n:])
+	}
+}
+
 func TestApplyNftNoData(t *testing.T) {
 	t.Parallel()
 	f := &fakeRunner{available: map[string]bool{"nft": true}}

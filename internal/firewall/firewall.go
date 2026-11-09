@@ -81,6 +81,11 @@ type Manager struct {
 	mu      sync.Mutex
 	runner  Runner
 	backend string // "nft" | "iptables"; empty = auto-detect on first use
+	applied bool   // true once Apply installed the sets (cleared by Clear)
+	// pending holds client blocks requested via AddIP before the sets
+	// existed (boot: honeypot hits can land while country data is still
+	// downloading). The next Apply folds them into the drop set.
+	pending []string
 }
 
 // New returns a Manager backed by the system's binaries.
@@ -141,6 +146,7 @@ func (m *Manager) Apply(countries, allowlist, ipBlocks []string, dir string) (st
 	if len(countries) > 0 && len(countryV4) == 0 && len(countryV6) == 0 && len(ipBlocks) == 0 && len(asnBlock4) == 0 && len(asnBlock6) == 0 {
 		return backend, fmt.Errorf("no cached country CIDRs found in %s — refresh geo data first", dir)
 	}
+	ipBlocks = append(append([]string(nil), ipBlocks...), m.pending...)
 	b4, b6 := classifyIPs(ipBlocks)
 	v4 := append(countryV4, b4...)
 	v4 = append(v4, asnBlock4...)
@@ -151,11 +157,17 @@ func (m *Manager) Apply(countries, allowlist, ipBlocks []string, dir string) (st
 	a6 = append(a6, asnAllow6...)
 	switch backend {
 	case "nft":
-		return backend, m.applyNft(v4, v6, a4, a6)
+		err = m.applyNft(v4, v6, a4, a6)
 	case "iptables":
-		return backend, m.applyIptables(v4, v6, a4, a6)
+		err = m.applyIptables(v4, v6, a4, a6)
+	default:
+		return backend, fmt.Errorf("unsupported backend %q", backend)
 	}
-	return backend, fmt.Errorf("unsupported backend %q", backend)
+	if err == nil {
+		m.applied = true
+		m.pending = nil
+	}
+	return backend, err
 }
 
 // AddIP installs a single blocked client IP/CIDR into the drop set without
@@ -163,7 +175,9 @@ func (m *Manager) Apply(countries, allowlist, ipBlocks []string, dir string) (st
 // its next connection is dropped immediately. The sets must already exist
 // (Apply ran once); errors (no backend, or the geo feature was never
 // applied) are returned for the caller to log — the DNS-level REFUSED still
-// enforces the block either way.
+// enforces the block either way. If Apply hasn't installed the sets yet
+// (boot, while geo data downloads) the entry is queued and installed by the
+// next Apply rather than failing against a table that doesn't exist.
 func (m *Manager) AddIP(entry string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -174,6 +188,10 @@ func (m *Manager) AddIP(entry string) error {
 	ip, v6, err := parseIPEntry(entry)
 	if err != nil {
 		return err
+	}
+	if !m.applied {
+		m.pending = append(m.pending, ip)
+		return nil
 	}
 	switch backend {
 	case "nft":
@@ -205,6 +223,13 @@ func (m *Manager) RemoveIP(entry string) error {
 	if err != nil {
 		return err
 	}
+	kept := m.pending[:0]
+	for _, p := range m.pending {
+		if p != ip {
+			kept = append(kept, p)
+		}
+	}
+	m.pending = kept
 	switch backend {
 	case "nft":
 		set := "geo_v4"
@@ -250,6 +275,8 @@ func (m *Manager) Clear() error {
 	if err != nil {
 		return err
 	}
+	m.applied = false
+	m.pending = nil
 	switch backend {
 	case "nft":
 		return m.clearNft()
