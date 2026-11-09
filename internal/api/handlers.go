@@ -30,10 +30,15 @@ import (
 // Handler implements the REST endpoints. It is created by main and injected
 // into the router.
 type Handler struct {
-	cfgMu      sync.Mutex // guards Cfg mutations + SaveConfig
-	Cfg        *config.Config
-	ConfigPath string
-	SaveConfig func() error
+	cfgMu sync.Mutex // guards Cfg mutations + SaveConfig
+	// tunnelPending is set when a save changed the tunnel config. An in-place
+	// reload can't apply it (the managed cloudflared process only picks it up
+	// on a real restart), so reloadConfig keeps reporting it until then. It
+	// resets with the process, which is exactly when it stops being pending.
+	tunnelPending atomic.Bool
+	Cfg           *config.Config
+	ConfigPath    string
+	SaveConfig    func() error
 	// Reload rebinds listeners, cache, TLS and the web server from the
 	// current in-memory config. Wired up by main; nil when unavailable.
 	Reload func() error

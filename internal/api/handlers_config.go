@@ -647,6 +647,14 @@ func rotateSecretIfUsersChanged(oldUsers, newUsers []config.WebUser, oldSecret s
 
 // applyPayload validates a submitted config, live-applies the hot parts and
 // persists it to disk. It returns the list of sections that need a restart.
+// carryOverUneditable copies into cfg the settings that exist in the config
+// file but are not part of the dashboard's config payload, so a save neither
+// wipes them from memory/irongrid.yaml nor reports them as changed. cfg is the
+// config freshly built from a payload; running is the live one.
+func carryOverUneditable(cfg, running *config.Config) {
+	cfg.Server.AllowFrom = running.Server.AllowFrom
+}
+
 func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	parseDur := func(s string) (time.Duration, error) {
 		if strings.TrimSpace(s) == "" {
@@ -983,6 +991,10 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	h.cfgMu.Lock()
 	defer h.cfgMu.Unlock()
 
+	// Carry over what the dashboard payload cannot edit, before the diff and
+	// before *h.Cfg is replaced below.
+	carryOverUneditable(cfg, h.Cfg)
+
 	// Diff against the running config to report restart-required sections.
 	restart := []string{}
 	if !reflect.DeepEqual(h.Cfg.Server, cfg.Server) {
@@ -1006,6 +1018,7 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	}
 	if !reflect.DeepEqual(h.Cfg.Tunnel, cfg.Tunnel) {
 		restart = append(restart, "tunnel")
+		h.tunnelPending.Store(true) // an in-place reload can't apply it; see reloadConfig
 	}
 	// DHCP is live-applied below (SetConfig + listener restart when the
 	// interface/enable state changed), so a pure pool-option tweak doesn't
@@ -1144,9 +1157,13 @@ func (h *Handler) reloadConfig(w http.ResponseWriter) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
-	// Sections the in-process reload does not handle still need a restart.
+	// Sections the in-process reload does not handle still need a restart —
+	// but only when they actually changed since the process started. Keying
+	// this off "the tunnel is configured" (e.g. a leftover token on a
+	// disabled tunnel) made every reload report it, so the dashboard's
+	// "Apply & restart" prompt returned after each click and never cleared.
 	remaining := []string{}
-	if h.Cfg.Tunnel.Enabled || h.Cfg.Tunnel.Token != "" || h.Cfg.Tunnel.QuickTunnel {
+	if h.tunnelPending.Load() {
 		remaining = append(remaining, "tunnel")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
