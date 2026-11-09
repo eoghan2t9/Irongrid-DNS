@@ -236,7 +236,8 @@ export default function QueryLog() {
                 <th>Domain</th>
                 <th>Type</th>
                 <th>Action</th>
-                <th>Reason / Upstream</th>
+                <th>Reason</th>
+                <th>Upstream</th>
                 <th>ms</th>
                 <th className="actions-cell">Actions</th>
               </tr>
@@ -286,7 +287,10 @@ export default function QueryLog() {
                   <td>
                     <span className={`badge badge-${e.action}`}>{ACTION_LABEL[e.action] || e.action}</span>
                   </td>
-                  <td className="dim small">{e.reason || e.upstream || ''}</td>
+                  <td className="dim small">{e.reason || ''}</td>
+                  <td className="mono dim small" title={e.upstream || 'No upstream used (answered locally or from cache)'}>
+                    {e.upstream || '—'}
+                  </td>
                   <td className="mono dim">{e.response_time_ms}</td>
                   <td className="actions-cell">
                     {e.action === 'blocked' && (
