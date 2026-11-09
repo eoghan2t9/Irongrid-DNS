@@ -121,7 +121,7 @@ export default function ServerTab({ f }) {
           )}
           {field(
             'Resolution strategy',
-            'how multiple upstreams are queried — race queries them all at once and uses the fastest answer; sequential tries them in list order, failing over to the next when one errors or answers SERVFAIL',
+            'how multiple upstreams are queried — race queries them all at once and uses the fastest answer; sequential tries them in list order, failing over to the next when one errors or answers SERVFAIL; round robin sends each query to the next upstream in turn (spreading load, with the same failover)',
             <select
               className="input"
               value={cfg.upstream_mode || 'race'}
@@ -129,6 +129,7 @@ export default function ServerTab({ f }) {
             >
               <option value="race">Race — all at once, fastest wins</option>
               <option value="sequential">Sequential — one at a time, in order</option>
+              <option value="roundrobin">Round robin — spread queries across upstreams</option>
             </select>,
           )}
         </div>

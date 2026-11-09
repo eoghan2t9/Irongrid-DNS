@@ -29,11 +29,13 @@ type Config struct {
 	// UpstreamMode decides how they are queried for each resolution:
 	// "race" (default) queries them all concurrently and returns the fastest
 	// successful answer; "sequential" tries them in list order, failing over
-	// to the next only when the previous errors or answers SERVFAIL.
+	// to the next only when the previous errors or answers SERVFAIL;
+	// "roundrobin" load-balances, sending each resolution to the next
+	// upstream in turn (failing over to the following ones on error/SERVFAIL).
 	Upstreams []string `yaml:"upstreams"`
-	// UpstreamMode is the multi-upstream resolution strategy ("race" or
-	// "sequential"); empty defaults to "race". It is global — client groups
-	// that override the upstream list use the same strategy.
+	// UpstreamMode is the multi-upstream resolution strategy ("race",
+	// "sequential" or "roundrobin"); empty defaults to "race". It is global —
+	// client groups that override the upstream list use the same strategy.
 	UpstreamMode string `yaml:"upstream_mode"`
 	// UpstreamRoutes is conditional (split-horizon) forwarding: queries for
 	// a domain subtree are sent to that route's own upstream set instead of
@@ -994,9 +996,9 @@ func (c *Config) validate() error {
 	switch c.UpstreamMode {
 	case "":
 		c.UpstreamMode = "race"
-	case "race", "sequential":
+	case "race", "sequential", "roundrobin":
 	default:
-		return fmt.Errorf("upstream_mode: unsupported mode %q (supported: race, sequential)", c.UpstreamMode)
+		return fmt.Errorf("upstream_mode: unsupported mode %q (supported: race, sequential, roundrobin)", c.UpstreamMode)
 	}
 	// Conditional routes: normalize the domain (lowercase, no trailing dot)
 	// and require at least one non-empty upstream per route.

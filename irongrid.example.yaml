@@ -134,6 +134,10 @@ upstreams:
 #               answer wins, hiding slow or down resolvers
 #   sequential  try them in list order, failing over to the next only when
 #               the previous errors or answers SERVFAIL
+#   roundrobin  load-balance: each query goes to the next upstream in turn
+#               (one server per query, so upstream traffic is spread instead
+#               of tripled), failing over to the following ones when that
+#               server errors or answers SERVFAIL
 # upstream_mode: race
 
 # Proactive cache warmer: pre-caches the answers for every domain your

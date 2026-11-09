@@ -25,6 +25,13 @@ func TestValidateUpstreamMode(t *testing.T) {
 	if c.UpstreamMode != "sequential" {
 		t.Fatalf("sequential upstream_mode was rewritten to %q", c.UpstreamMode)
 	}
+	c.UpstreamMode = "roundrobin"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("roundrobin upstream_mode: %v", err)
+	}
+	if c.UpstreamMode != "roundrobin" {
+		t.Fatalf("roundrobin upstream_mode was rewritten to %q", c.UpstreamMode)
+	}
 	c.UpstreamMode = "parallel"
 	if err := c.Validate(); err == nil {
 		t.Fatal("unsupported upstream_mode accepted")

@@ -15,6 +15,7 @@ import (
 	"math/bits"
 	"net"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,11 +41,20 @@ import (
 // upstream_mode). Race (default) queries every available upstream
 // concurrently and uses the fastest successful answer; sequential tries them
 // in list order, failing over to the next only when the previous errors or
-// answers SERVFAIL.
+// answers SERVFAIL; round-robin load-balances, sending each query to the next
+// upstream in turn (and failing over to the following ones if it errors or
+// answers SERVFAIL).
 const (
 	UpstreamModeRace       = "race"
 	UpstreamModeSequential = "sequential"
+	UpstreamModeRoundRobin = "roundrobin"
 )
+
+// rrCounter drives round-robin rotation: every query advances it by one, so
+// consecutive queries start on consecutive upstreams. It is process-wide
+// rather than per-handler, which keeps the spread even across client groups
+// that share the same upstream list.
+var rrCounter atomic.Uint64
 
 // Stats aggregates runtime counters exposed via the API.
 type Stats struct {
@@ -180,7 +190,7 @@ type Handler struct {
 // snapshot can read it without any lock.
 type handlerSettings struct {
 	Upstreams    []*upstream.Upstream
-	UpstreamMode string // "race" or "sequential" (see UpstreamModeRace/Sequential)
+	UpstreamMode string // "race", "sequential" or "roundrobin" (see UpstreamMode*)
 	// UpstreamRoutes is conditional (split-horizon) routing: per-domain
 	// upstream sets that win over the global forwarders and client-group
 	// upstream overrides (the most specific intent wins). Set via
@@ -2193,7 +2203,19 @@ func queryUpstreams(ctx context.Context, upstreams []*upstream.Upstream, mode st
 		logCooldownOnce("all upstreams in failure cooldown, query refused", "upstreams", len(upstreams))
 		return nil, "", fmt.Errorf("all upstreams in failure cooldown")
 	}
-	if mode == UpstreamModeSequential {
+	switch mode {
+	case UpstreamModeSequential:
+		return sequentialUpstreams(ctx, avail, r)
+	case UpstreamModeRoundRobin:
+		// Rotate so this query's first choice is the next upstream in turn;
+		// the rest of the rotated list is its failover order. avail is a
+		// fresh per-call slice, so rotating it in place is safe. The counter
+		// advances over the *available* upstreams, so a server in cooldown
+		// simply drops out of the rotation instead of leaving a gap.
+		start := int((rrCounter.Add(1) - 1) % uint64(len(avail)))
+		slices.Reverse(avail[:start]) // rotate left by start, in place
+		slices.Reverse(avail[start:])
+		slices.Reverse(avail)
 		return sequentialUpstreams(ctx, avail, r)
 	}
 	return raceUpstreams(ctx, avail, r)

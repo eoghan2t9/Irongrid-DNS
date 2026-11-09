@@ -22,7 +22,7 @@ import (
 type configPayload struct {
 	Server         serverPayload          `json:"server"`
 	Upstreams      []string               `json:"upstreams"`
-	UpstreamMode   string                 `json:"upstream_mode"` // "race" | "sequential"
+	UpstreamMode   string                 `json:"upstream_mode"` // "race" | "sequential" | "roundrobin"
 	UpstreamRoutes []upstreamRoutePayload `json:"upstream_routes"`
 	Cache          cachePayload           `json:"cache"`
 	TLS            tlsPayload             `json:"tls"`

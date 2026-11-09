@@ -220,6 +220,50 @@ func startSERVFAILServer(t *testing.T) string {
 	return pc.LocalAddr().String()
 }
 
+// TestRoundRobinSpreadsQueries verifies round-robin mode spreads consecutive
+// queries evenly across the upstreams — each query goes to exactly one server
+// (race sends every query to every server).
+func TestRoundRobinSpreadsQueries(t *testing.T) {
+	var hits [3]atomic.Int32
+	ups := make([]*upstream.Upstream, len(hits))
+	for i := range hits {
+		addr := startUDPCountingServer(t, fmt.Sprintf("10.0.0.%d", i+1), &hits[i])
+		ups[i] = &upstream.Upstream{Transport: upstream.UDP, Addr: addr}
+	}
+	const queries = 30
+	for range queries {
+		m := new(dns.Msg)
+		m.SetQuestion("example.com.", dns.TypeA)
+		if _, _, err := queryUpstreams(context.Background(), ups, UpstreamModeRoundRobin, m); err != nil {
+			t.Fatalf("queryUpstreams: %v", err)
+		}
+	}
+	want := int32(queries / len(hits))
+	for i := range hits {
+		if got := hits[i].Load(); got != want {
+			t.Errorf("upstream %d served %d queries, want %d (even spread)", i, got, want)
+		}
+	}
+}
+
+// TestRoundRobinFailsOver verifies a round-robin turn that lands on a failing
+// upstream still gets a real answer from the next one, whichever server the
+// rotation starts on.
+func TestRoundRobinFailsOver(t *testing.T) {
+	ups := []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: startSERVFAILServer(t)},
+		{Transport: upstream.UDP, Addr: startUDPTestServer(t, "1.1.1.1", 0)},
+	}
+	for i := range 10 {
+		m := new(dns.Msg)
+		m.SetQuestion("example.com.", dns.TypeA)
+		resp, _, err := queryUpstreams(context.Background(), ups, UpstreamModeRoundRobin, m)
+		if err != nil || resp == nil || resp.Rcode != dns.RcodeSuccess || len(resp.Answer) == 0 {
+			t.Fatalf("query %d: resp=%v err=%v, want a real answer via failover", i, resp, err)
+		}
+	}
+}
+
 // TestHandlerSequentialUpstreamFailover verifies the sequential strategy
 // fails over: a primary that answers SERVFAIL is skipped and the backup's
 // real answer is returned (under the default race strategy the first SERVFAIL
