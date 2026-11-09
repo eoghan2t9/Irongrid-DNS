@@ -1163,7 +1163,15 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			_ = h.writeRaw(w, hit, r, proto)
 			return
 		}
-		if len(hit.Raw) > 0 {
+		// A stale entry is kept as the serve-stale fallback only when it
+		// holds real data. A stale cached SERVFAIL (a dead domain's
+		// negatively-cached failure) protects nothing: keeping it made every
+		// retry re-resolve upstream and then answer from the stale SERVFAIL
+		// without ever refreshing it, for the whole stale window. Dropping it
+		// lets the retry resolve once and cache the fresh result, so the
+		// retries after it are plain cache hits. (A stale NXDOMAIN/NODATA is
+		// real data and is still kept.)
+		if len(hit.Raw) > 0 && !(hit.Negative && packedRcode(hit.Raw) == dns.RcodeServerFailure) {
 			stale = hit
 		}
 	}

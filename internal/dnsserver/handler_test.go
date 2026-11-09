@@ -584,6 +584,94 @@ func TestHandlerCoalescesBackgroundResolutions(t *testing.T) {
 	}
 }
 
+// startCountingSERVFAILServer runs a UDP DNS server that answers every query
+// with SERVFAIL and counts the queries it receives — a dead domain's upstream.
+func startCountingSERVFAILServer(t *testing.T, hits *atomic.Int32) string {
+	t.Helper()
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		hits.Add(1)
+		m := new(dns.Msg)
+		m.SetReply(r)
+		m.Rcode = dns.RcodeServerFailure
+		_ = w.WriteMsg(m)
+	})}
+	go func() { _ = srv.ActivateAndServe() }()
+	t.Cleanup(func() { _ = srv.Shutdown() })
+	return pc.LocalAddr().String()
+}
+
+// TestHandlerStaleServfailIsRefreshedNotReprobed: a domain that SERVFAILs
+// everywhere is negatively cached as SERVFAIL. Once that entry went stale,
+// every retry re-resolved it upstream and was answered from the stale
+// SERVFAIL without refreshing the entry — so a client retrying a dead domain
+// twice a second paid a full upstream resolution per query for the whole
+// stale window (5 minutes by default). A stale SERVFAIL protects no real
+// data, so the retry must re-resolve once and cache the fresh result.
+func TestHandlerStaleServfailIsRefreshedNotReprobed(t *testing.T) {
+	var hits atomic.Int32
+	addr := startCountingSERVFAILServer(t, &hits)
+	c := cache.NewLocalOnly(time.Hour, time.Second, 1024, 5*time.Minute)
+	h := NewHandler(filter.NewEngine(), c, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: addr},
+	}, nil, "nxdomain", 600, 5*time.Second)
+	query := func() *dns.Msg {
+		m := new(dns.Msg)
+		m.SetQuestion("dead.example.net.", dns.TypeA)
+		fw := &fakeWriter{}
+		h.ServeDNS(fw, m)
+		return fw.msg
+	}
+
+	if got := query(); got == nil || got.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("first query = %v, want SERVFAIL", got)
+	}
+	time.Sleep(1200 * time.Millisecond) // the cached SERVFAIL (1s) is now stale
+	if got := query(); got == nil || got.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("refresh query = %v, want SERVFAIL", got)
+	}
+	time.Sleep(150 * time.Millisecond) // background cache write
+	for range 5 {
+		if got := query(); got == nil || got.Rcode != dns.RcodeServerFailure {
+			t.Fatalf("retry = %v, want SERVFAIL", got)
+		}
+	}
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("upstream saw %d queries, want 2 (initial + one refresh): "+
+			"a stale SERVFAIL is being re-probed on every retry", got)
+	}
+}
+
+// TestHandlerStaleNXDOMAINStillServedWhenUpstreamServfails: only a stale
+// SERVFAIL is discarded. A stale NXDOMAIN is real data and must still be
+// served when re-resolution fails (RFC 8767).
+func TestHandlerStaleNXDOMAINStillServedWhenUpstreamServfails(t *testing.T) {
+	var hits atomic.Int32
+	addr := startCountingSERVFAILServer(t, &hits)
+	c := cache.NewLocalOnly(time.Hour, time.Second, 1024, 5*time.Minute)
+	q := dns.Question{Name: "gone.example.net.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	nx := new(dns.Msg)
+	nx.SetQuestion(q.Name, q.Qtype)
+	nx.Response = true
+	nx.Rcode = dns.RcodeNameError
+	c.SetNegative(t.Context(), q, nx, time.Second)
+	h := NewHandler(filter.NewEngine(), c, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: addr},
+	}, nil, "nxdomain", 600, 5*time.Second)
+
+	time.Sleep(1200 * time.Millisecond) // the cached NXDOMAIN is now stale
+	m := new(dns.Msg)
+	m.SetQuestion(q.Name, q.Qtype)
+	fw := &fakeWriter{}
+	h.ServeDNS(fw, m)
+	if fw.msg == nil || fw.msg.Rcode != dns.RcodeNameError {
+		t.Fatalf("answer = %v, want the stale NXDOMAIN while the upstream SERVFAILs", fw.msg)
+	}
+}
+
 // TestHandlerDoesNotCoalesceDistinctQuestions verifies the request pool keys
 // on the full question: concurrent queries for different domains each reach
 // the upstream rather than sharing a resolution.
