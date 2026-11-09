@@ -5,12 +5,19 @@ import (
 	"strings"
 
 	"golang.org/x/net/idna"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 )
 
 // normalizeDomain lowercases, strips the trailing dot and converts unicode
 // (IDN) domains to their ASCII (punycode) representation so matching is
 // consistent with the wire format used by miekg/dns.
 func normalizeDomain(d string) string {
+	// Fast path: wire names are almost always already lower-case ASCII with no
+	// trailing dot, in which case every step below is a no-op.
+	if dnsname.IsCanonical(d) {
+		return d
+	}
 	d = strings.TrimSpace(d)
 	d = strings.TrimSuffix(d, ".")
 	d = strings.ToLower(d)
