@@ -1200,10 +1200,31 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	// is invisible to the client.
 	upstreamQuery.Id = dns.Id()
 
-	// Resolve on its own goroutine so a stale cache entry (RFC 8767) can
-	// race it below instead of always waiting the full timeout out —
-	// resolveUpstreams itself is unchanged, still governed by ctx's
-	// deadline either way.
+	// No stale entry to race against (the overwhelmingly common case): there
+	// is nothing to select on, so resolve inline instead of paying for a
+	// goroutine, a channel and a result struct on every cache miss. Running
+	// on serve()'s own goroutine also puts resolveUpstreams under serve()'s
+	// panic recovery. resolveUpstreams is unchanged, still governed by
+	// ctx's deadline.
+	if len(stale.Raw) == 0 {
+		defer cancel()
+		resp, usedUp, err := h.resolveUpstreams(ctx, r, q, upstreams, upstreamMode, upstreamQuery)
+		h.finishResolve(w, r, q, client, qname, proto, start, resp, usedUp, err, stale, s, engine, domainWhitelisted, false)
+		return
+	}
+
+	// Serve-stale race (RFC 8767): a client shouldn't wait nearly as long for
+	// a resolution attempt as it would with no cache at all when a
+	// perfectly-serviceable (if expired) answer already sits in cache —
+	// that defeats the resiliency RFC 8767 exists for. Resolve on its own
+	// goroutine so it can race staleGrace below instead of always waiting
+	// the full timeout out. If the upstream hasn't answered in time, serve
+	// the stale answer now and let the resolution keep running:
+	// finishResolve still applies to whatever it eventually returns
+	// (DNSSEC/blocking/caching), just without writing to the client a second
+	// time (skipWrite) — so the cache still benefits from a fresh answer, or
+	// a genuine failure still gets logged, even though the client already
+	// has its response.
 	type resolveOutcome struct {
 		resp   *dns.Msg
 		usedUp string
@@ -1214,54 +1235,33 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		resp, usedUp, err := h.resolveUpstreams(ctx, r, q, upstreams, upstreamMode, upstreamQuery)
 		resCh <- resolveOutcome{resp, usedUp, err}
 	}()
-
-	// Serve-stale race: a client shouldn't wait nearly as long for a
-	// resolution attempt as it would with no cache at all when a
-	// perfectly-serviceable (if expired) answer already sits in cache —
-	// that defeats the resiliency RFC 8767 exists for. If the upstream
-	// hasn't answered within staleGrace, serve the stale answer now and
-	// let the resolution above keep running: finishResolve still applies
-	// to whatever it eventually returns (DNSSEC/blocking/caching), just
-	// without writing to the client a second time (skipWrite) — so the
-	// cache still benefits from a fresh answer, or a genuine failure still
-	// gets logged, even though the client already has its response. Only
-	// engaged when a stale entry actually exists, so the overwhelmingly
-	// common case (no stale answer available) never allocates the timer
-	// or takes this branch at all.
-	if len(stale.Raw) > 0 {
-		timer := time.NewTimer(staleGrace(timeout))
-		select {
-		case out := <-resCh:
-			timer.Stop()
-			cancel()
-			h.finishResolve(w, r, q, client, qname, proto, start, out.resp, out.usedUp, out.err, stale, s, engine, domainWhitelisted, false)
-			return
-		case <-timer.C:
-			if m := stale.Msg(); m != nil {
-				m.Id = r.Id
-				capTTL(m, staleServeTTL)
-				h.Stats.Cached.Add(1)
-				h.record(client, qname, q, "cached", "stale", "", start, m)
-				out := m
-				if r.IsEdns0() != nil {
-					out = attachEDE(m, dns.ExtendedErrorCodeStaleAnswer, "")
-				}
-				_ = h.write(w, out, r, proto)
-				putMsg(m) // fresh per-read decode, safe once written
+	timer := time.NewTimer(staleGrace(timeout))
+	select {
+	case out := <-resCh:
+		timer.Stop()
+		cancel()
+		h.finishResolve(w, r, q, client, qname, proto, start, out.resp, out.usedUp, out.err, stale, s, engine, domainWhitelisted, false)
+	case <-timer.C:
+		if m := stale.Msg(); m != nil {
+			m.Id = r.Id
+			capTTL(m, staleServeTTL)
+			h.Stats.Cached.Add(1)
+			h.record(client, qname, q, "cached", "stale", "", start, m)
+			out := m
+			if r.IsEdns0() != nil {
+				out = attachEDE(m, dns.ExtendedErrorCodeStaleAnswer, "")
 			}
-			retained = true // this goroutine keeps using w after serve() returns
-			go func() {
-				defer recoverPanic("background stale-race resolve")
-				defer cancel()
-				out := <-resCh
-				h.finishResolve(w, r, q, client, qname, proto, start, out.resp, out.usedUp, out.err, stale, s, engine, domainWhitelisted, true)
-			}()
-			return
+			_ = h.write(w, out, r, proto)
+			putMsg(m) // fresh per-read decode, safe once written
 		}
+		retained = true // this goroutine keeps using w after serve() returns
+		go func() {
+			defer recoverPanic("background stale-race resolve")
+			defer cancel()
+			out := <-resCh
+			h.finishResolve(w, r, q, client, qname, proto, start, out.resp, out.usedUp, out.err, stale, s, engine, domainWhitelisted, true)
+		}()
 	}
-	defer cancel()
-	out := <-resCh
-	h.finishResolve(w, r, q, client, qname, proto, start, out.resp, out.usedUp, out.err, stale, s, engine, domainWhitelisted, false)
 }
 
 // staleGrace bounds how long serve() waits for a fresh upstream answer
