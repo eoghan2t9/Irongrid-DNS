@@ -43,3 +43,19 @@ func TestPackBufPoolGrows(t *testing.T) {
 	}
 	t.Fatal("pool never returned the larger buffer — put did not preserve capacity")
 }
+
+// TestPackBufPoolNoAllocs pins the steady-state cost of a get/put cycle at
+// zero heap allocations. putPackBuf used to Put(&buf), which moves the slice
+// header to the heap on every call — one allocation per DoH/DoQ/raw-cache
+// response.
+func TestPackBufPoolNoAllocs(t *testing.T) {
+	// Warm the pools so the measurement is steady state.
+	for range 8 {
+		putPackBuf(getPackBuf())
+	}
+	if n := testing.AllocsPerRun(1000, func() {
+		putPackBuf(getPackBuf())
+	}); n != 0 {
+		t.Fatalf("get/put cycle allocated %v times, want 0", n)
+	}
+}
