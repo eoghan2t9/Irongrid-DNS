@@ -2,7 +2,11 @@ package filter
 
 import (
 	"regexp"
+	"regexp/syntax"
+	"slices"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/net/idna"
 
@@ -129,6 +133,189 @@ func hasDomainModifier(modifiers string) bool {
 type RegexRule struct {
 	Re   *regexp.Regexp
 	List string
+
+	// minLen, lits and foldLits are cheap necessary conditions derived from
+	// the pattern (see analyzeRegex): any name the regex matches is at least
+	// minLen bytes long, contains every string in lits, and contains every
+	// string in foldLits ignoring ASCII case. DecideDomain runs every regex on every
+	// non-blocked query, and RE2 costs ~65 ns per rule even when it fails at
+	// once, so checking these first skips almost all of them. They only ever
+	// rule a name OUT, never in, so a decision can't change.
+	minLen   int
+	lits     []string
+	foldLits []string
+}
+
+// mayMatch reports whether qname could possibly match the rule. A false
+// result guarantees Re.MatchString(qname) is false; true means "run the
+// regex to find out".
+func (r *RegexRule) mayMatch(qname string) bool {
+	if len(qname) < r.minLen {
+		return false
+	}
+	for _, l := range r.lits {
+		if !strings.Contains(qname, l) {
+			return false
+		}
+	}
+	for _, l := range r.foldLits {
+		if !containsFoldASCII(qname, l) {
+			return false
+		}
+	}
+	return true
+}
+
+// containsFoldASCII reports whether s contains lit (lowercase ASCII),
+// ignoring ASCII case, without allocating.
+func containsFoldASCII(s, lit string) bool {
+	n := len(lit)
+	for i := 0; i+n <= len(s); i++ {
+		j := 0
+		for ; j < n; j++ {
+			c := s[i+j]
+			if 'A' <= c && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			if c != lit[j] {
+				break
+			}
+		}
+		if j == n {
+			return true
+		}
+	}
+	return false
+}
+
+// maxRequiredLits bounds how many literal checks one rule can add; the
+// longest are kept since they are the most selective.
+const maxRequiredLits = 4
+
+// analyzeRegex derives, for pattern, a lower bound on the byte length of any
+// match, the literal substrings every match must contain, and the
+// case-insensitive literals every match must contain (ASCII only). All are
+// conservative — when the syntax tree is too complex to reason about they
+// degrade to 0 / nil (no filtering), never to a wrong rejection.
+func analyzeRegex(pattern string) (minLen int, lits, foldLits []string) {
+	sre, err := syntax.Parse(pattern, syntax.Perl)
+	if err != nil {
+		return 0, nil, nil
+	}
+	sre = sre.Simplify()
+	exact, fold := requiredLiterals(sre)
+	return minMatchLen(sre), topLiterals(exact), topLiterals(fold)
+}
+
+// topLiterals dedupes and keeps the longest maxRequiredLits literals.
+func topLiterals(in []string) []string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := slices.Clone(in)
+	slices.SortStableFunc(out, func(a, b string) int { return len(b) - len(a) })
+	out = slices.Compact(out)
+	if len(out) > maxRequiredLits {
+		out = out[:maxRequiredLits]
+	}
+	return out
+}
+
+// minMatchLen returns a lower bound on the number of bytes any match of re
+// consumes.
+func minMatchLen(re *syntax.Regexp) int {
+	const capLen = 1 << 20 // keep repeat arithmetic far from overflow
+	switch re.Op {
+	case syntax.OpLiteral:
+		if re.Flags&syntax.FoldCase != 0 {
+			// A case-folded rune can match a rune of a different UTF-8
+			// width (e.g. 'k' and the Kelvin sign), so only count runes.
+			return len(re.Rune)
+		}
+		n := 0
+		for _, r := range re.Rune {
+			n += utf8.RuneLen(r)
+		}
+		return n
+	case syntax.OpCharClass, syntax.OpAnyChar, syntax.OpAnyCharNotNL:
+		return 1
+	case syntax.OpCapture, syntax.OpPlus:
+		return minMatchLen(re.Sub[0])
+	case syntax.OpRepeat:
+		return min(capLen, re.Min*minMatchLen(re.Sub[0]))
+	case syntax.OpConcat:
+		n := 0
+		for _, sub := range re.Sub {
+			n += minMatchLen(sub)
+		}
+		return min(capLen, n)
+	case syntax.OpAlternate:
+		if len(re.Sub) == 0 {
+			return 0
+		}
+		n := minMatchLen(re.Sub[0])
+		for _, sub := range re.Sub[1:] {
+			n = min(n, minMatchLen(sub))
+		}
+		return n
+	default: // empty match, anchors, boundaries, star, quest, no-match
+		return 0
+	}
+}
+
+// requiredLiterals returns literal substrings that every match of re must
+// contain: exact ones, and case-folded ones (lowercased ASCII). A folded
+// literal is only reported when every character's case-fold orbit is pure
+// ASCII — e.g. 'k' also matches the Kelvin sign and 's' matches 'ſ', which an
+// ASCII comparison would miss, so those are left out.
+func requiredLiterals(re *syntax.Regexp) (exact, fold []string) {
+	switch re.Op {
+	case syntax.OpLiteral:
+		if re.Flags&syntax.FoldCase != 0 {
+			if l, ok := asciiFoldLiteral(re.Rune); ok {
+				return nil, []string{l}
+			}
+			return nil, nil
+		}
+		return []string{string(re.Rune)}, nil
+	case syntax.OpCapture, syntax.OpPlus:
+		return requiredLiterals(re.Sub[0])
+	case syntax.OpRepeat:
+		if re.Min >= 1 {
+			return requiredLiterals(re.Sub[0])
+		}
+		return nil, nil
+	case syntax.OpConcat:
+		for _, sub := range re.Sub {
+			e, f := requiredLiterals(sub)
+			exact = append(exact, e...)
+			fold = append(fold, f...)
+		}
+		return exact, fold
+	default: // alternation, star, quest, classes: nothing provably required
+		return nil, nil
+	}
+}
+
+// asciiFoldLiteral lowercases rs when every rune is ASCII and no rune's
+// case-fold orbit leaves ASCII.
+func asciiFoldLiteral(rs []rune) (string, bool) {
+	b := make([]byte, 0, len(rs))
+	for _, r := range rs {
+		if r > unicode.MaxASCII {
+			return "", false
+		}
+		for f := unicode.SimpleFold(r); f != r; f = unicode.SimpleFold(f) {
+			if f > unicode.MaxASCII {
+				return "", false
+			}
+		}
+		if 'A' <= r && r <= 'Z' {
+			r += 'a' - 'A'
+		}
+		b = append(b, byte(r))
+	}
+	return string(b), true
 }
 
 // parseRegexRule parses an AdGuard-style regex rule: /pattern/flags, where
@@ -170,5 +357,6 @@ func parseRegexRule(raw string, listID string) *RegexRule {
 	if err != nil {
 		return nil
 	}
-	return &RegexRule{Re: re, List: listID}
+	minLen, lits, foldLits := analyzeRegex(pattern)
+	return &RegexRule{Re: re, List: listID, minLen: minLen, lits: lits, foldLits: foldLits}
 }

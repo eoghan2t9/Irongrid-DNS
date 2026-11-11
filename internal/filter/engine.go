@@ -535,7 +535,7 @@ func (e *Engine) DecideDomain(qname string) Decision {
 	// regexes. RE2 matching is linear-time, so even a long regex list can't
 	// be weaponised into a ReDoS.
 	for _, rr := range rs.allowRegex {
-		if rr.Re.MatchString(qname) {
+		if rr.mayMatch(qname) && rr.Re.MatchString(qname) {
 			return Decision{Action: Allow, Reason: "whitelist:regex"}
 		}
 	}
@@ -562,7 +562,7 @@ func (e *Engine) DecideDomain(qname string) Decision {
 	// target any label (^ads\. matches only the first label, \.ads\. any
 	// label).
 	for _, rr := range rs.blockRegex {
-		if rr.Re.MatchString(qname) {
+		if rr.mayMatch(qname) && rr.Re.MatchString(qname) {
 			return Decision{Action: Block, Reason: "blocklist:regex", ListName: rs.listNames[rr.List]}
 		}
 	}
