@@ -80,7 +80,7 @@ func TestCopyOnWriteIsolatesPublishedSnapshot(t *testing.T) {
 	}
 	e.Compile()
 	snap := e.rs.Load()
-	before := len(snap.blockDomains) + len(snap.blockExact)
+	before := snap.blockDomains.Len() + snap.blockExact.Len()
 
 	var stop atomic.Bool
 	var wg sync.WaitGroup
@@ -105,7 +105,7 @@ func TestCopyOnWriteIsolatesPublishedSnapshot(t *testing.T) {
 	}
 	stop.Store(true)
 	wg.Wait()
-	if after := len(snap.blockDomains) + len(snap.blockExact); after != before {
+	if after := snap.blockDomains.Len() + snap.blockExact.Len(); after != before {
 		t.Fatalf("published snapshot was mutated in place: %d -> %d entries", before, after)
 	}
 }

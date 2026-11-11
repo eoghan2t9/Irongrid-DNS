@@ -41,15 +41,18 @@ type Decision struct {
 // every query that isn't already resolved by an earlier rewrite/cache/DHCP
 // hit.
 type ruleSet struct {
-	blockDomains map[string]struct{}
-	blockExact   map[string]struct{}
+	// blockDomains / blockExact are the downloaded lists' block rules as
+	// compact fingerprint tables (see hashTable); the per-entry payload indexes
+	// listIDs so a hit can still report which list it came from.
+	blockDomains *hashTable
+	blockExact   *hashTable
+	listIDs      []string
 	blockIPs     map[string]struct{}
 	allowDomains map[string]struct{}
 	allowExact   map[string]struct{}
 	allowIPs     map[string]struct{}
 	blockRegex   []RegexRule
 	allowRegex   []RegexRule
-	domainList   map[string]string
 	listNames    map[string]string
 
 	// userBlockExact / userBlockDomains hold only the manual blacklist's
@@ -68,14 +71,19 @@ type ruleSet struct {
 	userBlacklistLen    int
 }
 
+// listName resolves a table payload to the list's friendly name.
+func (rs *ruleSet) listName(li uint16) string {
+	if int(li) < len(rs.listIDs) {
+		return rs.listNames[rs.listIDs[li]]
+	}
+	return ""
+}
+
 var emptyRuleSet = &ruleSet{
-	blockDomains:     map[string]struct{}{},
-	blockExact:       map[string]struct{}{},
 	blockIPs:         map[string]struct{}{},
 	allowDomains:     map[string]struct{}{},
 	allowExact:       map[string]struct{}{},
 	allowIPs:         map[string]struct{}{},
-	domainList:       map[string]string{},
 	listNames:        map[string]string{},
 	userBlockExact:   map[string]struct{}{},
 	userBlockDomains: map[string]struct{}{},
@@ -87,8 +95,16 @@ var emptyRuleSet = &ruleSet{
 type Engine struct {
 	mu sync.Mutex
 
-	blockDomains map[string]struct{}
-	blockExact   map[string]struct{}
+	// blockDomains / blockExact hold the downloaded lists' block rules as
+	// compact tables. LoadList parses each list into throwaway maps and folds
+	// them in here immediately, so the large string maps never accumulate.
+	blockDomains *hashTable
+	blockExact   *hashTable
+	// listIDs / listIdx map a list ID to the uint16 payload stored in the
+	// tables above.
+	listIDs []string
+	listIdx map[string]uint16
+
 	blockIPs     map[string]struct{}
 	allowDomains map[string]struct{}
 	allowExact   map[string]struct{}
@@ -117,9 +133,7 @@ type Engine struct {
 	userBlockRegex []RegexRule
 	userAllowRegex []RegexRule
 
-	// domainList tracks which list a domain came from, for reporting.
-	domainList map[string]string // domain -> list ID
-	listNames  map[string]string // list ID -> friendly name
+	listNames map[string]string // list ID -> friendly name
 
 	// Explicit user entries take precedence over list contents.
 	userBlacklist []string
@@ -155,13 +169,11 @@ type Engine struct {
 // NewEngine returns an empty engine.
 func NewEngine() *Engine {
 	e := &Engine{
-		blockDomains:     map[string]struct{}{},
-		blockExact:       map[string]struct{}{},
+		listIdx:          map[string]uint16{},
 		blockIPs:         map[string]struct{}{},
 		allowDomains:     map[string]struct{}{},
 		allowExact:       map[string]struct{}{},
 		allowIPs:         map[string]struct{}{},
-		domainList:       map[string]string{},
 		listNames:        map[string]string{},
 		userBlockExact:   map[string]struct{}{},
 		userBlockDomains: map[string]struct{}{},
@@ -175,8 +187,10 @@ func NewEngine() *Engine {
 func (e *Engine) Reset() {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.blockDomains = map[string]struct{}{}
-	e.blockExact = map[string]struct{}{}
+	e.blockDomains = nil
+	e.blockExact = nil
+	e.listIDs = nil
+	e.listIdx = map[string]uint16{}
 	e.blockIPs = map[string]struct{}{}
 	e.allowDomains = map[string]struct{}{}
 	e.allowExact = map[string]struct{}{}
@@ -187,7 +201,6 @@ func (e *Engine) Reset() {
 	e.listAllowRegex = nil
 	e.userBlockRegex = nil
 	e.userAllowRegex = nil
-	e.domainList = map[string]string{}
 	e.listNames = map[string]string{}
 	e.userBlockExact = map[string]struct{}{}
 	e.userBlockDomains = map[string]struct{}{}
@@ -211,13 +224,13 @@ func (e *Engine) publishLocked() {
 	e.rs.Store(&ruleSet{
 		blockDomains:        e.blockDomains,
 		blockExact:          e.blockExact,
+		listIDs:             slices.Clone(e.listIDs),
 		blockIPs:            e.blockIPs,
 		allowDomains:        e.allowDomains,
 		allowExact:          e.allowExact,
 		allowIPs:            e.allowIPs,
 		blockRegex:          e.blockRegex,
 		allowRegex:          e.allowRegex,
-		domainList:          e.domainList,
 		listNames:           e.listNames,
 		userBlockExact:      e.userBlockExact,
 		userBlockDomains:    e.userBlockDomains,
@@ -235,13 +248,14 @@ func (e *Engine) unshareLocked() {
 	if !e.shared {
 		return
 	}
-	e.blockDomains = maps.Clone(e.blockDomains)
-	e.blockExact = maps.Clone(e.blockExact)
+	e.blockDomains = e.blockDomains.clone()
+	e.blockExact = e.blockExact.clone()
 	e.blockIPs = maps.Clone(e.blockIPs)
 	e.allowDomains = maps.Clone(e.allowDomains)
 	e.allowExact = maps.Clone(e.allowExact)
 	e.allowIPs = maps.Clone(e.allowIPs)
-	e.domainList = maps.Clone(e.domainList)
+	e.listIdx = maps.Clone(e.listIdx)
+	e.listIDs = slices.Clone(e.listIDs)
 	e.listNames = maps.Clone(e.listNames)
 	e.userBlockExact = maps.Clone(e.userBlockExact)
 	e.userBlockDomains = maps.Clone(e.userBlockDomains)
@@ -274,11 +288,12 @@ func (e *Engine) Rebuild(fill func(nb *Engine)) {
 			continue
 		}
 		e.blockDomains, e.blockExact, e.blockIPs = nb.blockDomains, nb.blockExact, nb.blockIPs
+		e.listIDs, e.listIdx = nb.listIDs, nb.listIdx
 		e.allowDomains, e.allowExact, e.allowIPs = nb.allowDomains, nb.allowExact, nb.allowIPs
 		e.blockRegex, e.allowRegex = nb.blockRegex, nb.allowRegex
 		e.listBlockRegex, e.listAllowRegex = nb.listBlockRegex, nb.listAllowRegex
 		e.userBlockRegex, e.userAllowRegex = nb.userBlockRegex, nb.userAllowRegex
-		e.domainList, e.listNames = nb.domainList, nb.listNames
+		e.listNames = nb.listNames
 		e.userBlockExact, e.userBlockDomains = nb.userBlockExact, nb.userBlockDomains
 		e.totalBlockedDomains, e.totalIPRules = nb.totalBlockedDomains, nb.totalIPRules
 		e.syncIPFlag()
@@ -353,14 +368,46 @@ func (e *Engine) LoadList(id, name string, content []byte) (ParseResult, error) 
 		e.listNames = map[string]string{}
 	}
 	e.listNames[id] = name
+	// Block rules are parsed into throwaway maps and folded straight into the
+	// compact tables, so only one list's worth of string maps is ever live
+	// (peak memory) and none survive past this call (steady-state memory).
+	blockDomains := map[string]struct{}{}
+	blockExact := map[string]struct{}{}
 	res := parseContent(string(content), id,
-		e.blockDomains, e.blockExact, e.blockIPs,
+		blockDomains, blockExact, e.blockIPs,
 		e.allowDomains, e.allowExact, e.allowIPs,
-		e.domainList, &e.listBlockRegex, &e.listAllowRegex)
+		nil, &e.listBlockRegex, &e.listAllowRegex)
+	li := e.listIndexLocked(id)
+	for d := range blockDomains {
+		e.blockDomains = e.blockDomains.insert(hashName(d), li)
+	}
+	for d := range blockExact {
+		e.blockExact = e.blockExact.insert(hashName(d), li)
+	}
 	e.totalBlockedDomains += res.Domains + res.ExactDomains + res.Regexes
 	e.totalIPRules += res.IPs
 	e.syncIPFlag()
 	return res, nil
+}
+
+// listIndexLocked returns the table payload for a list ID, assigning the next
+// index on first use. Callers hold e.mu. Past 65534 distinct lists (not a
+// realistic configuration) extra lists share the last slot, which only blurs
+// the "blocked by" attribution.
+func (e *Engine) listIndexLocked(id string) uint16 {
+	if i, ok := e.listIdx[id]; ok {
+		return i
+	}
+	if e.listIdx == nil {
+		e.listIdx = map[string]uint16{}
+	}
+	if len(e.listIDs) >= 1<<16-1 {
+		return uint16(len(e.listIDs) - 1)
+	}
+	i := uint16(len(e.listIDs))
+	e.listIDs = append(e.listIDs, id)
+	e.listIdx[id] = i
+	return i
 }
 
 // Compile rebuilds derived state (user lists take precedence over list rules).
@@ -373,24 +420,29 @@ func (e *Engine) Compile() {
 	// not.
 	e.blockRegex = slices.Concat(e.listBlockRegex, e.userBlockRegex)
 	e.allowRegex = slices.Concat(e.listAllowRegex, e.userAllowRegex)
-	if len(e.userWhitelist) > 0 {
-		// The loop below writes to the allow/block maps in place.
-		e.unshareLocked()
+	if len(e.userWhitelist) > 0 && e.shared {
+		// The loop below writes to the allow maps in place; they may be the
+		// published snapshot's. (The block tables are never written here.)
+		e.allowExact = maps.Clone(e.allowExact)
+		e.allowDomains = maps.Clone(e.allowDomains)
 	}
-	// User whitelist wins: remove matching block entries. Regex entries in
+	// User whitelist wins. Regex entries in
 	// the user lists are handled by parseUserRegexes; splitRule rejects the
 	// '/' lines so they fall through here untouched.
+	// DecideDomain consults the allow sets before the block tables, so a
+	// whitelist entry wins without needing to be deleted from them (which the
+	// compact tables can't do — they don't retain the names).
 	for _, d := range e.userWhitelist {
 		domain, exact, _, _ := splitRule(d)
 		if exact {
 			e.allowExact[domain] = struct{}{}
-			delete(e.blockExact, domain)
 		} else {
 			e.allowDomains[domain] = struct{}{}
-			delete(e.blockDomains, domain)
-			delete(e.blockExact, domain)
 		}
 	}
+	// Incremental LoadList growth can leave slack; trim before publishing.
+	e.blockDomains = e.blockDomains.fit()
+	e.blockExact = e.blockExact.fit()
 	// Manual blacklist entries are kept in their own sets rather than
 	// merged into blockExact/blockDomains, so DecideDomain can let them
 	// override the whitelist above — unlike a downloaded blocklist's
@@ -489,11 +541,12 @@ func (e *Engine) DecideDomain(qname string) Decision {
 	}
 
 	// Block exact matches.
-	if _, ok := rs.blockExact[qname]; ok {
-		return Decision{Action: Block, Reason: "blocklist:exact", ListName: rs.listNames[rs.domainList[qname]]}
+	qh := hashName(qname)
+	if li, ok := rs.blockExact.get(qh); ok {
+		return Decision{Action: Block, Reason: "blocklist:exact", ListName: rs.listName(li)}
 	}
-	if _, ok := rs.blockDomains[qname]; ok {
-		return Decision{Action: Block, Reason: "blocklist:" + qname, ListName: rs.listNames[rs.domainList[qname]]}
+	if li, ok := rs.blockDomains.get(qh); ok {
+		return Decision{Action: Block, Reason: "blocklist:" + qname, ListName: rs.listName(li)}
 	}
 	// Block subtree matches. Walk ancestors for better reasons.
 	for i := range lastDot {
@@ -501,8 +554,8 @@ func (e *Engine) DecideDomain(qname string) Decision {
 			continue
 		}
 		parent := qname[i+1:]
-		if _, ok := rs.blockDomains[parent]; ok {
-			return Decision{Action: Block, Reason: "blocklist:" + parent, ListName: rs.listNames[rs.domainList[parent]]}
+		if li, ok := rs.blockDomains.get(hashName(parent)); ok {
+			return Decision{Action: Block, Reason: "blocklist:" + parent, ListName: rs.listName(li)}
 		}
 	}
 	// Block regexes: matched against the full query name, so a pattern can
@@ -561,7 +614,7 @@ func (e *Engine) Stats() map[string]int {
 	rs := e.rs.Load()
 	return map[string]int{
 		"blocked_domains": rs.totalBlockedDomains,
-		"blocked_exact":   len(rs.blockExact),
+		"blocked_exact":   rs.blockExact.Len(),
 		"ip_rules":        rs.totalIPRules,
 		"regex_rules":     len(rs.blockRegex),
 		"whitelist":       rs.userWhitelistLen,
