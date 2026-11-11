@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"slices"
@@ -163,7 +164,9 @@ func (h *Handler) geoBlockIP(w http.ResponseWriter, r *http.Request) {
 	// Rebuild asynchronously, exactly like applyPayload: the geo rebuild can
 	// fetch country data, which must never stall the API response.
 	if h.RebuildGeo != nil {
-		_ = h.RebuildGeo(h.Cfg.GeoBlock)
+		if err := h.RebuildGeo(h.Cfg.GeoBlock); err != nil {
+			slog.Warn("rebuild geo block failed", "error", err)
+		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "entry": entry})
 }

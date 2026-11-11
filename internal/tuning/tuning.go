@@ -8,6 +8,7 @@ package tuning
 
 import (
 	"fmt"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/safego"
 	"log/slog"
 	"math"
 	"net"
@@ -229,6 +230,7 @@ func Start() (stop func()) {
 	logResult(last, "")
 	done := make(chan struct{})
 	go func() {
+		defer safego.Recover("tuning")
 		t := time.NewTicker(recheckInterval)
 		defer t.Stop()
 		for {

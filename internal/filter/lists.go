@@ -1,9 +1,13 @@
 package filter
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/safego"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -70,6 +74,10 @@ type StoredList struct {
 	LastFetched *time.Time `json:"last_fetched"`
 	LastError   string     `json:"last_error"`
 	RuleCount   int        `json:"rule_count"`
+
+	// fetchedThisRun is set once the list has been downloaded successfully by
+	// this process (as opposed to restored from the on-disk cache).
+	fetchedThisRun bool
 }
 
 // NewListManager creates a manager that persists cached list content under
@@ -159,16 +167,115 @@ func (m *ListManager) FetchAll(ctx context.Context) error {
 	// reason to pay for them one at a time. A single list's failure doesn't
 	// stop the rest — same as the old sequential loop — errgroup.Group's
 	// zero value (no WithContext) doesn't cancel siblings on the first error.
-	var g errgroup.Group
+	//
+	// Every failure is collected (errors.Join) rather than only the first, so
+	// the caller can log each list that didn't refresh.
+	var (
+		g    errgroup.Group
+		errM sync.Mutex
+		errs []error
+	)
 	g.SetLimit(fetchConcurrency)
 	for _, s := range specs {
 		if !s.Enabled {
 			continue
 		}
 		id := s.ID
-		g.Go(func() error { return m.FetchOne(ctx, id) })
+		g.Go(func() error {
+			if err := m.FetchOne(ctx, id); err != nil {
+				errM.Lock()
+				errs = append(errs, err)
+				errM.Unlock()
+			}
+			return nil
+		})
 	}
-	return g.Wait()
+	_ = g.Wait() // goroutines never return an error; failures are in errs
+	return errors.Join(errs...)
+}
+
+// bootRetryDelays is the backoff between boot-time fetch attempts. At boot the
+// process resolves list hostnames through itself (127.0.0.1:53), which isn't
+// listening yet when the first attempt fires, so the early attempts commonly
+// fail with "connection refused" and must be retried rather than abandoned.
+var bootRetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 45 * time.Second, 2 * time.Minute, 5 * time.Minute}
+
+// FetchAllWithRetry fetches every enabled list, then retries only the lists
+// that failed with backoff until they succeed, the attempts run out, or ctx is
+// cancelled. It returns the errors from the final attempt (nil when every list
+// refreshed) and recompiles the engine whenever at least one list changed.
+func (m *ListManager) FetchAllWithRetry(ctx context.Context) error {
+	err := m.FetchAll(ctx)
+	for _, d := range bootRetryDelays {
+		if err == nil {
+			break
+		}
+		slog.Warn("blocklist fetch failed, will retry", "retry_in", d.String(), "error", err)
+		select {
+		case <-ctx.Done():
+			m.reloadIfFetched()
+			return ctx.Err()
+		case <-time.After(d):
+		}
+		var errs []error
+		for _, id := range m.failedIDs() {
+			if e := m.FetchOne(ctx, id); e != nil {
+				errs = append(errs, e)
+			}
+		}
+		err = errors.Join(errs...)
+	}
+	m.reloadIfFetched()
+	return err
+}
+
+// reloadIfFetched recompiles the engine when any list was fetched since boot.
+func (m *ListManager) reloadIfFetched() {
+	m.mu.Lock()
+	changed := false
+	for _, s := range m.store {
+		if s.fetchedThisRun {
+			changed = true
+			break
+		}
+	}
+	m.mu.Unlock()
+	if changed {
+		m.ReloadAll()
+	}
+}
+
+// failedIDs returns the enabled lists whose last fetch attempt errored.
+func (m *ListManager) failedIDs() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var ids []string
+	for id, s := range m.store {
+		if s.Spec.Enabled && s.LastError != "" {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// validateFetched rejects a downloaded body that is evidently not a usable
+// list, so a 200 response carrying an empty file or an HTML error page can't
+// overwrite a good cached copy. prev is the currently held content (may be nil).
+func validateFetched(content, prev []byte) error {
+	trimmed := bytes.TrimSpace(content)
+	if len(trimmed) == 0 {
+		return errors.New("empty response body")
+	}
+	head := bytes.ToLower(trimmed[:min(len(trimmed), 256)])
+	if bytes.HasPrefix(head, []byte("<!doctype")) || bytes.HasPrefix(head, []byte("<html")) {
+		return errors.New("response is an HTML page, not a list")
+	}
+	// A list that suddenly shrinks to under a tenth of its previous size is
+	// almost certainly truncated or replaced by an error stub.
+	if len(prev) > 10<<10 && len(content) < len(prev)/10 {
+		return fmt.Errorf("response is %d bytes, under 10%% of the cached %d bytes", len(content), len(prev))
+	}
+	return nil
 }
 
 // FetchOne refreshes a single list from its URL (or file).
@@ -201,10 +308,21 @@ func (m *ListManager) FetchOne(ctx context.Context, id string) error {
 	}
 
 	m.mu.Lock()
+	prev := stored.Content
+	m.mu.Unlock()
+	if verr := validateFetched(content, prev); verr != nil {
+		m.mu.Lock()
+		stored.LastError = verr.Error()
+		m.mu.Unlock()
+		return fmt.Errorf("list %s (%s): rejected, keeping cached copy: %w", spec.ID, spec.URL, verr)
+	}
+
+	m.mu.Lock()
 	now := time.Now()
 	stored.Content = content
 	stored.LastFetched = &now
 	stored.LastError = ""
+	stored.fetchedThisRun = true
 	m.mu.Unlock()
 	return m.persist(id, content)
 }
@@ -253,8 +371,34 @@ func (m *ListManager) persist(id string, content []byte) error {
 	if err := os.MkdirAll(m.dir, 0o755); err != nil {
 		return err
 	}
+	// Write to a temp file in the same directory and rename it into place so a
+	// crash mid-write can never leave a truncated cache file behind.
 	//nolint:gosec // G703: id is validated above (no separators, not . or ..).
-	return os.WriteFile(filepath.Join(m.dir, id+".txt"), content, 0o600)
+	final := filepath.Join(m.dir, id+".txt")
+	tmp, err := os.CreateTemp(m.dir, id+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(content); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, final); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	return nil
 }
 
 // LoadCached restores previously persisted list content on startup.
@@ -268,9 +412,15 @@ func (m *ListManager) LoadCached() {
 		path := filepath.Join(m.dir, id+".txt")
 		if content, err := os.ReadFile(path); err == nil {
 			if stored.Content == nil {
-				now := time.Now()
+				// Use the cache file's mtime, not "now": otherwise every
+				// restart looks like a fresh fetch and pushes the next
+				// auto-refresh a full interval into the future.
+				fetched := time.Now()
+				if fi, serr := os.Stat(path); serr == nil {
+					fetched = fi.ModTime()
+				}
 				stored.Content = content
-				stored.LastFetched = &now
+				stored.LastFetched = &fetched
 			}
 		}
 	}
@@ -279,6 +429,7 @@ func (m *ListManager) LoadCached() {
 // StartRefresh runs the auto-update loop until ctx is cancelled.
 func (m *ListManager) StartRefresh(ctx context.Context) {
 	go func() {
+		defer safego.Recover("lists refresh")
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
 		for {

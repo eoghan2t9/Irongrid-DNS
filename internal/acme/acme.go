@@ -14,6 +14,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/safego"
 	"log/slog"
 	"net"
 	"net/http"
@@ -180,6 +181,7 @@ func (m *Manager) Serve() error {
 		}),
 	}
 	go func() {
+		defer safego.Recover("acme challenge listener")
 		if err := m.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			slog.Error("acme challenge server stopped", "addr", addr, "error", err)
 		}
@@ -465,9 +467,11 @@ func (m *Manager) NeedsRenewal() bool {
 // RunLoop renews on start when needed and then every 6 hours (so a failed attempt is retried well inside the renewal window) until
 // ctx is cancelled.
 func (m *Manager) RunLoop(ctx context.Context) {
+	defer safego.Recover("acme renewal loop")
 	// Initial issuance/renewal in the background so startup isn't blocked on
 	// the network.
 	go func() {
+		defer safego.Recover("acme initial issuance")
 		time.Sleep(2 * time.Second) // let listeners bind first
 		// Abort if the manager was stopped while we waited (e.g. ACME toggled
 		// off via a config reload during the startup window).
@@ -565,7 +569,9 @@ func accountKey(m *Manager) (*ecdsa.PrivateKey, error) {
 	der, err := x509.MarshalECPrivateKey(k)
 	if err == nil {
 		_ = os.MkdirAll(filepath.Dir(path), 0o755)
-		_ = os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600)
+		if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+			slog.Warn("persist acme account key failed", "error", err)
+		}
 	}
 	return k, nil
 }

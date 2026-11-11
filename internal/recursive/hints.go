@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/safego"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	neturl "net/url"
@@ -283,7 +285,9 @@ func loadRootHints(ctx context.Context, url, cachePath string, verify func(sig, 
 			if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err == nil {
 				// Only verified content is ever persisted, so the cache
 				// stays trustworthy by construction.
-				_ = os.WriteFile(cachePath, data, 0o600)
+				if err := os.WriteFile(cachePath, data, 0o600); err != nil {
+					slog.Warn("write root hints cache failed", "error", err)
+				}
 			}
 		}
 		return hints, "live", true, ""
@@ -364,6 +368,7 @@ func (m *HintsManager) Refresh(ctx context.Context) {
 // at boot).
 func (m *HintsManager) Start(ctx context.Context) {
 	go func() {
+		defer safego.Recover("root hints refresh")
 		ticker := time.NewTicker(m.interval)
 		defer ticker.Stop()
 		for {

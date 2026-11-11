@@ -15,7 +15,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -215,10 +214,11 @@ func main() {
 	// LoadCached()+ReloadAll(), so this network refresh no longer needs to
 	// hold up boot (same reasoning as the geo_block fetch above).
 	go func() {
-		if err := lists.FetchAll(ctx); err != nil {
-			slog.Warn("initial blocklist fetch partially failed, using cached content", "error", err)
-		} else {
-			lists.ReloadAll()
+		// Retries the failed lists with backoff: the first attempt races the
+		// DNS listener (we resolve list hosts through ourselves), and also
+		// recompiles the engine when any list was refreshed.
+		if err := lists.FetchAllWithRetry(ctx); err != nil {
+			slog.Warn("blocklist fetch still failing after retries, using cached content", "error", err)
 		}
 	}()
 
@@ -1132,7 +1132,9 @@ func main() {
 		}
 		// Geo blocking is hot-swapped asynchronously (see RebuildGeo).
 		if apiHandler.RebuildGeo != nil {
-			_ = apiHandler.RebuildGeo(cfg.GeoBlock)
+			if err := apiHandler.RebuildGeo(cfg.GeoBlock); err != nil {
+				slog.Warn("rebuild geo block on reload failed", "error", err)
+			}
 		}
 		// VPN split-tunnel profiles/routes: reconciled asynchronously, like
 		// geo blocking above — (re)connecting a profile can involve a slow
@@ -1290,49 +1292,6 @@ func main() {
 	slog.Info("bye")
 }
 
-// httpsRedirect returns a handler that 301s a plain-HTTP request to the same
-// path over HTTPS. The hostname is taken from the request (so real domains
-// and proxies work); the port is the HTTPS web server's port, with the
-// default 443 omitted for clean URLs.
-func httpsRedirect(httpsPort string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		host := r.Host
-		if h, _, err := net.SplitHostPort(r.Host); err == nil {
-			host = h
-		}
-		target := "https://" + host
-		if httpsPort != "443" && httpsPort != "" {
-			target += ":" + httpsPort
-		}
-		target += r.URL.RequestURI()
-		//nolint:gosec // G710 open redirect: the target host is the Host
-		// header the client itself sent, so this can only ever redirect a
-		// client to the host it already asked for — not an attacker-chosen
-		// site.
-		http.Redirect(w, r, target, http.StatusMovedPermanently)
-	}
-}
-
-// webTLSPort extracts the port of the HTTPS web server address
-// ("0.0.0.0:8443" -> "8443", "0.0.0.0" -> "").
-func webTLSPort(addr string) string {
-	_, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return ""
-	}
-	return port
-}
-
-// hostOnly strips the port from a listen address ("0.0.0.0:8443" ->
-// "0.0.0.0") so it can be displayed in logs.
-func hostOnly(addr string) string {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return addr
-	}
-	return host
-}
-
 // resolveL1Entries turns the cache.l1_entries config value into a concrete
 // per-shard L1 cap: -1 disables the in-process cache, 0 auto-sizes it from
 // the detected memory ceiling (see cache.AutoPerShard — cgroup-aware, so a
@@ -1366,212 +1325,4 @@ func routeSpecs(routes []config.UpstreamRoute) []dnsserver.RouteSpec {
 		specs = append(specs, dnsserver.RouteSpec{Domain: rt.Domain, Upstreams: rt.Upstreams})
 	}
 	return specs
-}
-
-// vpnReconcileArgs converts config.VPNConfig into the vpn package's own
-// input types for Manager.Reconcile. A disabled vpn.enabled reconciles with
-// no profiles/routes at all — Reconcile then tears down whatever was
-// previously connected, same as flipping the feature off in the dashboard.
-func vpnReconcileArgs(v config.VPNConfig) ([]vpn.ProfileSpec, []vpn.RouteSpec, vpn.Credentials) {
-	if !v.Enabled {
-		return nil, nil, vpn.Credentials{}
-	}
-	profiles := make([]vpn.ProfileSpec, 0, len(v.Profiles))
-	for _, p := range v.Profiles {
-		profiles = append(profiles, vpn.ProfileSpec{ID: p.ID, Provider: p.Provider, Region: p.Region})
-	}
-	routes := make([]vpn.RouteSpec, 0, len(v.Routes))
-	for _, rt := range v.Routes {
-		routes = append(routes, vpn.RouteSpec{Profile: rt.Profile, Domains: rt.Domains, Proxy: rt.Proxy})
-	}
-	creds := vpn.Credentials{
-		NordVPNToken: v.Providers.NordVPN.Token,
-		PIAUsername:  v.Providers.PIA.Username,
-		PIAPassword:  v.Providers.PIA.Password,
-	}
-	return profiles, routes, creds
-}
-
-// detectPublicIP finds this host's outbound-facing address via the
-// well-known "dial UDP, never send anything, read LocalAddr" trick — no
-// packet is actually sent (UDP connect just picks a route/local address),
-// so this costs nothing and needs no external service.
-func detectPublicIP() net.IP {
-	conn, err := net.Dial("udp", "8.8.8.8:80")
-	if err != nil {
-		return nil
-	}
-	defer conn.Close()
-	addr, ok := conn.LocalAddr().(*net.UDPAddr)
-	if !ok {
-		return nil
-	}
-	return addr.IP
-}
-
-// applyVPNPublicIP resolves vpn.proxy.public_ip (explicit override, or
-// auto-detected when empty) and installs it on mgr — the address
-// ProxyAnswer hands out for Proxy-enabled routes. Safe to call at boot and
-// again on every config reload.
-func applyVPNPublicIP(mgr *vpn.Manager, pc config.VPNProxyConfig) {
-	var ip net.IP
-	if pc.PublicIP != "" {
-		ip = net.ParseIP(pc.PublicIP)
-		if ip == nil {
-			slog.Error("vpn.proxy.public_ip is not a valid IP address", "value", pc.PublicIP)
-		}
-	}
-	if ip == nil {
-		ip = detectPublicIP()
-	}
-	mgr.SetPublicIP(ip)
-	switch {
-	case ip != nil:
-		slog.Info("vpn: proxy relay public IP set", "ip", ip)
-	case pc.Enabled:
-		slog.Warn("vpn: could not determine a public IP for the proxy relay — Proxy-enabled routes will not resolve until vpn.proxy.public_ip is set explicitly")
-	}
-}
-
-// applyVPNProxy (re)starts the SNI/Host relay listeners to match pc,
-// stopping whatever was running first — safe to call at boot and again on
-// every config reload; a no-op restart (identical config) still briefly
-// bounces the listeners, which is an accepted tradeoff for keeping this
-// simple (proxy reconfiguration is a rare, deliberate action, unlike the
-// DNS listeners' hot-restart path).
-func applyVPNProxy(mgr *vpn.Manager, pc config.VPNProxyConfig, webListen string) {
-	vpnRelayMu.Lock()
-	defer vpnRelayMu.Unlock()
-	if vpnRelay != nil {
-		vpnRelay.Stop()
-		vpnRelay = nil
-	}
-	if !pc.Enabled {
-		return
-	}
-	listen := pc.Listen
-	if listen == "" {
-		listen = ":443"
-	}
-	fallback := pc.Fallback
-	if fallback == "" {
-		fallback = webListen
-	}
-	if fallback == "" || fallback == listen {
-		slog.Error("vpn.proxy: fallback must be set to a different address than listen (server.web_listen is empty or the same as vpn.proxy.listen) — the relay was not started", "listen", listen, "fallback", fallback)
-		return
-	}
-	relay, err := vpn.NewRelay(mgr, fallback, "udp://1.1.1.1:53")
-	if err != nil {
-		slog.Error("vpn.proxy: relay init failed", "error", err)
-		return
-	}
-	if err := relay.Start(listen, pc.ListenHTTP); err != nil {
-		slog.Error("vpn.proxy: relay start failed", "error", err)
-		return
-	}
-	vpnRelay = relay
-	slog.Info("vpn: proxy relay started", "listen", listen, "listen_http", pc.ListenHTTP, "fallback", fallback)
-}
-
-func buildDHCPRuntime(c config.DHCPConfig) dhcp.Config {
-	_, subnet := parseCIDR(c.Subnet)
-	_, ipv6net := parseCIDR(c.IPv6Prefix)
-	var addrs dhcp.HostAddresses
-	addrs.IPv4, addrs.IPv6, addrs.MAC = hostLANAddresses(subnet, ipv6net, c.Interface)
-	return dhcp.ConfigFrom(c.Enabled, c.Interface, c.Subnet, c.RangeStart, c.RangeEnd,
-		c.Gateway, c.DNS, c.LeaseTime, c.Domain, dhcpStatics(c.StaticLeases),
-		c.IPv6, c.IPv6Prefix, c.IPv6RangeStart, c.IPv6RangeEnd, addrs)
-}
-
-// dhcpStatics converts the config's static-lease specs into the runtime type.
-func dhcpStatics(leases []config.DHCPStaticLease) []dhcp.StaticLease {
-	out := make([]dhcp.StaticLease, 0, len(leases))
-	for _, sl := range leases {
-		st := dhcp.StaticLease{MAC: sl.MAC, DUID: sl.DUID, Hostname: sl.Hostname}
-		if ip := net.ParseIP(sl.IP); ip != nil {
-			st.IP = ip
-		}
-		out = append(out, st)
-	}
-	return out
-}
-
-// parseCIDR returns the *net.IPNet for a CIDR string (nil when invalid — the
-// config validator has already rejected bad values by the time this runs).
-func parseCIDR(s string) (net.IP, *net.IPNet) {
-	if s == "" {
-		return nil, nil
-	}
-	ip, n, err := net.ParseCIDR(s)
-	if err != nil {
-		return nil, nil
-	}
-	return ip, n
-}
-
-// dhcpSummary renders a one-line description of the DHCP config for the boot
-// log (only called when the server is enabled).
-func dhcpSummary(c config.DHCPConfig) string {
-	s := "DHCPv4 " + c.Subnet
-	if c.RangeStart != "" {
-		s += " (pool " + c.RangeStart + "-" + c.RangeEnd + ")"
-	}
-	if c.IPv6 {
-		s += " + DHCPv6 " + c.IPv6Prefix
-	}
-	return s
-}
-
-// hostLANAddresses finds this host's own IPs (IPv4 and IPv6) inside the
-// served networks and its hardware MAC, so the DHCP options can point at this
-// box by default. Interface, when non-empty, restricts the search to that
-// NIC. Any part can be nil — the DHCP handlers then fall back to the
-// configured gateway/DNS values.
-func hostLANAddresses(subnet, ipv6net *net.IPNet, iface string) (v4, v6 net.IP, mac net.HardwareAddr) {
-	ifaces := []net.Interface{}
-	if iface != "" {
-		i, err := net.InterfaceByName(iface)
-		if err != nil {
-			slog.Error("dhcp interface not found", "interface", iface, "error", err)
-			return nil, nil, nil
-		}
-		ifaces = append(ifaces, *i)
-	} else {
-		all, err := net.Interfaces()
-		if err != nil {
-			return nil, nil, nil
-		}
-		for _, i := range all {
-			if i.Flags&net.FlagUp != 0 && i.Flags&net.FlagLoopback == 0 {
-				ifaces = append(ifaces, i)
-			}
-		}
-	}
-	for _, i := range ifaces {
-		if mac == nil && len(i.HardwareAddr) == 6 {
-			mac = i.HardwareAddr
-		}
-		addrs, err := i.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, a := range addrs {
-			ipnet, ok := a.(*net.IPNet)
-			if !ok {
-				continue
-			}
-			ip := ipnet.IP
-			if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-				continue
-			}
-			if ip.To4() != nil && v4 == nil && subnet != nil && subnet.Contains(ip) {
-				v4 = ip.To4()
-			}
-			if ip.To4() == nil && v6 == nil && ipv6net != nil && ipv6net.Contains(ip) {
-				v6 = ip
-			}
-		}
-	}
-	return v4, v6, mac
 }

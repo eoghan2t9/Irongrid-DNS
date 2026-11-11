@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/safego"
 	"iter"
 	"log/slog"
 	"slices"
@@ -938,6 +939,7 @@ func (l *Log) Prune(ctx context.Context) {
 // StartPruner periodically prunes old entries.
 func (l *Log) StartPruner(ctx context.Context) {
 	go func() {
+		defer safego.Recover("querylog pruner")
 		t := time.NewTicker(time.Hour)
 		defer t.Stop()
 		for {

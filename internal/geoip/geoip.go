@@ -13,6 +13,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -369,7 +370,9 @@ func (m *Manager) fetchURL(ctx context.Context, url, cachePath string) ([]byte, 
 		if err != nil {
 			return nil, err
 		}
-		_ = m.persist(cachePath, content)
+		if err := m.persist(cachePath, content); err != nil {
+			slog.Warn("persist geo cache failed", "error", err)
+		}
 		return content, nil
 	}
 	content, err := m.download(ctx, url)
@@ -379,7 +382,9 @@ func (m *Manager) fetchURL(ctx context.Context, url, cachePath string) ([]byte, 
 		}
 		return nil, err
 	}
-	_ = m.persist(cachePath, content)
+	if err := m.persist(cachePath, content); err != nil {
+		slog.Warn("persist geo cache failed", "error", err)
+	}
 	return content, nil
 }
 
@@ -461,7 +466,9 @@ func (m *Manager) RefreshASN(ctx context.Context, allowASNs, blockASNs []string)
 	// The firewall files are best-effort, like the country-list persist: a
 	// write failure leaves the DNS-level ASN rules fully enforced, and the
 	// firewall pass simply reads nothing.
-	_ = m.persistASNCIDRs(allow, block)
+	if err := m.persistASNCIDRs(allow, block); err != nil {
+		slog.Warn("persist asn cidrs failed", "error", err)
+	}
 	return allow, block, nil
 }
 
@@ -512,7 +519,9 @@ func (m *Manager) fetchASNFile(ctx context.Context, url, cachePath string) ([]by
 	if err != nil {
 		return nil, err
 	}
-	_ = m.persist(cachePath, content)
+	if err := m.persist(cachePath, content); err != nil {
+		slog.Warn("persist geo cache failed", "error", err)
+	}
 	return content, nil
 }
 

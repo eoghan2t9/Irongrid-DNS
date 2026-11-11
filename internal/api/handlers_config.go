@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"reflect"
 	"strings"
@@ -1101,21 +1102,27 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	// rebuild runs asynchronously so a country-data download can never stall
 	// the config save or hold cfgMu.
 	if h.RebuildGeo != nil {
-		_ = h.RebuildGeo(cfg.GeoBlock)
+		if err := h.RebuildGeo(cfg.GeoBlock); err != nil {
+			slog.Warn("rebuild geo block failed", "error", err)
+		}
 	}
 	// Client-group ASN matching needs the IP→ASN dataset pruned to the new
 	// group lists; the refresh and router rebuild run asynchronously for the
 	// same reason (and the router built above with the previous table is
 	// replaced the moment the fresh one lands).
 	if h.RebuildClientGroups != nil {
-		_ = h.RebuildClientGroups(cfg)
+		if err := h.RebuildClientGroups(cfg); err != nil {
+			slog.Warn("rebuild client groups failed", "error", err)
+		}
 	}
 	// VPN split-tunnel profiles/routes reconcile the same way: no listener
 	// rebind needed, but (re)connecting a profile can involve a slow round
 	// trip to the vendor's API, so it runs asynchronously rather than
 	// holding up this save.
 	if h.RebuildVPN != nil {
-		_ = h.RebuildVPN(cfg)
+		if err := h.RebuildVPN(cfg); err != nil {
+			slog.Warn("rebuild vpn failed", "error", err)
+		}
 	}
 	return restart, nil
 }

@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"net/http"
 	"slices"
@@ -105,7 +106,9 @@ func (h *Handler) deleteList(w http.ResponseWriter, id string) {
 	}
 	h.Cfg.Filter.Blocklists = lists
 	h.applyLists()
-	_ = h.SaveConfig()
+	if err := h.SaveConfig(); err != nil {
+		slog.Warn("save config after list change failed", "error", err)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "deleted"})
 }
 
@@ -196,7 +199,9 @@ func (h *Handler) addFilterEntry(w http.ResponseWriter, r *http.Request, which s
 		}
 	}
 	h.applyUserLists()
-	_ = h.SaveConfig()
+	if err := h.SaveConfig(); err != nil {
+		slog.Warn("save config after list change failed", "error", err)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "added"})
 }
 
@@ -223,7 +228,9 @@ func (h *Handler) deleteFilterEntry(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.applyUserLists()
-	_ = h.SaveConfig()
+	if err := h.SaveConfig(); err != nil {
+		slog.Warn("save config after list change failed", "error", err)
+	}
 	writeJSON(w, http.StatusOK, map[string]string{"ok": "deleted"})
 }
 

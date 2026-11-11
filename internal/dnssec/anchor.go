@@ -11,7 +11,9 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/safego"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -158,7 +160,9 @@ func (m *AnchorManager) load(ctx context.Context) (anchors []TrustAnchor, source
 	} else {
 		if m.cachePath != "" {
 			if mkErr := os.MkdirAll(filepath.Dir(m.cachePath), 0o755); mkErr == nil {
-				_ = os.WriteFile(m.cachePath, data, 0o600)
+				if err := os.WriteFile(m.cachePath, data, 0o600); err != nil {
+					slog.Warn("write dnssec anchor cache failed", "error", err)
+				}
 			}
 		}
 		return parsed, "live", ""
@@ -195,6 +199,7 @@ func (m *AnchorManager) fetch(ctx context.Context) ([]byte, error) {
 // HintsManager, before anything depends on Anchors()).
 func (m *AnchorManager) Start(ctx context.Context) {
 	go func() {
+		defer safego.Recover("dnssec anchor refresh")
 		ticker := time.NewTicker(m.interval)
 		defer ticker.Stop()
 		for {
