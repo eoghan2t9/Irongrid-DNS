@@ -15,8 +15,8 @@ RUN npm run build
 
 # ---- Stage 2: build the Go backend (cloudflared managed as a subprocess) ----
 # go.mod requires go 1.27; govulncheck reports 0 vulnerabilities against
-# 1.27.3. Keep in sync with the go-version pins in .github/workflows/.
-FROM golang:1.27.3-alpine AS gobuild
+# 1.27.4. Keep in sync with the go-version pins in .github/workflows/.
+FROM golang:1.27.4-alpine AS gobuild
 ARG VERSION
 ARG COMMIT
 ARG BUILDTIME
