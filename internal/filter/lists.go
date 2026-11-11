@@ -78,6 +78,13 @@ type StoredList struct {
 	// fetchedThisRun is set once the list has been downloaded successfully by
 	// this process (as opposed to restored from the on-disk cache).
 	fetchedThisRun bool
+
+	// onDisk is true once Content is known to be persisted in the cache dir,
+	// which makes it safe to drop the in-memory copy after compiling (see
+	// ReloadAll / contentLocked). size is the byte length of the content
+	// either way, kept for the shrink check in validateFetched.
+	onDisk bool
+	size   int
 }
 
 // NewListManager creates a manager that persists cached list content under
@@ -122,7 +129,12 @@ func (m *ListManager) SetSpecs(specs []ListSpec) {
 
 // ReloadAll recompiles the engine from every enabled list's cached content.
 // It must be called after FetchAll or FetchOne. The engine's user lists are
-// untouched; the caller re-applies them via SetUserLists + Compile if needed.
+// carried over automatically.
+//
+// The new rule set is built off to the side and swapped in atomically
+// (Engine.Rebuild), so queries are never evaluated against an empty or
+// half-loaded engine while a reload is in progress. Removed or disabled lists
+// simply aren't loaded into the new set.
 func (m *ListManager) ReloadAll() {
 	m.mu.Lock()
 	specs := make([]ListSpec, 0, len(m.store))
@@ -131,24 +143,61 @@ func (m *ListManager) ReloadAll() {
 	}
 	m.mu.Unlock()
 
-	// Reset first so removed/disabled lists no longer contribute rules.
-	m.engine.Reset()
-	m.mu.Lock()
-	for _, s := range specs {
-		if !s.Enabled {
-			continue
-		}
-		if stored, ok := m.store[s.ID]; ok {
-			res, err := m.engine.LoadList(s.ID, s.Name, stored.Content)
+	m.engine.Rebuild(func(nb *Engine) {
+		for _, s := range specs {
+			if !s.Enabled {
+				continue
+			}
+			m.mu.Lock()
+			stored, ok := m.store[s.ID]
+			var content []byte
+			if ok {
+				content = m.contentLocked(stored)
+			}
+			m.mu.Unlock()
+			if !ok {
+				continue
+			}
+			res, err := nb.LoadList(s.ID, s.Name, content)
 			if err == nil {
+				m.mu.Lock()
 				stored.RuleCount = res.Domains + res.ExactDomains + res.IPs
+				m.mu.Unlock()
 			}
 		}
-	}
-	m.mu.Unlock()
-	m.engine.Compile()
+	})
+	m.dropCompiledContent()
 	if m.OnChange != nil {
 		m.OnChange()
+	}
+}
+
+// contentLocked returns a list's content, from memory when held, otherwise
+// from the on-disk cache. Callers hold m.mu.
+func (m *ListManager) contentLocked(s *StoredList) []byte {
+	if s.Content != nil || !s.onDisk || m.dir == "" {
+		return s.Content
+	}
+	b, err := os.ReadFile(filepath.Join(m.dir, s.Spec.ID+".txt"))
+	if err != nil {
+		return nil
+	}
+	return b
+}
+
+// dropCompiledContent frees the raw list text of every list that is safely
+// persisted on disk. Once compiled into the engine the text is dead weight
+// (tens of MB across a typical set of lists) and is only needed again for the
+// content endpoint or a per-group engine rebuild, both of which read it back
+// from disk via contentLocked.
+func (m *ListManager) dropCompiledContent() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, s := range m.store {
+		if s.onDisk && s.Content != nil {
+			s.size = len(s.Content)
+			s.Content = nil
+		}
 	}
 }
 
@@ -260,8 +309,8 @@ func (m *ListManager) failedIDs() []string {
 
 // validateFetched rejects a downloaded body that is evidently not a usable
 // list, so a 200 response carrying an empty file or an HTML error page can't
-// overwrite a good cached copy. prev is the currently held content (may be nil).
-func validateFetched(content, prev []byte) error {
+// overwrite a good cached copy. prevSize is the byte length of the currently held content (0 if none).
+func validateFetched(content []byte, prevSize int) error {
 	trimmed := bytes.TrimSpace(content)
 	if len(trimmed) == 0 {
 		return errors.New("empty response body")
@@ -272,8 +321,8 @@ func validateFetched(content, prev []byte) error {
 	}
 	// A list that suddenly shrinks to under a tenth of its previous size is
 	// almost certainly truncated or replaced by an error stub.
-	if len(prev) > 10<<10 && len(content) < len(prev)/10 {
-		return fmt.Errorf("response is %d bytes, under 10%% of the cached %d bytes", len(content), len(prev))
+	if prevSize > 10<<10 && len(content) < prevSize/10 {
+		return fmt.Errorf("response is %d bytes, under 10%% of the cached %d bytes", len(content), prevSize)
 	}
 	return nil
 }
@@ -308,9 +357,9 @@ func (m *ListManager) FetchOne(ctx context.Context, id string) error {
 	}
 
 	m.mu.Lock()
-	prev := stored.Content
+	prevSize := max(len(stored.Content), stored.size)
 	m.mu.Unlock()
-	if verr := validateFetched(content, prev); verr != nil {
+	if verr := validateFetched(content, prevSize); verr != nil {
 		m.mu.Lock()
 		stored.LastError = verr.Error()
 		m.mu.Unlock()
@@ -323,8 +372,16 @@ func (m *ListManager) FetchOne(ctx context.Context, id string) error {
 	stored.LastFetched = &now
 	stored.LastError = ""
 	stored.fetchedThisRun = true
+	stored.size = len(content)
+	stored.onDisk = false
 	m.mu.Unlock()
-	return m.persist(id, content)
+	if err := m.persist(id, content); err != nil {
+		return err // content stays in memory (onDisk=false), nothing is dropped
+	}
+	m.mu.Lock()
+	stored.onDisk = m.dir != ""
+	m.mu.Unlock()
+	return nil
 }
 
 // fetchRemote downloads list content, coalescing concurrent downloads of the
@@ -420,6 +477,8 @@ func (m *ListManager) LoadCached() {
 					fetched = fi.ModTime()
 				}
 				stored.Content = content
+				stored.size = len(content)
+				stored.onDisk = true
 				stored.LastFetched = &fetched
 			}
 		}
@@ -490,7 +549,7 @@ func (m *ListManager) GetContent(id string) []byte {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if s, ok := m.store[id]; ok {
-		return s.Content
+		return m.contentLocked(s)
 	}
 	return nil
 }

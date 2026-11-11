@@ -48,18 +48,19 @@ func TestFetchOneCoalescesConcurrentDownloads(t *testing.T) {
 
 func TestValidateFetched(t *testing.T) {
 	big := bytes.Repeat([]byte("0.0.0.0 ads.example.com\n"), 1000) // > 10 KiB
+	bigN := len(big)
 	cases := []struct {
 		name    string
 		content []byte
-		prev    []byte
+		prev    int
 		wantErr bool
 	}{
-		{"ok", []byte("0.0.0.0 a.example.com\n"), nil, false},
-		{"empty", []byte("  \n"), nil, true},
-		{"html doctype", []byte("<!DOCTYPE html><html>502</html>"), nil, true},
-		{"html tag", []byte("<html><body>err</body></html>"), nil, true},
-		{"collapsed", []byte("0.0.0.0 a.example.com\n"), big, true},
-		{"similar size ok", big, big, false},
+		{"ok", []byte("0.0.0.0 a.example.com\n"), 0, false},
+		{"empty", []byte("  \n"), 0, true},
+		{"html doctype", []byte("<!DOCTYPE html><html>502</html>"), 0, true},
+		{"html tag", []byte("<html><body>err</body></html>"), 0, true},
+		{"collapsed", []byte("0.0.0.0 a.example.com\n"), bigN, true},
+		{"similar size ok", big, bigN, false},
 	}
 	for _, c := range cases {
 		if err := validateFetched(c.content, c.prev); (err != nil) != c.wantErr {

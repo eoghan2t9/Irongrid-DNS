@@ -141,6 +141,13 @@ type Engine struct {
 	// the IP sets change (syncIPFlag) and read lock-free.
 	hasIPRules atomic.Bool
 
+	// shared is true while the working maps above are the very same map
+	// objects the published snapshot (rs) references. Publishing hands the
+	// maps over instead of cloning them — a clone doubled the resident size of
+	// a ~1M-rule engine — so any later in-place mutation must first call
+	// unshareLocked, which clones them (copy-on-write). Guarded by mu.
+	shared bool
+
 	// rs is the published snapshot DecideDomain/CheckIPs/Stats/Lists read.
 	rs atomic.Pointer[ruleSet]
 }
@@ -186,35 +193,99 @@ func (e *Engine) Reset() {
 	e.userBlockDomains = map[string]struct{}{}
 	e.totalBlockedDomains = 0
 	e.totalIPRules = 0
+	e.shared = false
 	e.hasIPRules.Store(false)
 	e.rs.Store(emptyRuleSet)
 }
 
-// publishLocked builds a fresh, private ruleSet from the current working
-// state and atomically publishes it. Callers must hold e.mu. Every map is
-// copied rather than referenced: the working maps keep being mutated in
-// place by later LoadList/Compile/AddIPBlock calls, so a published snapshot
-// must never alias them, or a concurrent lock-free reader would race with
-// that later mutation.
+// publishLocked atomically publishes the current working state as the
+// snapshot lock-free readers use. Callers must hold e.mu.
+//
+// The maps are handed over by reference, not cloned: the working state and the
+// snapshot then share one copy, halving the memory of a large engine. That is
+// safe because every in-place mutation of a map goes through unshareLocked
+// (or replaces the map outright) first, so a published map is never written
+// to again.
 func (e *Engine) publishLocked() {
+	e.shared = true
 	e.rs.Store(&ruleSet{
-		blockDomains:        maps.Clone(e.blockDomains),
-		blockExact:          maps.Clone(e.blockExact),
-		blockIPs:            maps.Clone(e.blockIPs),
-		allowDomains:        maps.Clone(e.allowDomains),
-		allowExact:          maps.Clone(e.allowExact),
-		allowIPs:            maps.Clone(e.allowIPs),
+		blockDomains:        e.blockDomains,
+		blockExact:          e.blockExact,
+		blockIPs:            e.blockIPs,
+		allowDomains:        e.allowDomains,
+		allowExact:          e.allowExact,
+		allowIPs:            e.allowIPs,
 		blockRegex:          e.blockRegex,
 		allowRegex:          e.allowRegex,
-		domainList:          maps.Clone(e.domainList),
-		listNames:           maps.Clone(e.listNames),
-		userBlockExact:      maps.Clone(e.userBlockExact),
-		userBlockDomains:    maps.Clone(e.userBlockDomains),
+		domainList:          e.domainList,
+		listNames:           e.listNames,
+		userBlockExact:      e.userBlockExact,
+		userBlockDomains:    e.userBlockDomains,
 		totalBlockedDomains: e.totalBlockedDomains,
 		totalIPRules:        e.totalIPRules,
 		userWhitelistLen:    len(e.userWhitelist),
 		userBlacklistLen:    len(e.userBlacklist),
 	})
+}
+
+// unshareLocked gives the working state private copies of every map when they
+// are currently shared with the published snapshot, so they can be mutated
+// without racing a lock-free reader. Callers must hold e.mu.
+func (e *Engine) unshareLocked() {
+	if !e.shared {
+		return
+	}
+	e.blockDomains = maps.Clone(e.blockDomains)
+	e.blockExact = maps.Clone(e.blockExact)
+	e.blockIPs = maps.Clone(e.blockIPs)
+	e.allowDomains = maps.Clone(e.allowDomains)
+	e.allowExact = maps.Clone(e.allowExact)
+	e.allowIPs = maps.Clone(e.allowIPs)
+	e.domainList = maps.Clone(e.domainList)
+	e.listNames = maps.Clone(e.listNames)
+	e.userBlockExact = maps.Clone(e.userBlockExact)
+	e.userBlockDomains = maps.Clone(e.userBlockDomains)
+	e.shared = false
+}
+
+// Rebuild replaces every list-derived rule with a freshly built set and swaps
+// it in atomically. fill receives a private engine to LoadList into; user
+// lists are carried over, the result is compiled, and only then is it
+// published — so DecideDomain never observes an empty or half-loaded rule set
+// (Reset followed by LoadList/Compile exposed exactly that window).
+func (e *Engine) Rebuild(fill func(nb *Engine)) {
+	for attempt := 0; ; attempt++ {
+		e.mu.Lock()
+		bl, wl := e.userBlacklist, e.userWhitelist
+		bre, are := e.userBlockRegex, e.userAllowRegex
+		e.mu.Unlock()
+
+		nb := NewEngine()
+		nb.userBlacklist, nb.userWhitelist = bl, wl
+		nb.userBlockRegex, nb.userAllowRegex = bre, are
+		fill(nb)
+		nb.Compile()
+
+		e.mu.Lock()
+		// SetUserLists may have run while we were building; if so the new
+		// state was compiled against stale user lists, so build again.
+		if attempt < 3 && (!slices.Equal(bl, e.userBlacklist) || !slices.Equal(wl, e.userWhitelist)) {
+			e.mu.Unlock()
+			continue
+		}
+		e.blockDomains, e.blockExact, e.blockIPs = nb.blockDomains, nb.blockExact, nb.blockIPs
+		e.allowDomains, e.allowExact, e.allowIPs = nb.allowDomains, nb.allowExact, nb.allowIPs
+		e.blockRegex, e.allowRegex = nb.blockRegex, nb.allowRegex
+		e.listBlockRegex, e.listAllowRegex = nb.listBlockRegex, nb.listAllowRegex
+		e.userBlockRegex, e.userAllowRegex = nb.userBlockRegex, nb.userAllowRegex
+		e.domainList, e.listNames = nb.domainList, nb.listNames
+		e.userBlockExact, e.userBlockDomains = nb.userBlockExact, nb.userBlockDomains
+		e.totalBlockedDomains, e.totalIPRules = nb.totalBlockedDomains, nb.totalIPRules
+		e.syncIPFlag()
+		e.publishLocked()
+		e.mu.Unlock()
+		return
+	}
 }
 
 // syncIPFlag recomputes the hasIPRules gate from the current IP rule sets.
@@ -277,6 +348,7 @@ func (e *Engine) LoadList(id, name string, content []byte) (ParseResult, error) 
 	if id == "" {
 		return ParseResult{}, fmt.Errorf("list id required")
 	}
+	e.unshareLocked()
 	if e.listNames == nil {
 		e.listNames = map[string]string{}
 	}
@@ -301,6 +373,10 @@ func (e *Engine) Compile() {
 	// not.
 	e.blockRegex = slices.Concat(e.listBlockRegex, e.userBlockRegex)
 	e.allowRegex = slices.Concat(e.listAllowRegex, e.userAllowRegex)
+	if len(e.userWhitelist) > 0 {
+		// The loop below writes to the allow/block maps in place.
+		e.unshareLocked()
+	}
 	// User whitelist wins: remove matching block entries. Regex entries in
 	// the user lists are handled by parseUserRegexes; splitRule rejects the
 	// '/' lines so they fall through here untouched.
@@ -461,6 +537,7 @@ func (e *Engine) AddIPBlock(ip string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if parsed := net.ParseIP(ip); parsed != nil {
+		e.blockIPs = maps.Clone(e.blockIPs) // copy-on-write: the old set may be published
 		e.blockIPs[parsed.String()] = struct{}{}
 		e.syncIPFlag()
 		e.publishLocked()
@@ -472,6 +549,7 @@ func (e *Engine) RemoveIPBlock(ip string) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if parsed := net.ParseIP(ip); parsed != nil {
+		e.blockIPs = maps.Clone(e.blockIPs) // copy-on-write: the old set may be published
 		delete(e.blockIPs, parsed.String())
 		e.syncIPFlag()
 		e.publishLocked()
