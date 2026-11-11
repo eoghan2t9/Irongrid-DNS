@@ -462,7 +462,7 @@ func (m *Manager) NeedsRenewal() bool {
 	return time.Until(leaf.NotAfter) < m.renewIn
 }
 
-// RunLoop renews on start when needed and then on a fixed daily schedule until
+// RunLoop renews on start when needed and then every 6 hours (so a failed attempt is retried well inside the renewal window) until
 // ctx is cancelled.
 func (m *Manager) RunLoop(ctx context.Context) {
 	// Initial issuance/renewal in the background so startup isn't blocked on
@@ -493,7 +493,7 @@ func (m *Manager) RunLoop(ctx context.Context) {
 		}
 		m.notifyIssued()
 	}()
-	t := time.NewTicker(24 * time.Hour)
+	t := time.NewTicker(6 * time.Hour)
 	defer t.Stop()
 	for {
 		select {
