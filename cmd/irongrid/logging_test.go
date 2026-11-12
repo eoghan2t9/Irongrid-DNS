@@ -24,13 +24,13 @@ func TestNewLoggerLevels(t *testing.T) {
 	}
 	for _, tt := range tests {
 		l := newLogger(config.LoggingConfig{Level: tt.level})
-		if got := l.Enabled(nil, slog.LevelDebug); got != tt.wantDebug {
+		if got := l.Enabled(t.Context(), slog.LevelDebug); got != tt.wantDebug {
 			t.Errorf("level %q: debug enabled = %v, want %v", tt.level, got, tt.wantDebug)
 		}
-		if got := l.Enabled(nil, slog.LevelInfo); got != tt.wantInfo {
+		if got := l.Enabled(t.Context(), slog.LevelInfo); got != tt.wantInfo {
 			t.Errorf("level %q: info enabled = %v, want %v", tt.level, got, tt.wantInfo)
 		}
-		if got := l.Enabled(nil, slog.LevelError); got != tt.wantWarnError {
+		if got := l.Enabled(t.Context(), slog.LevelError); got != tt.wantWarnError {
 			t.Errorf("level %q: error enabled = %v, want %v", tt.level, got, tt.wantWarnError)
 		}
 	}

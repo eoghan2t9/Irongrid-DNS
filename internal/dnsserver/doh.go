@@ -14,8 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/net/http2"
-
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
@@ -112,9 +110,12 @@ func (m *Manager) startDoH(addr, path string) error {
 		WriteTimeout: 15 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
-	if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
-		return err
-	}
+	// HTTP/2 comes from net/http itself: the TLS config above advertises h2
+	// and Protocols makes the intent explicit (HTTP/1.1 stays enabled for
+	// clients that don't negotiate h2).
+	srv.Protocols = new(http.Protocols)
+	srv.Protocols.SetHTTP1(true)
+	srv.Protocols.SetHTTP2(true)
 
 	m.httpSrv = srv
 

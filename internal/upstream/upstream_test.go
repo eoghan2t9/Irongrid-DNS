@@ -888,3 +888,48 @@ func TestRecursiveFailureCountsAsFailure(t *testing.T) {
 		t.Fatal("Fails() = 0, want >= 1 (a recursive resolution failure must feed the circuit breaker)")
 	}
 }
+
+// TestDoHTransportNegotiatesHTTP2 pins that the production DoH transport (the
+// one New builds, via newDoHTransport) speaks HTTP/2 to an h2-capable server
+// even though it sets a custom DialContext and TLS config — the combination
+// for which Go silently falls back to HTTP/1.1 unless HTTP/2 is requested
+// explicitly.
+func TestDoHTransportNegotiatesHTTP2(t *testing.T) {
+	t.Parallel()
+	protoCh := make(chan int, 4)
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		protoCh <- r.ProtoMajor
+		body, _ := io.ReadAll(r.Body)
+		req := new(dns.Msg)
+		_ = req.Unpack(body)
+		resp := new(dns.Msg)
+		resp.SetReply(req)
+		resp.Answer = append(resp.Answer, &dns.A{
+			Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
+			A:   net.ParseIP("1.2.3.4"),
+		})
+		packed, _ := resp.Pack()
+		w.Header().Set("Content-Type", "application/dns-message")
+		_, _ = w.Write(packed)
+	}))
+	srv.EnableHTTP2 = true
+	srv.StartTLS()
+	defer srv.Close()
+
+	pool := x509.NewCertPool()
+	pool.AddCert(srv.Certificate())
+	u := &Upstream{Transport: HTTPS}
+	u.URL, _ = url.Parse(srv.URL + "/dns-query")
+	u.client = &http.Client{
+		Transport: newDoHTransport(&tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}),
+		Timeout:   5 * time.Second,
+	}
+	q := aQuery()
+	q.SetEdns0(4096, false)
+	if r, err := u.Query(t.Context(), q); err != nil || len(r.Answer) != 1 {
+		t.Fatalf("query: %v answers=%v", err, r)
+	}
+	if got := <-protoCh; got != 2 {
+		t.Fatalf("DoH upstream request used HTTP/%d, want HTTP/2", got)
+	}
+}

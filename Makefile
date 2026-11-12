@@ -1,4 +1,4 @@
-.PHONY: all web build run install test lint vuln docker docker-up release pgo-profile build-pgo clean bench bench-tcp bench-doh bench-reuseport bench-udp-sockets
+.PHONY: all web build run install test smoke lint vuln docker docker-up release pgo-profile build-pgo clean bench bench-tcp bench-doh bench-reuseport bench-udp-sockets
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.1.0)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo dev)
@@ -17,6 +17,10 @@ web:
 ## build: compile the single self-contained binary (uses existing web/dist)
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o irongrid ./cmd/irongrid
+
+## smoke: boot the real binary against a throwaway Dragonfly and check DNS/DoT/DoH(h2)/dashboard/reload/shutdown
+smoke:
+	go test -tags smoke -count=1 -run TestSmoke -v ./cmd/irongrid/
 
 ## pgo-profile: collect a CPU profile from the query-path benchmarks (PGO input)
 pgo-profile:

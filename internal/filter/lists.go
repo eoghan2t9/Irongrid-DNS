@@ -43,11 +43,12 @@ type ListManager struct {
 	// a manual refresh) never fetch the same list twice at once (see
 	// fetchRemote).
 	fetchFlight singleflight.Group
-	// OnChange, if set, is invoked after every successful ReloadAll. Used to
-	// rebuild anything else that derives from the same cached list content
-	// (e.g. per-client-group engines), which ReloadAll itself knows nothing
-	// about.
-	OnChange func()
+	// onChange, if set (SetOnChange), is invoked after every successful
+	// ReloadAll. Used to rebuild anything else that derives from the same
+	// cached list content (e.g. per-client-group engines), which ReloadAll
+	// itself knows nothing about. Guarded by mu: it is set during startup
+	// while the boot-time list fetch may already be running ReloadAll.
+	onChange func()
 }
 
 // ListSpec mirrors the config blocklist entry.
@@ -104,6 +105,14 @@ func NewListManager(engine *Engine, dir string) *ListManager {
 func (m *ListManager) SetAutoUpdate(d time.Duration) {
 	m.mu.Lock()
 	m.autoUpdate = d
+	m.mu.Unlock()
+}
+
+// SetOnChange registers fn to run after every successful ReloadAll (nil
+// clears it). Safe to call while a reload is in progress.
+func (m *ListManager) SetOnChange(fn func()) {
+	m.mu.Lock()
+	m.onChange = fn
 	m.mu.Unlock()
 }
 
@@ -167,8 +176,11 @@ func (m *ListManager) ReloadAll() {
 		}
 	})
 	m.dropCompiledContent()
-	if m.OnChange != nil {
-		m.OnChange()
+	m.mu.Lock()
+	cb := m.onChange
+	m.mu.Unlock()
+	if cb != nil {
+		cb()
 	}
 }
 

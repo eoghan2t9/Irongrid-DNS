@@ -25,8 +25,6 @@ import (
 	"syscall"
 	"time"
 
-	"golang.org/x/net/http2"
-
 	"github.com/eoghan2t9/Irongrid-DNS/internal/acme"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/api"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
@@ -391,12 +389,12 @@ func main() {
 	// (auto-refresh ticker, manual "refresh all lists") — they're built from
 	// the same cached content the global engine uses. The ASN table is
 	// unchanged by a list refresh, so the published one is reused.
-	lists.OnChange = func() {
+	lists.SetOnChange(func() {
 		if apiHandler == nil {
 			return
 		}
 		handler.SetClientRouter(dnsserver.BuildClientRouter(cfg, lists, apiHandler.GroupASN.Load()))
-	}
+	})
 	dnsMgr := dnsserver.NewManager(handler, tlsConf)
 	// SO_REUSEPORT socket count for the plain UDP and DoQ listeners
 	// (server.udp_sockets: 0 = auto, 1 = exclusive single socket, N =
@@ -825,9 +823,9 @@ func main() {
 			if webSharesDoH() {
 				wtls = wtls.Clone()
 				wtls.NextProtos = []string{"h2", "http/1.1"}
-				if err := http2.ConfigureServer(srv, &http2.Server{}); err != nil {
-					slog.Error("http2 setup failed", "error", err)
-				}
+				srv.Protocols = new(http.Protocols)
+				srv.Protocols.SetHTTP1(true)
+				srv.Protocols.SetHTTP2(true)
 			}
 			go func() {
 				// Tuned socket: the dashboard serves DoH when it shares the
@@ -1247,14 +1245,19 @@ func main() {
 	}
 
 	// ---- auto-start tunnel if configured ----
-	if cfg.Tunnel.Enabled {
+	// The API is already serving by now and PUT /api/config mutates cfg under
+	// this mutex, so snapshot the tunnel settings under it too.
+	cfgMu.Lock()
+	tc := cfg.Tunnel
+	cfgMu.Unlock()
+	if tc.Enabled {
 		mode := tunnel.ModeConfig
-		if cfg.Tunnel.Token != "" {
+		if tc.Token != "" {
 			mode = tunnel.ModeToken
-		} else if cfg.Tunnel.QuickTunnel {
+		} else if tc.QuickTunnel {
 			mode = tunnel.ModeQuick
 		}
-		if err := tunnelMgr.Start(mode, cfg.Tunnel.Token, cfg.Tunnel.ConfigFile, cfg.Tunnel.QuickTunnelURL, cfg.Tunnel.Hostname); err != nil {
+		if err := tunnelMgr.Start(mode, tc.Token, tc.ConfigFile, tc.QuickTunnelURL, tc.Hostname); err != nil {
 			slog.Error("tunnel failed to start", "error", err)
 		} else {
 			slog.Info("tunnel started", "mode", mode)

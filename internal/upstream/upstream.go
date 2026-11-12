@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"math/rand/v2"
 	"net"
 	"net/http"
@@ -22,7 +21,6 @@ import (
 
 	"github.com/miekg/dns"
 	"github.com/quic-go/quic-go"
-	"golang.org/x/net/http2"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/recursive"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
@@ -262,37 +260,7 @@ func Parse(spec string) (*Upstream, error) {
 			path = "/dns-query"
 		}
 		u.URL.Path = path
-		// Derived from the tuned core count (tuning.ScaleByCores) rather than
-		// a fixed value, same reasoning as upstreamPoolSize above.
-		maxIdle := tuning.ScaleByCores(4, 32, 1024)
-		transport := &http.Transport{
-			TLSClientConfig: u.tlsConf,
-			MaxIdleConns:    maxIdle,
-			// MaxIdleConnsPerHost defaults to 2, which silently dominates over
-			// MaxIdleConns with one host per upstream — a busy DoH forwarder
-			// would churn connections instead of reusing the idle pool.
-			MaxIdleConnsPerHost: maxIdle,
-			// Keep idle connections only briefly: DoH servers close them
-			// on their own schedule (often ~30-60s), and a conn the server
-			// already closed would fail the next POST with "unexpected
-			// EOF" — queryDoH retries that, but dropping stale conns here
-			// first keeps the retry path rare.
-			IdleConnTimeout: 30 * time.Second,
-			DialContext: (&net.Dialer{
-				Timeout:   5 * time.Second,
-				KeepAlive: 30 * time.Second,
-				// The DoH endpoint's sockets get the same buffer boost.
-				Control: tuning.SocketControl,
-			}).DialContext,
-		}
-		// HTTP/2 on the DoH transport is best-effort: ConfigureTransport only
-		// errors when the transport already pins NextProtos (never the case
-		// here), and DoH over HTTP/1.1 works fine — so log and continue
-		// instead of failing the upstream over a non-fatal limitation.
-		if cErr := http2.ConfigureTransport(transport); cErr != nil {
-			slog.Warn("upstream HTTP/2 unavailable, using HTTP/1.1", "host", u.Host, "error", cErr)
-		}
-		u.client = &http.Client{Transport: transport, Timeout: 10 * time.Second}
+		u.client = &http.Client{Transport: newDoHTransport(u.tlsConf), Timeout: 10 * time.Second}
 	}
 	return u, nil
 }
@@ -765,4 +733,36 @@ func (u *Upstream) CooldownUntil() *time.Time {
 	}
 	t := time.Unix(0, ns)
 	return &t
+}
+
+// newDoHTransport builds the HTTP transport for a DoH upstream.
+func newDoHTransport(tlsConf *tls.Config) *http.Transport {
+	// Derived from the tuned core count (tuning.ScaleByCores) rather than a
+	// fixed value, same reasoning as upstreamPoolSize above.
+	maxIdle := tuning.ScaleByCores(4, 32, 1024)
+	transport := &http.Transport{
+		TLSClientConfig: tlsConf,
+		MaxIdleConns:    maxIdle,
+		// MaxIdleConnsPerHost defaults to 2, which silently dominates over
+		// MaxIdleConns with one host per upstream — a busy DoH forwarder
+		// would churn connections instead of reusing the idle pool.
+		MaxIdleConnsPerHost: maxIdle,
+		// Keep idle connections only briefly: DoH servers close them
+		// on their own schedule (often ~30-60s), and a conn the server
+		// already closed would fail the next POST with "unexpected
+		// EOF" — queryDoH retries that, but dropping stale conns here
+		// first keeps the retry path rare.
+		IdleConnTimeout: 30 * time.Second,
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
+			// The DoH endpoint's sockets get the same buffer boost.
+			Control: tuning.SocketControl,
+		}).DialContext,
+	}
+	// Request HTTP/2 explicitly. With a custom DialContext/TLSClientConfig Go
+	// leaves HTTP/2 off and silently speaks HTTP/1.1 unless this is set; DoH
+	// still works over HTTP/1.1 if the server doesn't offer h2.
+	transport.ForceAttemptHTTP2 = true
+	return transport
 }
