@@ -263,6 +263,45 @@ export const api = {
   tunnelCheckCloudflaredUpdate: (restart = false) =>
     request('/api/tunnel/cloudflared-update' + (restart ? '?restart=1' : ''), { method: 'POST' }),
   tunnelRestart: () => request('/api/tunnel/restart', { method: 'POST' }),
+  // Cloudflare tunnel management (needs a Cloudflare API token; see Tunnel page).
+  cfStatus: () => request('/api/tunnel/cf/status'),
+  cfSetCredentials: (body) =>
+    request('/api/tunnel/cf/credentials', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  cfTunnels: () => request('/api/tunnel/cf/tunnels'),
+  cfCreateTunnel: (body) =>
+    request('/api/tunnel/cf/tunnels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  cfSelectTunnel: (tunnelId) =>
+    request('/api/tunnel/cf/tunnels/select', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ tunnel_id: tunnelId }),
+    }),
+  cfDeleteTunnel: (tunnelId) => request('/api/tunnel/cf/tunnels/' + encodeURIComponent(tunnelId), { method: 'DELETE' }),
+  cfHostnames: () => request('/api/tunnel/cf/hostnames'),
+  cfSaveHostname: (body, exists) =>
+    request('/api/tunnel/cf/hostnames', {
+      method: exists ? 'PUT' : 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  cfRemoveHostname: (hostname, withDns) =>
+    request('/api/tunnel/cf/hostnames?hostname=' + encodeURIComponent(hostname) + (withDns ? '&dns=1' : ''), {
+      method: 'DELETE',
+    }),
+  cfSyncDNS: (hostname, overwrite = false) =>
+    request('/api/tunnel/cf/hostnames/sync-dns', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ hostname, overwrite }),
+    }),
   dhcpLeases: () => request('/api/dhcp/leases'),
   config: () => request('/api/config'),
   saveConfig: (cfg) =>

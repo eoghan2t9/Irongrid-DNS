@@ -654,6 +654,11 @@ func rotateSecretIfUsersChanged(oldUsers, newUsers []config.WebUser, oldSecret s
 // config freshly built from a payload; running is the live one.
 func carryOverUneditable(cfg, running *config.Config) {
 	cfg.Server.AllowFrom = running.Server.AllowFrom
+	// The Cloudflare API credentials are managed from the Tunnel page and are
+	// never part of (or echoed in) the settings payload; without this a plain
+	// settings save would silently disconnect the Cloudflare account.
+	cfg.Tunnel.CloudflareAPIToken = running.Tunnel.CloudflareAPIToken
+	cfg.Tunnel.CloudflareAccountID = running.Tunnel.CloudflareAccountID
 }
 
 func (h *Handler) applyPayload(p configPayload) ([]string, error) {

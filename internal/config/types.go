@@ -783,4 +783,12 @@ type TunnelConfig struct {
 	QuickTunnel    bool   `yaml:"quick_tunnel"`     // unauth trycloudflare.com quick tunnel
 	QuickTunnelURL string `yaml:"quick_tunnel_url"` // origin URL exposed by quick tunnel
 	Hostname       string `yaml:"hostname"`         // e.g. dns.example.com
+	// CloudflareAPIToken is a scoped Cloudflare API token (Account: Cloudflare
+	// Tunnel: Edit, Zone: DNS: Edit, Zone: Zone: Read) that lets the dashboard
+	// manage the tunnel's public hostnames and their DNS records. It is not
+	// part of the dashboard's settings payload and is never sent back to it.
+	CloudflareAPIToken string `yaml:"cloudflare_api_token"`
+	// CloudflareAccountID is the account the API token manages; empty means
+	// derive it from the tunnel token.
+	CloudflareAccountID string `yaml:"cloudflare_account_id"`
 }

@@ -73,6 +73,17 @@ type Handler struct {
 	DNS        *dnsserver.Handler
 	DNSManager *dnsserver.Manager // listener manager; reports bound UDP/DoQ socket counts
 	Tunnel     *tunnel.Manager
+	// CloudflareBaseURL overrides the Cloudflare API root (tests).
+	CloudflareBaseURL string
+	// cfMu serialises read-modify-write of a tunnel's Cloudflare configuration,
+	// which Cloudflare replaces wholesale on every update. The cfCache* fields
+	// briefly cache the hostname listing so page loads and polling viewers
+	// don't each cost a burst of Cloudflare API calls (see handlers_cftunnel.go).
+	cfMu       sync.Mutex
+	cfCacheMu  sync.Mutex
+	cfCacheKey string
+	cfCacheAt  time.Time
+	cfCacheVal *cfHostnamesResp
 	VPN        *vpn.Manager
 	Upstreams  []*upstream.Upstream
 	// Hints is the authoritative root-hints manager for recursive://
@@ -203,6 +214,8 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 		h.installCloudflaredUpdate(ctx, w, r.URL.Query().Get("restart") == "1")
 	case len(parts) == 2 && parts[0] == "tunnel" && parts[1] == "restart" && r.Method == http.MethodPost:
 		h.tunnelRestart(w)
+	case len(parts) >= 3 && parts[0] == "tunnel" && parts[1] == "cf":
+		h.cloudflareAPI(ctx, w, r, parts[2:])
 	case len(parts) == 2 && parts[0] == "vpn" && parts[1] == "status" && r.Method == http.MethodGet:
 		h.vpnStatus(w)
 	case len(parts) == 1 && parts[0] == "config" && r.Method == http.MethodGet:
