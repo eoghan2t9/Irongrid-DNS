@@ -515,6 +515,9 @@ func (a *app) setupAPI() {
 	// with it above; the API's config-apply path reads it from here).
 	a.apiHandler.GroupASN.Store(a.groupASN)
 	a.apiApp.Handler = a.apiHandler
+	// Keeps the published Cloudflare DNS records in step with this server when
+	// the user has switched auto-sync on; idle otherwise.
+	go a.apiHandler.RunDNSSync(a.ctx)
 	// authorize/validSession/issueSession snapshot the auth fields under the
 	// same mutex applyPayload uses, so a session-secret rotation can never be
 	// read as a torn mix.

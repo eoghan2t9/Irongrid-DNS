@@ -84,8 +84,15 @@ type Handler struct {
 	cfCacheKey string
 	cfCacheAt  time.Time
 	cfCacheVal *cfHostnamesResp
-	VPN        *vpn.Manager
-	Upstreams  []*upstream.Upstream
+	// cfDNSMu serialises planning+applying the protocol DNS records between
+	// the dashboard and the background sync; cfSync* hold the sync's state.
+	cfDNSMu       sync.Mutex
+	cfSyncMu      sync.Mutex
+	cfSyncLast    *cfdnsSyncStatus
+	cfSyncKey     string
+	cfSyncChecked time.Time
+	VPN           *vpn.Manager
+	Upstreams     []*upstream.Upstream
 	// Hints is the authoritative root-hints manager for recursive://
 	// upstreams; nil when no recursive upstream is configured.
 	Hints     *recursive.HintsManager

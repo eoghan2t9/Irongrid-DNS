@@ -659,6 +659,7 @@ func carryOverUneditable(cfg, running *config.Config) {
 	// settings save would silently disconnect the Cloudflare account.
 	cfg.Tunnel.CloudflareAPIToken = running.Tunnel.CloudflareAPIToken
 	cfg.Tunnel.CloudflareAccountID = running.Tunnel.CloudflareAccountID
+	cfg.CloudflareDNS = running.CloudflareDNS
 }
 
 func (h *Handler) applyPayload(p configPayload) ([]string, error) {

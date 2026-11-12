@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net"
@@ -78,6 +79,8 @@ type dnsClient interface {
 	RecordsPointingAt(ctx context.Context, zoneID, tunnelID string) ([]cfapi.Record, error)
 	CreateTunnelCNAME(ctx context.Context, zoneID, name, tunnelID string) (*cfapi.Record, error)
 	UpdateTunnelCNAME(ctx context.Context, zoneID, recordID, name, tunnelID string) (*cfapi.Record, error)
+	CreateRecord(ctx context.Context, zoneID string, in cfapi.RecordInput) (*cfapi.Record, error)
+	UpdateRecord(ctx context.Context, zoneID, recordID string, in cfapi.RecordInput) (*cfapi.Record, error)
 	DeleteRecord(ctx context.Context, zoneID, recordID string) error
 }
 
@@ -129,6 +132,14 @@ func (f *fallbackDNS) UpdateTunnelCNAME(ctx context.Context, zoneID, recordID, n
 	})
 }
 
+func (f *fallbackDNS) CreateRecord(ctx context.Context, zoneID string, in cfapi.RecordInput) (*cfapi.Record, error) {
+	return withAlt(f, func(c *cfapi.Client) (*cfapi.Record, error) { return c.CreateRecord(ctx, zoneID, in) })
+}
+
+func (f *fallbackDNS) UpdateRecord(ctx context.Context, zoneID, recordID string, in cfapi.RecordInput) (*cfapi.Record, error) {
+	return withAlt(f, func(c *cfapi.Client) (*cfapi.Record, error) { return c.UpdateRecord(ctx, zoneID, recordID, in) })
+}
+
 func (f *fallbackDNS) DeleteRecord(ctx context.Context, zoneID, recordID string) error {
 	_, err := withAlt(f, func(c *cfapi.Client) (struct{}, error) { return struct{}{}, c.DeleteRecord(ctx, zoneID, recordID) })
 	return err
@@ -138,16 +149,33 @@ func (f *fallbackDNS) DeleteRecord(ctx context.Context, zoneID, recordID string)
 // actually wrong: the token has no DNS permission on this particular zone.
 func dnsDenied(zone string, err error) error {
 	if cfapi.IsPermission(err) {
-		return fmt.Errorf("cloudflare denies the API token access to DNS records in %s — it needs Zone › DNS › Edit with that zone (or All zones) under Zone Resources", zone)
+		return &zoneDeniedError{zone: zone, err: err}
 	}
 	return err
 }
+
+// zoneDeniedError is a permission refusal for one zone's DNS records. It still
+// unwraps to the Cloudflare error, so IsPermission recognises it.
+type zoneDeniedError struct {
+	zone string
+	err  error
+}
+
+func (e *zoneDeniedError) Error() string {
+	return fmt.Sprintf("cloudflare denies the API token access to DNS records in %s — it needs Zone › DNS › Edit with that zone (or All zones) under Zone Resources", e.zone)
+}
+
+func (e *zoneDeniedError) Unwrap() error { return e.err }
 
 // cfFail reports a Cloudflare error. 502 keeps it distinct from this
 // dashboard's own 401 (session) handling.
 func cfFail(w http.ResponseWriter, err error) {
 	body := map[string]any{"error": err.Error(), "cloudflare": true}
-	if cfapi.IsPermission(err) {
+	var zd *zoneDeniedError
+	switch {
+	case errors.As(err, &zd):
+		body["permission"] = true // the message already names the zone and the fix
+	case cfapi.IsPermission(err):
 		body["permission"] = true
 		body["error"] = "Cloudflare refused the request: the API token is invalid or is missing a permission " +
 			"(Account › Cloudflare Tunnel: Edit, Zone › DNS: Edit, Zone › Zone: Read). " + err.Error()
@@ -211,6 +239,12 @@ func (h *Handler) cloudflareAPI(ctx context.Context, w http.ResponseWriter, r *h
 		h.cfUpsertHostname(ctx, w, r, m == http.MethodPut)
 	case len(parts) == 1 && parts[0] == "hostnames" && m == http.MethodDelete:
 		h.cfDeleteHostname(ctx, w, r)
+	case len(parts) == 1 && parts[0] == "dns-plan" && m == http.MethodGet:
+		h.cfDNSPlan(ctx, w)
+	case len(parts) == 2 && parts[0] == "dns-plan" && parts[1] == "apply" && m == http.MethodPost:
+		h.cfDNSApply(ctx, w, r)
+	case len(parts) == 1 && parts[0] == "dns-settings" && m == http.MethodPut:
+		h.cfDNSSettings(ctx, w, r)
 	case len(parts) == 2 && parts[0] == "hostnames" && parts[1] == "sync-dns" && m == http.MethodPost:
 		h.cfSyncDNS(ctx, w, r)
 	default:

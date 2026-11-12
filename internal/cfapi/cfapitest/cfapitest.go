@@ -53,12 +53,49 @@ type Zone struct {
 
 // Record is a stored DNS record.
 type Record struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Type    string `json:"type"`
-	Content string `json:"content"`
-	Proxied bool   `json:"proxied"`
-	ZoneID  string `json:"-"`
+	ID      string         `json:"id"`
+	Name    string         `json:"name"`
+	Type    string         `json:"type"`
+	Content string         `json:"content"`
+	Proxied bool           `json:"proxied"`
+	TTL     int            `json:"ttl"`
+	Data    map[string]any `json:"data,omitempty"`
+	ZoneID  string         `json:"-"`
+}
+
+// normalise fills Content from Data the way Cloudflare presents SVCB/HTTPS
+// records ("<priority> <target> <value>").
+func (r *Record) normalise() {
+	if r.Data == nil {
+		return
+	}
+	prio, _ := r.Data["priority"].(float64)
+	target, _ := r.Data["target"].(string)
+	value, _ := r.Data["value"].(string)
+	if !strings.HasSuffix(target, ".") {
+		target += "."
+	}
+	r.Content = strconv.Itoa(int(prio)) + " " + target
+	if value != "" {
+		r.Content += " " + value
+	}
+}
+
+// conflicts applies Cloudflare's rule that a CNAME cannot share a name with
+// any other record.
+func (s *Server) conflicts(zoneID, name, typ, ignoreID string) bool {
+	for _, o := range s.Records {
+		if o.ZoneID != zoneID || !strings.EqualFold(o.Name, name) || o.ID == ignoreID {
+			continue
+		}
+		if (typ == "CNAME") != (o.Type == "CNAME") {
+			return true
+		}
+		if typ == "CNAME" && o.Type == "CNAME" {
+			return true
+		}
+	}
+	return false
 }
 
 // Server is the fake. Mutate its exported state only before a request is in
@@ -392,14 +429,13 @@ func (s *Server) dns(w http.ResponseWriter, r *http.Request, zoneID string, rest
 	case len(rest) == 0 && r.Method == http.MethodPost:
 		var body Record
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		for _, rec := range s.Records {
-			if rec.ZoneID == zoneID && strings.EqualFold(rec.Name, body.Name) && rec.Type == "CNAME" {
-				fail(w, http.StatusBadRequest, 81053, "An A, AAAA, or CNAME record with that host already exists.")
-				return
-			}
+		if s.conflicts(zoneID, body.Name, body.Type, "") {
+			fail(w, http.StatusBadRequest, 81053, "An A, AAAA, or CNAME record with that host already exists.")
+			return
 		}
 		s.seq++
-		rec := &Record{ID: "rec-" + strconv.Itoa(s.seq), Name: body.Name, Type: body.Type, Content: body.Content, Proxied: body.Proxied, ZoneID: zoneID}
+		rec := &Record{ID: "rec-" + strconv.Itoa(s.seq), Name: body.Name, Type: body.Type, Content: body.Content, Proxied: body.Proxied, TTL: body.TTL, Data: body.Data, ZoneID: zoneID}
+		rec.normalise()
 		s.Records = append(s.Records, rec)
 		reply(w, 200, rec, 1)
 	case len(rest) == 1 && r.Method == http.MethodPut:
@@ -407,7 +443,12 @@ func (s *Server) dns(w http.ResponseWriter, r *http.Request, zoneID string, rest
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		for _, rec := range s.Records {
 			if rec.ID == rest[0] && rec.ZoneID == zoneID {
-				rec.Type, rec.Name, rec.Content, rec.Proxied = body.Type, body.Name, body.Content, body.Proxied
+				if s.conflicts(zoneID, body.Name, body.Type, rec.ID) {
+					fail(w, http.StatusBadRequest, 81053, "An A, AAAA, or CNAME record with that host already exists.")
+					return
+				}
+				rec.Type, rec.Name, rec.Content, rec.Proxied, rec.TTL, rec.Data = body.Type, body.Name, body.Content, body.Proxied, body.TTL, body.Data
+				rec.normalise()
 				reply(w, 200, rec, 1)
 				return
 			}

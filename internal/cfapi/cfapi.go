@@ -469,6 +469,56 @@ type Record struct {
 	Type    string `json:"type"`
 	Content string `json:"content"`
 	Proxied bool   `json:"proxied"`
+	TTL     int    `json:"ttl"`
+	// Data is the structured form of SVCB/HTTPS records ({priority, target,
+	// value}); Content carries the same information as one string.
+	Data map[string]any `json:"data,omitempty"`
+}
+
+// RecordInput describes a record to create or replace. SVCB and HTTPS records
+// are described by Data ({priority, target, value}); every other type by
+// Content.
+type RecordInput struct {
+	Type    string
+	Name    string
+	Content string
+	TTL     int // 1 = automatic
+	Proxied bool
+	Data    map[string]any
+}
+
+func (in RecordInput) body() map[string]any {
+	ttl := in.TTL
+	if ttl == 0 {
+		ttl = 1
+	}
+	b := map[string]any{"type": in.Type, "name": in.Name, "ttl": ttl, "proxied": in.Proxied}
+	if in.Content != "" {
+		b["content"] = in.Content
+	}
+	if in.Data != nil {
+		b["data"] = in.Data
+	}
+	return b
+}
+
+// CreateRecord creates a DNS record of any supported type.
+func (c *Client) CreateRecord(ctx context.Context, zoneID string, in RecordInput) (*Record, error) {
+	var r Record
+	if _, err := c.do(ctx, http.MethodPost, "/zones/"+url.PathEscape(zoneID)+"/dns_records", nil, in.body(), &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
+}
+
+// UpdateRecord replaces an existing DNS record.
+func (c *Client) UpdateRecord(ctx context.Context, zoneID, recordID string, in RecordInput) (*Record, error) {
+	var r Record
+	path := "/zones/" + url.PathEscape(zoneID) + "/dns_records/" + url.PathEscape(recordID)
+	if _, err := c.do(ctx, http.MethodPut, path, nil, in.body(), &r); err != nil {
+		return nil, err
+	}
+	return &r, nil
 }
 
 // ListZones returns the zones visible to the token.

@@ -296,6 +296,20 @@ export const api = {
     request('/api/tunnel/cf/hostnames?hostname=' + encodeURIComponent(hostname) + (withDns ? '&dns=1' : ''), {
       method: 'DELETE',
     }),
+  // DNS records for the server's encrypted protocols (A/AAAA, SVCB, HTTPS).
+  cfDNSPlan: () => request('/api/tunnel/cf/dns-plan'),
+  cfDNSApply: (prune = false) =>
+    request('/api/tunnel/cf/dns-plan/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prune }),
+    }),
+  cfDNSSettings: (body) =>
+    request('/api/tunnel/cf/dns-settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
   cfSyncDNS: (hostname, overwrite = false) =>
     request('/api/tunnel/cf/hostnames/sync-dns', {
       method: 'POST',

@@ -34,11 +34,14 @@ type Config struct {
 	// Logging controls the application's own log stream (startup, errors,
 	// reloads — everything through slog). Distinct from Log above, which
 	// controls the DNS query log.
-	Logging      LoggingConfig `yaml:"logging"`
-	Web          WebConfig     `yaml:"web"`
-	Tunnel       TunnelConfig  `yaml:"tunnel"`
-	Rewrites     []RewriteSpec `yaml:"rewrites"`      // local DNS records (A/AAAA/CNAME)
-	ClientGroups []ClientGroup `yaml:"client_groups"` // per-client blocking/upstream policy
+	Logging LoggingConfig `yaml:"logging"`
+	Web     WebConfig     `yaml:"web"`
+	Tunnel  TunnelConfig  `yaml:"tunnel"`
+	// CloudflareDNS controls the DNS records published for this server's
+	// encrypted protocols; managed from the Tunnel page, not the settings payload.
+	CloudflareDNS CloudflareDNSConfig `yaml:"cloudflare_dns"`
+	Rewrites      []RewriteSpec       `yaml:"rewrites"`      // local DNS records (A/AAAA/CNAME)
+	ClientGroups  []ClientGroup       `yaml:"client_groups"` // per-client blocking/upstream policy
 	// VPN configures domain-based split-tunnel routing: the resolved answers
 	// for selected domains are routed out through a dedicated WireGuard
 	// tunnel to a NordVPN or PIA server instead of the host's normal default
@@ -773,6 +776,24 @@ type APIToken struct {
 	// ReadOnly restricts this token to GET/HEAD requests; a write request
 	// (POST/PUT/PATCH/DELETE) bearing a read-only token is refused.
 	ReadOnly bool `yaml:"read_only"`
+}
+
+// CloudflareDNSConfig controls the DNS records Irongrid publishes in
+// Cloudflare so clients can reach and discover its DoH, DoT and DoQ endpoints.
+type CloudflareDNSConfig struct {
+	// Host is the hostname to publish. Empty means server.discovery_host, then
+	// the first ACME domain.
+	Host string `yaml:"host"`
+	// AutoSync keeps the records in step with this server in the background
+	// (for example when its public IP changes). It creates and updates
+	// records but never deletes any.
+	AutoSync bool `yaml:"auto_sync"`
+	// IPv4 and IPv6 override the detected public addresses. "off" publishes
+	// no address record of that family.
+	IPv4 string `yaml:"ipv4"`
+	IPv6 string `yaml:"ipv6"`
+	// SkipHTTPS leaves out the HTTPS record for the hostname.
+	SkipHTTPS bool `yaml:"skip_https"`
 }
 
 // TunnelConfig controls the baked-in cloudflared tunnel.

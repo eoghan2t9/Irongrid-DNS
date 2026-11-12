@@ -3,6 +3,7 @@ import { api } from '../api'
 import { useToast } from '../toast-context'
 import TunnelCloudflare from './TunnelCloudflare'
 import TunnelHostnames from './TunnelHostnames'
+import TunnelDNSRecords from './TunnelDNSRecords'
 
 export default function Tunnel() {
   const toast = useToast()
@@ -185,6 +186,7 @@ export default function Tunnel() {
 
       <TunnelCloudflare cf={cf} reload={loadCF} tunnelRunning={!!status?.running} />
       <TunnelHostnames cf={cf} />
+      <TunnelDNSRecords cf={cf} />
 
       <div className="card">
         <h3>{status?.running ? 'Tunnel is running' : 'Start a tunnel'}</h3>
