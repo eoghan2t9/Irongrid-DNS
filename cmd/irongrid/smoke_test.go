@@ -11,7 +11,8 @@
 //	go test -tags smoke -count=1 -run TestSmoke ./cmd/irongrid/
 //
 // Needs a `dragonfly` binary (PATH, or IRONGRID_SMOKE_DRAGONFLY); skips without
-// one. IRONGRID_SMOKE_BIN reuses a prebuilt binary instead of building one.
+// one. IRONGRID_SMOKE_BIN reuses a prebuilt binary instead of building one;
+// IRONGRID_SMOKE_PPROF=1 enables /debug/pprof on the test instance.
 // Nothing here touches a running production instance: every port is an
 // ephemeral loopback port and Dragonfly is a private throwaway process.
 package main
@@ -227,6 +228,7 @@ func bootSmoke(t *testing.T, shared bool) *smokeEnv {
 	cfg.Server.ListenDoT = fmt.Sprintf("127.0.0.1:%d", env.dot)
 	cfg.Server.ListenDoH = fmt.Sprintf("127.0.0.1:%d", env.doh)
 	cfg.Server.ListenDoQ = ""
+	cfg.Server.DebugPprof = os.Getenv("IRONGRID_SMOKE_PPROF") != "" // opt-in: expose /debug/pprof (test credentials only)
 	cfg.Server.WebListen = fmt.Sprintf("127.0.0.1:%d", env.web)
 	env.webScheme = "http"
 	if shared {

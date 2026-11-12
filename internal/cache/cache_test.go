@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -587,11 +588,11 @@ func TestL1FIFOEviction(t *testing.T) {
 	for i, h := range hs {
 		c.set(h, false, []byte{byte(i)}, time.Hour, now, nil)
 	}
-	if _, _, _, _, ok := c.get(hs[0], false, now); ok {
+	if _, _, _, _, _, ok := c.get(hs[0], false, now); ok {
 		t.Fatal("oldest-inserted entry should have been evicted first")
 	}
 	for _, h := range hs[1:] {
-		if _, _, _, _, ok := c.get(h, false, now); !ok {
+		if _, _, _, _, _, ok := c.get(h, false, now); !ok {
 			t.Fatal("newer entry should still be cached")
 		}
 	}
@@ -614,18 +615,18 @@ func TestL1SecondChanceEviction(t *testing.T) {
 
 	// Read A before the shard is forced to evict — it should earn one
 	// second chance and survive ahead of B, which is never read.
-	if _, _, _, _, ok := c.get(hs[0], false, now); !ok {
+	if _, _, _, _, _, ok := c.get(hs[0], false, now); !ok {
 		t.Fatal("A should be cached before the read")
 	}
 	c.set(hs[2], false, []byte{2}, time.Hour, now, nil) // C, forces eviction
 
-	if _, _, _, _, ok := c.get(hs[0], false, now); !ok {
+	if _, _, _, _, _, ok := c.get(hs[0], false, now); !ok {
 		t.Fatal("A (read since insertion) should have survived eviction on its second chance")
 	}
-	if _, _, _, _, ok := c.get(hs[1], false, now); ok {
+	if _, _, _, _, _, ok := c.get(hs[1], false, now); ok {
 		t.Fatal("B (never read) should have been evicted ahead of A")
 	}
-	if _, _, _, _, ok := c.get(hs[2], false, now); !ok {
+	if _, _, _, _, _, ok := c.get(hs[2], false, now); !ok {
 		t.Fatal("C (just inserted) should still be cached")
 	}
 }
@@ -918,7 +919,7 @@ func TestL1RehydrationHonorsRealRemainingTTL(t *testing.T) {
 		t.Fatal("expected a hit on L2 rehydration")
 	}
 
-	_, remaining, stale, _, ok := c.l1.get(h, false, time.Now())
+	_, remaining, _, stale, _, ok := c.l1.get(h, false, time.Now())
 	if !ok {
 		t.Fatal("expected the entry to be rehydrated into L1")
 	}
@@ -928,4 +929,104 @@ func TestL1RehydrationHonorsRealRemainingTTL(t *testing.T) {
 	if remaining <= 0 || remaining > 6*time.Second {
 		t.Fatalf("L1 entry TTL = %v, want ~5s (the record's real remaining TTL), not anywhere near the 6h cap", remaining)
 	}
+}
+
+// An L2 hit re-warms L1. The L1 entry must not outlive the record: its
+// lifetime is the record's REMAINING TTL, not the cache's configured maximum
+// (6h here) — otherwise a 60s record keeps being served from L1 for hours,
+// with its TTL clamped to 1, long after it should have been re-resolved.
+func TestL1RewarmFromL2HonoursRecordTTL(t *testing.T) {
+	t.Parallel()
+	mr := miniredis.RunT(t)
+	mk := func() *Cache {
+		c := &Cache{
+			client:      redis.NewClient(&redis.Options{Addr: mr.Addr()}),
+			l1:          newL1(64, 0),
+			prefix:      "irongrid:dns:",
+			ttl:         6 * time.Hour,
+			negativeTTL: time.Minute,
+		}
+		c.startWriter()
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
+	q := dns.Question{Name: "short-ttl.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	writer := mk()
+	writer.Set(t.Context(), q, aResponse("1.2.3.4", 60), 0)
+	if err := writer.Close(); err != nil { // flush the queued L2 write
+		t.Fatal(err)
+	}
+
+	reader := mk() // empty L1, same L2
+	if res := reader.Lookup(q); len(res.Raw) == 0 {
+		t.Fatal("expected an L2 hit")
+	}
+	_, remaining, _, _, _, ok := reader.l1.get(keyHash(q), false, time.Now())
+	if !ok {
+		t.Fatal("L2 hit did not re-warm L1")
+	}
+	if remaining > 61*time.Second {
+		t.Fatalf("L1 re-warmed with %s remaining for a 60s record (the configured cache ttl leaked into L1)", remaining)
+	}
+}
+
+// prefetchTestCache builds an L1-only cache whose prefetch callback counts
+// invocations, with one positive entry stored `age` ago with lifetime ttl.
+func prefetchTestCache(t *testing.T, q dns.Question, ttl, age time.Duration) (*Cache, *atomic.Int64) {
+	t.Helper()
+	c := &Cache{l1: newL1(64, 0), prefix: "irongrid:dns:", ttl: 6 * time.Hour, negativeTTL: time.Minute}
+	var calls atomic.Int64
+	c.EnablePrefetch(func(context.Context, dns.Question) { calls.Add(1) })
+	m := aResponse("1.2.3.4", uint32(ttl.Seconds()))
+	m.Compress = true
+	packed, err := m.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Add(-age)
+	buf := make([]byte, cacheEntryPrefixLen+len(packed))
+	binary.BigEndian.PutUint64(buf[:cacheEntryPrefixLen], uint64(now.Unix()))
+	copy(buf[cacheEntryPrefixLen:], packed)
+	c.l1.set(keyHash(q), false, buf, ttl, now, ttlOffsets(packed))
+	return c, &calls
+}
+
+// A hit on a short-TTL record that is nowhere near expiry must not schedule a
+// refresh. Before the lead was bounded by the entry's own lifetime, every
+// record with a TTL under the 2-minute lead cap triggered an upstream refresh
+// on every single hit.
+func TestPrefetchNotTriggeredFarFromExpiry(t *testing.T) {
+	t.Parallel()
+	q := dns.Question{Name: "short.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	c, calls := prefetchTestCache(t, q, 60*time.Second, 5*time.Second) // 55s left of 60s
+	for range 200 {
+		if res := c.Lookup(q); len(res.Raw) == 0 {
+			t.Fatal("expected an L1 hit")
+		}
+	}
+	time.Sleep(50 * time.Millisecond) // let any (unwanted) prefetch goroutine run
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("%d prefetches scheduled for a record with 55s of 60s left, want 0", n)
+	}
+}
+
+// ...but one genuinely close to expiry (last fifth of its life) is refreshed.
+func TestPrefetchTriggeredNearExpiry(t *testing.T) {
+	t.Parallel()
+	q := dns.Question{Name: "near.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	c, calls := prefetchTestCache(t, q, 60*time.Second, 55*time.Second) // 5s left of 60s (< 12s lead)
+	if res := c.Lookup(q); len(res.Raw) == 0 {
+		t.Fatal("expected an L1 hit")
+	}
+	waitUntil(t, func() bool { return calls.Load() >= 1 })
+}
+
+func waitUntil(t *testing.T, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(2 * time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+		if cond() {
+			return
+		}
+	}
+	t.Fatal("condition not met within 2s")
 }

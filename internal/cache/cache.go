@@ -601,7 +601,7 @@ func (c *Cache) getPositive(ctx context.Context, h uint64) *dns.Msg {
 		return nil
 	}
 	now := time.Now()
-	if raw, _, stale, _, ok := c.l1.get(h, false, now); ok && !stale {
+	if raw, _, _, stale, _, ok := c.l1.get(h, false, now); ok && !stale {
 		c.l1Hits.Add(1)
 		return unpackEntry(raw, now)
 	}
@@ -690,13 +690,24 @@ func (c *Cache) EnablePrefetch(fn func(ctx context.Context, q dns.Question)) {
 // hash (prefetching sync.Map), and the goroutine is fully best-effort — a
 // failure just leaves the now-stale entry to serve-stale or upstream on the
 // next miss.
-func (c *Cache) maybePrefetch(q dns.Question, h uint64, remaining time.Duration, neg bool) {
+func (c *Cache) maybePrefetch(q dns.Question, h uint64, remaining, lifetime time.Duration, neg bool) {
 	if c.prefetch == nil || remaining <= 0 {
 		return
 	}
 	lead := c.prefetchLead()
 	if neg {
 		lead = c.negPrefetchLead()
+	}
+	// The lead is sized from the cache's configured TTL, which is far longer
+	// than a typical record's own TTL: with the 2-minute cap, every record
+	// with a TTL of 2 minutes or less is "within the lead" from the moment it
+	// is cached, so EVERY hit would schedule a refresh (one goroutine plus an
+	// upstream round trip per hit, forever, for the many CDN/cloud names with
+	// 30-300s TTLs). Bound it by the entry's own lifetime so a refresh is
+	// scheduled once, in the last fifth of the record's life.
+	if lifetime > 0 {
+		// (keeping the same 1s floor the configured leads have)
+		lead = min(lead, max(lifetime/5, time.Second))
 	}
 	if remaining > lead {
 		return
@@ -749,13 +760,13 @@ func (c *Cache) Lookup(q dns.Question) LookupResult {
 	var stale LookupResult
 
 	if c.l1 != nil {
-		posRaw, posRemaining, posStale, posOff, posOK := c.l1.get(h, false, now)
+		posRaw, posRemaining, posLife, posStale, posOff, posOK := c.l1.get(h, false, now)
 		if posOK && !posStale {
 			c.l1Hits.Add(1)
-			c.maybePrefetch(q, h, posRemaining, false)
+			c.maybePrefetch(q, h, posRemaining, posLife, false)
 			return positiveResult(posRaw, posOff)
 		}
-		negRaw, negRemaining, negStale, _, negOK := c.l1.get(h, true, now)
+		negRaw, negRemaining, negLife, negStale, _, negOK := c.l1.get(h, true, now)
 		if negOK && !negStale {
 			c.l1Hits.Add(1)
 			// Prefetch NXDOMAIN and NODATA negatives (stable, legitimate
@@ -767,7 +778,7 @@ func (c *Cache) Lookup(q dns.Question) LookupResult {
 			// failure cache absorb the retries. Blocked domains never reach
 			// the cache at all, so this can't leak a blocked lookup upstream.
 			if rcodeOf(negRaw) != dns.RcodeServerFailure {
-				c.maybePrefetch(q, h, negRemaining, true)
+				c.maybePrefetch(q, h, negRemaining, negLife, true)
 			}
 			return LookupResult{Raw: negRaw, Negative: true}
 		}
@@ -807,7 +818,7 @@ func (c *Cache) Lookup(q dns.Question) LookupResult {
 		// path) so this hit and every later L1 hit can serve the raw bytes.
 		off := ttlOffsets(posRaw[cacheEntryPrefixLen:])
 		if c.l1 != nil {
-			c.l1.set(h, false, posRaw, c.ttl, now, off)
+			c.l1.set(h, false, posRaw, c.rewarmTTL(posRaw, off, now), now, off)
 		}
 		return positiveResult(posRaw, off)
 	}
@@ -821,6 +832,38 @@ func (c *Cache) Lookup(q dns.Question) LookupResult {
 		return LookupResult{Raw: negRaw, Negative: true}
 	}
 	return stale
+}
+
+// rewarmTTL is how long an L2-fetched positive entry may live in L1: the
+// record's REMAINING lifetime (smallest Answer TTL minus the entry's age),
+// capped by the configured maximum. Using the configured maximum instead let
+// a 60s record sit in L1 for hours — served at TTL 1, never refreshed — after
+// any restart or L1 eviction. Returns 0 (don't populate L1) when the record
+// has already run out; with no Answer TTLs to read, falls back to the short
+// negative TTL rather than guessing long.
+func (c *Cache) rewarmTTL(posRaw []byte, off []uint32, now time.Time) time.Duration {
+	body := posRaw[cacheEntryPrefixLen:]
+	minTTL := ^uint32(0)
+	for _, o := range off {
+		if int(o)+4 <= len(body) {
+			if t := binary.BigEndian.Uint32(body[o : o+4]); t < minTTL {
+				minTTL = t
+			}
+		}
+	}
+	if minTTL == ^uint32(0) {
+		return c.negativeTTL
+	}
+	elapsed := now.Unix() - int64(binary.BigEndian.Uint64(posRaw[:cacheEntryPrefixLen]))
+	remaining := int64(minTTL) - elapsed
+	if remaining <= 0 {
+		return 0
+	}
+	d := time.Duration(remaining) * time.Second
+	if c.ttl > 0 && d > c.ttl {
+		d = c.ttl
+	}
+	return d
 }
 
 // positiveResult builds a positive LookupResult from stored bytes that carry
@@ -861,10 +904,10 @@ func (c *Cache) Fresh(q dns.Question) bool {
 	h := keyHash(q)
 	now := time.Now()
 	if c.l1 != nil {
-		if raw, _, stale, _, ok := c.l1.get(h, false, now); ok && !stale && len(raw) > 0 {
+		if raw, _, _, stale, _, ok := c.l1.get(h, false, now); ok && !stale && len(raw) > 0 {
 			return true
 		}
-		if raw, _, stale, _, ok := c.l1.get(h, true, now); ok && !stale && len(raw) > 0 {
+		if raw, _, _, stale, _, ok := c.l1.get(h, true, now); ok && !stale && len(raw) > 0 {
 			return true
 		}
 	}
@@ -1054,7 +1097,7 @@ func (c *Cache) getNegative(ctx context.Context, h uint64) *dns.Msg {
 		return nil
 	}
 	now := time.Now()
-	if raw, _, stale, _, ok := c.l1.get(h, true, now); ok && !stale {
+	if raw, _, _, stale, _, ok := c.l1.get(h, true, now); ok && !stale {
 		c.l1Hits.Add(1)
 		return unpackNegative(raw)
 	}

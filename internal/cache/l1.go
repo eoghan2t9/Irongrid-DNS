@@ -41,6 +41,7 @@ type l1Key struct {
 type l1Entry struct {
 	raw        []byte
 	ttlOff     []uint32
+	lifetime   time.Duration // the TTL this entry was stored with (expires - stored time)
 	expires    time.Time
 	staleUntil time.Time // expires + staleTTL; serves stale before this
 	// referenced marks the entry as read since it was last given a second
@@ -140,14 +141,14 @@ func (c *l1Cache) shard(h uint64) *l1Shard {
 //
 // ttlOff are the entry's stored Answer-TTL byte offsets (nil for negative
 // entries); callers pass them straight through to the raw serve path.
-func (c *l1Cache) get(h uint64, neg bool, now time.Time) (raw []byte, remaining time.Duration, stale bool, ttlOff []uint32, ok bool) {
+func (c *l1Cache) get(h uint64, neg bool, now time.Time) (raw []byte, remaining, lifetime time.Duration, stale bool, ttlOff []uint32, ok bool) {
 	key := l1Key{h: h, neg: neg}
 	s := c.shard(h)
 	s.mu.RLock()
 	e, ok := s.m[key]
 	s.mu.RUnlock()
 	if !ok {
-		return nil, 0, false, nil, false
+		return nil, 0, 0, false, nil, false
 	}
 	// Mark the entry as recently used so a second-chance eviction (see
 	// evictToCap) spares it instead of dropping it in strict insertion
@@ -155,13 +156,13 @@ func (c *l1Cache) get(h uint64, neg bool, now time.Time) (raw []byte, remaining 
 	// above, so a cache hit still costs exactly one map lookup.
 	e.referenced.Store(true)
 	if now.Before(e.expires) {
-		return e.raw, e.expires.Sub(now), false, e.ttlOff, true
+		return e.raw, e.expires.Sub(now), e.lifetime, false, e.ttlOff, true
 	}
 	if now.Before(e.staleUntil) {
-		return e.raw, 0, true, e.ttlOff, true
+		return e.raw, 0, e.lifetime, true, e.ttlOff, true
 	}
 	c.del(h, neg)
-	return nil, 0, false, nil, false
+	return nil, 0, 0, false, nil, false
 }
 
 // set stores raw under the question hash with a TTL, alongside the byte
@@ -180,7 +181,7 @@ func (c *l1Cache) set(h uint64, neg bool, raw []byte, ttl time.Duration, now tim
 	defer s.mu.Unlock()
 	if c.cap > 0 {
 		if _, exists := s.m[key]; !exists {
-			s.m[key] = &l1Entry{raw: raw, ttlOff: ttlOff, expires: now.Add(ttl), staleUntil: now.Add(ttl + c.staleTTL)}
+			s.m[key] = &l1Entry{raw: raw, ttlOff: ttlOff, lifetime: ttl, expires: now.Add(ttl), staleUntil: now.Add(ttl + c.staleTTL)}
 			s.queue = append(s.queue, key)
 			s.evictToCap(c.cap)
 			// Dead queue slots (deleted/expired keys) accumulate as the map
@@ -200,7 +201,7 @@ func (c *l1Cache) set(h uint64, neg bool, raw []byte, ttl time.Duration, now tim
 		// approximation; the L2-hit re-warm path re-sets the same key in
 		// place without churning the queue.
 	}
-	s.m[key] = &l1Entry{raw: raw, ttlOff: ttlOff, expires: now.Add(ttl), staleUntil: now.Add(ttl + c.staleTTL)}
+	s.m[key] = &l1Entry{raw: raw, ttlOff: ttlOff, lifetime: ttl, expires: now.Add(ttl), staleUntil: now.Add(ttl + c.staleTTL)}
 }
 
 // evictToCap enforces cap with a CLOCK (second-chance) approximation of
