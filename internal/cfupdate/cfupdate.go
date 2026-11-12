@@ -119,7 +119,7 @@ func BinaryVersion(ctx context.Context, binPath string) string {
 	// Executing a file that was written moments ago can fail with ETXTBSY
 	// while another goroutine's fork still holds the write descriptor, so a
 	// failed run is retried briefly before giving up.
-	for attempt := 0; attempt < 3; attempt++ {
+	for range 3 {
 		//nolint:gosec // binPath is the managed cloudflared binary, not user input
 		out, err := exec.CommandContext(ctx, binPath, "--version").Output()
 		if err == nil {
