@@ -147,6 +147,39 @@ func ddrAnswer(r *dns.Msg, q dns.Question, cfg *DDRConfig, local net.IP) *dns.Ms
 	return m
 }
 
+// ddrLocalIP is the server address to advertise as the hint: the address the
+// query arrived on when the transport reports a specific one, otherwise the
+// address the OS would use to reach the client. The fallback matters because
+// the UDP listener is bound to the wildcard address and the DoH and DoQ
+// writers expose no local address at all, so without it nearly every answer
+// would carry no hint — and a client discovering a resolver on a private
+// address uses the hint to confirm the designated resolver is the same host.
+func ddrLocalIP(local net.Addr, client string) net.IP {
+	if ip := localIPOf(local); len(ip) > 0 && !ip.IsUnspecified() {
+		return ip
+	}
+	return routeSourceIP(client)
+}
+
+// routeSourceIP returns the local address the OS routing table selects for
+// reaching client. Connecting a UDP socket only performs the route lookup and
+// sends nothing.
+func routeSourceIP(client string) net.IP {
+	ip := net.ParseIP(client)
+	if ip == nil {
+		return nil
+	}
+	c, err := net.DialUDP("udp", nil, &net.UDPAddr{IP: ip, Port: 9})
+	if err != nil {
+		return nil
+	}
+	defer func() { _ = c.Close() }()
+	if a, ok := c.LocalAddr().(*net.UDPAddr); ok && !a.IP.IsUnspecified() {
+		return a.IP
+	}
+	return nil
+}
+
 // localIPOf returns the IP of a connection's local address, or nil.
 func localIPOf(a net.Addr) net.IP {
 	switch v := a.(type) {

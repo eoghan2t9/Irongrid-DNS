@@ -109,6 +109,63 @@ func TestDDRAnswersSVCBForEveryEncryptedTransport(t *testing.T) {
 	}
 }
 
+// wildLocalWriter reports the wildcard (UDP listener) or no (DoH, DoQ) local
+// address, as the real transports do.
+type wildLocalWriter struct {
+	fakeWriter
+	local net.Addr
+}
+
+func (w *wildLocalWriter) LocalAddr() net.Addr { return w.local }
+
+func ipv4HintOf(m *dns.Msg) net.IP {
+	for _, rr := range m.Answer {
+		if s, ok := rr.(*dns.SVCB); ok {
+			for _, kv := range s.Value {
+				if h, ok := kv.(*dns.SVCBIPv4Hint); ok && len(h.Hint) == 1 {
+					return h.Hint[0]
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// The live listeners do not report a usable local address; the hint must
+// still be present, taken from the route to the client.
+func TestDDRHintWhenListenerReportsNoSpecificAddress(t *testing.T) {
+	for name, local := range map[string]net.Addr{
+		"udp wildcard":    &net.UDPAddr{IP: net.IPv4zero, Port: 53},
+		"doh (nil addr)":  nil,
+		"doq (empty str)": addrOnly(""),
+	} {
+		h := NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, 5*time.Second)
+		h.SetDDR(NewDDRConfig("dns.example.net", "0.0.0.0:853", "", "", "", ""))
+		m := new(dns.Msg)
+		m.SetQuestion("_dns.resolver.arpa.", dns.TypeSVCB)
+		w := &wildLocalWriter{local: local} // client 127.0.0.1 -> route source 127.0.0.1
+		h.ServeDNS(w, m)
+		if w.msg == nil {
+			t.Fatalf("%s: no response", name)
+		}
+		if got := ipv4HintOf(w.msg); !got.Equal(net.IPv4(127, 0, 0, 1)) {
+			t.Errorf("%s: ipv4hint = %v, want 127.0.0.1", name, got)
+		}
+	}
+}
+
+func TestRouteSourceIP(t *testing.T) {
+	if ip := routeSourceIP("127.0.0.1"); !ip.Equal(net.IPv4(127, 0, 0, 1)) {
+		t.Errorf("loopback route source = %v", ip)
+	}
+	if ip := routeSourceIP("not-an-ip"); ip != nil {
+		t.Errorf("garbage client must yield nil, got %v", ip)
+	}
+	if ip := routeSourceIP(""); ip != nil {
+		t.Errorf("empty client must yield nil, got %v", ip)
+	}
+}
+
 func TestDDRWithoutConfigIsNODATANotForwarded(t *testing.T) {
 	h := NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, 5*time.Second)
 	for _, qt := range []uint16{dns.TypeSVCB, dns.TypeA, dns.TypeAAAA} {

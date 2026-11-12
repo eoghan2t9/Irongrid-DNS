@@ -643,7 +643,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	//    client-blocking checks above, so an unauthorized client gets nothing.
 	if isDDRQuery(qname) {
 		h.Stats.Allowed.Add(1)
-		m := ddrAnswer(r, q, h.ddr.Load(), localIPOf(w.LocalAddr()))
+		m := ddrAnswer(r, q, h.ddr.Load(), ddrLocalIP(w.LocalAddr(), client))
 		h.record(client, qname, q, "rewrite", "ddr", "", start, m)
 		_ = h.write(w, m, r, proto)
 		putMsg(m)
