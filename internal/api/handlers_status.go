@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"runtime"
 	"strconv"
@@ -30,11 +31,16 @@ func (h *Handler) getStatus(w http.ResponseWriter) {
 			(proto == "doq" && s.ListenDoQ != "")
 	}
 	cacheOK := true
+	cacheErr := ""
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if h.Cache != nil {
 		if err := h.Cache.Ping(ctx); err != nil {
 			cacheOK = false
+			cacheErr = err.Error()
+			// Surface why: the dashboard only had a boolean before, which made
+			// a failing-but-connected cache impossible to diagnose.
+			slog.Warn("cache ping failed", "error", err)
 		}
 	}
 	// Root-hints status (only present when a recursive:// upstream is
@@ -70,10 +76,11 @@ func (h *Handler) getStatus(w http.ResponseWriter) {
 		// num_cpu is the tuned GOMAXPROCS the UDP auto sizing runs off
 		// (cgroup-aware via internal/tuning), so the dashboard's
 		// "recommended values" can compute the exact same numbers.
-		"num_cpu":    runtime.GOMAXPROCS(0),
-		"cache_ok":   cacheOK,
-		"tunnel":     h.Tunnel.Status(),
-		"root_hints": rootHints,
+		"num_cpu":     runtime.GOMAXPROCS(0),
+		"cache_ok":    cacheOK,
+		"cache_error": cacheErr,
+		"tunnel":      h.Tunnel.Status(),
+		"root_hints":  rootHints,
 		// System tuning state: file-descriptor limit, socket buffers, Linux
 		// socket sysctls and the Go runtime settings (dashboard card).
 		"tuning": tuningStatus,

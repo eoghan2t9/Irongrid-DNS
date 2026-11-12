@@ -91,8 +91,9 @@ func (a *app) setupCache() {
 		slog.Error("cache init failed — Dragonfly is a hard requirement, start it (see docker-compose.yml) and retry", "error", err)
 		os.Exit(1)
 	}
-	// Note: closes the *current* cache, which reload may have swapped.
-	defer func() { _ = a.dfly.Close() }()
+	// The client is closed by main() at process exit, not here: a defer in
+	// this helper would run as soon as setupCache returns and leave every
+	// later cache call failing with "redis: client is closed".
 	slog.Info("Dragonfly caching enabled", "positive_ttl", a.cfg.Cache.TTL, "negative_ttl", a.cfg.Cache.NegativeTTL)
 
 	// ---- validate Dragonfly config against system specs ----

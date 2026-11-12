@@ -627,7 +627,7 @@ export default function App() {
         <div className="sidebar-foot">
           {status && (
             <>
-              <div className="status-row">
+              <div className="status-row" title={status.cache_ok ? undefined : status.cache_error || undefined}>
                 <span className={`dot ${status.cache_ok ? 'ok' : 'bad'}`} />
                 Cache: {status.cache_ok ? 'online' : 'offline'}
               </div>
