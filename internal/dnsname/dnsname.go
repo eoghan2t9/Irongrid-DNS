@@ -27,7 +27,7 @@ func IsCanonical(s string) bool {
 	if s[n-1] == '.' || isSpaceByte(s[0]) || isSpaceByte(s[n-1]) {
 		return false
 	}
-	for i := 0; i < n; i++ {
+	for i := range n {
 		c := s[i]
 		if c >= 0x80 || ('A' <= c && c <= 'Z') {
 			return false

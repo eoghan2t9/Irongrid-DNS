@@ -28,15 +28,13 @@ func TestReloadAllNeverExposesEmptyEngine(t *testing.T) {
 	var leaked atomic.Int64
 	var wg sync.WaitGroup
 	for range 4 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for !stop.Load() {
 				if e.DecideDomain("blocked.example.com.").Action != Block {
 					leaked.Add(1)
 				}
 			}
-		}()
+		})
 	}
 	for range 200 {
 		m.ReloadAll()
@@ -84,14 +82,12 @@ func TestCopyOnWriteIsolatesPublishedSnapshot(t *testing.T) {
 
 	var stop atomic.Bool
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		for !stop.Load() {
 			e.DecideDomain("blocked.example.com.")
 			_, _ = e.CheckIPs(nil)
 		}
-	}()
+	})
 	for range 50 {
 		e.AddIPBlock("203.0.113.9")
 		e.SetUserLists(nil, []string{"blocked.example.com"})

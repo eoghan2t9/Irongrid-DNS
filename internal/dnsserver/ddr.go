@@ -18,7 +18,7 @@ const ddrTTL = 300
 
 // DDRConfig describes the encrypted endpoints this server advertises through
 // Discovery of Designated Resolvers. A zero port means the transport is not
-// offered. Host is the authentication domain name (ADN): the name clients
+// offered. Host is the authentication domain name: the name clients
 // validate the TLS certificate against, so it must be covered by the served
 // certificate.
 type DDRConfig struct {

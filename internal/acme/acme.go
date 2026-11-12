@@ -544,7 +544,7 @@ func (m *Manager) ariWantsRenewal(ctx context.Context) bool {
 		m.syncStatusFromCert() // surface an earlier CA-suggested renewal on the dashboard
 		info = fresh
 	}
-	if !info.shouldRenew(time.Now(), renewalCheckEvery, mrand.Float64()) {
+	if !info.shouldRenew(time.Now(), renewalCheckEvery, mrand.Float64()) { //nolint:gosec // renewal-time jitter, not security-sensitive
 		return false
 	}
 	slog.Info("acme: CA suggests renewing now (ARI)",
