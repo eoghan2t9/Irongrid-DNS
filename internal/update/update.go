@@ -575,8 +575,11 @@ func parseSemver(s string) (semver, error) {
 	if before, after, ok := strings.Cut(s, "-"); ok {
 		core, pre = before, after
 	}
+	// Accept "v2.1" as well as "v2.1.0": some projects (Dragonfly's v2.1)
+	// tag releases with only major.minor, and the missing parts are zero.
+	// Rejecting them made Newer() report "no update" for every such tag.
 	parts := strings.Split(core, ".")
-	if len(parts) != 3 {
+	if len(parts) > 3 {
 		return semver{}, fmt.Errorf("not a semantic version: %q", s)
 	}
 	var v semver

@@ -90,6 +90,22 @@ func skipUnlessLinuxSh(t *testing.T) {
 	}
 }
 
+// Dragonfly v2.1 is tagged with only major.minor and its binary prints
+// "v2.1-<hash>". The regex used to demand three parts, so the installed
+// version came back empty and the updater could neither see nor install it.
+func TestVersionReTwoAndThreePartTags(t *testing.T) {
+	for in, want := range map[string]string{
+		"dragonfly v2.1-1bfc6b18e0e4":   "v2.1",
+		"dragonfly v2.0.2-8ce4bbb10658": "v2.0.2",
+		"v1.40.1":                       "v1.40.1",
+		"no version here":               "",
+	} {
+		if got := versionRe.FindString(in); got != want {
+			t.Errorf("versionRe.FindString(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 func TestInstalledVersion(t *testing.T) {
 	t.Parallel()
 	skipUnlessLinuxSh(t)

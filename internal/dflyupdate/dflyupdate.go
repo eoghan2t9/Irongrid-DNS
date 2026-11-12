@@ -41,7 +41,7 @@ const (
 
 // versionRe pulls the release tag out of `dragonfly --version`, which prints
 // ANSI colour codes around a "v1.2.3-<commit>" token.
-var versionRe = regexp.MustCompile(`v\d+\.\d+\.\d+`)
+var versionRe = regexp.MustCompile(`v\d+\.\d+(?:\.\d+)?`)
 
 var (
 	defaultAPIClient      = &http.Client{Timeout: 10 * time.Second}
