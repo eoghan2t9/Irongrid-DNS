@@ -200,7 +200,9 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 2 && parts[0] == "tunnel" && parts[1] == "log" && r.Method == http.MethodGet:
 		h.tunnelLog(w)
 	case len(parts) == 2 && parts[0] == "tunnel" && parts[1] == "cloudflared-update" && r.Method == http.MethodPost:
-		h.installCloudflaredUpdate(ctx, w)
+		h.installCloudflaredUpdate(ctx, w, r.URL.Query().Get("restart") == "1")
+	case len(parts) == 2 && parts[0] == "tunnel" && parts[1] == "restart" && r.Method == http.MethodPost:
+		h.tunnelRestart(w)
 	case len(parts) == 2 && parts[0] == "vpn" && parts[1] == "status" && r.Method == http.MethodGet:
 		h.vpnStatus(w)
 	case len(parts) == 1 && parts[0] == "config" && r.Method == http.MethodGet:

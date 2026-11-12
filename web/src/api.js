@@ -259,7 +259,10 @@ export const api = {
     }),
   tunnelStop: () => request('/api/tunnel/stop', { method: 'POST' }),
   tunnelLog: () => request('/api/tunnel/log'),
-  tunnelCheckCloudflaredUpdate: () => request('/api/tunnel/cloudflared-update', { method: 'POST' }),
+  // restart=true also relaunches a running tunnel so it picks up the new binary.
+  tunnelCheckCloudflaredUpdate: (restart = false) =>
+    request('/api/tunnel/cloudflared-update' + (restart ? '?restart=1' : ''), { method: 'POST' }),
+  tunnelRestart: () => request('/api/tunnel/restart', { method: 'POST' }),
   dhcpLeases: () => request('/api/dhcp/leases'),
   config: () => request('/api/config'),
   saveConfig: (cfg) =>

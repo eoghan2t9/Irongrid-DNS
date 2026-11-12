@@ -4,6 +4,10 @@ import { useToast } from '../toast-context'
 
 const RESTART_POLL_MS = 1500
 const RESTART_TIMEOUT_MS = 90000
+// The tunnel restarts in the background after the API answers; give it a
+// moment before re-reading its status so the page shows the new version.
+const TUNNEL_SETTLE_MS = 3000
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 // statusOf folds a tool row into one label + badge tone, most urgent first.
 function statusOf(t) {
@@ -98,6 +102,16 @@ export default function Updates() {
       )
     )
       return
+    // A running tunnel keeps the old binary until it is relaunched, so the
+    // update restarts it (running_version is only set while it is running).
+    const tunnelRunning = tool.id === 'cloudflared' && !!tool.running_version
+    if (
+      tunnelRunning &&
+      !confirm(
+        `Update cloudflared to ${tool.latest_version}?\n\nThe tunnel is running, so it restarts to use the new version. Remote access through it drops for a few seconds.`,
+      )
+    )
+      return
     setBusy(tool.id)
     say(tool.id, '')
     try {
@@ -116,13 +130,39 @@ export default function Updates() {
         else toast(res.note || 'Dragonfly installed — restart it to apply', 'error')
         if (res.note) say('dragonfly', res.note)
       } else if (tool.id === 'cloudflared') {
-        const res = await api.tunnelCheckCloudflaredUpdate()
-        toast(res.installed ? `cloudflared updated to ${res.new_version}` : 'cloudflared is already up to date')
+        const res = await api.tunnelCheckCloudflaredUpdate(tunnelRunning)
+        toast(
+          res.installed
+            ? `cloudflared updated to ${res.new_version}${res.restarting ? ' — restarting the tunnel' : ''}`
+            : 'cloudflared is already up to date',
+        )
         if (res.note) say('cloudflared', res.note)
+        if (res.restarting) await sleep(TUNNEL_SETTLE_MS)
       }
       await load()
     } catch (e) {
       toast('Update failed: ' + e.message, 'error')
+    }
+    setBusy('')
+  }
+
+  // The tunnel restarts after the API has answered, so the answer only says
+  // it was accepted; the refresh below shows what it actually came back as.
+  const restartTunnel = async () => {
+    if (busy) return
+    if (!confirm('Restart the tunnel now? Remote access through it drops for a few seconds.')) return
+    setBusy('cloudflared')
+    try {
+      const res = await api.tunnelRestart()
+      if (res.restarting) {
+        toast('Restarting the tunnel…')
+        await sleep(TUNNEL_SETTLE_MS)
+      } else {
+        toast(res.note || 'The tunnel was not restarted', 'error')
+      }
+      await load()
+    } catch (e) {
+      toast('Restart failed: ' + e.message, 'error')
     }
     setBusy('')
   }
@@ -188,6 +228,11 @@ export default function Updates() {
                 {t.restart_pending && t.id === 'dragonfly' && (
                   <button className="btn small" onClick={restartDragonfly} disabled={!!busy}>
                     {working ? 'Restarting…' : 'Restart Dragonfly'}
+                  </button>
+                )}
+                {t.restart_pending && t.id === 'cloudflared' && (
+                  <button className="btn small" onClick={restartTunnel} disabled={!!busy}>
+                    {working ? 'Restarting…' : 'Restart tunnel'}
                   </button>
                 )}
                 {t.update_available && !t.error && (

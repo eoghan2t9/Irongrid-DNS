@@ -113,10 +113,21 @@ func (h *Handler) cloudflaredStatus(ctx context.Context) *toolStatus {
 		Error:       info.Error,
 		ReleaseURL:  "https://github.com/" + cfupdate.DefaultRepo + "/releases/latest",
 	}
+	// The live tunnel can lag the installed binary: an update swaps the file
+	// but the running process keeps what it was started from.
+	ts := h.Tunnel.Status()
+	if ts.Running {
+		t.Running = ts.RunningVersion
+		if ts.RunningVersion != "" && info.CurrentVersion != "" && ts.RunningVersion != info.CurrentVersion {
+			t.RestartPending = true
+		}
+	}
 	switch {
 	case info.CurrentVersion == "":
 		t.Note = "Not installed yet — it is downloaded the first time the tunnel starts"
-	case info.Available && h.Tunnel.Status().Running:
+	case t.RestartPending:
+		t.Note = "Version " + t.Current + " is installed but " + t.Running + " is still running — restart the tunnel to apply it"
+	case info.Available && ts.Running:
 		t.Note = "The running tunnel keeps the old version until it is restarted"
 	}
 	return t

@@ -14,7 +14,9 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -29,9 +31,9 @@ const (
 	// defaultAPIURL is the template for the "latest release" endpoint.
 	defaultAPIURL = "https://api.github.com/repos/%s/releases/latest"
 	// versionFileName is the sidecar file recording the installed release
-	// tag, written next to the binary. Reading it avoids exec'ing an
-	// unverified/old binary just to learn its version, and doubles as the
-	// "not installed yet" signal when absent.
+	// tag, written next to the binary. It is only a fallback now: the
+	// binary itself is asked first (see CurrentVersion), so a binary that
+	// was replaced by hand is never misreported from a stale marker.
 	versionFileName = "cloudflared.version"
 )
 
@@ -104,11 +106,56 @@ type Client struct {
 	latestURL string
 }
 
-// CurrentVersion reads the installed release tag from the sidecar file next
-// to binPath, or "" if cloudflared has never been installed there. binPath
-// should come from internal/tunnel.Manager.BinaryPath — that is the single
-// source of truth for where the managed binary lives.
+// versionRe pulls the release out of `cloudflared --version`, which prints
+// e.g. "cloudflared version 2026.10.7 (built 2026-10-30-17:05 UTC)".
+var versionRe = regexp.MustCompile(`(?i)\bversion\s+v?([0-9][^\s]*)`)
+
+// BinaryVersion runs `binPath --version` and returns the release it reports
+// (e.g. "2026.10.7"), or "" if the file is missing, cannot run, or prints
+// nothing recognisable.
+func BinaryVersion(ctx context.Context, binPath string) string {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	// Executing a file that was written moments ago can fail with ETXTBSY
+	// while another goroutine's fork still holds the write descriptor, so a
+	// failed run is retried briefly before giving up.
+	for attempt := 0; attempt < 3; attempt++ {
+		//nolint:gosec // binPath is the managed cloudflared binary, not user input
+		out, err := exec.CommandContext(ctx, binPath, "--version").Output()
+		if err == nil {
+			if m := versionRe.FindStringSubmatch(string(out)); m != nil {
+				return m[1]
+			}
+			return ""
+		}
+		select {
+		case <-ctx.Done():
+			return ""
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	return ""
+}
+
+// sameVersion compares two release strings ignoring a leading "v".
+func sameVersion(a, b string) bool {
+	return a != "" && strings.TrimPrefix(a, "v") == strings.TrimPrefix(b, "v")
+}
+
+// CurrentVersion returns the installed cloudflared release at binPath, or ""
+// if cloudflared is not installed there. The binary is asked first so the
+// answer is always about the file that will actually run; the sidecar marker
+// is only a fallback for a binary that exists but cannot report a version.
+// binPath should come from internal/tunnel.Manager.BinaryPath — that is the
+// single source of truth for where the managed binary lives.
 func CurrentVersion(binPath string) string {
+	if _, err := os.Stat(binPath); err != nil {
+		// No binary means not installed, whatever a leftover marker says.
+		return ""
+	}
+	if v := BinaryVersion(context.Background(), binPath); v != "" {
+		return v
+	}
 	data, err := os.ReadFile(versionPath(binPath))
 	if err != nil {
 		return ""
@@ -204,6 +251,13 @@ func (c *Client) Install(ctx context.Context, binPath string) (*InstallResult, e
 	if err := os.Chmod(installFrom, 0o755); err != nil {
 		return nil, err
 	}
+	// The checksum only proves the download matches what GitHub published;
+	// running the binary proves it is the right architecture, starts at all,
+	// and is the release we meant to install. Without this a bad asset would
+	// replace a working tunnel binary with one that cannot even start.
+	if got := BinaryVersion(ctx, installFrom); !sameVersion(got, rel.TagName) {
+		return nil, fmt.Errorf("downloaded binary reports version %q, expected %s — not installing", got, rel.TagName)
+	}
 
 	if _, err := os.Stat(binPath); err == nil {
 		_ = os.Rename(binPath, binPath+".prev")
@@ -222,9 +276,10 @@ func (c *Client) Install(ctx context.Context, binPath string) (*InstallResult, e
 		return nil, fmt.Errorf("install %s: %w", asset.Name, err)
 	}
 
-	if err := os.WriteFile(versionPath(binPath), []byte(rel.TagName), 0o600); err != nil {
-		return nil, fmt.Errorf("record installed version: %w", err)
-	}
+	// Best effort: the binary is the source of truth for its version, the
+	// marker is only a fallback, so failing to write it must not turn a
+	// completed install into an error.
+	_ = os.WriteFile(versionPath(binPath), []byte(rel.TagName), 0o600)
 
 	return &InstallResult{
 		PreviousVersion: cur,

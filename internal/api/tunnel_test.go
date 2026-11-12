@@ -2,12 +2,15 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tunnel"
@@ -193,4 +196,97 @@ func TestTunnelStopDisablesAutoStart(t *testing.T) {
 	if cfg.Tunnel.Token != "previously-saved-token" {
 		t.Errorf("cfg.Tunnel.Token = %q, want the token kept for re-use", cfg.Tunnel.Token)
 	}
+}
+
+// fakeCloudflared installs a stand-in cloudflared at the manager's binary
+// path: it reports ver for --version and otherwise idles until signalled.
+func fakeCloudflared(t *testing.T, h *Handler, ver string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake cloudflared is a shell script")
+	}
+	script := "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo \"cloudflared version " + ver + " (built x)\"; exit 0; fi\nexec sleep 30\n"
+	tmp := h.Tunnel.BinaryPath() + ".new"
+	if err := os.WriteFile(tmp, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmp, h.Tunnel.BinaryPath()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Restarting a tunnel that is not running must be refused, not start it, and
+// the route must be POST-only.
+func TestTunnelRestartRefusedWhenStopped(t *testing.T) {
+	t.Parallel()
+	h, _, _, _ := newTunnelTestHandler(t)
+
+	rr := httptest.NewRecorder()
+	h.HandleAPI(rr, httptest.NewRequest(http.MethodPost, "/api/tunnel/restart", nil))
+	if rr.Code != http.StatusConflict || !strings.Contains(rr.Body.String(), "not running") {
+		t.Fatalf("POST /api/tunnel/restart = %d %s, want 409 not running", rr.Code, rr.Body.String())
+	}
+	if h.Tunnel.Status().Running {
+		t.Error("a refused restart started the tunnel")
+	}
+
+	rr = httptest.NewRecorder()
+	h.HandleAPI(rr, httptest.NewRequest(http.MethodGet, "/api/tunnel/restart", nil))
+	if rr.Code != http.StatusNotFound {
+		t.Errorf("GET /api/tunnel/restart = %d, want 404", rr.Code)
+	}
+}
+
+// After an update swaps the binary, the live tunnel still runs the old
+// release: the Updates entry must say so and flag a pending restart, and the
+// restart route must relaunch it onto the new binary without touching the
+// saved auto-start setting.
+func TestCloudflaredRestartPendingAndRestartRoute(t *testing.T) {
+	t.Parallel()
+	h, cfg, _, _ := newTunnelTestHandler(t)
+	fakeCloudflared(t, h, "2026.11.1")
+	if err := h.Tunnel.Start(tunnel.ModeQuick, "", "", "http://localhost:8080", ""); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(h.Tunnel.Stop)
+	cfg.Tunnel.Enabled = false
+
+	// An offline, already-cancelled context makes the GitHub lookup fail fast;
+	// the running/installed comparison does not depend on it.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if ts := h.cloudflaredStatus(ctx); ts.RestartPending || ts.Running != "2026.11.1" {
+		t.Fatalf("before the update: pending=%v running=%q, want not pending, running 2026.11.1", ts.RestartPending, ts.Running)
+	}
+
+	fakeCloudflared(t, h, "2026.11.2") // the update lands on disk
+	ts := h.cloudflaredStatus(ctx)
+	if !ts.RestartPending || ts.Current != "2026.11.2" || ts.Running != "2026.11.1" {
+		t.Fatalf("after the update: %+v, want pending, installed 2026.11.2, running 2026.11.1", ts)
+	}
+	if !strings.Contains(ts.Note, "restart the tunnel") {
+		t.Errorf("note %q does not tell the user to restart the tunnel", ts.Note)
+	}
+
+	rr := httptest.NewRecorder()
+	h.HandleAPI(rr, httptest.NewRequest(http.MethodPost, "/api/tunnel/restart", nil))
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("POST /api/tunnel/restart = %d %s, want 202", rr.Code, rr.Body.String())
+	}
+
+	// The restart runs in the background, after the response.
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if st := h.Tunnel.Status(); st.Running && st.RunningVersion == "2026.11.2" {
+			if ts := h.cloudflaredStatus(ctx); ts.RestartPending {
+				t.Fatal("restart still flagged as pending after the tunnel runs the new binary")
+			}
+			if cfg.Tunnel.Enabled {
+				t.Error("restart changed the saved auto-start setting")
+			}
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("tunnel never came back on 2026.11.2; status %+v", h.Tunnel.Status())
 }

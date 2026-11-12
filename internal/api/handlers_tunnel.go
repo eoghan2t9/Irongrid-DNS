@@ -119,11 +119,39 @@ func (h *Handler) tunnelLog(w http.ResponseWriter) {
 	writeJSON(w, http.StatusOK, map[string]any{"lines": h.Tunnel.TailLog(50)})
 }
 
+// restartTunnelSoon restarts the tunnel in the background, shortly after the
+// HTTP response has gone out. The dashboard is often reached *through* this
+// tunnel, so restarting it inside the request would cut the connection that
+// is waiting for the answer; the caller polls /api/updates for the outcome.
+func (h *Handler) restartTunnelSoon() {
+	go func() {
+		time.Sleep(300 * time.Millisecond)
+		if err := h.Tunnel.Restart(); err != nil {
+			slog.Error("tunnel restart failed", "error", err)
+			return
+		}
+		slog.Info("tunnel restarted", "version", h.Tunnel.Status().RunningVersion)
+	}()
+}
+
+// tunnelRestart relaunches the running tunnel so it picks up a cloudflared
+// binary that was installed after it started. It never turns a stopped
+// tunnel on, and leaves the saved auto-start setting alone.
+func (h *Handler) tunnelRestart(w http.ResponseWriter) {
+	if !h.Tunnel.Status().Running {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": tunnel.ErrNotRunning.Error()})
+		return
+	}
+	h.restartTunnelSoon()
+	writeJSON(w, http.StatusAccepted, map[string]any{"restarting": true})
+}
+
 // installCloudflaredUpdate checks cloudflare/cloudflared's GitHub releases
-// and installs a newer managed binary if one exists. Unlike installUpdate
-// (Irongrid's own self-update), no restart is needed afterward: the swap
-// only affects the *next* tunnel Start(), not the running Irongrid process.
-func (h *Handler) installCloudflaredUpdate(ctx context.Context, w http.ResponseWriter) {
+// and installs a newer managed binary if one exists. Irongrid itself needs no
+// restart, but a tunnel that is already running keeps the old binary until it
+// is relaunched; with restart set the tunnel is relaunched here too (also
+// when an earlier update is still waiting for that restart).
+func (h *Handler) installCloudflaredUpdate(ctx context.Context, w http.ResponseWriter, restart bool) {
 	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 
@@ -147,10 +175,20 @@ func (h *Handler) installCloudflaredUpdate(ctx context.Context, w http.ResponseW
 		"asset_name":       res.AssetName,
 		"asset_size":       res.AssetSize,
 	}
-	if !res.Installed {
+	st := h.Tunnel.Status()
+	// pending: an earlier update is installed but the live process predates it.
+	pending := st.Running && st.RunningVersion != "" && st.RunningVersion != res.NewVersion
+	switch {
+	case restart && st.Running && (res.Installed || pending):
+		h.restartTunnelSoon()
+		payload["restarting"] = true
+		payload["note"] = "cloudflared " + res.NewVersion + " is installed; restarting the tunnel to run it"
+	case !res.Installed && pending:
+		payload["note"] = "cloudflared is already up to date; restart the tunnel to run " + res.NewVersion
+	case !res.Installed:
 		payload["note"] = "cloudflared is already up to date"
-	} else if h.Tunnel.Status().Running {
-		payload["note"] = "cloudflared updated; the running tunnel keeps using the old binary until it is next restarted"
+	case st.Running:
+		payload["note"] = "cloudflared updated; the running tunnel keeps using the old binary until it is restarted"
 	}
 	writeJSON(w, http.StatusOK, payload)
 }

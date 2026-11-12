@@ -12,6 +12,7 @@ vi.mock('../api', () => ({
     updatesDragonflyInstall: vi.fn(),
     updatesDragonflyRestart: vi.fn(),
     tunnelCheckCloudflaredUpdate: vi.fn(),
+    tunnelRestart: vi.fn(),
     status: vi.fn(),
   },
 }))
@@ -104,6 +105,68 @@ describe('Updates', () => {
     expect(await screen.findByText('Restart needed')).toBeInTheDocument()
     await userEvent.click(screen.getByRole('button', { name: 'Restart Dragonfly' }))
     await waitFor(() => expect(api.updatesDragonflyRestart).toHaveBeenCalledTimes(1))
+  })
+
+  const cloudflared = (over) =>
+    tool({
+      id: 'cloudflared',
+      name: 'cloudflared',
+      current_version: '2026.10.7',
+      latest_version: '2026.11.1',
+      ...over,
+    })
+
+  it('updates cloudflared and restarts a running tunnel after confirmation', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    api.updates.mockResolvedValue({ tools: [cloudflared({ running_version: '2026.10.7' })] })
+    api.tunnelCheckCloudflaredUpdate.mockResolvedValue({ installed: true, new_version: '2026.11.1', restarting: true })
+    renderPage()
+    await userEvent.click(await screen.findByRole('button', { name: 'Update to 2026.11.1' }))
+
+    expect(confirmSpy).toHaveBeenCalledTimes(1)
+    expect(confirmSpy.mock.calls[0][0]).toMatch(/tunnel is running/i)
+    await waitFor(() => expect(api.tunnelCheckCloudflaredUpdate).toHaveBeenCalledWith(true))
+  })
+
+  it('updates cloudflared without a prompt or restart when the tunnel is not running', async () => {
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    api.updates.mockResolvedValue({ tools: [cloudflared({})] })
+    api.tunnelCheckCloudflaredUpdate.mockResolvedValue({ installed: true, new_version: '2026.11.1' })
+    renderPage()
+    await userEvent.click(await screen.findByRole('button', { name: 'Update to 2026.11.1' }))
+
+    await waitFor(() => expect(api.tunnelCheckCloudflaredUpdate).toHaveBeenCalledWith(false))
+    expect(confirmSpy).not.toHaveBeenCalled()
+  })
+
+  it('does not update cloudflared when the restart confirmation is declined', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    api.updates.mockResolvedValue({ tools: [cloudflared({ running_version: '2026.10.7' })] })
+    renderPage()
+    await userEvent.click(await screen.findByRole('button', { name: 'Update to 2026.11.1' }))
+
+    expect(api.tunnelCheckCloudflaredUpdate).not.toHaveBeenCalled()
+  })
+
+  it('offers a tunnel restart when the new cloudflared is installed but not running', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    api.updates.mockResolvedValue({
+      tools: [
+        cloudflared({
+          current_version: '2026.11.1',
+          running_version: '2026.10.7',
+          update_available: false,
+          restart_pending: true,
+        }),
+      ],
+    })
+    api.tunnelRestart.mockResolvedValue({ restarting: true })
+    renderPage()
+
+    expect(await screen.findByText('Restart needed')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Restart Dragonfly/ })).not.toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Restart tunnel' }))
+    await waitFor(() => expect(api.tunnelRestart).toHaveBeenCalledTimes(1))
   })
 
   it('disables the update button for a tool that cannot be updated from here', async () => {

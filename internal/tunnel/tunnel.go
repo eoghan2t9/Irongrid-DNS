@@ -4,6 +4,8 @@
 package tunnel
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -13,7 +15,13 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/cfupdate"
 )
+
+// ErrNotRunning is returned by Restart when there is no running tunnel to
+// restart (a stopped tunnel is deliberately not started by a restart).
+var ErrNotRunning = errors.New("tunnel is not running")
 
 // Mode describes how the tunnel authenticates to Cloudflare.
 type Mode string
@@ -39,18 +47,35 @@ type BinaryStatus struct {
 
 // Status is the current tunnel state.
 type Status struct {
-	Running bool         `json:"running"`
-	Mode    Mode         `json:"mode"`
-	Started time.Time    `json:"started"`
-	Error   string       `json:"error"`
-	LastLog string       `json:"last_log"`
-	LogFile string       `json:"log_file"`
-	Binary  BinaryStatus `json:"binary"`
+	Running bool `json:"running"`
+	// RunningVersion is the cloudflared release the live process was started
+	// from. It can lag the installed binary after an update until the tunnel
+	// is restarted; empty when the tunnel is not running.
+	RunningVersion string       `json:"running_version,omitempty"`
+	Mode           Mode         `json:"mode"`
+	Started        time.Time    `json:"started"`
+	Error          string       `json:"error"`
+	LastLog        string       `json:"last_log"`
+	LogFile        string       `json:"log_file"`
+	Binary         BinaryStatus `json:"binary"`
+}
+
+// startArgs are the arguments of the last successful Start, kept so Restart
+// can relaunch the tunnel exactly as it was configured.
+type startArgs struct {
+	mode                                Mode
+	token, configFile, origin, hostname string
 }
 
 // Manager controls the managed cloudflared subprocess.
 type Manager struct {
+	// restartMu serialises Restart calls so two clicks cannot interleave a
+	// stop with another stop and a double start.
+	restartMu    sync.Mutex
 	mu           sync.Mutex
+	runVersion   string
+	last         startArgs
+	haveLast     bool
 	running      bool
 	started      time.Time
 	mode         Mode
@@ -129,6 +154,11 @@ func (m *Manager) Start(mode Mode, token, configFile, origin, hostname string) (
 		return fmt.Errorf("cloudflared binary not installed at %s: %w", m.binPath, statErr)
 	}
 
+	// Ask the binary which release it is before launching it: that is the
+	// version the new process will run, even if the file is swapped by an
+	// update a moment later.
+	runVersion := cfupdate.BinaryVersion(context.Background(), m.binPath)
+
 	args := buildArgs(mode, token, configFile, origin, m.logFile)
 	cmd := exec.Command(m.binPath, args...)
 	cmd.Env = append(os.Environ(), "QUIC_GO_DISABLE_ECN=1")
@@ -139,12 +169,16 @@ func (m *Manager) Start(mode Mode, token, configFile, origin, hostname string) (
 
 	m.mu.Lock()
 	m.cmd = cmd
+	m.runVersion = runVersion
+	m.last = startArgs{mode: mode, token: token, configFile: configFile, origin: origin, hostname: hostname}
+	m.haveLast = true
 	m.mu.Unlock()
 
 	go func() {
 		waitErr := cmd.Wait()
 		m.mu.Lock()
 		m.running = false
+		m.runVersion = ""
 		m.cmd = nil
 		if waitErr != nil {
 			m.lastErr = waitErr.Error()
@@ -231,11 +265,45 @@ func (m *Manager) Stop() {
 	}
 }
 
+// Restart stops the running tunnel and starts it again with the arguments it
+// was last started with, so a cloudflared binary that was swapped in by an
+// update takes effect. It returns ErrNotRunning (and does nothing) when the
+// tunnel is not running: a restart never turns a stopped tunnel on.
+func (m *Manager) Restart() error {
+	m.restartMu.Lock()
+	defer m.restartMu.Unlock()
+
+	m.mu.Lock()
+	running, args, ok := m.running, m.last, m.haveLast
+	m.mu.Unlock()
+	if !running {
+		return ErrNotRunning
+	}
+	if !ok {
+		return errors.New("tunnel was not started by this process; stop and start it from the Tunnel page")
+	}
+
+	m.Stop()
+	// Stop returns once the process is gone or has been killed; the exit is
+	// recorded asynchronously, and Start refuses while it still looks running.
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		still := m.running
+		m.mu.Unlock()
+		if !still {
+			return m.Start(args.mode, args.token, args.configFile, args.origin, args.hostname)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	return errors.New("tunnel did not stop in time; not restarting it")
+}
+
 // Status returns a snapshot for the API.
 func (m *Manager) Status() Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return Status{
+	s := Status{
 		Running: m.running,
 		Mode:    m.mode,
 		Started: m.started,
@@ -244,6 +312,10 @@ func (m *Manager) Status() Status {
 		LogFile: m.logFile,
 		Binary:  m.binaryStatus,
 	}
+	if m.running {
+		s.RunningVersion = m.runVersion
+	}
+	return s
 }
 
 // TailLog returns the most recent lines of the cloudflared log.
