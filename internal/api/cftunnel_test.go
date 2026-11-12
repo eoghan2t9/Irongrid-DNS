@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"maps"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -519,9 +520,7 @@ func TestCFHostnameOriginTLSSettingsRoundTrip(t *testing.T) {
 	}
 	body := func(over map[string]any) map[string]any {
 		b := map[string]any{"hostname": "a.example.com", "service": "https://localhost:443", "create_dns": &no}
-		for k, v := range over {
-			b[k] = v
-		}
+		maps.Copy(b, over)
 		return b
 	}
 
