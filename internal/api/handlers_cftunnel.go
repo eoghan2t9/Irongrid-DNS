@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net"
 	"net/http"
 	"net/url"
@@ -67,9 +68,7 @@ func cfFail(w http.ResponseWriter, err error) {
 
 func badRequest(w http.ResponseWriter, msg string, extra map[string]any) {
 	body := map[string]any{"error": msg}
-	for k, v := range extra {
-		body[k] = v
-	}
+	maps.Copy(body, extra)
 	writeJSON(w, http.StatusBadRequest, body)
 }
 
@@ -507,7 +506,7 @@ func validCFHostname(h string) bool {
 	if h == "" || len(h) > 253 || !strings.Contains(h, ".") {
 		return false
 	}
-	for _, l := range strings.Split(h, ".") {
+	for l := range strings.SplitSeq(h, ".") {
 		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
 			return false
 		}

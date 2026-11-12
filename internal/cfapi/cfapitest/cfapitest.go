@@ -90,7 +90,7 @@ func (s *Server) AddTunnel(name, status string, conns int) *Tunnel {
 	defer s.mu.Unlock()
 	s.seq++
 	t := &Tunnel{ID: "tun-" + strconv.Itoa(s.seq), Name: name, Status: status, CreatedAt: "2026-11-01T10:00:00Z", ConfigSrc: "cloudflare"}
-	for i := 0; i < conns; i++ {
+	for i := range conns {
 		t.Connections = append(t.Connections, Connection{ID: "c" + strconv.Itoa(i), ColoName: "LHR", OriginIP: "203.0.113.7", OpenedAt: "2026-11-12T08:00:00Z"})
 	}
 	s.Tunnels = append(s.Tunnels, t)
@@ -196,14 +196,8 @@ func page[T any](items []T, r *http.Request, forced int) ([]T, int) {
 	if pages == 0 {
 		pages = 1
 	}
-	lo := (pg - 1) * per
-	if lo > len(items) {
-		lo = len(items)
-	}
-	hi := lo + per
-	if hi > len(items) {
-		hi = len(items)
-	}
+	lo := min((pg-1)*per, len(items))
+	hi := min(lo+per, len(items))
 	return items[lo:hi], pages
 }
 

@@ -55,7 +55,7 @@ func TestListsWalkEveryPage(t *testing.T) {
 	t.Parallel()
 	s := cfapitest.New(t)
 	s.PerPage = 2
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		s.AddZone("zone" + strconv.Itoa(i) + ".example")
 		s.AddTunnel("t"+strconv.Itoa(i), "healthy", 1)
 	}
