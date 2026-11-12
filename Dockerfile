@@ -6,7 +6,7 @@ ARG COMMIT=dev
 ARG BUILDTIME=unknown
 
 # ---- Stage 1: build the React frontend ----
-FROM node:22-alpine AS web
+FROM node:24-alpine AS web
 WORKDIR /web
 COPY web/package.json web/package-lock.json* ./
 RUN npm install --no-audit --no-fund
@@ -33,7 +33,7 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags "-s -w \
     -o /out/irongrid ./cmd/irongrid
 
 # ---- Stage 3: minimal runtime ----
-FROM alpine:3.20
+FROM alpine:3.24
 RUN apk add --no-cache ca-certificates tzdata && \
     adduser -D -u 1000 irongrid && \
     mkdir -p /data/lists /data/certs && chown -R irongrid /data
