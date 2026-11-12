@@ -234,3 +234,79 @@ func TestStatusTimesPointersSet(t *testing.T) {
 		t.Errorf("next_renewal should be a timestamp after issuance: %s", s)
 	}
 }
+
+// After a restart the manager has issued nothing in this process, but a valid
+// ACME certificate is on disk (it only issues inside the renewal window). The
+// dashboard must show when that cert was issued and when renewal starts
+// instead of "never" and nothing.
+func TestStatusFromExistingCertAfterRestart(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeCACert(t, dir, []string{"example.com"}, 90) // valid 90 days, issued 1h ago
+	m := New(Options{Email: "a@b.c", Domains: []string{"example.com"}, CertDir: dir, RenewBeforeDays: 30})
+
+	st := m.GetStatus()
+	if st.LastSuccess == nil {
+		t.Fatal("LastSuccess is nil although a valid certificate is on disk")
+	}
+	if age := time.Since(*st.LastSuccess); age < 0 || age > 3*time.Hour {
+		t.Errorf("LastSuccess = %s ago, want about 1h (the cert's NotBefore)", age)
+	}
+	if st.NextRenewal == nil {
+		t.Fatal("NextRenewal is nil although a valid certificate is on disk")
+	}
+	// 90-day cert, 30-day window: renewal starts at day 60 (NOT day 30).
+	if until := time.Until(*st.NextRenewal); until < 59*24*time.Hour || until > 61*24*time.Hour {
+		t.Errorf("NextRenewal in %s, want about 60 days (expiry minus the 30-day window)", until)
+	}
+	if st.LastError != "" {
+		t.Errorf("LastError = %q, want empty", st.LastError)
+	}
+}
+
+// A missing cert, the self-signed startup placeholder, or a cert for other
+// domains is not an ACME issuance: nothing to report.
+func TestStatusNotInferredFromUnusableCert(t *testing.T) {
+	t.Parallel()
+	check := func(name string, setup func(dir string)) {
+		t.Helper()
+		dir := t.TempDir()
+		setup(dir)
+		m := New(Options{Email: "a@b.c", Domains: []string{"example.com"}, CertDir: dir, RenewBeforeDays: 30})
+		if st := m.GetStatus(); st.LastSuccess != nil || st.NextRenewal != nil {
+			t.Errorf("%s: LastSuccess=%v NextRenewal=%v, want both nil", name, st.LastSuccess, st.NextRenewal)
+		}
+	}
+	check("no cert", func(string) {})
+	check("self-signed placeholder", func(dir string) {
+		if _, err := cert.Generate(dir, []string{"example.com"}, "ecdsa", 0, 90); err != nil {
+			t.Fatal(err)
+		}
+	})
+	check("cert for other domains", func(dir string) { writeCACert(t, dir, []string{"other.org"}, 90) })
+}
+
+// Re-reading the cert (the periodic loop does this) must not overwrite a real
+// issuance time recorded by this process, but must keep NextRenewal in step
+// with whatever certificate is on disk.
+func TestSyncStatusKeepsRecordedIssuanceTime(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	writeCACert(t, dir, []string{"example.com"}, 90)
+	m := New(Options{Email: "a@b.c", Domains: []string{"example.com"}, CertDir: dir, RenewBeforeDays: 30})
+	issued := time.Now().Add(-10 * time.Minute)
+	m.mu.Lock()
+	m.Status.LastSuccess = &issued
+	m.mu.Unlock()
+	writeCACert(t, dir, []string{"example.com"}, 40) // a shorter-lived cert replaces it
+	if !m.syncStatusFromCert() {
+		t.Fatal("syncStatusFromCert = false for a valid cert")
+	}
+	st := m.GetStatus()
+	if !st.LastSuccess.Equal(issued) {
+		t.Errorf("LastSuccess changed to %v, want the recorded %v", st.LastSuccess, issued)
+	}
+	if until := time.Until(*st.NextRenewal); until < 9*24*time.Hour || until > 11*24*time.Hour {
+		t.Errorf("NextRenewal in %s, want about 10 days (40-day cert minus the 30-day window)", until)
+	}
+}

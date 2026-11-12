@@ -151,6 +151,7 @@ func New(o Options) *Manager {
 	} else {
 		m.Status.Challenge = "http-01"
 	}
+	m.syncStatusFromCert()
 	return m
 }
 
@@ -416,9 +417,15 @@ func (m *Manager) Issue(ctx context.Context) error {
 	issued := time.Now()
 	m.Status.LastSuccess = &issued
 	m.Status.LastError = ""
-	next := issued.Add(m.renewIn)
-	m.Status.NextRenewal = &next
 	m.mu.Unlock()
+	// Renewal starts renewIn before the new cert EXPIRES (a 90-day cert with
+	// a 30-day window renews at day 60), not renewIn after it was issued.
+	if !m.syncStatusFromCert() {
+		next := issued.Add(m.renewIn)
+		m.mu.Lock()
+		m.Status.NextRenewal = &next
+		m.mu.Unlock()
+	}
 	slog.Info("acme certificate issued", "domains", m.domains, "dir", m.dir)
 	return nil
 }
@@ -431,37 +438,71 @@ func (m *Manager) notifyIssued() {
 	}
 }
 
-// NeedsRenewal reports whether the current certificate is missing, expired,
-// within the renewal window, or does not cover every configured ACME domain
-// (e.g. only a self-signed fallback exists).
-func (m *Manager) NeedsRenewal() bool {
+// leafCert returns the leaf of the certificate on disk when it is a usable
+// ACME certificate for the configured domains. ok is false when there is no
+// readable cert, it is the self-signed startup placeholder (issuer == subject
+// is the self-signed mark, even when it happens to cover the domain names),
+// or it does not cover every configured ACME domain.
+func (m *Manager) leafCert() (leaf *x509.Certificate, ok bool) {
 	cert, err := tls.LoadX509KeyPair(
 		filepath.Join(m.dir, "cert.pem"),
 		filepath.Join(m.dir, "key.pem"),
 	)
 	if err != nil {
-		return true
+		return nil, false
 	}
-	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	leaf, err = x509.ParseCertificate(cert.Certificate[0])
 	if err != nil {
-		return true
+		return nil, false
 	}
-	// The startup self-signed fallback must be replaced even if it happens
-	// to cover the domain names (issuer == subject is the self-signed mark).
 	if leaf.Issuer.CommonName == leaf.Subject.CommonName {
-		return true
+		return nil, false
 	}
-	// A cert that doesn't cover the ACME domains must be replaced.
 	covered := map[string]bool{}
 	for _, d := range leaf.DNSNames {
 		covered[strings.ToLower(d)] = true
 	}
 	for _, d := range m.domains {
 		if !covered[strings.ToLower(d)] {
-			return true
+			return nil, false
 		}
 	}
+	return leaf, true
+}
+
+// NeedsRenewal reports whether the current certificate is missing, expired,
+// within the renewal window, or does not cover every configured ACME domain
+// (e.g. only a self-signed fallback exists).
+func (m *Manager) NeedsRenewal() bool {
+	leaf, ok := m.leafCert()
+	if !ok {
+		return true
+	}
 	return time.Until(leaf.NotAfter) < m.renewIn
+}
+
+// syncStatusFromCert fills the dashboard's "last issued" and "next renewal"
+// from the certificate on disk. Status is otherwise only written by Issue, so
+// after any restart with a still-valid certificate (the normal case — it
+// only issues inside the renewal window) the card would say "never issued"
+// with no next renewal. LastSuccess is only back-filled when this process
+// hasn't recorded an issuance itself; NextRenewal always follows the cert,
+// since renewal starts renewIn before it expires. Reports whether a usable
+// certificate was found.
+func (m *Manager) syncStatusFromCert() bool {
+	leaf, ok := m.leafCert()
+	if !ok {
+		return false
+	}
+	issued := leaf.NotBefore
+	next := leaf.NotAfter.Add(-m.renewIn)
+	m.mu.Lock()
+	if m.Status.LastSuccess == nil {
+		m.Status.LastSuccess = &issued
+	}
+	m.Status.NextRenewal = &next
+	m.mu.Unlock()
+	return true
 }
 
 // RunLoop renews on start when needed and then every 6 hours (so a failed attempt is retried well inside the renewal window) until
@@ -507,6 +548,7 @@ func (m *Manager) RunLoop(ctx context.Context) {
 		case <-m.stopCh:
 			return
 		case <-t.C:
+			m.syncStatusFromCert()
 			if !m.NeedsRenewal() {
 				continue
 			}
