@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"net"
 	"net/http"
@@ -10,6 +11,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cfapi"
@@ -26,7 +28,12 @@ import (
 
 // cfCtx is what the Cloudflare endpoints resolve from the config.
 type cfCtx struct {
-	client         *cfapi.Client
+	client *cfapi.Client
+	// dns is the client DNS-record calls go through: the tunnel API token
+	// first and, when Cloudflare denies it, the ACME (certificate) token.
+	dns *fallbackDNS
+	// dnsFallback reports that a second token is available for DNS records.
+	dnsFallback    bool
 	hasToken       bool
 	tunnelTokenSet bool
 	account        string
@@ -36,11 +43,21 @@ type cfCtx struct {
 func (h *Handler) cfContext() cfCtx {
 	h.cfgMu.Lock()
 	t := h.Cfg.Tunnel
+	acmeToken := h.Cfg.TLS.ACME.DNS01.CloudflareToken
 	h.cfgMu.Unlock()
 	c := cfCtx{account: t.CloudflareAccountID}
 	if t.CloudflareAPIToken != "" {
 		c.hasToken = true
 		c.client = &cfapi.Client{Token: t.CloudflareAPIToken, BaseURL: h.CloudflareBaseURL}
+		var alt *cfapi.Client
+		// The certificate settings already hold a Cloudflare token with
+		// Zone › DNS › Edit, so it can stand in for DNS records when the
+		// tunnel token lacks that permission.
+		if acmeToken != "" && acmeToken != t.CloudflareAPIToken {
+			alt = &cfapi.Client{Token: acmeToken, BaseURL: h.CloudflareBaseURL}
+		}
+		c.dns = &fallbackDNS{primary: c.client, alt: alt}
+		c.dnsFallback = alt != nil
 	}
 	if t.Token != "" {
 		c.tunnelTokenSet = true
@@ -52,6 +69,78 @@ func (h *Handler) cfContext() cfCtx {
 		}
 	}
 	return c
+}
+
+// dnsClient is the set of Cloudflare calls DNS handling needs.
+type dnsClient interface {
+	ListZones(ctx context.Context) ([]cfapi.Zone, error)
+	RecordsNamed(ctx context.Context, zoneID, name string) ([]cfapi.Record, error)
+	RecordsPointingAt(ctx context.Context, zoneID, tunnelID string) ([]cfapi.Record, error)
+	CreateTunnelCNAME(ctx context.Context, zoneID, name, tunnelID string) (*cfapi.Record, error)
+	UpdateTunnelCNAME(ctx context.Context, zoneID, recordID, name, tunnelID string) (*cfapi.Record, error)
+	DeleteRecord(ctx context.Context, zoneID, recordID string) error
+}
+
+// fallbackDNS tries the primary token for every DNS call and, only when
+// Cloudflare refuses it for lack of permission, the alternate token. The
+// primary stays the one that is configured on the Tunnel page: the alternate
+// is never used when the primary works, and its own failures are not shown in
+// place of the primary's unless they are something other than a refusal.
+type fallbackDNS struct {
+	primary, alt *cfapi.Client
+	used         atomic.Bool
+}
+
+func withAlt[T any](f *fallbackDNS, call func(*cfapi.Client) (T, error)) (T, error) {
+	v, err := call(f.primary)
+	if err == nil || f.alt == nil || !cfapi.IsPermission(err) {
+		return v, err
+	}
+	v2, err2 := call(f.alt)
+	switch {
+	case err2 == nil:
+		f.used.Store(true)
+		return v2, nil
+	case !cfapi.IsPermission(err2):
+		return v2, err2 // a real failure, not just a refusal
+	}
+	return v, err
+}
+
+func (f *fallbackDNS) ListZones(ctx context.Context) ([]cfapi.Zone, error) {
+	return withAlt(f, func(c *cfapi.Client) ([]cfapi.Zone, error) { return c.ListZones(ctx) })
+}
+
+func (f *fallbackDNS) RecordsNamed(ctx context.Context, zoneID, name string) ([]cfapi.Record, error) {
+	return withAlt(f, func(c *cfapi.Client) ([]cfapi.Record, error) { return c.RecordsNamed(ctx, zoneID, name) })
+}
+
+func (f *fallbackDNS) RecordsPointingAt(ctx context.Context, zoneID, tunnelID string) ([]cfapi.Record, error) {
+	return withAlt(f, func(c *cfapi.Client) ([]cfapi.Record, error) { return c.RecordsPointingAt(ctx, zoneID, tunnelID) })
+}
+
+func (f *fallbackDNS) CreateTunnelCNAME(ctx context.Context, zoneID, name, tunnelID string) (*cfapi.Record, error) {
+	return withAlt(f, func(c *cfapi.Client) (*cfapi.Record, error) { return c.CreateTunnelCNAME(ctx, zoneID, name, tunnelID) })
+}
+
+func (f *fallbackDNS) UpdateTunnelCNAME(ctx context.Context, zoneID, recordID, name, tunnelID string) (*cfapi.Record, error) {
+	return withAlt(f, func(c *cfapi.Client) (*cfapi.Record, error) {
+		return c.UpdateTunnelCNAME(ctx, zoneID, recordID, name, tunnelID)
+	})
+}
+
+func (f *fallbackDNS) DeleteRecord(ctx context.Context, zoneID, recordID string) error {
+	_, err := withAlt(f, func(c *cfapi.Client) (struct{}, error) { return struct{}{}, c.DeleteRecord(ctx, zoneID, recordID) })
+	return err
+}
+
+// dnsDenied turns Cloudflare's bare "Authentication error" into what is
+// actually wrong: the token has no DNS permission on this particular zone.
+func dnsDenied(zone string, err error) error {
+	if cfapi.IsPermission(err) {
+		return fmt.Errorf("cloudflare denies the API token access to DNS records in %s — it needs Zone › DNS › Edit with that zone (or All zones) under Zone Resources", zone)
+	}
+	return err
 }
 
 // cfFail reports a Cloudflare error. 502 keeps it distinct from this
@@ -172,8 +261,11 @@ type cfStatusResp struct {
 	TunnelID         string             `json:"tunnel_id"`
 	Tunnel           *cfTunnelView      `json:"tunnel,omitempty"`
 	SuggestedOrigins []originSuggestion `json:"suggested_origins"`
-	Error            string             `json:"error,omitempty"`
-	Permission       bool               `json:"permission,omitempty"`
+	// DNSFallback reports that the ACME (certificate) Cloudflare token can stand
+	// in for DNS records when the tunnel token is refused.
+	DNSFallback bool   `json:"dns_fallback,omitempty"`
+	Error       string `json:"error,omitempty"`
+	Permission  bool   `json:"permission,omitempty"`
 }
 
 // suggestedOrigins offers the local addresses a tunnel hostname most often
@@ -214,7 +306,7 @@ func (h *Handler) buildCFStatus(ctx context.Context) cfStatusResp {
 	resp := cfStatusResp{
 		APITokenSet: c.hasToken, TunnelTokenSet: c.tunnelTokenSet,
 		AccountID: c.account, TunnelID: c.tunnelID,
-		SuggestedOrigins: h.suggestedOrigins(),
+		SuggestedOrigins: h.suggestedOrigins(), DNSFallback: c.dnsFallback,
 	}
 	if c.hasToken && c.account != "" && c.tunnelID != "" {
 		t, err := c.client.GetTunnel(ctx, c.account, c.tunnelID)
@@ -297,7 +389,7 @@ func (h *Handler) cfZones(ctx context.Context, w http.ResponseWriter) {
 	if !cfReady(w, c, false) {
 		return
 	}
-	zones, err := c.client.ListZones(ctx)
+	zones, err := c.dns.ListZones(ctx)
 	if err != nil {
 		cfFail(w, err)
 		return
@@ -459,6 +551,12 @@ type cfHostnamesResp struct {
 	Hostnames []hostnameView `json:"hostnames"`
 	CatchAll  string         `json:"catch_all"`
 	DNSError  string         `json:"dns_error,omitempty"`
+	// DNSDeniedZones are zones whose DNS records Cloudflare will not let the
+	// token read: the token can see them but has no DNS permission on them.
+	DNSDeniedZones []string `json:"dns_denied_zones,omitempty"`
+	// DNSViaACME is set when the ACME (certificate) token had to be used for
+	// DNS records because the tunnel token was refused.
+	DNSViaACME bool `json:"dns_via_acme,omitempty"`
 }
 
 // cfServicePorts lists the origin schemes a tunnel hostname can point at and
@@ -555,7 +653,7 @@ func originReachable(service string) *bool {
 // <tunnel>.cfargotunnel.com. It never deletes anything, and it refuses to
 // overwrite a record that is not a CNAME (or a CNAME to somewhere else unless
 // overwrite is set), because that would take another service offline.
-func ensureDNS(ctx context.Context, cl *cfapi.Client, tunnelID, host string, zones []cfapi.Zone, overwrite bool) (dnsView, error) {
+func ensureDNS(ctx context.Context, cl dnsClient, tunnelID, host string, zones []cfapi.Zone, overwrite bool) (dnsView, error) {
 	z := cfapi.ZoneFor(zones, host)
 	if z == nil {
 		return dnsView{State: "no_zone", Detail: "no Cloudflare zone for this name is visible to the API token"}, nil
@@ -563,7 +661,7 @@ func ensureDNS(ctx context.Context, cl *cfapi.Client, tunnelID, host string, zon
 	v := dnsView{Zone: z.Name, ZoneID: z.ID}
 	recs, err := cl.RecordsNamed(ctx, z.ID, host)
 	if err != nil {
-		return v, err
+		return v, dnsDenied(z.Name, err)
 	}
 	target := cfapi.TunnelTarget(tunnelID)
 	var cname *cfapi.Record
@@ -579,7 +677,7 @@ func ensureDNS(ctx context.Context, cl *cfapi.Client, tunnelID, host string, zon
 	case cname == nil:
 		rec, err := cl.CreateTunnelCNAME(ctx, z.ID, host, tunnelID)
 		if err != nil {
-			return v, err
+			return v, dnsDenied(z.Name, err)
 		}
 		v.State, v.RecordID = "ok", rec.ID
 	case strings.EqualFold(cname.Content, target) && cname.Proxied:
@@ -587,7 +685,7 @@ func ensureDNS(ctx context.Context, cl *cfapi.Client, tunnelID, host string, zon
 	case strings.EqualFold(cname.Content, target) || overwrite:
 		rec, err := cl.UpdateTunnelCNAME(ctx, z.ID, cname.ID, host, tunnelID)
 		if err != nil {
-			return v, err
+			return v, dnsDenied(z.Name, err)
 		}
 		v.State, v.RecordID = "ok", rec.ID
 	default:
@@ -597,20 +695,36 @@ func ensureDNS(ctx context.Context, cl *cfapi.Client, tunnelID, host string, zon
 	return v, nil
 }
 
+// dnsDiag carries what went wrong while checking DNS, separating "this token
+// has no DNS permission on these zones" (fixable in Cloudflare) from other
+// failures.
+type dnsDiag struct {
+	Err    string   // zones could not be listed, or a lookup failed for another reason
+	Denied []string // zones whose DNS records Cloudflare will not let the token read
+}
+
 // dnsStates describes, without changing anything, where each hostname's DNS
 // stands relative to the tunnel.
-func dnsStates(ctx context.Context, cl *cfapi.Client, tunnelID string, hosts []string) (map[string]dnsView, string) {
+func dnsStates(ctx context.Context, cl dnsClient, tunnelID string, hosts []string) (map[string]dnsView, dnsDiag) {
 	out := make(map[string]dnsView, len(hosts))
+	var diag dnsDiag
 	zones, err := cl.ListZones(ctx)
 	if err != nil {
 		for _, h := range hosts {
 			out[h] = dnsView{State: "unknown", Detail: "the API token cannot read DNS zones"}
 		}
-		return out, err.Error()
+		diag.Err = err.Error()
+		return out, diag
 	}
 	pointing := map[string][]cfapi.Record{}
 	loaded := map[string]bool{}
-	var firstErr string
+	denied := map[string]bool{}
+	deny := func(zone string) {
+		if !denied[zone] {
+			denied[zone] = true
+			diag.Denied = append(diag.Denied, zone)
+		}
+	}
 	for _, host := range hosts {
 		z := cfapi.ZoneFor(zones, host)
 		if z == nil {
@@ -621,10 +735,19 @@ func dnsStates(ctx context.Context, cl *cfapi.Client, tunnelID string, hosts []s
 		if !loaded[z.ID] {
 			loaded[z.ID] = true
 			recs, err := cl.RecordsPointingAt(ctx, z.ID, tunnelID)
-			if err != nil && firstErr == "" {
-				firstErr = err.Error()
+			switch {
+			case cfapi.IsPermission(err):
+				deny(z.Name)
+			case err != nil && diag.Err == "":
+				diag.Err = err.Error()
 			}
 			pointing[z.ID] = recs
+		}
+		if denied[z.Name] {
+			v.State = "unknown"
+			v.Detail = "Cloudflare denies the API token access to DNS records in " + z.Name
+			out[host] = v
+			continue
 		}
 		var hit *cfapi.Record
 		for i := range pointing[z.ID] {
@@ -641,6 +764,10 @@ func dnsStates(ctx context.Context, cl *cfapi.Client, tunnelID string, hosts []s
 		default:
 			others, err := cl.RecordsNamed(ctx, z.ID, host)
 			switch {
+			case cfapi.IsPermission(err):
+				deny(z.Name)
+				v.State = "unknown"
+				v.Detail = "Cloudflare denies the API token access to DNS records in " + z.Name
 			case err != nil:
 				v.State, v.Detail = "unknown", err.Error()
 			case len(others) == 0:
@@ -653,7 +780,7 @@ func dnsStates(ctx context.Context, cl *cfapi.Client, tunnelID string, hosts []s
 		}
 		out[host] = v
 	}
-	return out, firstErr
+	return out, diag
 }
 
 func (h *Handler) cfCacheGet(key string) *cfHostnamesResp {
@@ -696,8 +823,11 @@ func (h *Handler) cfHostnames(ctx context.Context, w http.ResponseWriter) {
 	for _, r := range rules {
 		hosts = append(hosts, normHost(r.Hostname()))
 	}
-	dns, dnsErr := dnsStates(ctx, c.client, c.tunnelID, hosts)
-	resp := &cfHostnamesResp{TunnelID: c.tunnelID, Hostnames: make([]hostnameView, 0, len(rules)), CatchAll: cfg.CatchAll(), DNSError: dnsErr}
+	dns, diag := dnsStates(ctx, c.dns, c.tunnelID, hosts)
+	resp := &cfHostnamesResp{
+		TunnelID: c.tunnelID, Hostnames: make([]hostnameView, 0, len(rules)), CatchAll: cfg.CatchAll(),
+		DNSError: diag.Err, DNSDeniedZones: diag.Denied, DNSViaACME: c.dns.used.Load(),
+	}
 	for i, r := range rules {
 		resp.Hostnames = append(resp.Hostnames, hostnameView{
 			Hostname: r.Hostname(), Path: r.Path(), Service: r.Service(), NoTLSVerify: r.NoTLSVerify(),
@@ -779,10 +909,13 @@ func (h *Handler) cfUpsertHostname(ctx context.Context, w http.ResponseWriter, r
 
 	resp := map[string]any{"saved": true, "replaced": replaced, "hostname": req.Hostname}
 	if req.CreateDNS == nil || *req.CreateDNS {
-		zones, err := c.client.ListZones(ctx)
+		zones, err := c.dns.ListZones(ctx)
 		var dns dnsView
 		if err == nil {
-			dns, err = ensureDNS(ctx, c.client, c.tunnelID, req.Hostname, zones, req.OverwriteDNS)
+			dns, err = ensureDNS(ctx, c.dns, c.tunnelID, req.Hostname, zones, req.OverwriteDNS)
+		}
+		if c.dns.used.Load() {
+			resp["dns_via_acme"] = true
 		}
 		if err != nil {
 			// The hostname is on the tunnel; only its DNS needs another try.
@@ -827,8 +960,11 @@ func (h *Handler) cfDeleteHostname(ctx context.Context, w http.ResponseWriter, r
 	h.cfCacheClear()
 	resp := map[string]any{"removed": true, "hostname": host, "dns_removed": 0}
 	if withDNS {
-		removed, err := removeTunnelDNS(ctx, c.client, c.tunnelID, host)
+		removed, err := removeTunnelDNS(ctx, c.dns, c.tunnelID, host)
 		resp["dns_removed"] = removed
+		if c.dns.used.Load() {
+			resp["dns_via_acme"] = true
+		}
 		if err != nil {
 			resp["dns_error"] = err.Error()
 		}
@@ -839,7 +975,7 @@ func (h *Handler) cfDeleteHostname(ctx context.Context, w http.ResponseWriter, r
 
 // removeTunnelDNS deletes the CNAMEs for host that point at this tunnel. A
 // record pointing anywhere else is somebody else's and is left alone.
-func removeTunnelDNS(ctx context.Context, cl *cfapi.Client, tunnelID, host string) (int, error) {
+func removeTunnelDNS(ctx context.Context, cl dnsClient, tunnelID, host string) (int, error) {
 	zones, err := cl.ListZones(ctx)
 	if err != nil {
 		return 0, err
@@ -850,13 +986,13 @@ func removeTunnelDNS(ctx context.Context, cl *cfapi.Client, tunnelID, host strin
 	}
 	recs, err := cl.RecordsNamed(ctx, z.ID, host)
 	if err != nil {
-		return 0, err
+		return 0, dnsDenied(z.Name, err)
 	}
 	n := 0
 	for _, rec := range recs {
 		if rec.Type == "CNAME" && strings.EqualFold(rec.Content, cfapi.TunnelTarget(tunnelID)) {
 			if err := cl.DeleteRecord(ctx, z.ID, rec.ID); err != nil {
-				return n, err
+				return n, dnsDenied(z.Name, err)
 			}
 			n++
 		}
@@ -890,16 +1026,16 @@ func (h *Handler) cfSyncDNS(ctx context.Context, w http.ResponseWriter, r *http.
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "That hostname is not on this tunnel."})
 		return
 	}
-	zones, err := c.client.ListZones(ctx)
+	zones, err := c.dns.ListZones(ctx)
 	if err != nil {
 		cfFail(w, err)
 		return
 	}
-	dns, err := ensureDNS(ctx, c.client, c.tunnelID, host, zones, req.Overwrite)
+	dns, err := ensureDNS(ctx, c.dns, c.tunnelID, host, zones, req.Overwrite)
 	if err != nil {
 		cfFail(w, err)
 		return
 	}
 	h.cfCacheClear()
-	writeJSON(w, http.StatusOK, map[string]any{"hostname": host, "dns": dns})
+	writeJSON(w, http.StatusOK, map[string]any{"hostname": host, "dns": dns, "dns_via_acme": c.dns.used.Load()})
 }

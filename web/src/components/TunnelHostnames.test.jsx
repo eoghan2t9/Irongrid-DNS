@@ -102,6 +102,27 @@ describe('TunnelHostnames list', () => {
     expect(screen.getAllByRole('button', { name: 'Re-point DNS' })).toHaveLength(1)
   })
 
+  it('names the zone Cloudflare denies DNS access to and says how to fix it', async () => {
+    api.cfHostnames.mockResolvedValue({ ...listing, dns_denied_zones: ['eoghan-net.com'] })
+    renderIt()
+    expect(await screen.findByText('eoghan-net.com')).toBeInTheDocument()
+    expect(screen.getByText(/Zone Resources/)).toBeInTheDocument()
+    expect(screen.getByText(/use/, { selector: 'div' })).toHaveTextContent(/Replace token/)
+  })
+
+  it('keeps the generic message for other DNS lookup failures', async () => {
+    api.cfHostnames.mockResolvedValue({ ...listing, dns_error: 'cloudflare: rate limited' })
+    renderIt()
+    expect(await screen.findByText(/DNS status is incomplete: cloudflare: rate limited/)).toBeInTheDocument()
+    expect(screen.queryByText(/Zone Resources/)).not.toBeInTheDocument()
+  })
+
+  it('tells the user when the ACME token handled DNS', async () => {
+    api.cfHostnames.mockResolvedValue({ ...listing, dns_via_acme: true })
+    renderIt()
+    expect(await screen.findByText(/certificate \(ACME\) settings/)).toBeInTheDocument()
+  })
+
   it('reports an error from the server instead of an empty list', async () => {
     api.cfHostnames.mockRejectedValue(new Error('Cloudflare refused the request'))
     renderIt()

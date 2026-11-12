@@ -474,3 +474,133 @@ func TestCFSuggestedOriginsFollowTheListeners(t *testing.T) {
 		t.Errorf("separate ports: %+v", got)
 	}
 }
+
+func (f *cfFixture) seedDNSHosts() {
+	f.fake.SetConfig(f.tunnel.ID, `{"ingress":[
+	  {"hostname":"ok.example.com","service":"http://localhost:1"},
+	  {"hostname":"missing.example.com","service":"http://localhost:2"},
+	  {"service":"http_status:404"}]}`)
+	f.fake.AddRecord(f.zone, "ok.example.com", "CNAME", cfapi.TunnelTarget(f.tunnel.ID), true)
+}
+
+// The token can see the zone but has no DNS permission on it. Cloudflare only
+// says "Authentication error"; the page must say which zone, so the fix is
+// obvious.
+func TestCFDNSDenialNamesTheZone(t *testing.T) {
+	t.Parallel()
+	f := newCFFixture(t)
+	f.seedDNSHosts()
+	f.fake.Deny(cfapitest.Token, true, false)
+
+	code, out := f.do(http.MethodGet, "/api/tunnel/cf/hostnames", nil)
+	if code != http.StatusOK {
+		t.Fatalf("= %d %v", code, out)
+	}
+	if z, _ := out["dns_denied_zones"].([]any); len(z) != 1 || z[0] != "example.com" {
+		t.Errorf("dns_denied_zones = %v, want [example.com]", out["dns_denied_zones"])
+	}
+	if out["dns_error"] != nil {
+		t.Errorf("a permission denial was reported as a generic error: %v", out["dns_error"])
+	}
+	row := hostnames(t, out)["ok.example.com"]
+	d, _ := row["dns"].(map[string]any)
+	if d["state"] != "unknown" || !strings.Contains(d["detail"].(string), "example.com") {
+		t.Errorf("row dns = %v, want unknown naming the zone", d)
+	}
+
+	// Writing reports the same cause, and still saves the hostname itself.
+	code, out = f.do(http.MethodPost, "/api/tunnel/cf/hostnames", map[string]any{"hostname": "new.example.com", "service": "http://localhost:3"})
+	msg, _ := out["dns_error"].(string)
+	if code != http.StatusOK || out["saved"] != true || !strings.Contains(msg, "DNS records in example.com") {
+		t.Errorf("add under a DNS denial = %d %v", code, out)
+	}
+}
+
+// The certificate settings hold a second Cloudflare token. It stands in for DNS
+// records only when the tunnel token is refused, and never otherwise.
+func TestCFDNSFallsBackToTheACMETokenOnlyWhenRefused(t *testing.T) {
+	t.Parallel()
+	f := newCFFixture(t)
+	f.seedDNSHosts()
+	f.cfg.TLS.ACME.DNS01.CloudflareToken = cfapitest.DNSToken
+	f.fake.Deny(cfapitest.Token, true, false)
+
+	_, out := f.do(http.MethodGet, "/api/tunnel/cf/hostnames", nil)
+	rows := hostnames(t, out)
+	if dnsState(rows["ok.example.com"]) != "ok" || dnsState(rows["missing.example.com"]) != "missing" {
+		t.Fatalf("states with the fallback = %v / %v", rows["ok.example.com"]["dns"], rows["missing.example.com"]["dns"])
+	}
+	if out["dns_via_acme"] != true || out["dns_denied_zones"] != nil {
+		t.Errorf("dns_via_acme=%v denied=%v, want the fallback reported and nothing denied", out["dns_via_acme"], out["dns_denied_zones"])
+	}
+
+	code, out := f.do(http.MethodPost, "/api/tunnel/cf/hostnames", map[string]any{"hostname": "new.example.com", "service": "http://localhost:3"})
+	if d, _ := out["dns"].(map[string]any); code != http.StatusOK || d["state"] != "ok" || out["dns_via_acme"] != true {
+		t.Fatalf("add via the fallback = %d %v", code, out)
+	}
+	created := false
+	for _, r := range f.fake.RecordsFor() {
+		created = created || r.Name == "new.example.com"
+	}
+	if !created {
+		t.Error("the fallback token did not create the DNS record")
+	}
+
+	// Once the tunnel token has DNS permission the fallback is not touched.
+	f.fake.Deny(cfapitest.Token, false, false)
+	f.h.cfCacheClear()
+	before := f.fake.CallsBy(cfapitest.DNSToken)
+	_, out = f.do(http.MethodGet, "/api/tunnel/cf/hostnames", nil)
+	if f.fake.CallsBy(cfapitest.DNSToken) != before || out["dns_via_acme"] != nil {
+		t.Errorf("the ACME token was used although the tunnel token works (via_acme=%v)", out["dns_via_acme"])
+	}
+}
+
+func TestCFFallbackAlsoRefusedStillNamesTheZone(t *testing.T) {
+	t.Parallel()
+	f := newCFFixture(t)
+	f.seedDNSHosts()
+	f.cfg.TLS.ACME.DNS01.CloudflareToken = cfapitest.DNSToken
+	f.fake.Deny(cfapitest.Token, true, false)
+	f.fake.Deny(cfapitest.DNSToken, true, false)
+
+	_, out := f.do(http.MethodGet, "/api/tunnel/cf/hostnames", nil)
+	if z, _ := out["dns_denied_zones"].([]any); len(z) != 1 || out["dns_via_acme"] != nil {
+		t.Errorf("denied=%v via_acme=%v, want the zone named and no claim the fallback helped", out["dns_denied_zones"], out["dns_via_acme"])
+	}
+}
+
+// A token without Zone › Zone › Read cannot list zones at all; the fallback
+// token may.
+func TestCFZoneListFallsBackToo(t *testing.T) {
+	t.Parallel()
+	f := newCFFixture(t)
+	f.seedDNSHosts()
+	f.cfg.TLS.ACME.DNS01.CloudflareToken = cfapitest.DNSToken
+	f.fake.Deny(cfapitest.Token, true, true)
+
+	code, out := f.do(http.MethodGet, "/api/tunnel/cf/zones", nil)
+	if zs, _ := out["zones"].([]any); code != http.StatusOK || len(zs) != 1 {
+		t.Fatalf("zones = %d %v", code, out)
+	}
+	_, out = f.do(http.MethodGet, "/api/tunnel/cf/hostnames", nil)
+	if dnsState(hostnames(t, out)["ok.example.com"]) != "ok" {
+		t.Errorf("states did not resolve through the fallback: %v", out)
+	}
+}
+
+func TestCFStatusReportsWhetherAFallbackExists(t *testing.T) {
+	t.Parallel()
+	f := newCFFixture(t)
+	if _, out := f.do(http.MethodGet, "/api/tunnel/cf/status", nil); out["dns_fallback"] != nil {
+		t.Errorf("dns_fallback = %v with no ACME token", out["dns_fallback"])
+	}
+	f.cfg.TLS.ACME.DNS01.CloudflareToken = cfapitest.Token // the very same token adds nothing
+	if _, out := f.do(http.MethodGet, "/api/tunnel/cf/status", nil); out["dns_fallback"] != nil {
+		t.Errorf("dns_fallback = %v for the identical token", out["dns_fallback"])
+	}
+	f.cfg.TLS.ACME.DNS01.CloudflareToken = cfapitest.DNSToken
+	if _, out := f.do(http.MethodGet, "/api/tunnel/cf/status", nil); out["dns_fallback"] != true {
+		t.Errorf("dns_fallback = %v, want true with a distinct ACME token", out["dns_fallback"])
+	}
+}

@@ -21,6 +21,10 @@ const Account = "acc1"
 // Token is the API token the fake accepts.
 const Token = "test-api-token"
 
+// DNSToken is a second token the fake accepts, standing in for the separate
+// Cloudflare token kept in the certificate (ACME) settings.
+const DNSToken = "test-dns-token"
+
 // Tunnel is a stored tunnel.
 type Tunnel struct {
 	ID          string       `json:"id"`
@@ -72,13 +76,24 @@ type Server struct {
 	PerPage int
 	// Calls records "METHOD path" for every request that reached a handler.
 	Calls []string
-	seq   int
+	// DenyDNS and DenyZones list tokens that Cloudflare refuses on the DNS
+	// record routes / the zone list, like a token missing that permission.
+	DenyDNS   map[string]bool
+	DenyZones map[string]bool
+	// TokenCalls counts requests per token.
+	TokenCalls map[string]int
+	seq        int
 }
 
 // New starts a fake Cloudflare API and stops it when the test ends.
 func New(t *testing.T) *Server {
 	t.Helper()
-	s := &Server{Configs: map[string]map[string]json.RawMessage{}}
+	s := &Server{
+		Configs:    map[string]map[string]json.RawMessage{},
+		DenyDNS:    map[string]bool{},
+		DenyZones:  map[string]bool{},
+		TokenCalls: map[string]int{},
+	}
 	s.Server = httptest.NewServer(http.HandlerFunc(s.serve))
 	t.Cleanup(s.Close)
 	return s
@@ -146,6 +161,20 @@ func (s *Server) RecordsFor() []Record {
 	return out
 }
 
+// CallsBy returns how many requests used the token.
+func (s *Server) CallsBy(token string) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.TokenCalls[token]
+}
+
+// Deny makes Cloudflare refuse the token on the DNS record routes.
+func (s *Server) Deny(token string, dns, zones bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.DenyDNS[token], s.DenyZones[token] = dns, zones
+}
+
 // CallCount counts recorded calls whose "METHOD path" starts with prefix.
 func (s *Server) CallCount(prefix string) int {
 	s.mu.Lock()
@@ -206,11 +235,18 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request) {
 	defer s.mu.Unlock()
 	s.Calls = append(s.Calls, r.Method+" "+r.URL.Path)
 
-	if r.Header.Get("Authorization") != "Bearer "+Token {
+	tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+	s.TokenCalls[tok]++
+	if tok != Token && tok != DNSToken {
 		fail(w, http.StatusForbidden, 10000, "Authentication error")
 		return
 	}
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if (len(parts) >= 1 && parts[0] == "zones" && len(parts) == 1 && s.DenyZones[tok]) ||
+		(len(parts) >= 3 && parts[0] == "zones" && parts[2] == "dns_records" && s.DenyDNS[tok]) {
+		fail(w, http.StatusForbidden, 10000, "Authentication error")
+		return
+	}
 	switch {
 	case len(parts) == 1 && parts[0] == "accounts" && r.Method == http.MethodGet:
 		reply(w, 200, []map[string]string{{"id": Account, "name": "Test Account"}}, 1)

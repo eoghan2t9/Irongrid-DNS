@@ -168,10 +168,26 @@ export default function TunnelHostnames({ cf }) {
             <span className="mono">{data?.catch_all || 'http_status:404'}</span>.
           </p>
           {error && <div className="error-text">{error}</div>}
+          {data?.dns_denied_zones?.length > 0 && (
+            <div className="error-text">
+              Cloudflare is denying the API token access to DNS records in{' '}
+              <strong>{data.dns_denied_zones.join(', ')}</strong>. The token can see the zone, but its DNS permission
+              doesn&apos;t cover it: in Cloudflare, edit the token connected above and, under <em>Zone Resources</em>,
+              include {data.dns_denied_zones.length > 1 ? 'these zones' : 'this zone'} (or All zones) for{' '}
+              <strong>Zone → DNS → Edit</strong>. If you edited a different token, use <strong>Replace token</strong>{' '}
+              above. This list rechecks every few seconds.
+            </div>
+          )}
           {data?.dns_error && (
             <div className="error-text">
-              DNS status is incomplete: {data.dns_error}. Add <strong>Zone → DNS → Edit</strong> and{' '}
-              <strong>Zone → Zone → Read</strong> to the API token.
+              DNS status is incomplete: {data.dns_error}. The API token needs <strong>Zone → Zone → Read</strong> and{' '}
+              <strong>Zone → DNS → Edit</strong>.
+            </div>
+          )}
+          {data?.dns_via_acme && (
+            <div className="dim small">
+              DNS records were handled with the Cloudflare token from your certificate (ACME) settings, because the
+              tunnel API token has no DNS access.
             </div>
           )}
           {data && rows.length === 0 && !error && <div className="dim small">No hostnames yet — add one below.</div>}

@@ -210,6 +210,12 @@ export default function TunnelCloudflare({ cf, reload, tunnelRunning }) {
           <div className="dim small">
             Connected to account <span className="mono">{cf.account_id || '—'}</span>
           </div>
+          {cf.dns_fallback && (
+            <div className="dim small">
+              If this token isn&apos;t allowed to edit DNS, the Cloudflare token from your certificate (ACME) settings
+              is used for DNS records instead.
+            </div>
+          )}
           {replacing && <div style={{ marginTop: 12 }}>{connectForm}</div>}
           {cf.error && (
             <div className="error-text" style={{ marginTop: 8 }}>

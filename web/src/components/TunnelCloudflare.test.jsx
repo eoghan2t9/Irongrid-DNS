@@ -117,6 +117,15 @@ describe('TunnelCloudflare when connected', () => {
     expect(screen.getByText('In use')).toBeInTheDocument()
   })
 
+  it('mentions the ACME token fallback only when one is available', async () => {
+    const { unmount } = renderIt()
+    await screen.findByText('spare')
+    expect(screen.queryByText(/certificate \(ACME\) settings/)).not.toBeInTheDocument()
+    unmount()
+    renderIt({ cf: { ...connectedCf, dns_fallback: true } })
+    expect(await screen.findByText(/certificate \(ACME\) settings/)).toBeInTheDocument()
+  })
+
   it('warns when the selected tunnel is configured locally', async () => {
     renderIt({ cf: { ...connectedCf, tunnel: { ...connectedCf.tunnel, remotely_managed: false } } })
     expect(await screen.findByText(/configured by a local config file/)).toBeInTheDocument()
