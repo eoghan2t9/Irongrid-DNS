@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cfapi"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsplan"
 )
 
 // ---- Cloudflare tunnel management ----
@@ -286,6 +287,10 @@ type originSuggestion struct {
 	Label       string `json:"label"`
 	Service     string `json:"service"`
 	NoTLSVerify bool   `json:"no_tls_verify"`
+	// OriginServerName, when set, is the name the origin's certificate is
+	// valid for: the connector dials localhost but verifies the certificate
+	// as this, so verification can stay on.
+	OriginServerName string `json:"origin_server_name,omitempty"`
 }
 
 type cfStatusResp struct {
@@ -308,7 +313,26 @@ type cfStatusResp struct {
 func (h *Handler) suggestedOrigins() []originSuggestion {
 	h.cfgMu.Lock()
 	web, tls, doh := h.Cfg.Server.WebListen, h.Cfg.Server.WebTLS, h.Cfg.Server.ListenDoH
+	// The certificate is issued for the discovery host or the ACME domain, not
+	// for "localhost", which is what the connector dials.
+	certName := dnsplan.Normalize(h.Cfg.Server.DiscoveryHost)
+	for i := 0; certName == "" && i < len(h.Cfg.TLS.ACME.Domains); i++ {
+		if d := dnsplan.Normalize(h.Cfg.TLS.ACME.Domains[i]); d != "" && !strings.HasPrefix(d, "*.") {
+			certName = d
+		}
+	}
 	h.cfgMu.Unlock()
+	// tlsOrigin returns the certificate handling for a local HTTPS origin:
+	// verify as the certificate's own name when it is known, and only skip
+	// verification when it is not.
+	tlsOrigin := func(s originSuggestion) originSuggestion {
+		if certName != "" {
+			s.OriginServerName = certName
+		} else {
+			s.NoTLSVerify = true
+		}
+		return s
+	}
 	port := func(addr string) string {
 		_, p, err := net.SplitHostPort(addr)
 		if err != nil {
@@ -326,11 +350,16 @@ func (h *Handler) suggestedOrigins() []originSuggestion {
 		if doh != "" && port(doh) == p {
 			label = "Irongrid dashboard + DoH (shared port)"
 		}
-		// Loopback to a certificate issued for a public name cannot verify.
-		out = append(out, originSuggestion{Label: label, Service: scheme + "://localhost:" + p, NoTLSVerify: tls})
+		s := originSuggestion{Label: label, Service: scheme + "://localhost:" + p}
+		if tls {
+			// Loopback to a certificate issued for a public name cannot verify
+			// as "localhost".
+			s = tlsOrigin(s)
+		}
+		out = append(out, s)
 	}
 	if p := port(doh); p != "" && p != port(web) {
-		out = append(out, originSuggestion{Label: "Irongrid DoH endpoint", Service: "https://localhost:" + p, NoTLSVerify: true})
+		out = append(out, tlsOrigin(originSuggestion{Label: "Irongrid DoH endpoint", Service: "https://localhost:" + p}))
 	}
 	return out
 }
@@ -576,6 +605,7 @@ type hostnameView struct {
 	Path            string  `json:"path,omitempty"`
 	Service         string  `json:"service"`
 	NoTLSVerify     bool    `json:"no_tls_verify"`
+	OriginServer    string  `json:"origin_server_name,omitempty"`
 	DNS             dnsView `json:"dns"`
 	OriginReachable *bool   `json:"origin_reachable"`
 }
@@ -864,7 +894,7 @@ func (h *Handler) cfHostnames(ctx context.Context, w http.ResponseWriter) {
 	}
 	for i, r := range rules {
 		resp.Hostnames = append(resp.Hostnames, hostnameView{
-			Hostname: r.Hostname(), Path: r.Path(), Service: r.Service(), NoTLSVerify: r.NoTLSVerify(),
+			Hostname: r.Hostname(), Path: r.Path(), Service: r.Service(), NoTLSVerify: r.NoTLSVerify(), OriginServer: r.OriginServerName(),
 			DNS: dns[hosts[i]], OriginReachable: originReachable(r.Service()),
 		})
 	}
@@ -873,12 +903,15 @@ func (h *Handler) cfHostnames(ctx context.Context, w http.ResponseWriter) {
 }
 
 type cfHostnameReq struct {
-	Hostname     string `json:"hostname"`
-	Service      string `json:"service"`
-	Path         string `json:"path"`
-	NoTLSVerify  bool   `json:"no_tls_verify"`
-	CreateDNS    *bool  `json:"create_dns"` // default true
-	OverwriteDNS bool   `json:"overwrite_dns"`
+	Hostname    string `json:"hostname"`
+	Service     string `json:"service"`
+	Path        string `json:"path"`
+	NoTLSVerify bool   `json:"no_tls_verify"`
+	// OriginServerName verifies the origin's certificate as this name instead
+	// of the one in the origin URL (e.g. localhost).
+	OriginServerName string `json:"origin_server_name"`
+	CreateDNS        *bool  `json:"create_dns"` // default true
+	OverwriteDNS     bool   `json:"overwrite_dns"`
 }
 
 // cfEditable loads the tunnel and refuses ones whose hostnames live in a local
@@ -916,6 +949,11 @@ func (h *Handler) cfUpsertHostname(ctx context.Context, w http.ResponseWriter, r
 		badRequest(w, "The path filter can't contain spaces and must be under 200 characters.", nil)
 		return
 	}
+	req.OriginServerName = normHost(req.OriginServerName)
+	if req.OriginServerName != "" && (strings.HasPrefix(req.OriginServerName, "*.") || !validCFHostname(req.OriginServerName)) {
+		badRequest(w, "The certificate name must be a full hostname such as dns.example.com (no wildcard).", nil)
+		return
+	}
 	c := h.cfContext()
 	if !cfReady(w, c, true) {
 		return
@@ -934,7 +972,7 @@ func (h *Handler) cfUpsertHostname(ctx context.Context, w http.ResponseWriter, r
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "That hostname is not on this tunnel."})
 		return
 	}
-	replaced := cfg.Upsert(cfapi.NewRule(req.Hostname, req.Service, req.Path, req.NoTLSVerify))
+	replaced := cfg.Upsert(cfapi.NewRuleOrigin(req.Hostname, req.Service, req.Path, req.NoTLSVerify, req.OriginServerName))
 	if err := c.client.PutConfig(ctx, c.account, c.tunnelID, cfg); err != nil {
 		cfFail(w, err)
 		return

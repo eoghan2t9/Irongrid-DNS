@@ -146,9 +146,82 @@ describe('TunnelHostnames changes', () => {
           path: '',
           // The preset knows the loopback hop uses a certificate for another name.
           no_tls_verify: true,
+          origin_server_name: '',
           create_dns: true,
         },
         false,
+      ),
+    )
+  })
+
+  it('verifies as the certificate name when the preset knows it, instead of skipping verification', async () => {
+    renderIt({
+      cf: cf({
+        suggested_origins: [
+          {
+            label: 'Irongrid dashboard + DoH (shared port)',
+            service: 'https://localhost:443',
+            no_tls_verify: false,
+            origin_server_name: 'adguard2.example.com',
+          },
+        ],
+      }),
+    })
+    await screen.findByText('ok.example.com')
+    await userEvent.type(screen.getByLabelText('Hostname'), 'dns.example.com')
+    await userEvent.selectOptions(screen.getByLabelText('Origin preset'), '0')
+
+    expect(screen.getByLabelText('Origin certificate')).toHaveValue('name')
+    expect(screen.getByLabelText('Certificate name')).toHaveValue('adguard2.example.com')
+    await userEvent.click(screen.getByRole('button', { name: 'Add hostname' }))
+    await waitFor(() =>
+      expect(api.cfSaveHostname).toHaveBeenCalledWith(
+        {
+          hostname: 'dns.example.com',
+          service: 'https://localhost:443',
+          path: '',
+          no_tls_verify: false,
+          origin_server_name: 'adguard2.example.com',
+          create_dns: true,
+        },
+        false,
+      ),
+    )
+  })
+
+  it('needs a name before saving when verifying as a specific name', async () => {
+    renderIt()
+    await screen.findByText('ok.example.com')
+    await userEvent.type(screen.getByLabelText('Hostname'), 'dns.example.com')
+    await userEvent.type(screen.getByLabelText('Origin URL'), 'https://localhost:443')
+    await userEvent.selectOptions(screen.getByLabelText('Origin certificate'), 'name')
+    expect(screen.getByRole('button', { name: 'Add hostname' })).toBeDisabled()
+    await userEvent.type(screen.getByLabelText('Certificate name'), 'adguard2.example.com')
+    expect(screen.getByRole('button', { name: 'Add hostname' })).toBeEnabled()
+  })
+
+  it('edits a rule that verifies as a name and keeps that choice', async () => {
+    api.cfHostnames.mockResolvedValue({
+      ...listing,
+      hostnames: [
+        {
+          hostname: 'named.example.com',
+          service: 'https://localhost:443',
+          origin_server_name: 'adguard2.example.com',
+          origin_reachable: true,
+          dns: { state: 'ok' },
+        },
+      ],
+    })
+    renderIt()
+    expect(await screen.findByText('verified as adguard2.example.com')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: 'Edit' }))
+    expect(screen.getByLabelText('Origin certificate')).toHaveValue('name')
+    await userEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+    await waitFor(() =>
+      expect(api.cfSaveHostname).toHaveBeenCalledWith(
+        expect.objectContaining({ no_tls_verify: false, origin_server_name: 'adguard2.example.com' }),
+        true,
       ),
     )
   })
@@ -174,6 +247,7 @@ describe('TunnelHostnames changes', () => {
           service: 'https://localhost:443',
           path: '',
           no_tls_verify: true,
+          origin_server_name: '',
           // Its DNS is already fine, so an edit does not touch it by default.
           create_dns: false,
         },

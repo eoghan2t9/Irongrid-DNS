@@ -15,7 +15,24 @@ const DNS_BADGE = {
 }
 
 const CUSTOM = '__custom__'
-const blankForm = { hostname: '', preset: CUSTOM, service: '', path: '', noTls: false, createDns: true }
+// How the tunnel checks the origin's TLS certificate: normally, as a named
+// host (the certificate is for a public name but the tunnel dials localhost),
+// or not at all (only reasonable for a hop on the same machine).
+const CERT_VERIFY = 'verify'
+const CERT_NAME = 'name'
+const CERT_SKIP = 'skip'
+
+const certModeOf = (o) => (o.origin_server_name ? CERT_NAME : o.no_tls_verify ? CERT_SKIP : CERT_VERIFY)
+
+const blankForm = {
+  hostname: '',
+  preset: CUSTOM,
+  service: '',
+  path: '',
+  certMode: CERT_VERIFY,
+  serverName: '',
+  createDns: true,
+}
 
 // TunnelHostnames lists the public hostnames on the Cloudflare tunnel, with the
 // DNS record and local-origin state of each, and adds, edits and removes them.
@@ -61,7 +78,7 @@ export default function TunnelHostnames({ cf }) {
       return
     }
     const s = suggestions[Number(value)]
-    if (s) set({ preset: value, service: s.service, noTls: s.no_tls_verify })
+    if (s) set({ preset: value, service: s.service, certMode: certModeOf(s), serverName: s.origin_server_name || '' })
   }
 
   const startEdit = (row) => {
@@ -72,7 +89,8 @@ export default function TunnelHostnames({ cf }) {
       preset: idx >= 0 ? String(idx) : CUSTOM,
       service: row.service,
       path: row.path || '',
-      noTls: !!row.no_tls_verify,
+      certMode: certModeOf(row),
+      serverName: row.origin_server_name || '',
       createDns: row.dns?.state !== 'ok',
     })
     document.getElementById('tunnel-hostname-form')?.scrollIntoView?.({ behavior: 'smooth', block: 'center' })
@@ -92,7 +110,8 @@ export default function TunnelHostnames({ cf }) {
           hostname: form.hostname.trim(),
           service: form.service.trim(),
           path: form.path.trim(),
-          no_tls_verify: form.noTls,
+          no_tls_verify: form.certMode === CERT_SKIP,
+          origin_server_name: form.certMode === CERT_NAME ? form.serverName.trim() : '',
           create_dns: form.createDns,
         },
         editing,
@@ -227,6 +246,11 @@ export default function TunnelHostnames({ cf }) {
                             )}
                             <span className="mono">{row.service}</span>
                             {row.path && <span className="dim small">path {row.path}</span>}
+                            {row.origin_server_name && (
+                              <span className="chip" title="The tunnel verifies the origin's certificate as this name">
+                                verified as {row.origin_server_name}
+                              </span>
+                            )}
                             {row.no_tls_verify && <span className="chip">TLS not verified</span>}
                           </span>
                         </td>
@@ -351,11 +375,31 @@ export default function TunnelHostnames({ cf }) {
               value={form.path}
               onChange={(e) => set({ path: e.target.value })}
             />
-            <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
-              <label className="row dim small" style={{ gap: 6 }}>
-                <input type="checkbox" checked={form.noTls} onChange={(e) => set({ noTls: e.target.checked })} />
-                Don&apos;t verify the origin&apos;s TLS certificate
+            {(form.service.trim().startsWith('https://') || form.certMode !== CERT_VERIFY) && (
+              <label className="input-label">
+                Origin certificate
+                <select
+                  className="input"
+                  aria-label="Origin certificate"
+                  value={form.certMode}
+                  onChange={(e) => set({ certMode: e.target.value })}
+                >
+                  <option value={CERT_VERIFY}>Verify normally</option>
+                  <option value={CERT_NAME}>Verify as a specific name…</option>
+                  <option value={CERT_SKIP}>Don&apos;t verify (same-machine hop only)</option>
+                </select>
               </label>
+            )}
+            {form.certMode === CERT_NAME && (
+              <input
+                className="input"
+                placeholder="adguard2.example.com"
+                aria-label="Certificate name"
+                value={form.serverName}
+                onChange={(e) => set({ serverName: e.target.value })}
+              />
+            )}
+            <div className="row" style={{ gap: 16, flexWrap: 'wrap' }}>
               <label className="row dim small" style={{ gap: 6 }}>
                 <input
                   type="checkbox"
@@ -369,7 +413,12 @@ export default function TunnelHostnames({ cf }) {
               <button
                 className="btn primary"
                 type="submit"
-                disabled={!form.hostname.trim() || !form.service.trim() || busy === 'save'}
+                disabled={
+                  !form.hostname.trim() ||
+                  !form.service.trim() ||
+                  (form.certMode === CERT_NAME && !form.serverName.trim()) ||
+                  busy === 'save'
+                }
               >
                 {busy === 'save' ? 'Saving…' : editing ? 'Save changes' : 'Add hostname'}
               </button>

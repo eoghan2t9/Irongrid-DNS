@@ -185,6 +185,45 @@ func TestUpsertReplaceKeepsOtherOriginSettings(t *testing.T) {
 	}
 }
 
+// Regression: editing an existing hostname dropped the TLS settings chosen in
+// the edit (they were deleted before being merged), so a rule that needed
+// "skip verification" or a server name lost it on every save and the tunnel
+// answered 502.
+func TestUpsertReplaceAppliesTheNewTLSSettings(t *testing.T) {
+	t.Parallel()
+	cfg := &TunnelConfig{Other: map[string]json.RawMessage{}}
+	old := NewRule("a.example.com", "https://localhost:443", "", false)
+	old["originRequest"] = json.RawMessage(`{"connectTimeout":"5s"}`)
+	cfg.Rules = []Rule{old}
+
+	// Turn verification off on an existing rule.
+	cfg.Upsert(NewRuleOrigin("a.example.com", "https://localhost:443", "", true, ""))
+	got := cfg.Hostnames()[0]
+	if !got.NoTLSVerify() {
+		t.Fatal("editing a rule to skip TLS verification did not stick")
+	}
+	var o map[string]any
+	_ = json.Unmarshal(got["originRequest"], &o)
+	if o["connectTimeout"] != "5s" {
+		t.Errorf("another origin setting was lost: %v", o)
+	}
+
+	// Switch to verifying as a specific name instead.
+	cfg.Upsert(NewRuleOrigin("a.example.com", "https://localhost:443", "", false, "dns.example.com"))
+	got = cfg.Hostnames()[0]
+	if got.NoTLSVerify() || got.OriginServerName() != "dns.example.com" {
+		t.Errorf("after switching to a server name: noTLSVerify=%v name=%q", got.NoTLSVerify(), got.OriginServerName())
+	}
+
+	// And back to plain verification: both settings are removed, others kept.
+	cfg.Upsert(NewRuleOrigin("a.example.com", "https://localhost:443", "", false, ""))
+	got = cfg.Hostnames()[0]
+	_ = json.Unmarshal(got["originRequest"], &o)
+	if got.NoTLSVerify() || got.OriginServerName() != "" || o["connectTimeout"] != "5s" {
+		t.Errorf("after clearing: %v", o)
+	}
+}
+
 func TestConfigRemoveAndMissingCatchAll(t *testing.T) {
 	t.Parallel()
 	s := cfapitest.New(t)

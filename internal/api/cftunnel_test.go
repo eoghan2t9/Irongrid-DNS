@@ -475,6 +475,89 @@ func TestCFSuggestedOriginsFollowTheListeners(t *testing.T) {
 	}
 }
 
+// With a certificate name known, the presets verify as that name instead of
+// asking to skip verification.
+func TestCFSuggestedOriginsVerifyAsTheCertificateName(t *testing.T) {
+	t.Parallel()
+	f := newCFFixture(t)
+	f.cfg.Server.WebListen, f.cfg.Server.WebTLS, f.cfg.Server.ListenDoH = "0.0.0.0:443", true, "0.0.0.0:8443"
+	f.cfg.TLS.ACME.Domains = []string{"*.example.com", "adguard2.example.com"}
+	got := f.h.suggestedOrigins()
+	if len(got) != 2 {
+		t.Fatalf("suggestions = %+v", got)
+	}
+	for _, s := range got {
+		if s.OriginServerName != "adguard2.example.com" || s.NoTLSVerify {
+			t.Errorf("%s = %+v, want verification kept on, as the (non-wildcard) ACME domain", s.Service, s)
+		}
+	}
+	// A discovery host takes precedence over the ACME domain.
+	f.cfg.Server.DiscoveryHost = "Dns.Example.com"
+	if got := f.h.suggestedOrigins(); got[0].OriginServerName != "dns.example.com" {
+		t.Errorf("with a discovery host: %+v", got[0])
+	}
+	// A plain-HTTP origin needs neither.
+	f.cfg.Server.WebTLS = false
+	if got := f.h.suggestedOrigins(); got[0].NoTLSVerify || got[0].OriginServerName != "" {
+		t.Errorf("plain HTTP origin: %+v", got[0])
+	}
+}
+
+// The origin TLS settings must survive the full add / list / edit / clear
+// cycle through the API. Editing used to drop them, which left a tunnel rule
+// unable to verify its local origin (a 502 for every visitor).
+func TestCFHostnameOriginTLSSettingsRoundTrip(t *testing.T) {
+	t.Parallel()
+	f := newCFFixture(t)
+	f.fake.SetConfig(f.tunnel.ID, `{"ingress":[{"hostname":"a.example.com","service":"tcp://localhost:853","originRequest":{"connectTimeout":"5s"}},{"service":"http_status:404"}]}`)
+	no := false
+	stored := func() map[string]any {
+		var rules []map[string]any
+		_ = json.Unmarshal(f.fake.Config(f.tunnel.ID)["ingress"], &rules)
+		om, _ := rules[0]["originRequest"].(map[string]any)
+		return om
+	}
+	body := func(over map[string]any) map[string]any {
+		b := map[string]any{"hostname": "a.example.com", "service": "https://localhost:443", "create_dns": &no}
+		for k, v := range over {
+			b[k] = v
+		}
+		return b
+	}
+
+	// Edit: verify as the certificate's name.
+	if code, out := f.do(http.MethodPut, "/api/tunnel/cf/hostnames", body(map[string]any{"origin_server_name": "Adguard2.Example.com"})); code != http.StatusOK {
+		t.Fatalf("edit = %d %v", code, out)
+	}
+	if om := stored(); om["originServerName"] != "adguard2.example.com" || om["noTLSVerify"] != nil || om["connectTimeout"] != "5s" {
+		t.Fatalf("originRequest = %v, want the server name set and the existing timeout kept", om)
+	}
+	_, out := f.do(http.MethodGet, "/api/tunnel/cf/hostnames", nil)
+	row := hostnames(t, out)["a.example.com"]
+	if row["origin_server_name"] != "adguard2.example.com" || row["no_tls_verify"] != false {
+		t.Errorf("listing = %v", row)
+	}
+
+	// Edit: skip verification instead (this is the case that used to be lost).
+	f.h.cfCacheClear()
+	f.do(http.MethodPut, "/api/tunnel/cf/hostnames", body(map[string]any{"no_tls_verify": true}))
+	if om := stored(); om["noTLSVerify"] != true || om["originServerName"] != nil || om["connectTimeout"] != "5s" {
+		t.Fatalf("after choosing skip: %v", om)
+	}
+
+	// Edit: back to plain verification clears both, keeps the rest.
+	f.do(http.MethodPut, "/api/tunnel/cf/hostnames", body(nil))
+	if om := stored(); om["noTLSVerify"] != nil || om["originServerName"] != nil || om["connectTimeout"] != "5s" {
+		t.Errorf("after clearing: %v", om)
+	}
+
+	for _, bad := range []string{"*.example.com", "a b.example.com", "nodot"} {
+		if code, _ := f.do(http.MethodPut, "/api/tunnel/cf/hostnames", body(map[string]any{"origin_server_name": bad})); code != http.StatusBadRequest {
+			t.Errorf("origin_server_name %q = %d, want 400", bad, code)
+		}
+	}
+}
+
 func (f *cfFixture) seedDNSHosts() {
 	f.fake.SetConfig(f.tunnel.ID, `{"ingress":[
 	  {"hostname":"ok.example.com","service":"http://localhost:1"},

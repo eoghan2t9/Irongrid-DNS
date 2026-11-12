@@ -296,32 +296,63 @@ func (r Rule) NoTLSVerify() bool {
 	return o.NoTLSVerify
 }
 
+// OriginServerName reports originRequest.originServerName: the name the
+// connector expects the origin's TLS certificate to be valid for, when the
+// address it dials (such as localhost) is not that name.
+func (r Rule) OriginServerName() string {
+	var o struct {
+		Name string `json:"originServerName"`
+	}
+	_ = json.Unmarshal(r["originRequest"], &o)
+	return o.Name
+}
+
 // NewRule builds a hostname rule.
 func NewRule(hostname, service, path string, noTLSVerify bool) Rule {
+	return NewRuleOrigin(hostname, service, path, noTLSVerify, "")
+}
+
+// NewRuleOrigin builds a hostname rule with its origin TLS settings:
+// noTLSVerify skips certificate verification, serverName verifies the
+// certificate as that name instead of the one in the origin URL.
+func NewRuleOrigin(hostname, service, path string, noTLSVerify bool, serverName string) Rule {
 	r := Rule{}
 	r["hostname"], _ = json.Marshal(hostname)
 	r["service"], _ = json.Marshal(service)
 	if path != "" {
 		r["path"], _ = json.Marshal(path)
 	}
+	o := map[string]any{}
 	if noTLSVerify {
-		r["originRequest"] = json.RawMessage(`{"noTLSVerify":true}`)
+		o["noTLSVerify"] = true
+	}
+	if serverName != "" {
+		o["originServerName"] = serverName
+	}
+	if len(o) > 0 {
+		r["originRequest"], _ = json.Marshal(o)
 	}
 	return r
 }
 
-// mergeOriginRequest returns old's originRequest with only noTLSVerify set to
-// what rule asks for, so other origin settings (timeouts, HTTP host header,
-// ...) configured elsewhere survive an edit made here.
-func mergeOriginRequest(old, rule Rule) (json.RawMessage, bool) {
+// mergeOriginRequest returns old's originRequest with only the TLS settings
+// managed here (noTLSVerify, originServerName) set to what rule asks for, so
+// other origin settings (timeouts, HTTP host header, ...) configured elsewhere
+// survive an edit made here.
+func mergeOriginRequest(old Rule, noTLSVerify bool, serverName string) (json.RawMessage, bool) {
 	m := map[string]json.RawMessage{}
 	if raw, ok := old["originRequest"]; ok {
 		_ = json.Unmarshal(raw, &m)
 	}
-	if rule.NoTLSVerify() {
+	if noTLSVerify {
 		m["noTLSVerify"] = json.RawMessage("true")
 	} else {
 		delete(m, "noTLSVerify")
+	}
+	if serverName != "" {
+		m["originServerName"], _ = json.Marshal(serverName)
+	} else {
+		delete(m, "originServerName")
 	}
 	if len(m) == 0 {
 		return nil, false
@@ -430,8 +461,11 @@ func (c *TunnelConfig) Upsert(rule Rule) bool {
 				rule[k] = v
 			}
 		}
+		// Read the TLS settings the new rule asks for before its originRequest
+		// is replaced by the merge of the old one with them.
+		noTLS, serverName := rule.NoTLSVerify(), rule.OriginServerName()
 		delete(rule, "originRequest")
-		if raw, ok := mergeOriginRequest(old, rule); ok {
+		if raw, ok := mergeOriginRequest(old, noTLS, serverName); ok {
 			rule["originRequest"] = raw
 		}
 		c.Rules[i] = rule
