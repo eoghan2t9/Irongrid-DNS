@@ -13,9 +13,11 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/safego"
 	"log/slog"
+	mrand "math/rand/v2"
 	"net"
 	"net/http"
 	"os"
@@ -76,6 +78,12 @@ type Manager struct {
 
 	// Status mirrors the last issuance/renewal attempt for the dashboard.
 	Status Status
+
+	// ari is the CA's most recent renewal window for the certificate on disk
+	// (RFC 9773), guarded by mu. dirOverride and httpc exist for tests.
+	ari         *ariInfo
+	dirOverride string
+	httpc       *http.Client
 }
 
 // Status is the public state of the ACME manager.
@@ -261,10 +269,7 @@ func (m *Manager) Issue(ctx context.Context) error {
 		}
 	}
 
-	dirURL := LetsEncryptProd
-	if m.staging {
-		dirURL = LetsEncryptStaging
-	}
+	dirURL := m.directoryURL()
 	key, err := accountKey(m)
 	if err != nil {
 		err = fmt.Errorf("generate ACME account key: %w", err)
@@ -481,6 +486,78 @@ func (m *Manager) NeedsRenewal() bool {
 	return time.Until(leaf.NotAfter) < m.renewIn
 }
 
+// renewalCheckEvery is how often RunLoop looks at the certificate. It is also
+// the horizon ARI uses to decide that a suggested renewal moment is "soon
+// enough to act on now".
+const renewalCheckEvery = 6 * time.Hour
+
+// directoryURL is the ACME directory this manager talks to.
+func (m *Manager) directoryURL() string {
+	switch {
+	case m.dirOverride != "":
+		return m.dirOverride
+	case m.staging:
+		return LetsEncryptStaging
+	}
+	return LetsEncryptProd
+}
+
+func (m *Manager) httpClient() *http.Client {
+	if m.httpc != nil {
+		return m.httpc
+	}
+	return http.DefaultClient
+}
+
+// ariWantsRenewal reports whether the CA is asking for the certificate on
+// disk to be renewed now (RFC 9773). It is advisory and additive: it is
+// consulted only when the day-count rule says the certificate is still fine,
+// and every failure answers false so a CA without ARI, a network blip or a
+// malformed reply can never trigger or block a renewal. The CA's Retry-After
+// is honoured by reusing the last answer until it elapses.
+func (m *Manager) ariWantsRenewal(ctx context.Context) bool {
+	leaf, ok := m.leafCert()
+	if !ok {
+		return false
+	}
+	serial := leaf.SerialNumber.String()
+
+	m.mu.Lock()
+	info := m.ari
+	m.mu.Unlock()
+
+	if info == nil || info.serial != serial || time.Since(info.fetched) >= info.RetryAfter {
+		cctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		defer cancel()
+		fresh, err := fetchARI(cctx, m.httpClient(), m.directoryURL(), leaf)
+		if err != nil {
+			if errors.Is(err, errNoARI) {
+				slog.Debug("acme: CA does not offer renewal information")
+			} else {
+				slog.Warn("acme: renewal information unavailable", "error", err)
+			}
+			return false
+		}
+		m.mu.Lock()
+		m.ari = fresh
+		m.mu.Unlock()
+		m.syncStatusFromCert() // surface an earlier CA-suggested renewal on the dashboard
+		info = fresh
+	}
+	if !info.shouldRenew(time.Now(), renewalCheckEvery, mrand.Float64()) {
+		return false
+	}
+	slog.Info("acme: CA suggests renewing now (ARI)",
+		"window_start", info.Start, "window_end", info.End, "explanation", info.ExplanationURL)
+	return true
+}
+
+// needsRenewalNow is the renewal decision: the certificate is missing,
+// expired or inside the renewal window, or the CA asked for an early renewal.
+func (m *Manager) needsRenewalNow(ctx context.Context) bool {
+	return m.NeedsRenewal() || m.ariWantsRenewal(ctx)
+}
+
 // syncStatusFromCert fills the dashboard's "last issued" and "next renewal"
 // from the certificate on disk. Status is otherwise only written by Issue, so
 // after any restart with a still-valid certificate (the normal case — it
@@ -497,6 +574,11 @@ func (m *Manager) syncStatusFromCert() bool {
 	issued := leaf.NotBefore
 	next := leaf.NotAfter.Add(-m.renewIn)
 	m.mu.Lock()
+	// A CA-suggested window that opens before our own threshold wins: that is
+	// when renewal will actually be attempted.
+	if m.ari != nil && m.ari.serial == leaf.SerialNumber.String() && m.ari.Start.Before(next) {
+		next = m.ari.Start
+	}
 	if m.Status.LastSuccess == nil {
 		m.Status.LastSuccess = &issued
 	}
@@ -521,10 +603,10 @@ func (m *Manager) RunLoop(ctx context.Context) {
 			return
 		default:
 		}
-		if !m.NeedsRenewal() {
+		if !m.needsRenewalNow(ctx) {
 			return
 		}
-		slog.Info("acme certificate missing or expiring soon — issuing")
+		slog.Info("acme certificate missing, expiring soon or due for renewal — issuing")
 		if err := m.Issue(ctx); err != nil {
 			slog.Error("acme initial issuance failed", "error", err)
 			return
@@ -538,7 +620,7 @@ func (m *Manager) RunLoop(ctx context.Context) {
 		}
 		m.notifyIssued()
 	}()
-	t := time.NewTicker(6 * time.Hour)
+	t := time.NewTicker(renewalCheckEvery)
 	defer t.Stop()
 	for {
 		select {
@@ -549,7 +631,7 @@ func (m *Manager) RunLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			m.syncStatusFromCert()
-			if !m.NeedsRenewal() {
+			if !m.needsRenewalNow(ctx) {
 				continue
 			}
 			if err := m.Issue(ctx); err != nil {
