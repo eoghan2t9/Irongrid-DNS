@@ -493,8 +493,15 @@ type ServerConfig struct {
 	ListenDoH3 string `yaml:"listen_doh3"`
 	ListenDoQ  string `yaml:"listen_doq"` // DNS over QUIC, "" disables
 	DoHPath    string `yaml:"doh_path"`   // HTTP path served for DoH (RFC 8484)
-	WebListen  string `yaml:"web_listen"` // management web UI + REST API
-	WebTLS     bool   `yaml:"web_tls"`    // serve the web UI + API over HTTPS (uses the TLS cert)
+	// DiscoveryHost is the hostname advertised to clients through Discovery
+	// of Designated Resolvers (RFC 9462): a query for _dns.resolver.arpa is
+	// answered with SVCB records pointing at this name for each enabled
+	// encrypted listener, so devices can upgrade from plain DNS on their own.
+	// It must be a name the TLS certificate covers. Empty = the first
+	// acme.domains entry when ACME is enabled, otherwise nothing is advertised.
+	DiscoveryHost string `yaml:"discovery_host"`
+	WebListen     string `yaml:"web_listen"` // management web UI + REST API
+	WebTLS        bool   `yaml:"web_tls"`    // serve the web UI + API over HTTPS (uses the TLS cert)
 	// WebRedirect serves a plain-HTTP listener on WebRedirectPort that 301s
 	// to https://<host>/ — a convenience when web_tls is enabled.
 	WebRedirect     bool `yaml:"web_redirect"`

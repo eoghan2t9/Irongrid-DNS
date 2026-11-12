@@ -146,6 +146,7 @@ func (a *app) reload() error {
 	a.handler.SetUpstreamHealthCheck(a.cfg.UpstreamHealth.Enabled)
 	a.handler.SetPadding(a.cfg.Server.Padding)
 	a.handler.SetCookies(a.cfg.Server.Cookies)
+	a.handler.SetDDR(a.ddrConfig())
 	// DHCP: pool/option/static changes apply immediately (handlers read
 	// them per packet); a bind change (interface, enable state, subnet)
 	// restarts the packet listeners without dropping leases. Capture the

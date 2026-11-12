@@ -298,6 +298,20 @@ func (a *app) setupPolicy() {
 	// toggle applies without a restart.
 	a.handler.SetPadding(a.cfg.Server.Padding)
 	a.handler.SetCookies(a.cfg.Server.Cookies)
+	a.handler.SetDDR(a.ddrConfig())
+}
+
+// ddrConfig builds the RFC 9462 Discovery of Designated Resolvers answer from
+// the listener config. The advertised host is server.discovery_host, falling
+// back to the first ACME domain (the name the certificate is issued for).
+// Returns nil — advertise nothing — when neither is set.
+func (a *app) ddrConfig() *dnsserver.DDRConfig {
+	s := a.cfg.Server
+	host := s.DiscoveryHost
+	if host == "" && a.cfg.TLS.ACME.Enabled && len(a.cfg.TLS.ACME.Domains) > 0 {
+		host = a.cfg.TLS.ACME.Domains[0]
+	}
+	return dnsserver.NewDDRConfig(host, s.ListenDoT, s.ListenDoH, s.ListenDoH3, s.ListenDoQ, s.DoHPath)
 }
 
 // startDNSSECAnchors starts the live IANA anchor fetch + refresh the first time local

@@ -139,6 +139,9 @@ type Handler struct {
 	Padding atomic.Bool
 	// Cookies enables server DNS cookies (RFC 7873). Set via SetCookies.
 	Cookies atomic.Bool
+	// ddr is the Discovery of Designated Resolvers (RFC 9462) configuration
+	// answered for _dns.resolver.arpa. Set via SetDDR; nil advertises nothing.
+	ddr atomic.Pointer[DDRConfig]
 	// vpnRouter is the optional domain-based VPN split-tunnel manager; nil
 	// (the default) disables the hook entirely. Set via SetVPNRouter. Its
 	// Observe method is called directly from write() on every response, so
@@ -628,6 +631,20 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		})
 		h.Stats.Allowed.Add(1)
 		h.record(client, qname, q, "minimal", "rfc8482-any", "", start, m)
+		_ = h.write(w, m, r, proto)
+		putMsg(m)
+		return
+	}
+
+	// 0.9 Discovery of Designated Resolvers (RFC 9462): _dns.resolver.arpa is
+	//    answered locally and never forwarded or filtered — an upstream's own
+	//    designation would point clients past this server, and the name must
+	//    not be subject to blocklists. It sits behind the ACL, rate limit and
+	//    client-blocking checks above, so an unauthorized client gets nothing.
+	if isDDRQuery(qname) {
+		h.Stats.Allowed.Add(1)
+		m := ddrAnswer(r, q, h.ddr.Load(), localIPOf(w.LocalAddr()))
+		h.record(client, qname, q, "rewrite", "ddr", "", start, m)
 		_ = h.write(w, m, r, proto)
 		putMsg(m)
 		return

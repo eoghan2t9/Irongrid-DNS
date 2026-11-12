@@ -228,6 +228,7 @@ func bootSmoke(t *testing.T, shared bool) *smokeEnv {
 	cfg.Server.ListenDoT = fmt.Sprintf("127.0.0.1:%d", env.dot)
 	cfg.Server.ListenDoH = fmt.Sprintf("127.0.0.1:%d", env.doh)
 	cfg.Server.ListenDoQ = ""
+	cfg.Server.DiscoveryHost = "dns.smoke.test"                     // advertised via DDR (RFC 9462)
 	cfg.Server.DebugPprof = os.Getenv("IRONGRID_SMOKE_PPROF") != "" // opt-in: expose /debug/pprof (test credentials only)
 	cfg.Server.WebListen = fmt.Sprintf("127.0.0.1:%d", env.web)
 	env.webScheme = "http"
@@ -346,6 +347,39 @@ func runSmoke(t *testing.T, shared bool) {
 		r, err := query(t, "tcp-tls", fmt.Sprintf("127.0.0.1:%d", e.dot), "ok-dot.smoke.test", dns.TypeA)
 		if err != nil || firstA(r) != "198.51.100.10" {
 			t.Fatalf("DoT: got %q err=%v", firstA(r), err)
+		}
+	})
+
+	// DDR (RFC 9462): the real binary answers _dns.resolver.arpa locally with
+	// the configured DoH and DoT endpoints — not forwarded to the (fake)
+	// upstream, which would answer it with an A record.
+	t.Run("ddr", func(t *testing.T) {
+		r, err := query(t, "udp", fmt.Sprintf("127.0.0.1:%d", e.udp), "_dns.resolver.arpa", dns.TypeSVCB)
+		if err != nil || r == nil || r.Rcode != dns.RcodeSuccess {
+			t.Fatalf("DDR query: %v err=%v", r, err)
+		}
+		var sawDoH, sawDoT bool
+		for _, rr := range r.Answer {
+			s, ok := rr.(*dns.SVCB)
+			if !ok {
+				t.Fatalf("DDR answer is %T, want SVCB (forwarded upstream?)", rr)
+			}
+			if s.Target != "dns.smoke.test." {
+				t.Errorf("DDR target = %q", s.Target)
+			}
+			for _, kv := range s.Value {
+				if a, ok := kv.(*dns.SVCBAlpn); ok {
+					switch strings.Join(a.Alpn, ",") {
+					case "h2":
+						sawDoH = true
+					case "dot":
+						sawDoT = true
+					}
+				}
+			}
+		}
+		if !sawDoH || !sawDoT {
+			t.Fatalf("DDR missing endpoints (doh=%v dot=%v): %v", sawDoH, sawDoT, r.Answer)
 		}
 	})
 
