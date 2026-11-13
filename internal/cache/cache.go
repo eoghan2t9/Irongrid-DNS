@@ -80,8 +80,13 @@ type Cache struct {
 	// EnablePrefetch must be called before the cache is published to serving
 	// goroutines (it is: at construction, and before SetCache swaps a
 	// replacement in) — the field is read lock-free on the lookup path.
-	prefetch    func(ctx context.Context, q dns.Question)
-	prefetching sync.Map // msgKey -> struct{}: one in-flight refresh per key
+	prefetch       func(ctx context.Context, q dns.Question)
+	prefetching    sync.Map // msgKey -> struct{}: one in-flight refresh per key
+	prefetchSem    chan struct{}
+	prefetchCtx    context.Context
+	prefetchCancel context.CancelFunc
+	prefetchMu     sync.RWMutex
+	prefetchWG     sync.WaitGroup
 
 	// L2 write batching: Set/SetNegative enqueue their Dragonfly writes and
 	// a pool of writer goroutines commits them in pipelined batches (see
@@ -109,13 +114,22 @@ type Cache struct {
 	l1Misses atomic.Int64
 }
 
+const prefetchConcurrency = 32
+
+func (c *Cache) initPrefetch() {
+	c.prefetchSem = make(chan struct{}, prefetchConcurrency)
+	c.prefetchCtx, c.prefetchCancel = context.WithCancel(context.Background())
+}
+
 // NewLocalOnly returns a Cache backed only by the in-process L1 layer, with
 // no Dragonfly connection — for tests in other packages that need a working
 // Cache without standing up a real Redis-compatible server. serveStale is
 // the RFC 8767 stale window (0 disables serve-stale); prefetch is off until
 // EnablePrefetch is called.
 func NewLocalOnly(ttl, negativeTTL time.Duration, l1Entries int, serveStale time.Duration) *Cache {
-	return &Cache{l1: newL1(l1Entries, serveStale), prefix: "irongrid:dns:", ttl: ttl, negativeTTL: negativeTTL}
+	c := &Cache{l1: newL1(l1Entries, serveStale), prefix: "irongrid:dns:", ttl: ttl, negativeTTL: negativeTTL}
+	c.initPrefetch()
+	return c
 }
 
 // New connects to Dragonfly. It returns an error if the instance is
@@ -159,6 +173,7 @@ func New(addr, password string, db int, ttl, negativeTTL, serveStale time.Durati
 		ttl:         ttl,
 		negativeTTL: negativeTTL,
 	}
+	c.initPrefetch()
 	c.startWriter()
 	return c, nil
 }
@@ -337,9 +352,18 @@ func summarizeServerInfo(info string) string {
 // racing the shutdown sees wclosed and falls back to a direct synchronous
 // SET instead of sending on a channel the writer has stopped draining.
 func (c *Cache) Close() error {
-	if c.writes != nil && c.wclosed.CompareAndSwap(false, true) {
-		close(c.wdone)
-		c.wwg.Wait()
+	c.prefetchMu.Lock()
+	firstClose := c.wclosed.CompareAndSwap(false, true)
+	c.prefetchMu.Unlock()
+	if firstClose {
+		if c.prefetchCancel != nil {
+			c.prefetchCancel()
+		}
+		c.prefetchWG.Wait()
+		if c.writes != nil {
+			close(c.wdone)
+			c.wwg.Wait()
+		}
 	}
 	if c.client != nil {
 		return c.client.Close()
@@ -715,9 +739,37 @@ func (c *Cache) maybePrefetch(q dns.Question, h uint64, remaining, lifetime time
 	if _, loaded := c.prefetching.LoadOrStore(h, struct{}{}); loaded {
 		return
 	}
+	if c.prefetchSem != nil {
+		select {
+		case c.prefetchSem <- struct{}{}:
+		default:
+			c.prefetching.Delete(h)
+			return
+		}
+	}
+	c.prefetchMu.RLock()
+	if c.wclosed.Load() {
+		c.prefetchMu.RUnlock()
+		if c.prefetchSem != nil {
+			<-c.prefetchSem
+		}
+		c.prefetching.Delete(h)
+		return
+	}
+	c.prefetchWG.Add(1)
+	c.prefetchMu.RUnlock()
+
+	parent := c.prefetchCtx
+	if parent == nil {
+		parent = context.Background()
+	}
 	go func() {
+		defer c.prefetchWG.Done()
+		if c.prefetchSem != nil {
+			defer func() { <-c.prefetchSem }()
+		}
 		defer c.prefetching.Delete(h)
-		ctx, cancel := context.WithTimeout(context.Background(), prefetchTimeout)
+		ctx, cancel := context.WithTimeout(parent, prefetchTimeout)
 		defer cancel()
 		c.prefetch(ctx, q)
 	}()

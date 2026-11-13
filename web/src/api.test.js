@@ -83,4 +83,18 @@ describe('api request', () => {
     await expect(api.status()).resolves.toEqual({ ok: true })
     expect(globalThis.fetch).toHaveBeenCalledTimes(2)
   })
+
+  it('does not retry non-idempotent POST requests on network failure', async () => {
+    globalThis.fetch = vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
+    await expect(api.refreshLists()).rejects.toThrow('Failed to fetch')
+    expect(globalThis.fetch).toHaveBeenCalledTimes(1)
+  })
+
+  it('encodes UTF-8 passwords in Basic auth headers without throwing', async () => {
+    setCredentials('admin', 'pässwörd-🔐')
+    globalThis.fetch = vi.fn().mockResolvedValue({ status: 200, ok: true, json: async () => ({ ok: true }) })
+    await api.status()
+    const [, opts] = globalThis.fetch.mock.calls[0]
+    expect(opts.headers.Authorization).toMatch(/^Basic [A-Za-z0-9+/=]+$/)
+  })
 })

@@ -3,7 +3,6 @@ package api
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
@@ -35,7 +34,10 @@ func (h *Handler) addList(w http.ResponseWriter, r *http.Request) {
 	h.cfgMu.Lock()
 	defer h.cfgMu.Unlock()
 	var p listPayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || p.ID == "" {
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if p.ID == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id, url required"})
 		return
 	}
@@ -57,8 +59,7 @@ func (h *Handler) updateList(w http.ResponseWriter, r *http.Request, id string) 
 	h.cfgMu.Lock()
 	defer h.cfgMu.Unlock()
 	var p listPayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad body"})
+	if !decodeJSON(w, r, &p) {
 		return
 	}
 	changed := false
@@ -184,7 +185,10 @@ func (h *Handler) addFilterEntry(w http.ResponseWriter, r *http.Request, which s
 	h.cfgMu.Lock()
 	defer h.cfgMu.Unlock()
 	var p filterEntryPayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || p.Entry == "" {
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if p.Entry == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "entry required"})
 		return
 	}
@@ -214,7 +218,10 @@ func (h *Handler) deleteFilterEntry(w http.ResponseWriter, r *http.Request) {
 	h.cfgMu.Lock()
 	defer h.cfgMu.Unlock()
 	var p filterDeletePayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || p.Entry == "" {
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if p.Entry == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "entry, kind required"})
 		return
 	}
@@ -241,7 +248,10 @@ func (h *Handler) applyUserLists() {
 
 func (h *Handler) checkFilter(w http.ResponseWriter, r *http.Request) {
 	var p filterEntryPayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || p.Entry == "" {
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if p.Entry == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "entry required"})
 		return
 	}

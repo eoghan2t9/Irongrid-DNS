@@ -37,6 +37,8 @@ const (
 	LetsEncryptStaging = "https://acme-staging-v02.api.letsencrypt.org/directory"
 )
 
+var defaultHTTPClient = &http.Client{Timeout: 30 * time.Second}
+
 // Manager issues and renews certificates for the configured domains.
 type Manager struct {
 	mu       sync.Mutex
@@ -506,7 +508,7 @@ func (m *Manager) httpClient() *http.Client {
 	if m.httpc != nil {
 		return m.httpc
 	}
-	return http.DefaultClient
+	return defaultHTTPClient
 }
 
 // ariWantsRenewal reports whether the CA is asking for the certificate on

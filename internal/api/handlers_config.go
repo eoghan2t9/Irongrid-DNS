@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -662,89 +661,57 @@ func carryOverUneditable(cfg, running *config.Config) {
 	cfg.CloudflareDNS = running.CloudflareDNS
 }
 
-func (h *Handler) applyPayload(p configPayload) ([]string, error) {
-	parseDur := func(s string) (time.Duration, error) {
-		if strings.TrimSpace(s) == "" {
-			return 0, nil
-		}
-		d, err := time.ParseDuration(s)
-		if err != nil {
-			return 0, err
-		}
-		return d, nil
-	}
+type durationBinding struct {
+	name string
+	raw  string
+	dst  *time.Duration
+}
 
-	ttl, err := parseDur(p.Cache.TTL)
-	if err != nil {
-		return nil, fmt.Errorf("cache.ttl: %w", err)
+func parseDurations(bindings []durationBinding) error {
+	for _, b := range bindings {
+		if strings.TrimSpace(b.raw) == "" {
+			*b.dst = 0
+			continue
+		}
+		d, err := time.ParseDuration(b.raw)
+		if err != nil {
+			return fmt.Errorf("%s: %w", b.name, err)
+		}
+		*b.dst = d
 	}
-	negTTL, err := parseDur(p.Cache.NegativeTTL)
-	if err != nil {
-		return nil, fmt.Errorf("cache.negative_ttl: %w", err)
-	}
-	serveStale, err := parseDur(p.Cache.ServeStale)
-	if err != nil {
-		return nil, fmt.Errorf("cache.serve_stale: %w", err)
-	}
-	lookupTimeout, err := parseDur(p.Cache.LookupTimeout)
-	if err != nil {
-		return nil, fmt.Errorf("cache.lookup_timeout: %w", err)
-	}
-	failureTTL, err := parseDur(p.Cache.FailureTTL)
-	if err != nil {
-		return nil, fmt.Errorf("cache.failure_ttl: %w", err)
-	}
-	recursiveTimeout, err := parseDur(p.Recursive.ServerTimeout)
-	if err != nil {
-		return nil, fmt.Errorf("recursive.server_timeout: %w", err)
-	}
-	blocklistAutoUpdate, err := parseDur(p.Filter.AutoUpdate)
-	if err != nil {
-		return nil, fmt.Errorf("filter.auto_update: %w", err)
-	}
-	blockFor, err := parseDur(p.RateLimit.BlockFor)
-	if err != nil {
-		return nil, fmt.Errorf("rate_limit.block_for: %w", err)
-	}
-	nxWindow, err := parseDur(p.RateLimit.NXGuard.Window)
-	if err != nil {
-		return nil, fmt.Errorf("rate_limit.nxdomain_guard.window: %w", err)
-	}
-	nxBlockFor, err := parseDur(p.RateLimit.NXGuard.BlockFor)
-	if err != nil {
-		return nil, fmt.Errorf("rate_limit.nxdomain_guard.block_for: %w", err)
-	}
-	rqWindow, err := parseDur(p.RateLimit.RepeatQuery.Window)
-	if err != nil {
-		return nil, fmt.Errorf("rate_limit.repeat_query_guard.window: %w", err)
-	}
-	rqBlockFor, err := parseDur(p.RateLimit.RepeatQuery.BlockFor)
-	if err != nil {
-		return nil, fmt.Errorf("rate_limit.repeat_query_guard.block_for: %w", err)
-	}
-	rqUDPBlockFor, err := parseDur(p.RateLimit.RepeatQuery.UDPBlockFor)
-	if err != nil {
-		return nil, fmt.Errorf("rate_limit.repeat_query_guard.udp_block_for: %w", err)
-	}
-	geoAutoUpdate, err := parseDur(p.GeoBlock.AutoUpdate)
-	if err != nil {
-		return nil, fmt.Errorf("geo_block.auto_update: %w", err)
-	}
-	geoUDPBlock, err := parseDur(p.GeoBlock.HoneypotUDPBlock)
-	if err != nil {
-		return nil, fmt.Errorf("geo_block.honeypot_udp_block: %w", err)
-	}
-	leaseTime, err := parseDur(p.DHCP.LeaseTime)
-	if err != nil {
-		return nil, fmt.Errorf("dhcp.lease_time: %w", err)
-	}
-	warmerInterval, err := parseDur(p.Warmer.Interval)
-	if err != nil {
-		return nil, fmt.Errorf("warmer.interval: %w", err)
-	}
-	warmerLookback, err := parseDur(p.Warmer.Lookback)
-	if err != nil {
-		return nil, fmt.Errorf("warmer.lookback: %w", err)
+	return nil
+}
+
+func buildConfigFromPayload(p configPayload) (*config.Config, error) {
+	var (
+		ttl, negTTL, serveStale, lookupTimeout, failureTTL time.Duration
+		recursiveTimeout, blocklistAutoUpdate              time.Duration
+		blockFor, nxWindow, nxBlockFor                     time.Duration
+		rqWindow, rqBlockFor, rqUDPBlockFor                time.Duration
+		geoAutoUpdate, geoUDPBlock                         time.Duration
+		leaseTime, warmerInterval, warmerLookback          time.Duration
+	)
+	if err := parseDurations([]durationBinding{
+		{"cache.ttl", p.Cache.TTL, &ttl},
+		{"cache.negative_ttl", p.Cache.NegativeTTL, &negTTL},
+		{"cache.serve_stale", p.Cache.ServeStale, &serveStale},
+		{"cache.lookup_timeout", p.Cache.LookupTimeout, &lookupTimeout},
+		{"cache.failure_ttl", p.Cache.FailureTTL, &failureTTL},
+		{"recursive.server_timeout", p.Recursive.ServerTimeout, &recursiveTimeout},
+		{"filter.auto_update", p.Filter.AutoUpdate, &blocklistAutoUpdate},
+		{"rate_limit.block_for", p.RateLimit.BlockFor, &blockFor},
+		{"rate_limit.nxdomain_guard.window", p.RateLimit.NXGuard.Window, &nxWindow},
+		{"rate_limit.nxdomain_guard.block_for", p.RateLimit.NXGuard.BlockFor, &nxBlockFor},
+		{"rate_limit.repeat_query_guard.window", p.RateLimit.RepeatQuery.Window, &rqWindow},
+		{"rate_limit.repeat_query_guard.block_for", p.RateLimit.RepeatQuery.BlockFor, &rqBlockFor},
+		{"rate_limit.repeat_query_guard.udp_block_for", p.RateLimit.RepeatQuery.UDPBlockFor, &rqUDPBlockFor},
+		{"geo_block.auto_update", p.GeoBlock.AutoUpdate, &geoAutoUpdate},
+		{"geo_block.honeypot_udp_block", p.GeoBlock.HoneypotUDPBlock, &geoUDPBlock},
+		{"dhcp.lease_time", p.DHCP.LeaseTime, &leaseTime},
+		{"warmer.interval", p.Warmer.Interval, &warmerInterval},
+		{"warmer.lookback", p.Warmer.Lookback, &warmerLookback},
+	}); err != nil {
+		return nil, err
 	}
 	// Friendly defaults when auto-block is switched on without explicit
 	// values: 3 violations then a 10-minute cooldown.
@@ -755,6 +722,11 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 		if p.RateLimit.BlockAfter < 1 {
 			p.RateLimit.BlockAfter = 3
 		}
+	}
+
+	routes := make([]config.UpstreamRoute, 0, len(p.UpstreamRoutes))
+	for _, rt := range p.UpstreamRoutes {
+		routes = append(routes, config.UpstreamRoute{Domain: rt.Domain, Upstreams: rt.Upstreams})
 	}
 
 	cfg := &config.Config{
@@ -782,15 +754,9 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			XFFHopLimit:       p.Server.XFFHopLimit,
 			DoHASNHeader:      p.Server.DoHASNHeader,
 		},
-		Upstreams:    p.Upstreams,
-		UpstreamMode: p.UpstreamMode,
-		UpstreamRoutes: func() []config.UpstreamRoute {
-			routes := make([]config.UpstreamRoute, 0, len(p.UpstreamRoutes))
-			for _, rt := range p.UpstreamRoutes {
-				routes = append(routes, config.UpstreamRoute{Domain: rt.Domain, Upstreams: rt.Upstreams})
-			}
-			return routes
-		}(),
+		Upstreams:      p.Upstreams,
+		UpstreamMode:   p.UpstreamMode,
+		UpstreamRoutes: routes,
 		Cache: config.CacheConfig{
 			Addr:          p.Cache.Addr,
 			Password:      p.Cache.Password,
@@ -962,49 +928,12 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 			MAC: sl.MAC, DUID: sl.DUID, IP: sl.IP, Hostname: sl.Hostname,
 		})
 	}
-	users, err := resolveWebUsers(h.Cfg.Web.Users, p.Web.Users)
-	if err != nil {
-		return nil, err
-	}
-	cfg.Web.Users = users
+	return cfg, nil
+}
 
-	// Rotate the session secret whenever the Users list actually changed
-	// (any add/edit/delete/role change) — every previously issued session
-	// cookie, including the one authorizing this very request if it was the
-	// caller's own account that changed, becomes invalid at once. A save
-	// that doesn't touch Users keeps the existing secret so other sessions
-	// are unaffected. This mirrors the single-admin password-change
-	// behavior it replaces, extended to the whole account list; it is
-	// intentionally coarse (any user's change signs out every user) rather
-	// than building per-user session versioning.
-	secret, err := rotateSecretIfUsersChanged(h.Cfg.Web.Users, cfg.Web.Users, h.Cfg.Web.SessionSecret)
-	if err != nil {
-		return nil, fmt.Errorf("rotate session secret: %w", err)
-	}
-	cfg.Web.SessionSecret = secret
-
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
-	// Parse conditional routes before any live-apply: a bad route spec (e.g.
-	// an unsupported upstream scheme, which Validate doesn't catch) fails the
-	// save with nothing touched. SetUpstreamRoutes takes the compiled routes,
-	// so the live-apply below can no longer fail.
-	parsedRoutes, err := dnsserver.ParseRoutes(routeSpecs(cfg.UpstreamRoutes))
-	if err != nil {
-		return nil, err
-	}
-
-	h.cfgMu.Lock()
-	defer h.cfgMu.Unlock()
-
-	// Carry over what the dashboard payload cannot edit, before the diff and
-	// before *h.Cfg is replaced below.
-	carryOverUneditable(cfg, h.Cfg)
-
-	// Diff against the running config to report restart-required sections.
+func (h *Handler) diffRestartSections(next *config.Config) []string {
 	restart := []string{}
-	if !reflect.DeepEqual(h.Cfg.Server, cfg.Server) {
+	if !reflect.DeepEqual(h.Cfg.Server, next.Server) {
 		restart = append(restart, "server (listeners)")
 	}
 	// cache.failure_ttl is live-applied below (SetFailureTTL), so exclude it
@@ -1014,16 +943,16 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 		c.FailureTTL = 0
 		return c
 	}
-	if !reflect.DeepEqual(cacheNoFailure(h.Cfg.Cache), cacheNoFailure(cfg.Cache)) {
+	if !reflect.DeepEqual(cacheNoFailure(h.Cfg.Cache), cacheNoFailure(next.Cache)) {
 		restart = append(restart, "cache")
 	}
-	if !reflect.DeepEqual(h.Cfg.TLS, cfg.TLS) {
+	if !reflect.DeepEqual(h.Cfg.TLS, next.TLS) {
 		restart = append(restart, "tls")
 	}
-	if !reflect.DeepEqual(h.Cfg.Log, cfg.Log) {
+	if !reflect.DeepEqual(h.Cfg.Log, next.Log) {
 		restart = append(restart, "log")
 	}
-	if !reflect.DeepEqual(h.Cfg.Tunnel, cfg.Tunnel) {
+	if !reflect.DeepEqual(h.Cfg.Tunnel, next.Tunnel) {
 		restart = append(restart, "tunnel")
 		h.tunnelPending.Store(true) // an in-place reload can't apply it; see reloadConfig
 	}
@@ -1031,17 +960,19 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	// interface/enable state changed), so a pure pool-option tweak doesn't
 	// prompt a restart — but a bind change (interface, enabling/disabling)
 	// is reported like the other listener-bound sections.
-	if h.DHCP != nil && !reflect.DeepEqual(dhcpBindConfig(h.Cfg.DHCP), dhcpBindConfig(cfg.DHCP)) {
+	if h.DHCP != nil && !reflect.DeepEqual(dhcpBindConfig(h.Cfg.DHCP), dhcpBindConfig(next.DHCP)) {
 		restart = append(restart, "dhcp (listeners)")
 	}
+	return restart
+}
 
-	// Live-apply the hot sections.
+func (h *Handler) liveApplyConfig(cfg *config.Config, parsedRoutes []dnsserver.UpstreamRoute) error {
 	if !reflect.DeepEqual(h.Cfg.Upstreams, cfg.Upstreams) {
 		ups := make([]*upstream.Upstream, 0, len(cfg.Upstreams))
 		for _, spec := range cfg.Upstreams {
 			up, err := upstream.Parse(spec)
 			if err != nil {
-				return nil, fmt.Errorf("upstream %q: %w", spec, err)
+				return fmt.Errorf("upstream %q: %w", spec, err)
 			}
 			ups = append(ups, up)
 		}
@@ -1092,6 +1023,54 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	if h.DHCP != nil {
 		h.DHCP.SetConfig(h.dhcpRuntimeConfig(cfg.DHCP))
 	}
+	return nil
+}
+
+func (h *Handler) applyPayload(p configPayload) ([]string, error) {
+	cfg, err := buildConfigFromPayload(p)
+	if err != nil {
+		return nil, err
+	}
+	users, err := resolveWebUsers(h.Cfg.Web.Users, p.Web.Users)
+	if err != nil {
+		return nil, err
+	}
+	cfg.Web.Users = users
+
+	// Rotate the session secret whenever the Users list actually changed
+	// (any add/edit/delete/role change) — every previously issued session
+	// cookie, including the one authorizing this very request if it was the
+	// caller's own account that changed, becomes invalid at once. A save
+	// that doesn't touch Users keeps the existing secret so other sessions
+	// are unaffected.
+	secret, err := rotateSecretIfUsersChanged(h.Cfg.Web.Users, cfg.Web.Users, h.Cfg.Web.SessionSecret)
+	if err != nil {
+		return nil, fmt.Errorf("rotate session secret: %w", err)
+	}
+	cfg.Web.SessionSecret = secret
+
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	// Parse conditional routes before any live-apply: a bad route spec (e.g.
+	// an unsupported upstream scheme, which Validate doesn't catch) fails the
+	// save with nothing touched. SetUpstreamRoutes takes the compiled routes,
+	// so the live-apply below can no longer fail.
+	parsedRoutes, err := dnsserver.ParseRoutes(routeSpecs(cfg.UpstreamRoutes))
+	if err != nil {
+		return nil, err
+	}
+
+	h.cfgMu.Lock()
+	defer h.cfgMu.Unlock()
+
+	// Carry over what the dashboard payload cannot edit, before the diff and
+	// before *h.Cfg is replaced below.
+	carryOverUneditable(cfg, h.Cfg)
+	restart := h.diffRestartSections(cfg)
+	if err := h.liveApplyConfig(cfg, parsedRoutes); err != nil {
+		return nil, err
+	}
 
 	oldSecret := h.Cfg.Web.SessionSecret
 	*h.Cfg = *cfg
@@ -1104,27 +1083,18 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 		h.Cfg.Web.SessionSecret = oldSecret
 		return nil, err
 	}
-	// Geo-blocking changes are hot-swapped (no listener rebind needed). The
-	// rebuild runs asynchronously so a country-data download can never stall
-	// the config save or hold cfgMu.
+	// Geo-blocking, client-group ASN, and VPN reconciliations run
+	// asynchronously so external downloads/API calls never stall the save.
 	if h.RebuildGeo != nil {
 		if err := h.RebuildGeo(cfg.GeoBlock); err != nil {
 			slog.Warn("rebuild geo block failed", "error", err)
 		}
 	}
-	// Client-group ASN matching needs the IP→ASN dataset pruned to the new
-	// group lists; the refresh and router rebuild run asynchronously for the
-	// same reason (and the router built above with the previous table is
-	// replaced the moment the fresh one lands).
 	if h.RebuildClientGroups != nil {
 		if err := h.RebuildClientGroups(cfg); err != nil {
 			slog.Warn("rebuild client groups failed", "error", err)
 		}
 	}
-	// VPN split-tunnel profiles/routes reconcile the same way: no listener
-	// rebind needed, but (re)connecting a profile can involve a slow round
-	// trip to the vendor's API, so it runs asynchronously rather than
-	// holding up this save.
 	if h.RebuildVPN != nil {
 		if err := h.RebuildVPN(cfg); err != nil {
 			slog.Warn("rebuild vpn failed", "error", err)
@@ -1141,8 +1111,7 @@ func (h *Handler) getConfig(w http.ResponseWriter) {
 
 func (h *Handler) putConfig(w http.ResponseWriter, r *http.Request) {
 	var p configPayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad body: " + err.Error()})
+	if !decodeJSONLimit(w, r, &p, 1<<20) {
 		return
 	}
 	restart, err := h.applyPayload(p)

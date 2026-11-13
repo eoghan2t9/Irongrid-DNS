@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -79,8 +78,7 @@ func (h *Handler) generateTLS(w http.ResponseWriter, r *http.Request) {
 	h.cfgMu.Lock()
 	defer h.cfgMu.Unlock()
 	var p tlsGeneratePayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad body"})
+	if !decodeJSON(w, r, &p) {
 		return
 	}
 	hosts := make([]string, 0, len(p.Hosts))
@@ -130,8 +128,7 @@ func (h *Handler) uploadTLS(w http.ResponseWriter, r *http.Request) {
 	h.cfgMu.Lock()
 	defer h.cfgMu.Unlock()
 	var p tlsUploadPayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad body"})
+	if !decodeJSONLimit(w, r, &p, 1<<20) {
 		return
 	}
 	if strings.TrimSpace(p.CertPEM) == "" || strings.TrimSpace(p.KeyPEM) == "" {

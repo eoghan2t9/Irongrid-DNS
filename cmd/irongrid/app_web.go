@@ -139,7 +139,11 @@ func (a *app) startWebServer(srv *http.Server, useTLS bool) {
 		wtls, err := cert.LoadOrGenerate(a.cfg.TLS.CertFile, a.cfg.TLS.KeyFile, a.cfg.TLS.CertDir, a.cfg.TLS.SelfSignedHosts)
 		if err != nil {
 			slog.Error("cannot enable HTTPS, falling back to plain HTTP", "error", err)
-			go func() { _ = srv.ListenAndServe() }()
+			go func() {
+				if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+					slog.Error("web server error", "error", err)
+				}
+			}()
 			return
 		}
 		// When DoH shares this listener, advertise HTTP/2 (RFC 8484
@@ -197,7 +201,13 @@ func (a *app) startRedirect() {
 	if a.redirectSrv != nil {
 		old := a.redirectSrv
 		a.redirectSrv = nil
-		go func() { _ = old.Shutdown(context.Background()) }()
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := old.Shutdown(ctx); err != nil {
+				_ = old.Close()
+			}
+		}()
 	}
 	if !want {
 		return

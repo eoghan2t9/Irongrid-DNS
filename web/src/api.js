@@ -6,9 +6,16 @@ let onUnauthorized = null
 // gone from memory — the signed irongrid_session cookie (set on login) keeps
 // the user authenticated instead, so we don't send a broken empty-password
 // header that would 401 before the cookie is considered.
+function encodeBase64UTF8(str) {
+  const bytes = new TextEncoder().encode(str)
+  let bin = ''
+  for (const b of bytes) bin += String.fromCharCode(b)
+  return btoa(bin)
+}
+
 function authHeader() {
   if (!credentials || !credentials.user || !credentials.pass) return null
-  return 'Basic ' + btoa(`${credentials.user}:${credentials.pass}`)
+  return 'Basic ' + encodeBase64UTF8(`${credentials.user}:${credentials.pass}`)
 }
 
 export function setAuthHandler(fn) {
@@ -78,10 +85,12 @@ async function fetchWithAuthRetry(path, options = {}) {
   const headers = { ...(options.headers || {}) }
   const auth = authHeader()
   if (auth) headers.Authorization = auth
+  const method = (options.method || 'GET').toUpperCase()
+  const idempotent = method === 'GET' || method === 'HEAD'
   try {
     return await timedFetch(path, { ...options, headers })
   } catch (err) {
-    if (err.message && err.message.startsWith('Request timed out')) throw err
+    if (!idempotent || (err.message && err.message.startsWith('Request timed out'))) throw err
     return await timedFetch(path, { ...options, headers })
   }
 }

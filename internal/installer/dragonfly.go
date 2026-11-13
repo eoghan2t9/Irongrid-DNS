@@ -30,6 +30,11 @@ const (
 	dflyImage = "docker.dragonflydb.io/dragonfly/dragonfly"
 )
 
+var (
+	dflyAPIClient      = &http.Client{Timeout: 30 * time.Second}
+	dflyDownloadClient = &http.Client{Timeout: 5 * time.Minute}
+)
+
 // redisPing reports whether addr answers a Redis PING with "+PONG".
 func redisPing(addr string) bool {
 	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
@@ -90,7 +95,7 @@ func latestDragonflyVersion(ctx context.Context) (string, error) {
 	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("User-Agent", "irongrid-installer")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := dflyAPIClient.Do(req)
 	if err != nil {
 		return "", err
 	}
@@ -134,7 +139,7 @@ func ensureDragonflyNative(addr string, out io.Writer) error {
 	if err != nil {
 		return err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := dflyDownloadClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("download Dragonfly: %w", err)
 	}

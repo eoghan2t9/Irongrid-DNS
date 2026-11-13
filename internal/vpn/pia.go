@@ -86,11 +86,13 @@ type PIA struct {
 
 func (p *PIA) Name() string { return "pia" }
 
+var defaultPIAHTTP = &http.Client{Timeout: 15 * time.Second}
+
 func (p *PIA) client() *http.Client {
 	if p.HTTP != nil {
 		return p.HTTP
 	}
-	return &http.Client{Timeout: 15 * time.Second}
+	return defaultPIAHTTP
 }
 
 // Connect resolves region (a PIA region id, e.g. "uk_london" — see PIA's

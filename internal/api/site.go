@@ -3,7 +3,6 @@ package api
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -134,7 +133,10 @@ type siteCheckResult struct {
 // through the filter engine so the dashboard can offer one-click whitelisting.
 func (h *Handler) siteCheck(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	var p siteCheckPayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || strings.TrimSpace(p.URL) == "" {
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if strings.TrimSpace(p.URL) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "url required"})
 		return
 	}

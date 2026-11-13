@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -204,14 +203,6 @@ func cfReady(w http.ResponseWriter, c cfCtx, needTunnel bool) bool {
 		return true
 	}
 	return false
-}
-
-func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
-	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<16)).Decode(v); err != nil {
-		badRequest(w, "bad request body", nil)
-		return false
-	}
-	return true
 }
 
 // cloudflareAPI routes /api/tunnel/cf/*.

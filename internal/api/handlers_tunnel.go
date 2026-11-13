@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"encoding/json"
 	"log/slog"
 	"net/http"
 	"os"
@@ -29,8 +28,7 @@ func (h *Handler) tunnelStatus(w http.ResponseWriter) {
 
 func (h *Handler) tunnelStart(w http.ResponseWriter, r *http.Request) {
 	var p tunnelStartPayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad body"})
+	if !decodeJSON(w, r, &p) {
 		return
 	}
 	mode := tunnel.Mode(p.Mode)

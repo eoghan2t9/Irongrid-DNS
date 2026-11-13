@@ -117,5 +117,5 @@ docker-up:
 	docker compose up -d --build
 
 clean:
-	rm -f irongrid
+	rm -f irongrid *.test internal/*/*.test
 	rm -rf dist web/dist web/node_modules

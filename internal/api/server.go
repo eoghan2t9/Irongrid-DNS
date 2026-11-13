@@ -158,13 +158,13 @@ const sessionLifetime = 30 * 24 * time.Hour
 // authSnapshot copies the auth-relevant config fields under the shared mutex
 // (when set) so every check in a single request sees one consistent snapshot,
 // even while a config apply is rotating the session secret mid-request.
-func (a *App) authSnapshot() (users []config.WebUser, secret string, secure bool) {
+func (a *App) authSnapshot() (users []config.WebUser, tokens []config.APIToken, secret string, secure bool) {
 	if a.Mu != nil {
 		a.Mu.Lock()
 		defer a.Mu.Unlock()
 	}
 	cfg := a.Config
-	return cfg.Web.Users, cfg.Web.SessionSecret, cfg.Server.WebTLS
+	return cfg.Web.Users, cfg.Web.Tokens, cfg.Web.SessionSecret, cfg.Server.WebTLS
 }
 
 // userByUsername finds the user with the given username in users, or nil.
@@ -183,7 +183,7 @@ func userByUsername(users []config.WebUser, username string) *config.WebUser {
 // "viewer" role user is scoped to GET/HEAD only, exactly like a read-only
 // APIToken.
 func (a *App) authorize(w http.ResponseWriter, r *http.Request) bool {
-	users, secret, secure := a.authSnapshot()
+	users, tokens, secret, secure := a.authSnapshot()
 	if u := a.validSession(r, users, secret); u != nil {
 		if u.Role == "viewer" && r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "viewer account cannot make a "+r.Method+" request", http.StatusForbidden)
@@ -195,7 +195,7 @@ func (a *App) authorize(w http.ResponseWriter, r *http.Request) bool {
 	// flow below: no loginGuard lockout interaction (a wrong high-entropy
 	// token isn't a guessable-password attack), and a read-only token is
 	// scoped to GET/HEAD only.
-	if tokenOK, readOnly := a.validToken(r); tokenOK {
+	if tokenOK, readOnly := validToken(r, tokens); tokenOK {
 		if readOnly && r.Method != http.MethodGet && r.Method != http.MethodHead {
 			http.Error(w, "read-only API token cannot make a "+r.Method+" request", http.StatusForbidden)
 			return false
@@ -261,7 +261,7 @@ func (a *App) allowAPIRequest(w http.ResponseWriter, r *http.Request) bool {
 // The payload ("user.exp") is base64url-encoded so usernames containing dots
 // can't break the "payload.sig" split.
 func (a *App) issueSession(w http.ResponseWriter, user string) {
-	_, secret, secure := a.authSnapshot()
+	_, _, secret, secure := a.authSnapshot()
 	a.issueSessionWith(w, user, secret, secure)
 }
 
@@ -363,7 +363,7 @@ func tokenMatches(presented, stored string) bool {
 // against the configured API tokens (web.tokens), independent of the
 // primary username/password. Returns whether a token matched and, if so,
 // whether it's read-only.
-func (a *App) validToken(r *http.Request) (ok, readOnly bool) {
+func validToken(r *http.Request, tokens []config.APIToken) (ok, readOnly bool) {
 	const prefix = "Bearer "
 	authz := r.Header.Get("Authorization")
 	if !strings.HasPrefix(authz, prefix) {
@@ -373,11 +373,7 @@ func (a *App) validToken(r *http.Request) (ok, readOnly bool) {
 	if presented == "" {
 		return false, false
 	}
-	if a.Mu != nil {
-		a.Mu.Lock()
-		defer a.Mu.Unlock()
-	}
-	for _, t := range a.Config.Web.Tokens {
+	for _, t := range tokens {
 		if tokenMatches(presented, t.Token) {
 			return true, t.ReadOnly
 		}
@@ -514,6 +510,8 @@ func writeBrotli(w http.ResponseWriter, data []byte) bool {
 
 // isCompressible reports whether a content type is worth gzipping.
 func isCompressible(ct string) bool {
+	base, _, _ := strings.Cut(ct, ";")
+	ct = strings.TrimSpace(strings.ToLower(base))
 	switch {
 	case strings.HasPrefix(ct, "text/"),
 		ct == "application/javascript",
@@ -538,6 +536,22 @@ func sanitizeLogString(s string) string {
 		}
 		return r
 	}, s)
+}
+
+// decodeJSON decodes a JSON request body bounded to 64 KiB, writing a 400
+// error response and returning false on failure.
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) bool {
+	return decodeJSONLimit(w, r, v, 1<<16)
+}
+
+// decodeJSONLimit decodes a JSON request body bounded to maxBytes, writing a
+// 400 error response and returning false on failure.
+func decodeJSONLimit(w http.ResponseWriter, r *http.Request, v any, maxBytes int64) bool {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxBytes)).Decode(v); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad request body"})
+		return false
+	}
+	return true
 }
 
 // writeJSON is a small helper.

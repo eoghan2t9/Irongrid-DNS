@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
@@ -22,7 +21,10 @@ func (h *Handler) rateUnblock(w http.ResponseWriter, r *http.Request) {
 	var p struct {
 		IP string `json:"ip"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || p.IP == "" {
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if p.IP == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ip required"})
 		return
 	}
@@ -111,7 +113,10 @@ func (h *Handler) geoBlockIP(w http.ResponseWriter, r *http.Request) {
 		IP     string `json:"ip"`
 		Prefix int    `json:"prefix"` // optional: block ip/prefix instead of the bare IP
 	}
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || strings.TrimSpace(p.IP) == "" {
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if strings.TrimSpace(p.IP) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ip required"})
 		return
 	}
@@ -177,7 +182,10 @@ func (h *Handler) geoUnblock(w http.ResponseWriter, r *http.Request) {
 	var p struct {
 		IP string `json:"ip"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || p.IP == "" {
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if p.IP == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ip required"})
 		return
 	}

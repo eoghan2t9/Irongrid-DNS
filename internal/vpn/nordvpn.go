@@ -40,11 +40,13 @@ type NordVPN struct {
 
 func (n *NordVPN) Name() string { return "nordvpn" }
 
+var defaultNordHTTP = &http.Client{Timeout: 15 * time.Second}
+
 func (n *NordVPN) client() *http.Client {
 	if n.HTTP != nil {
 		return n.HTTP
 	}
-	return &http.Client{Timeout: 15 * time.Second}
+	return defaultNordHTTP
 }
 
 // Connect resolves region (an ISO 3166-1 alpha-2 code like "gb", or a full

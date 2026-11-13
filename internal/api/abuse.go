@@ -35,7 +35,10 @@ func (h *Handler) abuseReport(w http.ResponseWriter, r *http.Request) {
 	var p struct {
 		IP string `json:"ip"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || net.ParseIP(strings.TrimSpace(p.IP)) == nil {
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if net.ParseIP(strings.TrimSpace(p.IP)) == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a valid ip is required"})
 		return
 	}
@@ -150,7 +153,10 @@ func (h *Handler) abuseASN(w http.ResponseWriter, r *http.Request) {
 	var p struct {
 		IP string `json:"ip"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || net.ParseIP(strings.TrimSpace(p.IP)) == nil {
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if net.ParseIP(strings.TrimSpace(p.IP)) == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "a valid ip is required"})
 		return
 	}

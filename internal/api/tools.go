@@ -310,7 +310,10 @@ type resolveResult struct {
 // dashboard can offer both a dig-style lookup and a propagation comparison.
 func (h *Handler) toolsResolve(ctx context.Context, w http.ResponseWriter, r *http.Request) {
 	var p toolsResolvePayload
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || strings.TrimSpace(p.Name) == "" {
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if strings.TrimSpace(p.Name) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name required"})
 		return
 	}
@@ -434,7 +437,10 @@ func (h *Handler) toolsMail(ctx context.Context, w http.ResponseWriter, r *http.
 	var p struct {
 		Domain string `json:"domain"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || strings.TrimSpace(p.Domain) == "" {
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if strings.TrimSpace(p.Domain) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "domain required"})
 		return
 	}
@@ -599,8 +605,7 @@ func (h *Handler) toolsRBL(ctx context.Context, w http.ResponseWriter, r *http.R
 	var p struct {
 		IP string `json:"ip"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ip required"})
+	if !decodeJSON(w, r, &p) {
 		return
 	}
 	v4 := net.ParseIP(strings.TrimSpace(p.IP)).To4()
@@ -661,7 +666,10 @@ func (h *Handler) toolsAXFR(ctx context.Context, w http.ResponseWriter, r *http.
 	var p struct {
 		Domain string `json:"domain"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || strings.TrimSpace(p.Domain) == "" {
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if strings.TrimSpace(p.Domain) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "domain required"})
 		return
 	}
@@ -778,7 +786,10 @@ func (h *Handler) toolsSubdomains(ctx context.Context, w http.ResponseWriter, r 
 	var p struct {
 		Domain string `json:"domain"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || strings.TrimSpace(p.Domain) == "" {
+	if !decodeJSON(w, r, &p) {
+		return
+	}
+	if strings.TrimSpace(p.Domain) == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "domain required"})
 		return
 	}
