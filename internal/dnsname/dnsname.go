@@ -4,6 +4,14 @@ package dnsname
 
 import "strings"
 
+// Question identifies a DNS query tuple (name, type, class) independently of
+// the underlying DNS library's wire representation.
+type Question struct {
+	Name   string
+	Qtype  uint16
+	Qclass uint16
+}
+
 // CanonicalDomain trims whitespace, lowercases, and strips the trailing
 // dot that DNS wire format uses but human-facing config/APIs omit.
 func CanonicalDomain(s string) string {

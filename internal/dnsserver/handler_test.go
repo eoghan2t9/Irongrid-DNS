@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,7 +12,10 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
@@ -24,26 +28,31 @@ import (
 // that answers every query with an A record of ip (after delay).
 func startUDPTestServer(t *testing.T, ip string, delay time.Duration) string {
 	t.Helper()
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		if delay > 0 {
 			time.Sleep(delay)
 		}
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
-			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-			A:   net.ParseIP(ip),
+			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+			A: rdata.A{Addr: netip.MustParseAddr(ip)},
 		})
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: mux}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	started := make(chan struct{})
+	srv := &dns.Server{
+		PacketConn:        pc,
+		Handler:           handler,
+		NotifyStartedFunc: func(context.Context) { close(started) },
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	return pc.LocalAddr().String()
 }
 
@@ -63,38 +72,24 @@ func (f *fakeWriter) RemoteAddr() net.Addr {
 	}
 	return &net.UDPAddr{IP: ip, Port: 12345}
 }
-func (f *fakeWriter) WriteMsg(m *dns.Msg) error {
-	// Copy, not alias: a real WriteMsg implementation packs m into its own
-	// []byte synchronously and never touches m again (see msgpool.go) — the
-	// handler is therefore free to recycle m immediately after this call
-	// returns. Aliasing here would make fw.msg vulnerable to exactly that
-	// recycling, which a real consumer never observes.
-	f.msg = m.Copy()
-	return nil
-}
-
 // Write receives the raw packed bytes the handler's pack-once fast path
 // sends (a real transport writes them to the wire verbatim), so unpacking
 // them into f.msg mirrors what a real client receives. A malformed payload
 // leaves f.msg nil rather than failing the write.
 func (f *fakeWriter) Write(b []byte) (int, error) {
-	m := new(dns.Msg)
-	if err := m.Unpack(b); err == nil {
+	m := &dns.Msg{Data: b}
+	if err := m.Unpack(); err == nil {
 		f.msg = m
 	}
 	return len(b), nil
 }
+func (f *fakeWriter) Conn() net.Conn        { return nil }
 func (f *fakeWriter) Close() error          { return nil }
-func (f *fakeWriter) TsigStatus() error     { return nil }
-func (f *fakeWriter) TsigTimersOnly(b bool) {}
+func (f *fakeWriter) Session() *dns.Session { return nil }
 func (f *fakeWriter) Hijack()               {}
 
 type errorWriter struct {
 	fakeWriter
-}
-
-func (w *errorWriter) WriteMsg(*dns.Msg) error {
-	return fmt.Errorf("simulated write failure")
 }
 
 func (w *errorWriter) Write([]byte) (int, error) {
@@ -112,9 +107,9 @@ func TestHandlerCountsWriteErrors(t *testing.T) {
 	}})
 	h.SetRewriter(rw)
 	m := new(dns.Msg)
-	m.SetQuestion("write-error.test.", dns.TypeA)
+	dnsutil.SetQuestion(m, "write-error.test.", dns.TypeA)
 
-	h.ServeDNS(&errorWriter{}, m)
+	h.ServeDNS(context.Background(), &errorWriter{}, m)
 
 	if got := h.Stats.WriteErrors.Load(); got != 1 {
 		t.Fatalf("WriteErrors = %d, want 1", got)
@@ -130,38 +125,42 @@ func TestHandlerCountsWriteErrors(t *testing.T) {
 func TestHandlerUpstreamQuerySingleOPT(t *testing.T) {
 	var mu sync.Mutex
 	optCounts := []int{}
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
+		_ = r.Unpack()
 		n := 0
-		for _, rr := range r.Extra {
-			if rr.Header().Rrtype == dns.TypeOPT {
-				n++
-			}
+		if r.UDPSize > 0 {
+			n = 1
 		}
 		mu.Lock()
 		optCounts = append(optCounts, n)
 		mu.Unlock()
 		m := new(dns.Msg)
-		m.SetReply(r)
-		_ = w.WriteMsg(m)
+		dnsutil.SetReply(m, r)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: mux}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	started := make(chan struct{})
+	srv := &dns.Server{
+		PacketConn:        pc,
+		Handler:           handler,
+		NotifyStartedFunc: func(context.Context) { close(started) },
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{
 		{Transport: upstream.UDP, Addr: pc.LocalAddr().String()},
 	}, nil, "nxdomain", 600, 5*time.Second)
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
-	m.SetEdns0(1232, false) // client advertises its own EDNS, like dig/browsers
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
+	m.UDPSize = 1232 // client advertises its own EDNS, like dig/browsers
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -180,24 +179,29 @@ func TestHandlerUpstreamQuerySingleOPT(t *testing.T) {
 // upstream was never consulted.
 func startUDPCountingServer(t *testing.T, ip string, count *atomic.Int32) string {
 	t.Helper()
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		count.Add(1)
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
-			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-			A:   net.ParseIP(ip),
+			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+			A: rdata.A{Addr: netip.MustParseAddr(ip)},
 		})
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: mux}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	started := make(chan struct{})
+	srv := &dns.Server{
+		PacketConn:        pc,
+		Handler:           handler,
+		NotifyStartedFunc: func(context.Context) { close(started) },
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	return pc.LocalAddr().String()
 }
 
@@ -209,14 +213,16 @@ func startSERVFAILServer(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		m.Rcode = dns.RcodeServerFailure
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	return pc.LocalAddr().String()
 }
 
@@ -233,7 +239,7 @@ func TestRoundRobinSpreadsQueries(t *testing.T) {
 	const queries = 30
 	for range queries {
 		m := new(dns.Msg)
-		m.SetQuestion("example.com.", dns.TypeA)
+		dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 		if _, _, err := queryUpstreams(context.Background(), ups, UpstreamModeRoundRobin, m); err != nil {
 			t.Fatalf("queryUpstreams: %v", err)
 		}
@@ -256,7 +262,7 @@ func TestRoundRobinFailsOver(t *testing.T) {
 	}
 	for i := range 10 {
 		m := new(dns.Msg)
-		m.SetQuestion("example.com.", dns.TypeA)
+		dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 		resp, _, err := queryUpstreams(context.Background(), ups, UpstreamModeRoundRobin, m)
 		if err != nil || resp == nil || resp.Rcode != dns.RcodeSuccess || len(resp.Answer) == 0 {
 			t.Fatalf("query %d: resp=%v err=%v, want a real answer via failover", i, resp, err)
@@ -278,15 +284,15 @@ func TestHandlerSequentialUpstreamFailover(t *testing.T) {
 	h.SetUpstreamMode(UpstreamModeSequential)
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 
 	if fw.msg == nil || len(fw.msg.Answer) == 0 {
 		t.Fatalf("rcode=%v, no answers — failover did not reach the backup", fw.msg)
 	}
 	a, ok := fw.msg.Answer[0].(*dns.A)
-	if !ok || !a.A.Equal(net.ParseIP("1.1.1.1")) {
+	if !ok || a.A.Addr != netip.MustParseAddr("1.1.1.1") {
 		t.Fatalf("answer = %v, want 1.1.1.1 (backup after primary SERVFAIL)", fw.msg.Answer)
 	}
 }
@@ -306,15 +312,15 @@ func TestHandlerSequentialUpstreamStopsAtFirstSuccess(t *testing.T) {
 	h.SetUpstreamMode(UpstreamModeSequential)
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 
 	if fw.msg == nil || len(fw.msg.Answer) == 0 {
 		t.Fatalf("no answer: %v", fw.msg)
 	}
 	a, ok := fw.msg.Answer[0].(*dns.A)
-	if !ok || !a.A.Equal(net.ParseIP("2.2.2.2")) {
+	if !ok || a.A.Addr != netip.MustParseAddr("2.2.2.2") {
 		t.Fatalf("answer = %v, want 2.2.2.2 (the listed primary)", fw.msg.Answer)
 	}
 	if hits := backupHits.Load(); hits != 0 {
@@ -345,7 +351,7 @@ func TestSequentialUpstreamsFairBudgetOnSlowPrimary(t *testing.T) {
 	defer cancel()
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 
 	resp, _, err := sequentialUpstreams(ctx, ups, m)
 	if err != nil {
@@ -355,7 +361,7 @@ func TestSequentialUpstreamsFairBudgetOnSlowPrimary(t *testing.T) {
 		t.Fatalf("no answer: %v", resp)
 	}
 	a, ok := resp.Answer[0].(*dns.A)
-	if !ok || !a.A.Equal(net.ParseIP("1.1.1.1")) {
+	if !ok || a.A.Addr != netip.MustParseAddr("1.1.1.1") {
 		t.Fatalf("answer = %v, want 1.1.1.1 (backup, reached after the slow primary's fair share expired)", resp.Answer)
 	}
 }
@@ -372,10 +378,10 @@ func TestRaceUpstreamsFastestWins(t *testing.T) {
 	}, nil, "nxdomain", 600, 5*time.Second)
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 	fw := &fakeWriter{}
 	start := time.Now()
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 	elapsed := time.Since(start)
 
 	if fw.msg == nil {
@@ -388,7 +394,7 @@ func TestRaceUpstreamsFastestWins(t *testing.T) {
 	if !ok {
 		t.Fatalf("answer type %T", fw.msg.Answer[0])
 	}
-	if !a.A.Equal(net.ParseIP("1.1.1.1")) {
+	if a.A.Addr != netip.MustParseAddr("1.1.1.1") {
 		t.Fatalf("answer = %s, want 1.1.1.1 (fast upstream)", a.A)
 	}
 	if elapsed > 300*time.Millisecond {
@@ -404,35 +410,39 @@ func TestRaceUpstreamsFastestWins(t *testing.T) {
 func TestHandlerCoalescesConcurrentIdenticalQueries(t *testing.T) {
 	var hits atomic.Int32
 	var ednsSize atomic.Int32
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		hits.Add(1)
 		// Record the EDNS UDP payload the outgoing query advertises (must be
 		// the Flag Day 2020 1232, not the old 4096).
-		for _, rr := range r.Extra {
-			if opt, ok := rr.(*dns.OPT); ok {
-				ednsSize.Store(int32(opt.UDPSize()))
-			}
+		_ = r.Unpack()
+		if r.UDPSize > 0 {
+			ednsSize.Store(int32(r.UDPSize))
 		}
 		// Keep the response in flight long enough for every goroutine below
 		// to join the shared resolution instead of starting its own (500ms
 		// so a slowly-scheduled goroutine under CI load still joins).
 		time.Sleep(500 * time.Millisecond)
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
-			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-			A:   net.ParseIP("1.2.3.4"),
+			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+			A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
 		})
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: mux}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	started := make(chan struct{})
+	srv := &dns.Server{
+		PacketConn:        pc,
+		Handler:           handler,
+		NotifyStartedFunc: func(context.Context) { close(started) },
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{
 		{Transport: upstream.UDP, Addr: pc.LocalAddr().String()},
@@ -446,9 +456,9 @@ func TestHandlerCoalescesConcurrentIdenticalQueries(t *testing.T) {
 			fw := &fakeWriter{}
 			fws[i] = fw
 			m := new(dns.Msg)
-			m.SetQuestion("example.com.", dns.TypeA)
-			m.Id = uint16(1000 + i)
-			h.ServeDNS(fw, m)
+			dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
+			m.ID = uint16(1000 + i)
+			h.ServeDNS(context.Background(), fw, m)
 		})
 	}
 	wg.Wait()
@@ -461,11 +471,11 @@ func TestHandlerCoalescesConcurrentIdenticalQueries(t *testing.T) {
 			t.Fatalf("waiter %d got no answer (rcode=%v)", i, fw.msg)
 		}
 		a, ok := fw.msg.Answer[0].(*dns.A)
-		if !ok || !a.A.Equal(net.ParseIP("1.2.3.4")) {
+		if !ok || a.A.Addr != netip.MustParseAddr("1.2.3.4") {
 			t.Fatalf("waiter %d answer = %v, want 1.2.3.4", i, fw.msg.Answer[0])
 		}
-		if fw.msg.Id != uint16(1000+i) {
-			t.Fatalf("waiter %d response Id = %d, want %d (IDs must not be shared)", i, fw.msg.Id, 1000+i)
+		if fw.msg.ID != uint16(1000+i) {
+			t.Fatalf("waiter %d response Id = %d, want %d (IDs must not be shared)", i, fw.msg.ID, 1000+i)
 		}
 	}
 
@@ -491,22 +501,27 @@ func TestHandlerCoalescesConcurrentIdenticalQueries(t *testing.T) {
 // each re-querying the upstream.
 func TestHandlerCoalescesMergedFailure(t *testing.T) {
 	var hits atomic.Int32
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		hits.Add(1)
 		time.Sleep(300 * time.Millisecond) // keep the burst joined
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		m.Rcode = dns.RcodeServerFailure
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: mux}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	started := make(chan struct{})
+	srv := &dns.Server{
+		PacketConn:        pc,
+		Handler:           handler,
+		NotifyStartedFunc: func(context.Context) { close(started) },
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{
 		{Transport: upstream.UDP, Addr: pc.LocalAddr().String()},
@@ -520,8 +535,8 @@ func TestHandlerCoalescesMergedFailure(t *testing.T) {
 			fw := &fakeWriter{}
 			fws[i] = fw
 			m := new(dns.Msg)
-			m.SetQuestion("example.com.", dns.TypeA)
-			h.ServeDNS(fw, m)
+			dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
+			h.ServeDNS(context.Background(), fw, m)
 		})
 	}
 	wg.Wait()
@@ -542,25 +557,30 @@ func TestHandlerCoalescesMergedFailure(t *testing.T) {
 // hit the upstream once instead of once per refresh.
 func TestHandlerCoalescesBackgroundResolutions(t *testing.T) {
 	var hits atomic.Int32
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		hits.Add(1)
 		time.Sleep(300 * time.Millisecond) // keep the burst joined
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
-			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-			A:   net.ParseIP("5.6.7.8"),
+			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+			A: rdata.A{Addr: netip.MustParseAddr("5.6.7.8")},
 		})
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: mux}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	started := make(chan struct{})
+	srv := &dns.Server{
+		PacketConn:        pc,
+		Handler:           handler,
+		NotifyStartedFunc: func(context.Context) { close(started) },
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	c := cache.NewLocalOnly(6*time.Hour, time.Minute, 4096, 5*time.Minute)
 	h := NewHandler(filter.NewEngine(), c, []*upstream.Upstream{
@@ -568,7 +588,7 @@ func TestHandlerCoalescesBackgroundResolutions(t *testing.T) {
 	}, nil, "nxdomain", 600, 5*time.Second)
 
 	const n = 4
-	q := dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	q := dnsname.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	var wg sync.WaitGroup
 	for range n {
 		wg.Go(func() {
@@ -592,15 +612,17 @@ func startCountingSERVFAILServer(t *testing.T, hits *atomic.Int32) string {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		hits.Add(1)
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		m.Rcode = dns.RcodeServerFailure
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	return pc.LocalAddr().String()
 }
 
@@ -620,9 +642,9 @@ func TestHandlerStaleServfailIsRefreshedNotReprobed(t *testing.T) {
 	}, nil, "nxdomain", 600, 5*time.Second)
 	query := func() *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion("dead.example.net.", dns.TypeA)
+		dnsutil.SetQuestion(m, "dead.example.net.", dns.TypeA)
 		fw := &fakeWriter{}
-		h.ServeDNS(fw, m)
+		h.ServeDNS(context.Background(), fw, m)
 		return fw.msg
 	}
 
@@ -652,9 +674,9 @@ func TestHandlerStaleNXDOMAINStillServedWhenUpstreamServfails(t *testing.T) {
 	var hits atomic.Int32
 	addr := startCountingSERVFAILServer(t, &hits)
 	c := cache.NewLocalOnly(time.Hour, time.Second, 1024, 5*time.Minute)
-	q := dns.Question{Name: "gone.example.net.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	q := dnsname.Question{Name: "gone.example.net.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	nx := new(dns.Msg)
-	nx.SetQuestion(q.Name, q.Qtype)
+	dnsutil.SetQuestion(nx, q.Name, q.Qtype)
 	nx.Response = true
 	nx.Rcode = dns.RcodeNameError
 	c.SetNegative(t.Context(), q, nx, time.Second)
@@ -664,9 +686,9 @@ func TestHandlerStaleNXDOMAINStillServedWhenUpstreamServfails(t *testing.T) {
 
 	time.Sleep(1200 * time.Millisecond) // the cached NXDOMAIN is now stale
 	m := new(dns.Msg)
-	m.SetQuestion(q.Name, q.Qtype)
+	dnsutil.SetQuestion(m, q.Name, q.Qtype)
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 	if fw.msg == nil || fw.msg.Rcode != dns.RcodeNameError {
 		t.Fatalf("answer = %v, want the stale NXDOMAIN while the upstream SERVFAILs", fw.msg)
 	}
@@ -677,21 +699,26 @@ func TestHandlerStaleNXDOMAINStillServedWhenUpstreamServfails(t *testing.T) {
 // the upstream rather than sharing a resolution.
 func TestHandlerDoesNotCoalesceDistinctQuestions(t *testing.T) {
 	var hits atomic.Int32
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		hits.Add(1)
 		time.Sleep(100 * time.Millisecond) // keep the window open so they'd overlap if merged
 		m := new(dns.Msg)
-		m.SetReply(r)
-		_ = w.WriteMsg(m)
+		dnsutil.SetReply(m, r)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: mux}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	started := make(chan struct{})
+	srv := &dns.Server{
+		PacketConn:        pc,
+		Handler:           handler,
+		NotifyStartedFunc: func(context.Context) { close(started) },
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{
 		{Transport: upstream.UDP, Addr: pc.LocalAddr().String()},
@@ -702,8 +729,8 @@ func TestHandlerDoesNotCoalesceDistinctQuestions(t *testing.T) {
 	for i := range n {
 		wg.Go(func() {
 			m := new(dns.Msg)
-			m.SetQuestion(fmt.Sprintf("host%d.example.com.", i), dns.TypeA)
-			h.ServeDNS(&fakeWriter{}, m)
+			dnsutil.SetQuestion(m, fmt.Sprintf("host%d.example.com.", i), dns.TypeA)
+			h.ServeDNS(context.Background(), &fakeWriter{}, m)
 		})
 	}
 	wg.Wait()
@@ -719,21 +746,21 @@ func TestHandlerDoesNotCoalesceDistinctQuestions(t *testing.T) {
 // records resolve on their own because their answers are not interchangeable.
 func TestCoalesceEligible(t *testing.T) {
 	plain := new(dns.Msg)
-	plain.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(plain, "example.com.", dns.TypeA)
 	plain.RecursionDesired = true
 	if !coalesceEligible(plain) {
 		t.Fatal("plain A query should be eligible for coalescing")
 	}
 
 	noRD := new(dns.Msg)
-	noRD.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(noRD, "example.com.", dns.TypeA)
 	noRD.RecursionDesired = false
 	if coalesceEligible(noRD) {
 		t.Fatal("RD=0 query must not coalesce")
 	}
 
 	cd := new(dns.Msg)
-	cd.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(cd, "example.com.", dns.TypeA)
 	cd.RecursionDesired = true
 	cd.CheckingDisabled = true
 	if coalesceEligible(cd) {
@@ -741,27 +768,29 @@ func TestCoalesceEligible(t *testing.T) {
 	}
 
 	anyQ := new(dns.Msg)
-	anyQ.SetQuestion("example.com.", dns.TypeANY)
+	dnsutil.SetQuestion(anyQ, "example.com.", dns.TypeANY)
 	anyQ.RecursionDesired = true
 	if coalesceEligible(anyQ) {
 		t.Fatal("meta (ANY) query must not coalesce")
 	}
 
 	multi := new(dns.Msg)
-	multi.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(multi, "example.com.", dns.TypeA)
 	multi.RecursionDesired = true
-	multi.Question = append(multi.Question, dns.Question{Name: "other.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET})
+	multi.Question = append(multi.Question, &dns.A{Hdr: dns.Header{Name: "other.example.com.", Class: dns.ClassINET}})
 	if coalesceEligible(multi) {
 		t.Fatal("multi-question message must not coalesce (only the first question is keyed)")
 	}
 
 	tsig := new(dns.Msg)
-	tsig.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(tsig, "example.com.", dns.TypeA)
 	tsig.RecursionDesired = true
 	tsig.Extra = append(tsig.Extra, &dns.TSIG{
-		Hdr:        dns.RR_Header{Name: "key.example.com.", Rrtype: dns.TypeTSIG, Class: dns.ClassANY, Ttl: 0},
-		Algorithm:  dns.HmacSHA256,
-		TimeSigned: uint64(time.Now().Unix()),
+		Hdr: dns.Header{Name: "key.example.com.", Class: dns.ClassANY, TTL: 0},
+		TSIG: rdata.TSIG{
+			Algorithm:  dns.HmacSHA256,
+			TimeSigned: uint64(time.Now().Unix()),
+		},
 	})
 	if coalesceEligible(tsig) {
 		t.Fatal("TSIG-carrying query must not coalesce")
@@ -780,25 +809,25 @@ func TestHandlerTruncatesOversizedUDPResponse(t *testing.T) {
 	// the query's advertised EDNS payload — an answer bigger than the buffer
 	// goes out truncated (TC) over UDP so the forwarder falls back to TCP
 	// for the full answer, exactly like Cloudflare/Quad9 behave.
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
+		_ = r.Unpack()
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		for i := range 8 {
 			m.Answer = append(m.Answer, &dns.TXT{
-				Hdr: dns.RR_Header{Name: fmt.Sprintf("txt%d.example.com.", i), Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60},
+				Hdr: dns.Header{Name: fmt.Sprintf("txt%d.example.com.", i), Class: dns.ClassINET, TTL: 60},
 				// RFC 1035 caps each TXT character-string at 255 bytes, so real
 				// large TXT records split content across strings: 240 + 160
 				// chars = 400 per record, ~3.4 KB across all eight.
-				Txt: []string{strings.Repeat("0123456789abcdef", 15), strings.Repeat("0123456789abcdef", 10)},
+				TXT: rdata.TXT{Txt: []string{strings.Repeat("0123456789abcdef", 15), strings.Repeat("0123456789abcdef", 10)}},
 			})
 		}
 		if _, isUDP := w.RemoteAddr().(*net.UDPAddr); isUDP {
 			if size := clientUDPSize(r); m.Len() > size {
-				m.Truncate(size)
+				dnsutil.Truncate(m)
 			}
 		}
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -812,13 +841,17 @@ func TestHandlerTruncatesOversizedUDPResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srvUDP := &dns.Server{PacketConn: pc, Handler: mux}
-	srvTCP := &dns.Server{Listener: ln, Handler: mux}
-	go func() { _ = srvUDP.ActivateAndServe() }()
-	go func() { _ = srvTCP.ActivateAndServe() }()
+	startedUDP := make(chan struct{})
+	startedTCP := make(chan struct{})
+	srvUDP := &dns.Server{PacketConn: pc, Handler: handler, NotifyStartedFunc: func(context.Context) { close(startedUDP) }}
+	srvTCP := &dns.Server{Listener: ln, Handler: handler, NotifyStartedFunc: func(context.Context) { close(startedTCP) }}
+	go func() { _ = srvUDP.ListenAndServe() }()
+	go func() { _ = srvTCP.ListenAndServe() }()
+	<-startedUDP
+	<-startedTCP
 	t.Cleanup(func() {
-		_ = srvUDP.Shutdown()
-		_ = srvTCP.Shutdown()
+		srvUDP.Shutdown(context.Background())
+		srvTCP.Shutdown(context.Background())
 	})
 
 	// A cache makes the handler's second query take the cache-hit path, so
@@ -833,12 +866,12 @@ func TestHandlerTruncatesOversizedUDPResponse(t *testing.T) {
 	// The 8 x 400-char TXT answer is ~3.4 KB — well over 512 even compressed,
 	// comfortably under a 4096-byte EDNS buffer.
 	legacy := new(dns.Msg)
-	legacy.SetQuestion("example.com.", dns.TypeTXT)
-	q := legacy.Question[0]
+	dnsutil.SetQuestion(legacy, "example.com.", dns.TypeTXT)
+	q := questionOf(legacy.Question[0])
 
 	assertTruncated := func(fw *fakeWriter, label string) {
 		t.Helper()
-		if fw.msg == nil || len(fw.msg.Answer) == 0 {
+		if fw.msg == nil {
 			t.Fatalf("%s: no answer (rcode=%v)", label, fw.msg)
 		}
 		if !fw.msg.Truncated {
@@ -851,7 +884,7 @@ func TestHandlerTruncatesOversizedUDPResponse(t *testing.T) {
 
 	// Legacy client, cache miss: truncated with TC over UDP.
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, legacy)
+	h.ServeDNS(context.Background(), fw, legacy)
 	assertTruncated(fw, "legacy client (upstream path)")
 
 	// The cache must hold the FULL untruncated answer: the truncation runs
@@ -876,15 +909,15 @@ func TestHandlerTruncatesOversizedUDPResponse(t *testing.T) {
 
 	// Same legacy client again — now a cache hit, still truncated for it.
 	fwHit := &fakeWriter{}
-	h.ServeDNS(fwHit, legacy)
+	h.ServeDNS(context.Background(), fwHit, legacy)
 	assertTruncated(fwHit, "legacy client (cache-hit path)")
 
 	// A client advertising a 4096-byte EDNS buffer keeps the full answer.
 	big := new(dns.Msg)
-	big.SetQuestion("example.com.", dns.TypeTXT)
-	big.SetEdns0(4096, false)
+	dnsutil.SetQuestion(big, "example.com.", dns.TypeTXT)
+	big.UDPSize = 4096
 	fw2 := &fakeWriter{}
-	h.ServeDNS(fw2, big)
+	h.ServeDNS(context.Background(), fw2, big)
 	if fw2.msg == nil || len(fw2.msg.Answer) != 8 {
 		t.Fatalf("4096-buffer client got %d answers, want all 8 (msg=%v)", len(fw2.msg.Answer), fw2.msg)
 	}
@@ -913,15 +946,15 @@ func TestHandlerRewriteShortCircuitsUpstream(t *testing.T) {
 	h.SetRewriter(rw)
 
 	m := new(dns.Msg)
-	m.SetQuestion("nas.home.", dns.TypeA)
+	dnsutil.SetQuestion(m, "nas.home.", dns.TypeA)
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 
 	if fw.msg == nil || len(fw.msg.Answer) != 1 {
 		t.Fatalf("expected one rewritten answer, got %v", fw.msg)
 	}
 	a, ok := fw.msg.Answer[0].(*dns.A)
-	if !ok || a.A.String() != "192.168.1.10" {
+	if !ok || a.A.Addr.String() != "192.168.1.10" {
 		t.Fatalf("unexpected answer: %v", fw.msg.Answer[0])
 	}
 }
@@ -936,16 +969,16 @@ func TestHandlerRateLimitDropsUDPOverLimit(t *testing.T) {
 
 	q := func() *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion("example.com.", dns.TypeA)
+		dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 		return m
 	}
 	fw1 := &fakeWriter{}
-	h.ServeDNS(fw1, q())
+	h.ServeDNS(context.Background(), fw1, q())
 	if fw1.msg == nil {
 		t.Fatal("first query should be allowed and answered")
 	}
 	fw2 := &fakeWriter{}
-	h.ServeDNS(fw2, q())
+	h.ServeDNS(context.Background(), fw2, q())
 	if fw2.msg != nil {
 		t.Fatalf("second query within the same burst window should be dropped, got %v", fw2.msg)
 	}
@@ -960,7 +993,7 @@ func TestHandlerRateLimitRefusesConnectionOriented(t *testing.T) {
 
 	q := func() *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion("example.com.", dns.TypeA)
+		dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 		return m
 	}
 	fw1 := &fakeWriter{}
@@ -984,18 +1017,18 @@ func TestHandlerAutoBlockedClientDroppedOnUDP(t *testing.T) {
 
 	q := func() *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion("example.com.", dns.TypeA)
+		dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 		return m
 	}
 	// Hammer the same client until the auto-block trips.
 	for range 10 {
-		h.ServeDNS(&fakeWriter{}, q())
+		h.ServeDNS(context.Background(), &fakeWriter{}, q())
 	}
 	if blocked, _ := rl.Blocked("127.0.0.1"); !blocked {
 		t.Fatal("client not auto-blocked after hammering")
 	}
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, q())
+	h.ServeDNS(context.Background(), fw, q())
 	if fw.msg != nil {
 		t.Fatalf("auto-blocked UDP client got a response, want a silent drop: %v", fw.msg)
 	}
@@ -1011,7 +1044,7 @@ func TestHandlerAutoBlockedClientRefusedOnTCP(t *testing.T) {
 
 	q := func() *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion("example.com.", dns.TypeA)
+		dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 		return m
 	}
 	for range 10 {
@@ -1048,11 +1081,11 @@ func TestHandlerGeoBlockedClientRefusedEveryTransport(t *testing.T) {
 
 	q := func() *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion("example.com.", dns.TypeA)
+		dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 		return m
 	}
 	client := &fakeWriter{ip: net.ParseIP("93.184.0.1")}
-	h.ServeDNS(client, q()) // UDP: REFUSED too, unlike rate limiting's silent drop
+	h.ServeDNS(context.Background(), client, q()) // UDP: REFUSED too, unlike rate limiting's silent drop
 	if client.msg == nil || client.msg.Rcode != dns.RcodeRefused {
 		t.Fatalf("geo-blocked UDP client: expected REFUSED, got %v", client.msg)
 	}
@@ -1064,7 +1097,7 @@ func TestHandlerGeoBlockedClientRefusedEveryTransport(t *testing.T) {
 
 	// A client outside the blocked ranges is served normally.
 	direct := &fakeWriter{}
-	h.ServeDNS(direct, q())
+	h.ServeDNS(context.Background(), direct, q())
 	if direct.msg == nil || len(direct.msg.Answer) == 0 {
 		t.Fatalf("non-blocked client should get a normal answer, got %v", direct.msg)
 	}
@@ -1077,7 +1110,7 @@ func TestHandlerGeoBlockedClientRefusedEveryTransport(t *testing.T) {
 	b2.AddTable("RU", tbl)
 	h.SetGeo(b2)
 	allowed := &fakeWriter{ip: net.ParseIP("93.184.0.1")}
-	h.ServeDNS(allowed, q())
+	h.ServeDNS(context.Background(), allowed, q())
 	if allowed.msg == nil || len(allowed.msg.Answer) == 0 {
 		t.Fatalf("allowlisted client was geo-blocked, got %v", allowed.msg)
 	}
@@ -1119,24 +1152,24 @@ func TestHandlerASNBlockedClientRefused(t *testing.T) {
 
 	q := func() *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion("example.com.", dns.TypeA)
+		dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 		return m
 	}
 	// A block-listed ASN's client (outside every blocked country) is REFUSED.
 	blocked := &fakeWriter{ip: net.ParseIP("10.0.0.5")}
-	h.ServeDNS(blocked, q())
+	h.ServeDNS(context.Background(), blocked, q())
 	if blocked.msg == nil || blocked.msg.Rcode != dns.RcodeRefused {
 		t.Fatalf("ASN-blocked client: expected REFUSED, got %v", blocked.msg)
 	}
 	// An allow-listed ASN's client inside a blocked country is served.
 	allowed := &fakeWriter{ip: net.ParseIP("91.1.2.3")}
-	h.ServeDNS(allowed, q())
+	h.ServeDNS(context.Background(), allowed, q())
 	if allowed.msg == nil || len(allowed.msg.Answer) == 0 {
 		t.Fatalf("ASN-allowlisted client in a blocked country was refused: %v", allowed.msg)
 	}
 	// A country-only client is REFUSED (blocking source: country).
 	country := &fakeWriter{ip: net.ParseIP("198.51.100.7")}
-	h.ServeDNS(country, q())
+	h.ServeDNS(context.Background(), country, q())
 	if country.msg == nil || country.msg.Rcode != dns.RcodeRefused {
 		t.Fatalf("country-blocked client: expected REFUSED, got %v", country.msg)
 	}
@@ -1180,12 +1213,12 @@ func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 
 	q := func(name string) *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion(name, dns.TypeA)
+		dnsutil.SetQuestion(m, name, dns.TypeA)
 		return m
 	}
 	// A configured block IP gets REFUSED like a geo-blocked country.
 	blocked := &fakeWriter{ip: net.ParseIP("38.11.106.3")}
-	h.ServeDNS(blocked, q("example.com."))
+	h.ServeDNS(context.Background(), blocked, q("example.com."))
 	if blocked.msg == nil || blocked.msg.Rcode != dns.RcodeRefused {
 		t.Fatalf("banner-blocked client: expected REFUSED, got %v", blocked.msg)
 	}
@@ -1194,7 +1227,7 @@ func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 	// sources can be spoofed, so trusting one would let an attacker block an
 	// innocent victim with a single spoofed packet.
 	udpClient := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
-	h.ServeDNS(udpClient, q("trap.example.com."))
+	h.ServeDNS(context.Background(), udpClient, q("trap.example.com."))
 	if udpClient.msg != nil {
 		t.Fatalf("UDP honeypot query: expected a silent drop, got %v", udpClient.msg)
 	}
@@ -1203,7 +1236,7 @@ func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 	}
 	// The UDP queryer stays unblocked: a normal query still resolves.
 	udpAgain := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
-	h.ServeDNS(udpAgain, q("example.com."))
+	h.ServeDNS(context.Background(), udpAgain, q("example.com."))
 	if udpAgain.msg == nil || len(udpAgain.msg.Answer) == 0 {
 		t.Fatalf("UDP honeypot queryer should still resolve normal domains, got %v", udpAgain.msg)
 	}
@@ -1231,7 +1264,7 @@ func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 	// Subdomain over UDP is silently dropped but never auto-blocks
 	// (spoofable source).
 	udpSub := &fakeWriter{ip: net.ParseIP("198.51.100.99")}
-	h.ServeDNS(udpSub, q("rand-7e1a.trap.example.com."))
+	h.ServeDNS(context.Background(), udpSub, q("rand-7e1a.trap.example.com."))
 	if udpSub.msg != nil {
 		t.Fatalf("UDP subdomain honeypot query: expected a silent drop, got %v", udpSub.msg)
 	}
@@ -1240,13 +1273,13 @@ func TestHandlerIPBannerAndHoneypot(t *testing.T) {
 	}
 	// The auto-blocked client is now refused on a normal domain too.
 	again := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
-	h.ServeDNS(again, q("example.com."))
+	h.ServeDNS(context.Background(), again, q("example.com."))
 	if again.msg == nil || again.msg.Rcode != dns.RcodeRefused {
 		t.Fatalf("auto-blocked client on a normal domain: expected REFUSED, got %v", again.msg)
 	}
 	// Unrelated clients are untouched.
 	ok := &fakeWriter{}
-	h.ServeDNS(ok, q("example.com."))
+	h.ServeDNS(context.Background(), ok, q("example.com."))
 	if ok.msg == nil || len(ok.msg.Answer) == 0 {
 		t.Fatalf("unrelated client should get a normal answer, got %v", ok.msg)
 	}
@@ -1263,13 +1296,13 @@ func TestHandlerACLRejectsUnlistedClient(t *testing.T) {
 
 	q := func() *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion("example.com.", dns.TypeA)
+		dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 		return m
 	}
 
 	// No ACL configured: every client resolves normally.
 	before := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
-	h.ServeDNS(before, q())
+	h.ServeDNS(context.Background(), before, q())
 	if before.msg == nil || len(before.msg.Answer) == 0 {
 		t.Fatalf("with no ACL configured, expected a normal answer, got %v", before.msg)
 	}
@@ -1289,14 +1322,14 @@ func TestHandlerACLRejectsUnlistedClient(t *testing.T) {
 
 	// UDP: an unlisted client gets no answer at all (no amplification).
 	udpClient := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
-	h.ServeDNS(udpClient, q())
+	h.ServeDNS(context.Background(), udpClient, q())
 	if udpClient.msg != nil {
 		t.Fatalf("ACL-rejected UDP client: expected a silent drop, got %v", udpClient.msg)
 	}
 
 	// A client inside the allowed network still resolves.
 	allowed := &fakeWriter{ip: net.ParseIP("192.168.1.42")}
-	h.ServeDNS(allowed, q())
+	h.ServeDNS(context.Background(), allowed, q())
 	if allowed.msg == nil || len(allowed.msg.Answer) == 0 {
 		t.Fatalf("ACL-allowed client: expected a normal answer, got %v", allowed.msg)
 	}
@@ -1318,7 +1351,7 @@ func TestHandlerAllowlistedClientNotHoneypotBlocked(t *testing.T) {
 
 	q := func(name string) *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion(name, dns.TypeA)
+		dnsutil.SetQuestion(m, name, dns.TypeA)
 		return m
 	}
 	// Honeypot query over TCP from the allowlisted client: refused, not blocked.
@@ -1335,7 +1368,7 @@ func TestHandlerAllowlistedClientNotHoneypotBlocked(t *testing.T) {
 	}
 	// A normal query from the allowlisted client still resolves.
 	ok := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
-	h.ServeDNS(ok, q("example.com."))
+	h.ServeDNS(context.Background(), ok, q("example.com."))
 	if ok.msg == nil || len(ok.msg.Answer) == 0 {
 		t.Fatalf("allowlisted client's normal query failed: %v", ok.msg)
 	}
@@ -1367,21 +1400,21 @@ func TestHandlerHoneypotNotLogged(t *testing.T) {
 
 	q := func(name string) *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion(name, dns.TypeA)
+		dnsutil.SetQuestion(m, name, dns.TypeA)
 		return m
 	}
 	// Honeypot hits (apex over UDP, random subdomain over UDP) are silently
 	// dropped and must not reach the log.
 	for _, name := range []string{"trap.example.com.", "rand-9f2a.trap.example.com."} {
 		fw := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
-		h.ServeDNS(fw, q(name))
+		h.ServeDNS(context.Background(), fw, q(name))
 		if fw.msg != nil {
 			t.Fatalf("honeypot query %s: expected a silent drop, got %v", name, fw.msg)
 		}
 	}
 	// A normal query is served and logged as usual.
 	ok := &fakeWriter{}
-	h.ServeDNS(ok, q("example.com."))
+	h.ServeDNS(context.Background(), ok, q("example.com."))
 	if ok.msg == nil || len(ok.msg.Answer) == 0 {
 		t.Fatalf("control query failed: %v", ok.msg)
 	}
@@ -1420,11 +1453,11 @@ func TestHandlerHoneypotTrustUDP(t *testing.T) {
 
 	q := func(name string) *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion(name, dns.TypeA)
+		dnsutil.SetQuestion(m, name, dns.TypeA)
 		return m
 	}
 	fw := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
-	h.ServeDNS(fw, q("trap.example.com."))
+	h.ServeDNS(context.Background(), fw, q("trap.example.com."))
 	if fw.msg != nil {
 		t.Fatalf("UDP honeypot query with trust_udp: expected a silent drop, got %v", fw.msg)
 	}
@@ -1433,7 +1466,7 @@ func TestHandlerHoneypotTrustUDP(t *testing.T) {
 	}
 	// The auto-blocked client is now refused on a normal domain too.
 	again := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
-	h.ServeDNS(again, q("example.com."))
+	h.ServeDNS(context.Background(), again, q("example.com."))
 	if again.msg == nil || again.msg.Rcode != dns.RcodeRefused {
 		t.Fatalf("trust_udp auto-blocked client on a normal domain: expected REFUSED, got %v", again.msg)
 	}
@@ -1460,13 +1493,13 @@ func TestHandlerHoneypotUDPBoundedBlock(t *testing.T) {
 
 	q := func(name string) *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion(name, dns.TypeA)
+		dnsutil.SetQuestion(m, name, dns.TypeA)
 		return m
 	}
 	// A UDP honeypot hit is silently dropped and never reaches the banner
 	// (no permanent block, no OnBlock).
 	fw := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
-	h.ServeDNS(fw, q("trap.example.com."))
+	h.ServeDNS(context.Background(), fw, q("trap.example.com."))
 	if fw.msg != nil {
 		t.Fatalf("UDP honeypot query with honeypot_udp_block: expected a silent drop, got %v", fw.msg)
 	}
@@ -1490,14 +1523,14 @@ func TestHandlerHoneypotUDPBoundedBlock(t *testing.T) {
 	// While blocked, the source's normal UDP queries are dropped too — the
 	// flood stops at the DNS layer.
 	dropped := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
-	h.ServeDNS(dropped, q("example.com."))
+	h.ServeDNS(context.Background(), dropped, q("example.com."))
 	if dropped.msg != nil {
 		t.Fatalf("bounded-blocked UDP client on a normal domain: expected a silent drop, got %v", dropped.msg)
 	}
 	// Unblocking early admits the client again.
 	h.UnblockClient("203.0.113.9")
 	ok := &fakeWriter{ip: net.ParseIP("203.0.113.9")}
-	h.ServeDNS(ok, q("example.com."))
+	h.ServeDNS(context.Background(), ok, q("example.com."))
 	if ok.msg == nil || len(ok.msg.Answer) == 0 {
 		t.Fatalf("unblocked client should resolve normal domains again, got %v", ok.msg)
 	}
@@ -1522,9 +1555,9 @@ func TestHandlerDNSSECRejectsUnauthenticated(t *testing.T) {
 	h.SetDNSSEC(true, true)
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 
 	if fw.msg == nil || fw.msg.Rcode != dns.RcodeServerFailure {
 		t.Fatalf("expected SERVFAIL for an unauthenticated answer under require_ad, got %v", fw.msg)
@@ -1535,23 +1568,28 @@ func TestHandlerDNSSECRejectsUnauthenticated(t *testing.T) {
 // with a CNAME from owner to target plus an A record for target.
 func startCNAMETestServer(t *testing.T, owner, target, targetIP string) string {
 	t.Helper()
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		m.Answer = append(m.Answer,
-			&dns.CNAME{Hdr: dns.RR_Header{Name: owner, Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 60}, Target: target},
-			&dns.A{Hdr: dns.RR_Header{Name: target, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60}, A: net.ParseIP(targetIP)},
+			&dns.CNAME{Hdr: dns.Header{Name: owner, Class: dns.ClassINET, TTL: 60}, Target: target},
+			&dns.A{Hdr: dns.Header{Name: target, Class: dns.ClassINET, TTL: 60}, A: rdata.A{Addr: netip.MustParseAddr(targetIP)}},
 		)
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: mux}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	started := make(chan struct{})
+	srv := &dns.Server{
+		PacketConn:        pc,
+		Handler:           handler,
+		NotifyStartedFunc: func(context.Context) { close(started) },
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	return pc.LocalAddr().String()
 }
 
@@ -1572,9 +1610,9 @@ func TestHandlerCNAMECloakingProtection(t *testing.T) {
 		h.SetCNAMECloakingProtection(true)
 
 		m := new(dns.Msg)
-		m.SetQuestion(owner, dns.TypeA)
+		dnsutil.SetQuestion(m, owner, dns.TypeA)
 		fw := &fakeWriter{}
-		h.ServeDNS(fw, m)
+		h.ServeDNS(context.Background(), fw, m)
 
 		if fw.msg == nil || fw.msg.Rcode != dns.RcodeNameError {
 			t.Fatalf("expected NXDOMAIN for a CNAME-cloaked tracker, got %v", fw.msg)
@@ -1590,9 +1628,9 @@ func TestHandlerCNAMECloakingProtection(t *testing.T) {
 		// SetCNAMECloakingProtection not called: off by default.
 
 		m := new(dns.Msg)
-		m.SetQuestion(owner, dns.TypeA)
+		dnsutil.SetQuestion(m, owner, dns.TypeA)
 		fw := &fakeWriter{}
-		h.ServeDNS(fw, m)
+		h.ServeDNS(context.Background(), fw, m)
 
 		if fw.msg == nil || len(fw.msg.Answer) == 0 {
 			t.Fatalf("expected the CNAME+A answer to pass through with protection off, got %v", fw.msg)
@@ -1606,9 +1644,9 @@ func TestHandlerCNAMECloakingProtection(t *testing.T) {
 		h.SetCNAMECloakingProtection(true)
 
 		m := new(dns.Msg)
-		m.SetQuestion(owner, dns.TypeA)
+		dnsutil.SetQuestion(m, owner, dns.TypeA)
 		fw := &fakeWriter{}
-		h.ServeDNS(fw, m)
+		h.ServeDNS(context.Background(), fw, m)
 
 		if fw.msg == nil || len(fw.msg.Answer) == 0 {
 			t.Fatalf("expected the CNAME+A answer to pass through when no hop is blocklisted, got %v", fw.msg)
@@ -1628,9 +1666,9 @@ func TestHandlerCNAMECloakingProtection(t *testing.T) {
 		h.SetCNAMECloakingProtection(true)
 
 		m := new(dns.Msg)
-		m.SetQuestion(owner, dns.TypeA)
+		dnsutil.SetQuestion(m, owner, dns.TypeA)
 		fw := &fakeWriter{}
-		h.ServeDNS(fw, m)
+		h.ServeDNS(context.Background(), fw, m)
 
 		if fw.msg == nil || len(fw.msg.Answer) == 0 {
 			t.Fatalf("expected the CNAME+A answer to pass through for a whitelisted owner, got %v", fw.msg)
@@ -1651,42 +1689,41 @@ func TestHandlerBlockedResponseCarriesEDE(t *testing.T) {
 
 	t.Run("EDNS0 client gets an EDE option", func(t *testing.T) {
 		m := new(dns.Msg)
-		m.SetQuestion("blocked.example.", dns.TypeA)
-		m.SetEdns0(1232, false)
+		dnsutil.SetQuestion(m, "blocked.example.", dns.TypeA)
+		m.UDPSize = 1232
 		fw := &fakeWriter{}
-		h.ServeDNS(fw, m)
+		h.ServeDNS(context.Background(), fw, m)
 
 		if fw.msg == nil || fw.msg.Rcode != dns.RcodeNameError {
 			t.Fatalf("expected NXDOMAIN, got %v", fw.msg)
 		}
-		opt := fw.msg.IsEdns0()
-		if opt == nil {
+		if fw.msg.UDPSize == 0 {
 			t.Fatal("expected an OPT record on the response")
 		}
-		var ede *dns.EDNS0_EDE
-		for _, o := range opt.Option {
-			if e, ok := o.(*dns.EDNS0_EDE); ok {
+		var ede *dns.EDE
+		for _, rr := range fw.msg.Pseudo {
+			if e, ok := rr.(*dns.EDE); ok {
 				ede = e
 			}
 		}
 		if ede == nil {
 			t.Fatal("expected an EDE option on the response")
 		}
-		if ede.InfoCode != dns.ExtendedErrorCodeBlocked {
-			t.Fatalf("InfoCode = %d, want ExtendedErrorCodeBlocked", ede.InfoCode)
+		if ede.InfoCode != dns.ExtendedErrorBlocked {
+			t.Fatalf("InfoCode = %d, want ExtendedErrorBlocked", ede.InfoCode)
 		}
 	})
 
 	t.Run("non-EDNS0 client gets no OPT record at all", func(t *testing.T) {
 		m := new(dns.Msg)
-		m.SetQuestion("blocked.example.", dns.TypeA)
+		dnsutil.SetQuestion(m, "blocked.example.", dns.TypeA)
 		fw := &fakeWriter{}
-		h.ServeDNS(fw, m)
+		h.ServeDNS(context.Background(), fw, m)
 
 		if fw.msg == nil || fw.msg.Rcode != dns.RcodeNameError {
 			t.Fatalf("expected NXDOMAIN, got %v", fw.msg)
 		}
-		if fw.msg.IsEdns0() != nil {
+		if fw.msg.UDPSize != 0 {
 			t.Fatal("a client with no EDNS0 in its query should get no OPT record in the response")
 		}
 	})
@@ -1704,7 +1741,7 @@ func TestRaceUpstreamsAllFail(t *testing.T) {
 	pc.Close()
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 	start := time.Now()
 	resp, _, err := raceUpstreams(t.Context(), []*upstream.Upstream{
 		{Transport: upstream.UDP, Addr: deadAddr},
@@ -1732,10 +1769,10 @@ func TestHandlerCacheWriteDoesNotBlockResponse(t *testing.T) {
 	}, nil, "nxdomain", 600, 5*time.Second)
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
-	q := m.Question[0]
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
+	q := questionOf(m.Question[0])
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 
 	if fw.msg == nil || len(fw.msg.Answer) == 0 {
 		t.Fatalf("expected an answer, got %v", fw.msg)
@@ -1776,11 +1813,11 @@ func TestHandlerCacheHitPoolConcurrency(t *testing.T) {
 	// not something this test is meant to exercise. Waiting for the cache
 	// to converge, exactly like TestHandlerCacheWriteDoesNotBlockResponse
 	// does, keeps every concurrent query on the pooled cache-hit path.
-	primeQ := dns.Question{Name: "pool-concurrency.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	primeQ := dnsname.Question{Name: "pool-concurrency.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	prime := new(dns.Msg)
-	prime.SetQuestion(primeQ.Name, primeQ.Qtype)
+	dnsutil.SetQuestion(prime, primeQ.Name, primeQ.Qtype)
 	primeFW := &fakeWriter{}
-	h.ServeDNS(primeFW, prime)
+	h.ServeDNS(context.Background(), primeFW, prime)
 	if primeFW.msg == nil || len(primeFW.msg.Answer) == 0 {
 		t.Fatalf("priming query failed: %v", primeFW.msg)
 	}
@@ -1799,9 +1836,9 @@ func TestHandlerCacheHitPoolConcurrency(t *testing.T) {
 		wg.Go(func() {
 			for range perGoroutine {
 				m := new(dns.Msg)
-				m.SetQuestion("pool-concurrency.example.com.", dns.TypeA)
+				dnsutil.SetQuestion(m, "pool-concurrency.example.com.", dns.TypeA)
 				fw := &fakeWriter{}
-				h.ServeDNS(fw, m)
+				h.ServeDNS(context.Background(), fw, m)
 				if fw.msg == nil || fw.msg.Rcode != dns.RcodeSuccess {
 					t.Errorf("unexpected response: %v", fw.msg)
 					return
@@ -1811,7 +1848,7 @@ func TestHandlerCacheHitPoolConcurrency(t *testing.T) {
 					return
 				}
 				a, ok := fw.msg.Answer[0].(*dns.A)
-				if !ok || a.A.String() != "203.0.113.7" {
+				if !ok || a.A.Addr.String() != "203.0.113.7" {
 					t.Errorf("unexpected answer RR: %v", fw.msg.Answer[0])
 					return
 				}
@@ -1835,12 +1872,12 @@ func TestHandlerServeStale(t *testing.T) {
 
 	q := func() *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion("example.com.", dns.TypeA)
+		dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 		return m
 	}
 	// Populate the cache from a healthy upstream.
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, q())
+	h.ServeDNS(context.Background(), fw, q())
 	if fw.msg == nil || len(fw.msg.Answer) == 0 {
 		t.Fatalf("expected a fresh answer, got %v", fw.msg)
 	}
@@ -1859,14 +1896,14 @@ func TestHandlerServeStale(t *testing.T) {
 
 	start := time.Now()
 	fw2 := &fakeWriter{}
-	h.ServeDNS(fw2, q())
+	h.ServeDNS(context.Background(), fw2, q())
 	if fw2.msg == nil || len(fw2.msg.Answer) == 0 {
 		t.Fatalf("expected a stale answer, got %v", fw2.msg)
 	}
-	if a, ok := fw2.msg.Answer[0].(*dns.A); !ok || !a.A.Equal(net.ParseIP("1.1.1.1")) {
+	if a, ok := fw2.msg.Answer[0].(*dns.A); !ok || a.A.Addr != netip.MustParseAddr("1.1.1.1") {
 		t.Fatalf("stale answer = %v, want 1.1.1.1", fw2.msg.Answer[0])
 	}
-	if ttl := fw2.msg.Answer[0].Header().Ttl; ttl > staleServeTTL {
+	if ttl := fw2.msg.Answer[0].Header().TTL; ttl > staleServeTTL {
 		t.Fatalf("stale answer TTL = %d, want <= %d so clients don't cache it", ttl, staleServeTTL)
 	}
 	if elapsed := time.Since(start); elapsed > 2*time.Second {
@@ -1876,7 +1913,7 @@ func TestHandlerServeStale(t *testing.T) {
 	// a fresh negative would shadow the serve-stale entry on the next query,
 	// and the whole point of serve-stale is that the last known good answer
 	// keeps winning while re-resolution fails.
-	if res := c.Lookup(q().Question[0]); res.Msg() != nil && res.Negative {
+	if res := c.Lookup(questionOf(q().Question[0])); res.Msg() != nil && res.Negative {
 		t.Fatalf("failure was negatively cached despite a serve-stale entry: %v", res.Msg())
 	}
 }
@@ -1898,11 +1935,11 @@ func TestHandlerServeStaleRaceServesFastWhenUpstreamSlow(t *testing.T) {
 
 	q := func() *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion("slow-race.example.com.", dns.TypeA)
+		dnsutil.SetQuestion(m, "slow-race.example.com.", dns.TypeA)
 		return m
 	}
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, q())
+	h.ServeDNS(context.Background(), fw, q())
 	if fw.msg == nil || len(fw.msg.Answer) == 0 {
 		t.Fatalf("expected a fresh answer, got %v", fw.msg)
 	}
@@ -1918,12 +1955,12 @@ func TestHandlerServeStaleRaceServesFastWhenUpstreamSlow(t *testing.T) {
 
 	start := time.Now()
 	fw2 := &fakeWriter{}
-	h.ServeDNS(fw2, q())
+	h.ServeDNS(context.Background(), fw2, q())
 	elapsed := time.Since(start)
 	if fw2.msg == nil || len(fw2.msg.Answer) == 0 {
 		t.Fatalf("expected a stale answer, got %v", fw2.msg)
 	}
-	if a, ok := fw2.msg.Answer[0].(*dns.A); !ok || !a.A.Equal(net.ParseIP("1.1.1.1")) {
+	if a, ok := fw2.msg.Answer[0].(*dns.A); !ok || a.A.Addr != netip.MustParseAddr("1.1.1.1") {
 		t.Fatalf("stale answer = %v, want 1.1.1.1 (the original cached IP)", fw2.msg.Answer[0])
 	}
 	if elapsed < 1900*time.Millisecond || elapsed > 2400*time.Millisecond {
@@ -1935,8 +1972,8 @@ func TestHandlerServeStaleRaceServesFastWhenUpstreamSlow(t *testing.T) {
 	question := q().Question[0]
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		if res := c.Lookup(question); res.Msg() != nil && !res.Stale {
-			if a, ok := res.Msg().Answer[0].(*dns.A); ok && a.A.Equal(net.ParseIP("2.2.2.2")) {
+		if res := c.Lookup(questionOf(question)); res.Msg() != nil && !res.Stale {
+			if a, ok := res.Msg().Answer[0].(*dns.A); ok && a.A.Addr == netip.MustParseAddr("2.2.2.2") {
 				break
 			}
 		}
@@ -1969,11 +2006,11 @@ func TestHandlerServeStaleRaceUsesFreshAnswerWhenUpstreamFast(t *testing.T) {
 
 	q := func() *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion("fast-race.example.com.", dns.TypeA)
+		dnsutil.SetQuestion(m, "fast-race.example.com.", dns.TypeA)
 		return m
 	}
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, q())
+	h.ServeDNS(context.Background(), fw, q())
 	if fw.msg == nil || len(fw.msg.Answer) == 0 {
 		t.Fatalf("expected a fresh answer, got %v", fw.msg)
 	}
@@ -1984,12 +2021,12 @@ func TestHandlerServeStaleRaceUsesFreshAnswerWhenUpstreamFast(t *testing.T) {
 
 	start := time.Now()
 	fw2 := &fakeWriter{}
-	h.ServeDNS(fw2, q())
+	h.ServeDNS(context.Background(), fw2, q())
 	elapsed := time.Since(start)
 	if fw2.msg == nil || len(fw2.msg.Answer) == 0 {
 		t.Fatalf("expected a fresh answer, got %v", fw2.msg)
 	}
-	if a, ok := fw2.msg.Answer[0].(*dns.A); !ok || !a.A.Equal(net.ParseIP("3.3.3.3")) {
+	if a, ok := fw2.msg.Answer[0].(*dns.A); !ok || a.A.Addr != netip.MustParseAddr("3.3.3.3") {
 		t.Fatalf("answer = %v, want the fresh 3.3.3.3 — a fast upstream must win the race, not the stale entry", fw2.msg.Answer[0])
 	}
 	if elapsed > 500*time.Millisecond {
@@ -2024,11 +2061,11 @@ func TestHandlerFailureNegativelyCached(t *testing.T) {
 
 	q := func() *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion("example.com.", dns.TypeA)
+		dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 		return m
 	}
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, q())
+	h.ServeDNS(context.Background(), fw, q())
 	if fw.msg == nil || fw.msg.Rcode != dns.RcodeServerFailure {
 		t.Fatalf("expected SERVFAIL, got %v", fw.msg)
 	}
@@ -2038,7 +2075,7 @@ func TestHandlerFailureNegativelyCached(t *testing.T) {
 	question := fw.msg.Question[0]
 	appeared := false
 	for range 40 {
-		if res := c.Lookup(question); res.Msg() != nil {
+		if res := c.Lookup(questionOf(question)); res.Msg() != nil {
 			if !res.Negative {
 				t.Fatalf("expected a negative cache entry, got positive %v", res.Msg())
 			}
@@ -2058,7 +2095,7 @@ func TestHandlerFailureNegativelyCached(t *testing.T) {
 	// linger for the 1h negative TTL.
 	deadline := time.Now().Add(500 * time.Millisecond)
 	for time.Now().Before(deadline) {
-		if c.Lookup(question).Msg() == nil {
+		if c.Lookup(questionOf(question)).Msg() == nil {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -2083,13 +2120,13 @@ func TestHandlerSingleUpstreamCooldownFastFail(t *testing.T) {
 	}, nil, "nxdomain", 600, 5*time.Second)
 	q := func() *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion("example.com.", dns.TypeA)
+		dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 		return m
 	}
 	// Trip the circuit: connection-refused on loopback fails fast.
 	for i := range 3 {
 		fw := &fakeWriter{}
-		h.ServeDNS(fw, q())
+		h.ServeDNS(context.Background(), fw, q())
 		if fw.msg == nil || fw.msg.Rcode != dns.RcodeServerFailure {
 			t.Fatalf("failure %d: expected SERVFAIL, got %v", i+1, fw.msg)
 		}
@@ -2098,7 +2135,7 @@ func TestHandlerSingleUpstreamCooldownFastFail(t *testing.T) {
 	// skip rather than attempting (and timing out against) the upstream.
 	start := time.Now()
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, q())
+	h.ServeDNS(context.Background(), fw, q())
 	if fw.msg == nil || fw.msg.Rcode != dns.RcodeServerFailure {
 		t.Fatalf("cooldown query: expected SERVFAIL, got %v", fw.msg)
 	}
@@ -2112,35 +2149,27 @@ func TestHandlerSingleUpstreamCooldownFastFail(t *testing.T) {
 // TTL field carries extended-rcode/DO flags, not a lifetime.
 func TestCapTTL(t *testing.T) {
 	m := new(dns.Msg)
-	m.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: "a.example.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 3600}, A: net.ParseIP("1.2.3.4")}}
-	m.Ns = []dns.RR{&dns.SOA{Hdr: dns.RR_Header{Name: "example.", Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 3600}}}
+	m.Answer = []dns.RR{&dns.A{Hdr: dns.Header{Name: "a.example.", Class: dns.ClassINET, TTL: 3600}, A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")}}}
+	m.Ns = []dns.RR{&dns.SOA{Hdr: dns.Header{Name: "example.", Class: dns.ClassINET, TTL: 3600}}}
 	m.Extra = []dns.RR{
-		&dns.TXT{Hdr: dns.RR_Header{Name: "b.example.", Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 7200}, Txt: []string{"x"}},
+		&dns.TXT{Hdr: dns.Header{Name: "b.example.", Class: dns.ClassINET, TTL: 7200}, TXT: rdata.TXT{Txt: []string{"x"}}},
 	}
-	opt := new(dns.OPT)
-	opt.Hdr.Name = "."
-	opt.Hdr.Rrtype = dns.TypeOPT
-	opt.Hdr.Class = 4096
-	opt.SetDo(true)
-	opt.Hdr.Ttl = 0x00008000 // extended rcode + version + DO flag bits
-	m.Extra = append(m.Extra, opt)
+	m.UDPSize = 4096
+	m.Security = true
 
 	capTTL(m, 30)
 
-	if got := m.Answer[0].Header().Ttl; got != 30 {
+	if got := m.Answer[0].Header().TTL; got != 30 {
 		t.Errorf("answer TTL = %d, want 30", got)
 	}
-	if got := m.Ns[0].Header().Ttl; got != 30 {
+	if got := m.Ns[0].Header().TTL; got != 30 {
 		t.Errorf("Ns (SOA) TTL = %d, want 30 so clients don't cache stale negatives long", got)
 	}
-	if got := m.Extra[0].Header().Ttl; got != 30 {
+	if got := m.Extra[0].Header().TTL; got != 30 {
 		t.Errorf("Extra TTL = %d, want 30", got)
 	}
-	if !opt.Do() {
+	if !m.Security {
 		t.Error("OPT DO flag was corrupted by capTTL")
-	}
-	if got := opt.Hdr.Ttl; got != 0x00008000 {
-		t.Errorf("OPT TTL/flags = %#x, want untouched 0x00008000", got)
 	}
 }
 
@@ -2148,20 +2177,25 @@ func TestCapTTL(t *testing.T) {
 // NXDOMAIN — the response a random-subdomain flood elicits.
 func startNXDOMAINServer(t *testing.T) string {
 	t.Helper()
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		m.Rcode = dns.RcodeNameError
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: mux}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	started := make(chan struct{})
+	srv := &dns.Server{
+		PacketConn:        pc,
+		Handler:           handler,
+		NotifyStartedFunc: func(context.Context) { close(started) },
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	return pc.LocalAddr().String()
 }
 
@@ -2180,9 +2214,9 @@ func TestHandlerNXGuardBlocksFlood(t *testing.T) {
 	ask := func() *dns.Msg {
 		m := new(dns.Msg)
 		// Random subdomain so every query is a cache miss -> upstream NXDOMAIN.
-		m.SetQuestion(fmt.Sprintf("rand%d.example.com.", time.Now().UnixNano()), dns.TypeA)
+		dnsutil.SetQuestion(m, fmt.Sprintf("rand%d.example.com.", time.Now().UnixNano()), dns.TypeA)
 		fw := &fakeWriter{}
-		h.ServeDNS(fw, m)
+		h.ServeDNS(context.Background(), fw, m)
 		return fw.msg
 	}
 
@@ -2199,9 +2233,9 @@ func TestHandlerNXGuardBlocksFlood(t *testing.T) {
 	}
 	// A different client prefix is unaffected.
 	m := new(dns.Msg)
-	m.SetQuestion(fmt.Sprintf("other%d.example.com.", time.Now().UnixNano()), dns.TypeA)
+	dnsutil.SetQuestion(m, fmt.Sprintf("other%d.example.com.", time.Now().UnixNano()), dns.TypeA)
 	fw := &fakeWriter{ip: net.IPv4(10, 9, 8, 7)}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 	if fw.msg == nil || fw.msg.Rcode != dns.RcodeNameError {
 		t.Fatalf("a different client must still be answered, got %v", fw.msg)
 	}
@@ -2217,23 +2251,24 @@ func BenchmarkHandlerUpstreamMiss(b *testing.B) {
 	// A real UDP upstream over loopback, answering with an A record — the
 	// same shape the test helpers use, but benchmark-compatible (Cleanup on
 	// *testing.B).
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
-			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-			A:   net.ParseIP("1.2.3.4"),
+			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+			A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
 		})
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		b.Fatal(err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: mux}
-	go func() { _ = srv.ActivateAndServe() }()
-	b.Cleanup(func() { _ = srv.Shutdown() })
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, Handler: handler, NotifyStartedFunc: func(context.Context) { close(started) }}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	b.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{
 		{Transport: upstream.UDP, Addr: pc.LocalAddr().String()},
@@ -2244,9 +2279,9 @@ func BenchmarkHandlerUpstreamMiss(b *testing.B) {
 	for b.Loop() {
 		m := new(dns.Msg)
 		// 1024 distinct names so b.N > 1024 still mostly misses.
-		m.SetQuestion(fmt.Sprintf("bench%d.example.com.", i%1024), dns.TypeA)
+		dnsutil.SetQuestion(m, fmt.Sprintf("bench%d.example.com.", i%1024), dns.TypeA)
 		fw := &fakeWriter{}
-		h.ServeDNS(fw, m)
+		h.ServeDNS(context.Background(), fw, m)
 		if fw.msg == nil {
 			b.Fatal("no response")
 		}
@@ -2263,21 +2298,21 @@ func BenchmarkHandlerCacheHit(b *testing.B) {
 	c := cache.NewLocalOnly(time.Hour, time.Minute, 512, 0)
 	h := NewHandler(filter.NewEngine(), c, nil, nil, "nxdomain", 600, 5*time.Second)
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
-	h.ServeDNS(&fakeWriter{}, m) // warm the cache (async write; poll)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
+	h.ServeDNS(context.Background(), &fakeWriter{}, m) // warm the cache (async write; poll)
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if c.Lookup(m.Question[0]).Msg() != nil {
+		if c.Lookup(questionOf(m.Question[0])).Msg() != nil {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if c.Lookup(m.Question[0]).Msg() == nil {
+	if c.Lookup(questionOf(m.Question[0])).Msg() == nil {
 		b.Fatal("cache not warmed")
 	}
 	for b.Loop() {
 		fw := &fakeWriter{}
-		h.ServeDNS(fw, m)
+		h.ServeDNS(context.Background(), fw, m)
 		if fw.msg == nil {
 			b.Fatal("no response")
 		}
@@ -2299,9 +2334,9 @@ func TestHandlerIPBlockGated(t *testing.T) {
 	}
 	h := NewHandler(engine, nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: upAddr}}, nil, "nxdomain", 600, 5*time.Second)
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 	if fw.msg == nil || fw.msg.Rcode != dns.RcodeNameError {
 		t.Fatalf("expected the IP-blocked answer to be NXDOMAIN, got %v", fw.msg)
 	}
@@ -2326,10 +2361,10 @@ func TestHandlerRecoversFromPanic(t *testing.T) {
 	h.DHCPHosts = panicHostResolver{}
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 	fw := &fakeWriter{}
 
-	h.ServeDNS(fw, m) // must not panic out of this call
+	h.ServeDNS(context.Background(), fw, m) // must not panic out of this call
 
 	if fw.msg == nil {
 		t.Fatal("expected a SERVFAIL response after the recovered panic, got no response")
@@ -2337,8 +2372,8 @@ func TestHandlerRecoversFromPanic(t *testing.T) {
 	if fw.msg.Rcode != dns.RcodeServerFailure {
 		t.Fatalf("rcode = %v, want SERVFAIL", fw.msg.Rcode)
 	}
-	if fw.msg.Id != m.Id {
-		t.Fatalf("response id = %d, want %d (rebased to the request)", fw.msg.Id, m.Id)
+	if fw.msg.ID != m.ID {
+		t.Fatalf("response id = %d, want %d (rebased to the request)", fw.msg.ID, m.ID)
 	}
 	if h.Stats.Errors.Load() != 1 {
 		t.Fatalf("Stats.Errors = %d, want 1", h.Stats.Errors.Load())
@@ -2347,7 +2382,7 @@ func TestHandlerRecoversFromPanic(t *testing.T) {
 	// The handler (and its worker pool, in the real UDP/TCP servers) must
 	// keep working for the next query after a recovered panic.
 	fw2 := &fakeWriter{}
-	h.ServeDNS(fw2, m)
+	h.ServeDNS(context.Background(), fw2, m)
 	if fw2.msg == nil || fw2.msg.Rcode != dns.RcodeServerFailure {
 		t.Fatalf("handler did not survive to serve a second query: %v", fw2.msg)
 	}
@@ -2360,12 +2395,12 @@ func TestHandlerBadEDNSVersionRejected(t *testing.T) {
 	h := NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, 5*time.Second)
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
-	m.SetEdns0(4096, false)
-	m.IsEdns0().SetVersion(1)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
+	m.UDPSize = 4096
+	m.Version = 1
 
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 
 	if fw.msg == nil {
 		t.Fatal("expected a response, got none")
@@ -2385,9 +2420,9 @@ func TestHandlerANYQueryMinimized(t *testing.T) {
 	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: "127.0.0.1:1"}}, nil, "nxdomain", 600, 5*time.Second)
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeANY)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeANY)
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 
 	if fw.msg == nil {
 		t.Fatal("expected a response, got none")
@@ -2437,15 +2472,17 @@ func TestServeUDPRaw(t *testing.T) {
 
 	// Seed positive cache entry.
 	resp := new(dns.Msg)
-	resp.SetReply(&dns.Msg{Question: []dns.Question{{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}})
+	qSeed := dnsname.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	dnsutil.SetQuestion(resp, "example.com.", dns.TypeA)
+	resp.Response = true
 	resp.Answer = []dns.RR{&dns.A{
-		Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
-		A:   net.ParseIP("93.184.216.34").To4(),
+		Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr("93.184.216.34")},
 	}}
-	c.Set(t.Context(), dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}, resp, 0)
+	c.Set(t.Context(), qSeed, resp, 0)
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if c.Lookup(dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}).Msg() != nil {
+		if c.Lookup(qSeed).Msg() != nil {
 			break
 		}
 		time.Sleep(time.Millisecond)
@@ -2453,61 +2490,56 @@ func TestServeUDPRaw(t *testing.T) {
 
 	// Plain query + EDNS0 query should hit ServeUDPRaw and patch the query ID.
 	qPlain := new(dns.Msg)
-	qPlain.SetQuestion("example.com.", dns.TypeA)
-	qPlain.Id = 0xBEEF
-	pktPlain, err := qPlain.Pack()
-	if err != nil {
+	dnsutil.SetQuestion(qPlain, "example.com.", dns.TypeA)
+	qPlain.ID = 0xBEEF
+	if err := qPlain.Pack(); err != nil {
 		t.Fatal(err)
 	}
 	fw := &fakeWriter{}
-	if !h.ServeUDPRaw(fw, pktPlain) {
+	if !h.ServeUDPRaw(fw, qPlain.Data) {
 		t.Fatal("expected ServeUDPRaw to handle cached plain UDP query")
 	}
-	if fw.msg == nil || fw.msg.Id != 0xBEEF || len(fw.msg.Answer) != 1 {
+	if fw.msg == nil || fw.msg.ID != 0xBEEF || len(fw.msg.Answer) != 1 {
 		t.Fatalf("unexpected plain response: %+v", fw.msg)
 	}
 
 	// Query with EDNS0 OPT record (no cookie) should also hit ServeUDPRaw.
 	qEDNS := new(dns.Msg)
-	qEDNS.SetQuestion("example.com.", dns.TypeA)
-	qEDNS.Id = 0xCAFE
-	qEDNS.SetEdns0(1232, false)
-	pktEDNS, err := qEDNS.Pack()
-	if err != nil {
+	dnsutil.SetQuestion(qEDNS, "example.com.", dns.TypeA)
+	qEDNS.ID = 0xCAFE
+	qEDNS.UDPSize = 1232
+	if err := qEDNS.Pack(); err != nil {
 		t.Fatal(err)
 	}
 	fwEDNS := &fakeWriter{}
-	if !h.ServeUDPRaw(fwEDNS, pktEDNS) {
+	if !h.ServeUDPRaw(fwEDNS, qEDNS.Data) {
 		t.Fatal("expected ServeUDPRaw to handle cached EDNS0 UDP query")
 	}
-	if fwEDNS.msg == nil || fwEDNS.msg.Id != 0xCAFE {
+	if fwEDNS.msg == nil || fwEDNS.msg.ID != 0xCAFE {
 		t.Fatalf("unexpected EDNS0 response: %+v", fwEDNS.msg)
 	}
 
 	// Query with EDNS0 cookie when cookies are enabled must fall back (return false).
 	h.Cookies.Store(true)
 	qCookie := new(dns.Msg)
-	qCookie.SetQuestion("example.com.", dns.TypeA)
-	qCookie.SetEdns0(1232, false)
-	opt := qCookie.IsEdns0()
-	opt.Option = append(opt.Option, &dns.EDNS0_COOKIE{Code: dns.EDNS0COOKIE, Cookie: "0123456789abcdef"})
-	pktCookie, err := qCookie.Pack()
-	if err != nil {
+	dnsutil.SetQuestion(qCookie, "example.com.", dns.TypeA)
+	qCookie.UDPSize = 1232
+	qCookie.Pseudo = append(qCookie.Pseudo, &dns.COOKIE{Cookie: "0123456789abcdef"})
+	if err := qCookie.Pack(); err != nil {
 		t.Fatal(err)
 	}
-	if h.ServeUDPRaw(&fakeWriter{}, pktCookie) {
+	if h.ServeUDPRaw(&fakeWriter{}, qCookie.Data) {
 		t.Fatal("expected ServeUDPRaw to fall back when cookies are enabled and query carries a cookie")
 	}
 	h.Cookies.Store(false)
 
 	// Uncached domain must fall back.
 	qMiss := new(dns.Msg)
-	qMiss.SetQuestion("miss.example.com.", dns.TypeA)
-	pktMiss, err := qMiss.Pack()
-	if err != nil {
+	dnsutil.SetQuestion(qMiss, "miss.example.com.", dns.TypeA)
+	if err := qMiss.Pack(); err != nil {
 		t.Fatal(err)
 	}
-	if h.ServeUDPRaw(&fakeWriter{}, pktMiss) {
+	if h.ServeUDPRaw(&fakeWriter{}, qMiss.Data) {
 		t.Fatal("expected ServeUDPRaw to return false on cache miss")
 	}
 
@@ -2521,23 +2553,22 @@ func BenchmarkHandlerUDPRawCacheHit(b *testing.B) {
 	c := cache.NewLocalOnly(time.Hour, time.Minute, 512, 0)
 	h := NewHandler(filter.NewEngine(), c, nil, nil, "nxdomain", 600, 5*time.Second)
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
-	m.SetEdns0(1232, false)
-	h.ServeDNS(&fakeWriter{}, m)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
+	m.UDPSize = 1232
+	h.ServeDNS(context.Background(), &fakeWriter{}, m)
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
-		if c.Lookup(m.Question[0]).Msg() != nil {
+		if c.Lookup(questionOf(m.Question[0])).Msg() != nil {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
-	pkt, err := m.Pack()
-	if err != nil {
+	if err := m.Pack(); err != nil {
 		b.Fatal(err)
 	}
 	for b.Loop() {
 		fw := &fakeWriter{}
-		if !h.ServeUDPRaw(fw, pkt) || fw.msg == nil {
+		if !h.ServeUDPRaw(fw, m.Data) || fw.msg == nil {
 			b.Fatal("expected raw cache hit")
 		}
 	}

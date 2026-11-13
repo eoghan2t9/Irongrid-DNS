@@ -1,9 +1,11 @@
 package filter
 
 import (
-	"net"
+	"net/netip"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
 )
 
 // BuildBlockResponse crafts the response a blocked query receives.
@@ -15,8 +17,7 @@ func BuildBlockResponse(req *dns.Msg, mode string, ttl uint32) *dns.Msg {
 		return nil
 	}
 	q := req.Question[0]
-	m := new(dns.Msg)
-	m.SetReply(req)
+	m := dnsutil.SetReply(new(dns.Msg), req)
 	m.RecursionAvailable = true
 
 	switch mode {
@@ -28,8 +29,8 @@ func BuildBlockResponse(req *dns.Msg, mode string, ttl uint32) *dns.Msg {
 		return m
 	default:
 		// Mode is an IP literal: answer A/AAAA with the blackhole address.
-		ip := net.ParseIP(mode)
-		if ip == nil {
+		ip, err := netip.ParseAddr(mode)
+		if err != nil {
 			m.Rcode = dns.RcodeRefused
 			return m
 		}
@@ -45,18 +46,19 @@ func BuildBlockResponse(req *dns.Msg, mode string, ttl uint32) *dns.Msg {
 // blockAnswerRR synthesizes an answer for the requested type. A v4 blackhole
 // answers A records and maps AAAA queries to :: (and vice versa) so both
 // address families are always blackholed regardless of the configured IP.
-func blockAnswerRR(q dns.Question, ip net.IP, ttl uint32) dns.RR {
-	hdr := dns.RR_Header{Name: q.Name, Rrtype: q.Qtype, Class: q.Qclass, Ttl: ttl}
-	v4 := ip.To4() != nil
+func blockAnswerRR(q dns.RR, ip netip.Addr, ttl uint32) dns.RR {
+	qtype := dns.RRToType(q)
+	hdr := dns.Header{Name: q.Header().Name, Class: q.Header().Class, TTL: ttl}
+	v4 := ip.Is4()
 	switch {
-	case q.Qtype == dns.TypeA && v4:
-		return &dns.A{Hdr: hdr, A: ip.To4()}
-	case q.Qtype == dns.TypeA && !v4:
-		return &dns.A{Hdr: hdr, A: net.IPv4zero.To4()}
-	case q.Qtype == dns.TypeAAAA && !v4:
-		return &dns.AAAA{Hdr: hdr, AAAA: ip}
-	case q.Qtype == dns.TypeAAAA && v4:
-		return &dns.AAAA{Hdr: hdr, AAAA: net.IPv6zero}
+	case qtype == dns.TypeA && v4:
+		return &dns.A{Hdr: hdr, A: rdata.A{Addr: ip}}
+	case qtype == dns.TypeA && !v4:
+		return &dns.A{Hdr: hdr, A: rdata.A{Addr: netip.IPv4Unspecified()}}
+	case qtype == dns.TypeAAAA && !v4:
+		return &dns.AAAA{Hdr: hdr, AAAA: rdata.AAAA{Addr: ip}}
+	case qtype == dns.TypeAAAA && v4:
+		return &dns.AAAA{Hdr: hdr, AAAA: rdata.AAAA{Addr: netip.IPv6Unspecified()}}
 	}
 	return nil
 }

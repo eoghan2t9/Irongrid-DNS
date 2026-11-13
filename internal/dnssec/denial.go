@@ -6,7 +6,8 @@ import (
 	"strings"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 )
 
 // validateDenial checks whether resp's Authority section (NSEC or NSEC3
@@ -27,7 +28,7 @@ func (v *Validator) validateDenial(ctx context.Context, up *upstream.Upstream, r
 		return false, false, nil
 	}
 	q := resp.Question[0]
-	qname := strings.ToLower(dns.Fqdn(q.Name))
+	qname := strings.ToLower(dnsutil.Fqdn(q.Header().Name))
 
 	var nsecs []*dns.NSEC
 	var nsec3s []*dns.NSEC3
@@ -69,10 +70,11 @@ func (v *Validator) validateDenial(ctx context.Context, up *upstream.Upstream, r
 		}
 	}
 
+	qtype := dns.RRToType(q)
 	if len(nsec3s) > 0 {
-		return proveNSEC3(resp.Rcode, qname, q.Qtype, nsec3s), true, nil
+		return proveNSEC3(resp.Rcode, qname, qtype, nsec3s), true, nil
 	}
-	return proveNSEC(resp.Rcode, qname, q.Qtype, nsecs), true, nil
+	return proveNSEC(resp.Rcode, qname, qtype, nsecs), true, nil
 }
 
 // verifyDenialRR reports whether rr has a verified signature among sigs,
@@ -102,14 +104,14 @@ func bitmapHasType(bitmap []uint16, t uint16) bool {
 }
 
 // proveNSEC applies RFC 4035 §5.4's NSEC denial-of-existence proof.
-func proveNSEC(rcode int, qname string, qtype uint16, nsecs []*dns.NSEC) bool {
+func proveNSEC(rcode uint16, qname string, qtype uint16, nsecs []*dns.NSEC) bool {
 	if rcode == dns.RcodeSuccess {
 		// NODATA: an NSEC record owned exactly by qname, with qtype's (and
 		// CNAME's — a CNAME would mean this is actually a redirect, not a
 		// true NODATA) bit absent from its type bitmap, proves the name
 		// exists but this type doesn't.
 		for _, n := range nsecs {
-			if strings.EqualFold(strings.ToLower(dns.Fqdn(n.Header().Name)), qname) {
+			if strings.EqualFold(strings.ToLower(dnsutil.Fqdn(n.Header().Name)), qname) {
 				return !bitmapHasType(n.TypeBitMap, qtype) && !bitmapHasType(n.TypeBitMap, dns.TypeCNAME)
 			}
 		}
@@ -138,9 +140,9 @@ func proveNSEC(rcode int, qname string, qtype uint16, nsecs []*dns.NSEC) bool {
 	// exactly) — that's the closest encloser, since it's the longest
 	// ancestor known to be present. Then a wildcard beneath it must be
 	// covered (proven absent) too.
-	labels := dns.SplitDomainName(qname)
+	labels := splitLabels(qname)
 	for i := 1; i < len(labels); i++ {
-		ancestor := dns.Fqdn(strings.Join(labels[i:], "."))
+		ancestor := dnsutil.Fqdn(strings.Join(labels[i:], "."))
 		if !nsecOwnerExists(nsecs, ancestor) {
 			continue
 		}
@@ -165,8 +167,8 @@ func proveNSEC(rcode int, qname string, qtype uint16, nsecs []*dns.NSEC) bool {
 // the synthesized one.
 func nsecCoversAny(nsecs []*dns.NSEC, name string) bool {
 	for _, n := range nsecs {
-		owner := strings.ToLower(dns.Fqdn(n.Header().Name))
-		next := strings.ToLower(dns.Fqdn(n.NextDomain))
+		owner := strings.ToLower(dnsutil.Fqdn(n.Header().Name))
+		next := strings.ToLower(dnsutil.Fqdn(n.NextDomain))
 		if nsecCovers(owner, next, name) {
 			return true
 		}
@@ -188,7 +190,7 @@ func nsecCovers(owner, next, name string) bool {
 // (which always exists in any signed zone) guarantees the walk terminates.
 func nsecOwnerExists(nsecs []*dns.NSEC, name string) bool {
 	for _, n := range nsecs {
-		if strings.EqualFold(strings.ToLower(dns.Fqdn(n.Header().Name)), name) {
+		if strings.EqualFold(strings.ToLower(dnsutil.Fqdn(n.Header().Name)), name) {
 			return true
 		}
 	}
@@ -203,8 +205,8 @@ func nsecOwnerExists(nsecs []*dns.NSEC, name string) bool {
 // effectively always ASCII/punycode, and this package never needs to order
 // arbitrary binary label content.
 func canonicalLess(a, b string) bool {
-	la := dns.SplitDomainName(dns.Fqdn(a))
-	lb := dns.SplitDomainName(dns.Fqdn(b))
+	la := splitLabels(dnsutil.Fqdn(a))
+	lb := splitLabels(dnsutil.Fqdn(b))
 	for i, j := len(la)-1, len(lb)-1; i >= 0 && j >= 0; i, j = i-1, j-1 {
 		c := strings.Compare(strings.ToLower(la[i]), strings.ToLower(lb[j]))
 		if c != 0 {
@@ -224,10 +226,10 @@ func canonicalLess(a, b string) bool {
 // record doesn't prove there's no *unsigned delegation* hiding in its
 // range, a claim this function never makes for a plain name's own
 // existence — Cover/Match's interval math is unaffected by the flag.
-func proveNSEC3(rcode int, qname string, qtype uint16, nsec3s []*dns.NSEC3) bool {
+func proveNSEC3(rcode uint16, qname string, qtype uint16, nsec3s []*dns.NSEC3) bool {
 	if rcode == dns.RcodeSuccess {
 		for _, n := range nsec3s {
-			if n.Match(qname) {
+			if nsec3Match(n, qname) {
 				return !bitmapHasType(n.TypeBitMap, qtype) && !bitmapHasType(n.TypeBitMap, dns.TypeCNAME)
 			}
 		}
@@ -240,12 +242,12 @@ func proveNSEC3(rcode int, qname string, qtype uint16, nsec3s []*dns.NSEC3) bool
 	if !nsec3CoversAny(nsec3s, qname) {
 		return false
 	}
-	labels := dns.SplitDomainName(qname)
+	labels := splitLabels(qname)
 	for i := 1; i < len(labels); i++ {
-		ancestor := dns.Fqdn(strings.Join(labels[i:], "."))
+		ancestor := dnsutil.Fqdn(strings.Join(labels[i:], "."))
 		matched := false
 		for _, n := range nsec3s {
-			if n.Match(ancestor) {
+			if nsec3Match(n, ancestor) {
 				matched = true
 				break
 			}
@@ -260,9 +262,51 @@ func proveNSEC3(rcode int, qname string, qtype uint16, nsec3s []*dns.NSEC3) bool
 
 func nsec3CoversAny(nsec3s []*dns.NSEC3, name string) bool {
 	for _, n := range nsec3s {
-		if n.Cover(name) {
+		if nsec3Cover(n, name) {
 			return true
 		}
 	}
 	return false
+}
+
+func nsec3HashForZone(n *dns.NSEC3, name string) (owner, next, h string, ok bool) {
+	if n.Hash != 1 {
+		return "", "", "", false
+	}
+	owner, zone, hasDot := strings.Cut(strings.ToLower(dnsutil.Fqdn(n.Header().Name)), ".")
+	if !hasDot || owner == "" {
+		return "", "", "", false
+	}
+	q := strings.ToLower(dnsutil.Fqdn(name))
+	if q != zone && !strings.HasSuffix(q, "."+zone) {
+		return "", "", "", false
+	}
+	h = strings.ToLower(dnsutil.NSEC3Name(q, n.Salt, n.Iterations))
+	if h == "" {
+		return "", "", "", false
+	}
+	return owner, strings.ToLower(n.NextDomain), h, true
+}
+
+func nsec3Match(n *dns.NSEC3, name string) bool {
+	owner, _, h, ok := nsec3HashForZone(n, name)
+	return ok && h == owner
+}
+
+func nsec3Cover(n *dns.NSEC3, name string) bool {
+	owner, next, h, ok := nsec3HashForZone(n, name)
+	if !ok {
+		return false
+	}
+	if owner < next {
+		return owner < h && h < next
+	}
+	return h > owner || h < next
+}
+
+func splitLabels(s string) []string {
+	if s == "." {
+		return nil
+	}
+	return dnsutil.Split(s)
 }

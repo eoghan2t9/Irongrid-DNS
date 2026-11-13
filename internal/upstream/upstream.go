@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
 	"github.com/quic-go/quic-go"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/recursive"
@@ -49,7 +49,7 @@ var poolMaxIdle = 20 * time.Second
 // pooledConn is a warm connection tagged with the moment it was returned to
 // the pool, so getConn can evict connections that sat idle too long.
 type pooledConn struct {
-	conn     *dns.Conn
+	conn     net.Conn
 	pooledAt time.Time
 }
 
@@ -59,6 +59,17 @@ type pooledConn struct {
 // dials through it, Control hook and all.
 func tunedDialer() *net.Dialer {
 	return &net.Dialer{Timeout: 8 * time.Second, Control: tuning.SocketControl}
+}
+
+func newDNSClient(tlsConf *tls.Config) *dns.Client {
+	return &dns.Client{
+		Transport: &dns.Transport{
+			Dialer:       tunedDialer(),
+			ReadTimeout:  8 * time.Second,
+			WriteTimeout: 8 * time.Second,
+			TLSConfig:    tlsConf,
+		},
+	}
 }
 
 // Circuit breaker: after circuitOpenFails consecutive failures an upstream
@@ -248,11 +259,11 @@ func Parse(spec string) (*Upstream, error) {
 	}
 	switch u.Transport {
 	case UDP:
-		u.udpClient = &dns.Client{Net: "udp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
+		u.udpClient = newDNSClient(nil)
 	case TCP:
-		u.tcpClient = &dns.Client{Net: "tcp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
+		u.tcpClient = newDNSClient(nil)
 	case TLS:
-		u.dotClient = &dns.Client{Net: "tcp-tls", TLSConfig: u.tlsConf, Timeout: 8 * time.Second, Dialer: tunedDialer()}
+		u.dotClient = newDNSClient(u.tlsConf)
 	}
 	if u.Transport == HTTPS {
 		path := parsed.Path
@@ -272,13 +283,13 @@ func NewWithTLS(transport Transport, addr, host string, tlsConf *tls.Config) *Up
 	switch u.Transport {
 	case UDP:
 		u.udpPool = make(chan *pooledConn, upstreamPoolSize)
-		u.udpClient = &dns.Client{Net: "udp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
+		u.udpClient = newDNSClient(nil)
 	case TCP:
 		u.connPool = make(chan *pooledConn, upstreamPoolSize)
-		u.tcpClient = &dns.Client{Net: "tcp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
+		u.tcpClient = newDNSClient(nil)
 	case TLS:
 		u.connPool = make(chan *pooledConn, upstreamPoolSize)
-		u.dotClient = &dns.Client{Net: "tcp-tls", TLSConfig: tlsConf, Timeout: 8 * time.Second, Dialer: tunedDialer()}
+		u.dotClient = newDNSClient(tlsConf)
 	case HTTPS:
 		u.client = &http.Client{Timeout: 10 * time.Second}
 	}
@@ -352,14 +363,14 @@ func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns
 		// so replies can never cross between queries.
 		c := u.udpClient
 		if c == nil {
-			c = &dns.Client{Net: "udp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
+			c = newDNSClient(nil)
 		}
 		var (
 			r   *dns.Msg
 			err error
 		)
 		if conn := u.udpGetConn(); conn != nil {
-			r, _, err = c.ExchangeWithConnContext(ctx, m, conn)
+			r, err = exchangeWithConn(ctx, c, m, conn)
 			if err != nil {
 				// The pooled socket may have gone stale while idle (a NAT
 				// dropped it, the server restarted): close it and retry on a
@@ -370,18 +381,17 @@ func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns
 				u.udpPutConn(conn)
 			}
 		}
-		if err != nil || r == nil {
+		if (err != nil || r == nil) && ctx.Err() == nil {
 			// Pool empty (no pooled attempt happened), or the pooled socket
 			// failed: dial a socket, exchange on it, and — on success — put
 			// it in the pool so the next query reuses it. (A plain
-			// ExchangeContext would dial and immediately close its own
-			// socket, which is exactly the per-query syscall churn the pool
-			// exists to avoid.)
-			conn, derr := c.DialContext(ctx, u.Addr)
+			// Exchange would dial and immediately close its own socket, which
+			// is exactly the per-query syscall churn the pool exists to avoid.)
+			conn, derr := c.Dialer.DialContext(ctx, "udp", u.Addr)
 			if derr != nil {
 				err = derr
 			} else {
-				r, _, err = c.ExchangeWithConnContext(ctx, m, conn)
+				r, err = exchangeWithConn(ctx, c, m, conn)
 				if err != nil {
 					conn.Close()
 				} else {
@@ -393,6 +403,9 @@ func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns
 			u.markResult(nil)
 			return r, nil
 		}
+		if cerr := ctx.Err(); cerr != nil {
+			return nil, cerr
+		}
 		// A truncated UDP reply (the answer outgrew the negotiated EDNS
 		// buffer) or a UDP failure (packet loss, an oversized answer
 		// dropped as a fragment) is exactly what a TCP retry fixes —
@@ -403,7 +416,7 @@ func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns
 		// error for the breaker).
 		c = u.tcpClient
 		if c == nil {
-			c = &dns.Client{Net: "tcp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
+			c = newDNSClient(nil)
 		}
 		tr, terr := u.pooledExchange(ctx, m, c)
 		if terr == nil {
@@ -416,7 +429,7 @@ func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns
 	}
 	c := u.tcpClient
 	if c == nil {
-		c = &dns.Client{Net: "tcp", Timeout: 8 * time.Second, Dialer: tunedDialer()}
+		c = newDNSClient(nil)
 	}
 	return u.pooledExchange(ctx, m, c)
 }
@@ -424,7 +437,7 @@ func (u *Upstream) queryClassic(ctx context.Context, m *dns.Msg, tcp bool) (*dns
 func (u *Upstream) queryDoT(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	c := u.dotClient
 	if c == nil {
-		c = &dns.Client{Net: "tcp-tls", TLSConfig: u.tlsConf, Timeout: 8 * time.Second, Dialer: tunedDialer()}
+		c = newDNSClient(u.tlsConf)
 	}
 	return u.pooledExchange(ctx, m, c)
 }
@@ -437,7 +450,7 @@ func (u *Upstream) queryDoT(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 // failure, and a fully recovered upstream resets its counter.
 func (u *Upstream) pooledExchange(ctx context.Context, m *dns.Msg, client *dns.Client) (*dns.Msg, error) {
 	if conn := u.getConn(); conn != nil {
-		r, _, err := client.ExchangeWithConnContext(ctx, m, conn)
+		r, err := exchangeWithConn(ctx, client, m, conn)
 		if err == nil {
 			u.markResult(nil)
 			u.putConn(conn)
@@ -450,16 +463,28 @@ func (u *Upstream) pooledExchange(ctx context.Context, m *dns.Msg, client *dns.C
 		// fall through to a fresh dial rather than failing the query over
 		// a warm-connection hiccup.
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	// dialTimeout bounds the dial itself rather than letting it inherit
 	// whatever's left of ctx's full query deadline — see dialTimeout's doc.
 	dialCtx, cancel := context.WithTimeout(ctx, dialTimeout)
-	conn, err := client.DialContext(dialCtx, u.Addr)
+	var (
+		conn net.Conn
+		err  error
+	)
+	if client.TLSConfig != nil {
+		dialer := tls.Dialer{NetDialer: client.Dialer, Config: client.TLSConfig}
+		conn, err = dialer.DialContext(dialCtx, "tcp", u.Addr)
+	} else {
+		conn, err = client.Dialer.DialContext(dialCtx, "tcp", u.Addr)
+	}
 	cancel()
 	if err != nil {
 		u.markResult(err)
 		return nil, err
 	}
-	r, _, err := client.ExchangeWithConnContext(ctx, m, conn)
+	r, err := exchangeWithConn(ctx, client, m, conn)
 	if err != nil {
 		u.markResult(err)
 		conn.Close()
@@ -468,6 +493,30 @@ func (u *Upstream) pooledExchange(ctx context.Context, m *dns.Msg, client *dns.C
 	u.markResult(nil)
 	u.putConn(conn)
 	return r, nil
+}
+
+// exchangeWithConn wraps dns.Client.ExchangeWithConn so that ctx cancellation
+// or deadline expiry immediately unblocks any in-flight socket I/O.
+func exchangeWithConn(ctx context.Context, c *dns.Client, m *dns.Msg, conn net.Conn) (*dns.Msg, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	done := make(chan struct{})
+	defer close(done)
+	if ctxDone := ctx.Done(); ctxDone != nil {
+		go func() {
+			select {
+			case <-ctxDone:
+				_ = conn.SetDeadline(time.Now())
+			case <-done:
+			}
+		}()
+	}
+	r, _, err := c.ExchangeWithConn(ctx, m, conn)
+	if err != nil && ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	return r, err
 }
 
 // markResult feeds the circuit breaker: a success closes the circuit and
@@ -527,7 +576,7 @@ func (u *Upstream) Available() bool {
 // idle in the pool longer than poolMaxIdle is presumed stale — the upstream
 // almost certainly closed it server-side — and is closed instead of
 // returned, so reuse never wastes a query on a guaranteed EOF.
-func (u *Upstream) getConn() *dns.Conn {
+func (u *Upstream) getConn() net.Conn {
 	for {
 		select {
 		case pc := <-u.connPool:
@@ -546,7 +595,7 @@ func (u *Upstream) getConn() *dns.Conn {
 
 // putConn returns a connection to the pool, closing it instead if the pool
 // is full (or nil).
-func (u *Upstream) putConn(c *dns.Conn) {
+func (u *Upstream) putConn(c net.Conn) {
 	select {
 	case u.connPool <- &pooledConn{conn: c, pooledAt: time.Now()}:
 	default:
@@ -559,7 +608,7 @@ func (u *Upstream) putConn(c *dns.Conn) {
 // that sat idle in the pool past poolMaxIdle is presumed dead — a NAT may
 // have dropped it — and is closed instead of returned, so reuse never
 // wastes a query on a socket that can't deliver.
-func (u *Upstream) udpGetConn() *dns.Conn {
+func (u *Upstream) udpGetConn() net.Conn {
 	for {
 		select {
 		case pc := <-u.udpPool:
@@ -578,7 +627,7 @@ func (u *Upstream) udpGetConn() *dns.Conn {
 
 // udpPutConn returns a socket to the UDP pool, closing it instead when the
 // pool is full (or unconfigured).
-func (u *Upstream) udpPutConn(c *dns.Conn) {
+func (u *Upstream) udpPutConn(c net.Conn) {
 	select {
 	case u.udpPool <- &pooledConn{conn: c, pooledAt: time.Now()}:
 	default:
@@ -635,10 +684,10 @@ func (u *Upstream) Close() {
 }
 
 func (u *Upstream) queryDoH(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
-	packed, err := m.Pack()
-	if err != nil {
+	if err := m.Pack(); err != nil {
 		return nil, err
 	}
+	packed := m.Data
 	// Go's http.Transport never retries POST requests, so a query that lands
 	// on a keep-alive connection the server closed while idle dies with a
 	// transport error even though a fresh connection would answer fine (this
@@ -684,8 +733,8 @@ func (u *Upstream) queryDoH(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 			u.markResult(err)
 			return nil, err
 		}
-		r := new(dns.Msg)
-		if err := r.Unpack(body); err != nil {
+		r := &dns.Msg{Data: body}
+		if err := r.Unpack(); err != nil {
 			u.markResult(err)
 			return nil, err
 		}

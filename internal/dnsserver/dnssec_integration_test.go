@@ -1,15 +1,19 @@
 package dnsserver
 
 import (
+	"context"
 	"crypto"
 	"net"
+	"net/netip"
 	"testing"
 	"time"
 
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnssec"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
-	"github.com/miekg/dns"
 )
 
 // This file exercises Handler.serve's DNSSEC local-validation wiring
@@ -28,10 +32,12 @@ type dnssecIntegrationKey struct {
 func genIntegrationKey(t *testing.T, zone string) dnssecIntegrationKey {
 	t.Helper()
 	k := &dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags:     257,
-		Protocol:  3,
-		Algorithm: dns.ECDSAP256SHA256,
+		Hdr: dns.Header{Name: zone, Class: dns.ClassINET, TTL: 3600},
+		DNSKEY: rdata.DNSKEY{
+			Flags:     257,
+			Protocol:  3,
+			Algorithm: dns.ECDSAP256SHA256,
+		},
 	}
 	priv, err := k.Generate(256)
 	if err != nil {
@@ -47,19 +53,26 @@ func genIntegrationKey(t *testing.T, zone string) dnssecIntegrationKey {
 func signIntegration(t *testing.T, k dnssecIntegrationKey, rrset []dns.RR) *dns.RRSIG {
 	t.Helper()
 	hdr := rrset[0].Header()
-	sig := &dns.RRSIG{
-		Hdr:         dns.RR_Header{Name: hdr.Name, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: hdr.Ttl},
-		TypeCovered: hdr.Rrtype,
-		Algorithm:   k.dnsk.Algorithm,
-		Labels:      uint8(len(dns.SplitDomainName(hdr.Name))),
-		OrigTtl:     hdr.Ttl,
-		Expiration:  uint32(time.Now().Add(24 * time.Hour).Unix()),
-		Inception:   uint32(time.Now().Add(-1 * time.Hour).Unix()),
-		KeyTag:      k.dnsk.KeyTag(),
-		SignerName:  k.zone,
+	rrtype := dns.RRToType(rrset[0])
+	labels := uint8(0)
+	if hdr.Name != "." {
+		labels = uint8(len(dnsutil.Split(hdr.Name)))
 	}
-	if err := sig.Sign(k.priv, rrset); err != nil {
-		t.Fatalf("sign %s/%s: %v", hdr.Name, dns.TypeToString[hdr.Rrtype], err)
+	sig := &dns.RRSIG{
+		Hdr: dns.Header{Name: hdr.Name, Class: dns.ClassINET, TTL: hdr.TTL},
+		RRSIG: rdata.RRSIG{
+			TypeCovered: rrtype,
+			Algorithm:   k.dnsk.Algorithm,
+			Labels:      labels,
+			OrigTTL:     hdr.TTL,
+			Expiration:  uint32(time.Now().Add(24 * time.Hour).Unix()),
+			Inception:   uint32(time.Now().Add(-1 * time.Hour).Unix()),
+			KeyTag:      k.dnsk.KeyTag(),
+			SignerName:  k.zone,
+		},
+	}
+	if err := sig.Sign(k.priv, rrset, new(dns.SignOption)); err != nil {
+		t.Fatalf("sign %s/%s: %v", hdr.Name, dnsutil.TypeToString(rrtype), err)
 	}
 	return sig
 }
@@ -77,17 +90,16 @@ func dnssecIntegrationFixture(t *testing.T, tamperA bool) (addr string, anchor d
 	anchor = dnssec.TrustAnchor{Zone: ".", KeyTag: rootDS.KeyTag, Algorithm: rootDS.Algorithm, DigestType: rootDS.DigestType, Digest: rootDS.Digest}
 
 	a := &dns.A{
-		Hdr: dns.RR_Header{Name: "example.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
-		A:   net.ParseIP("192.0.2.1"),
+		Hdr: dns.Header{Name: "example.", Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr("192.0.2.1")},
 	}
 	aRRset := []dns.RR{a}
 	aSig := signIntegration(t, leaf, aRRset)
 
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
-		q := r.Question[0]
+	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
+		q := questionOf(r.Question[0])
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		switch {
 		case q.Name == "." && q.Qtype == dns.TypeDNSKEY:
 			rrset := []dns.RR{root.dnsk}
@@ -97,26 +109,28 @@ func dnssecIntegrationFixture(t *testing.T, tamperA bool) (addr string, anchor d
 			m.Answer = append(m.Answer, leaf.dnsk, signIntegration(t, leaf, rrset))
 		case q.Name == "example." && q.Qtype == dns.TypeDS:
 			ds := leaf.dnsk.ToDS(dns.SHA256)
-			ds.Hdr = dns.RR_Header{Name: "example.", Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: 3600}
+			ds.Hdr = dns.Header{Name: "example.", Class: dns.ClassINET, TTL: 3600}
 			rrset := []dns.RR{ds}
 			m.Answer = append(m.Answer, ds, signIntegration(t, root, rrset))
 		case q.Name == "example." && q.Qtype == dns.TypeA:
 			served := a
 			if tamperA {
-				served = &dns.A{Hdr: a.Hdr, A: net.ParseIP("198.51.100.66")}
+				served = &dns.A{Hdr: a.Hdr, A: rdata.A{Addr: netip.MustParseAddr("198.51.100.66")}}
 			}
 			m.Answer = append(m.Answer, served, aSig)
 			m.AuthenticatedData = true // a lying/compromised upstream claiming AD=1 regardless
 		}
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: mux}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, Handler: handler, NotifyStartedFunc: func(context.Context) { close(started) }}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	return pc.LocalAddr().String(), anchor
 }
 
@@ -128,9 +142,9 @@ func TestHandlerLocalDNSSECValidationAcceptsGenuineChain(t *testing.T) {
 	h.SetDNSSECValidateLocally(true)
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.", dns.TypeA)
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 
 	if fw.msg == nil {
 		t.Fatal("expected a response")
@@ -148,9 +162,9 @@ func TestHandlerLocalDNSSECValidationRejectsTamperedAnswerDespiteADBit(t *testin
 	h.SetDNSSECValidateLocally(true)
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.", dns.TypeA)
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 
 	if fw.msg == nil {
 		t.Fatal("expected a response")
@@ -178,8 +192,8 @@ func TestHandlerLocalDNSSECValidationFailsOpenOnInfrastructureError(t *testing.T
 	anchor := dnssec.TrustAnchor{Zone: ".", KeyTag: rootDS.KeyTag, Algorithm: rootDS.Algorithm, DigestType: rootDS.DigestType, Digest: rootDS.Digest}
 
 	a := &dns.A{
-		Hdr: dns.RR_Header{Name: "example.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
-		A:   net.ParseIP("192.0.2.1"),
+		Hdr: dns.Header{Name: "example.", Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr("192.0.2.1")},
 	}
 	aSig := signIntegration(t, leaf, []dns.RR{a})
 
@@ -188,26 +202,27 @@ func TestHandlerLocalDNSSECValidationFailsOpenOnInfrastructureError(t *testing.T
 	// NXDOMAIN for every DNSKEY/DS lookup the chain walk needs — modeling
 	// an upstream that's degraded or doesn't support those record types
 	// right now, without actually being compromised.
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
-		q := r.Question[0]
+	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
+		q := questionOf(r.Question[0])
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		if q.Name == "example." && q.Qtype == dns.TypeA {
 			m.Answer = append(m.Answer, a, aSig)
 			m.AuthenticatedData = true
 		} else {
 			m.Rcode = dns.RcodeServerFailure // DNSKEY/DS lookups all fail
 		}
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: mux}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, Handler: handler, NotifyStartedFunc: func(context.Context) { close(started) }}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	h := NewHandler(filter.NewEngine(), nil, []*upstream.Upstream{{Transport: upstream.UDP, Addr: pc.LocalAddr().String()}}, nil, "nxdomain", 600, 5*time.Second)
 	h.DNSSECValidator = dnssec.NewValidator(dnssec.NewAnchorManagerForTest(anchor))
@@ -215,9 +230,9 @@ func TestHandlerLocalDNSSECValidationFailsOpenOnInfrastructureError(t *testing.T
 	h.SetDNSSECValidateLocally(true)
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.", dns.TypeA)
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 
 	if fw.msg == nil || fw.msg.Rcode != dns.RcodeSuccess || len(fw.msg.Answer) == 0 {
 		t.Fatalf("a chain-walk infrastructure failure must fail open to AD-bit trust, not SERVFAIL a legitimate answer; got %v", fw.msg)
@@ -234,9 +249,9 @@ func TestHandlerDNSSECValidateLocallyOffPreservesADBitTrust(t *testing.T) {
 	h.SetDNSSEC(true, false) // require_ad off, local validation left off (default)
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.", dns.TypeA)
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 
 	if fw.msg == nil || fw.msg.Rcode != dns.RcodeSuccess {
 		t.Fatalf("with local validation off, expected the pre-existing AD-bit-trust behavior to pass the answer through, got %v", fw.msg)

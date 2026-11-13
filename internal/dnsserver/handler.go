@@ -10,6 +10,7 @@ import (
 	"encoding/binary"
 	"log/slog"
 	"net"
+	"net/netip"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -17,7 +18,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/vpn"
 	"golang.org/x/sync/singleflight"
@@ -283,7 +286,7 @@ func NewHandler(engine *filter.Engine, c *cache.Cache, ups []*upstream.Upstream,
 
 // ServeDNS implements dns.Handler. clientIP may be empty (callers that know
 // it better — like the DoH server — supply it through the context).
-func (h *Handler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+func (h *Handler) ServeDNS(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 	client := clientIPOf(w.RemoteAddr())
 	h.serve(w, r, client, "udp")
 }
@@ -324,8 +327,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			h.Stats.Errors.Add(1)
 			if r != nil && len(r.Question) > 0 {
 				m := new(dns.Msg)
-				m.SetRcode(r, dns.RcodeServerFailure)
-				_ = w.WriteMsg(m)
+				dnsutil.SetReply(m, r)
+				m.Rcode = dns.RcodeServerFailure
+				_ = h.write(w, m, r, proto)
 			}
 		}
 	}()
@@ -360,6 +364,9 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	dnssecEnabled := s.DNSSECEnabled
 	cookiesOn := h.Cookies.Load()
 
+	if r != nil && len(r.Data) > 0 && r.UDPSize == 0 && len(r.Pseudo) == 0 && len(r.Answer) == 0 && len(r.Ns) == 0 && len(r.Extra) == 0 {
+		_ = r.Unpack()
+	}
 	if r == nil || len(r.Question) == 0 {
 		m := getMsg()
 		m.Response = true
@@ -380,7 +387,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			return
 		}
 		refused := getMsg()
-		refused.SetReply(r)
+		dnsutil.SetReply(refused, r)
 		refused.Rcode = dns.RcodeRefused
 		_ = h.write(w, refused, r, proto)
 		putMsg(refused)
@@ -394,10 +401,10 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	//     until the client falls back to a version we support. Only version
 	//     0 is defined today, so this only ever fires against a client
 	//     probing for/expecting a future EDNS version.
-	if opt := r.IsEdns0(); opt != nil && opt.Version() != 0 {
+	if r.Version != 0 {
 		m := newReply(r)
 		m.Rcode = dns.RcodeBadVers
-		m.SetEdns0(ednsUDPSize, false)
+		m.UDPSize = ednsUDPSize
 		_ = h.write(w, m, r, proto)
 		putMsg(m)
 		return
@@ -445,7 +452,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			return
 		}
 		refused := getMsg()
-		refused.SetReply(r)
+		dnsutil.SetReply(refused, r)
 		refused.Rcode = dns.RcodeRefused
 		_ = h.write(w, refused, r, proto)
 		putMsg(refused)
@@ -461,7 +468,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			return
 		}
 		refused := getMsg()
-		refused.SetReply(r)
+		dnsutil.SetReply(refused, r)
 		refused.Rcode = dns.RcodeRefused
 		_ = h.write(w, refused, r, proto)
 		putMsg(refused)
@@ -476,14 +483,14 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			return
 		}
 		refused := getMsg()
-		refused.SetReply(r)
+		dnsutil.SetReply(refused, r)
 		refused.Rcode = dns.RcodeRefused
 		_ = h.write(w, refused, r, proto)
 		putMsg(refused)
 		return
 	}
 
-	q := r.Question[0]
+	q := questionOf(r.Question[0])
 	qname := dnsname.CanonicalDomain(q.Name)
 
 	// 0.52 Repeat-query flood detection: a client resolving the *same*
@@ -546,14 +553,14 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 				reason = "asn-blocked"
 			}
 			refused := getMsg()
-			refused.SetReply(r)
+			dnsutil.SetReply(refused, r)
 			refused.Rcode = dns.RcodeRefused
 			h.record(client, qname, q, action, reason, "", start, refused)
 			out := refused
-			if r.IsEdns0() != nil {
+			if r.UDPSize > 0 {
 				// Prohibited: the block is about who's asking, not what's
 				// being asked — distinct from a domain-blocklist hit below.
-				out = attachEDE(refused, dns.ExtendedErrorCodeProhibited, reason)
+				out = attachEDE(refused, dns.ExtendedErrorProhibited, reason)
 			}
 			_ = h.write(w, out, r, proto)
 			putMsg(refused)
@@ -608,7 +615,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			return
 		}
 		refused := getMsg()
-		refused.SetReply(r)
+		dnsutil.SetReply(refused, r)
 		refused.Rcode = dns.RcodeRefused
 		_ = h.write(w, refused, r, proto)
 		putMsg(refused)
@@ -626,9 +633,8 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	if q.Qtype == dns.TypeANY {
 		m := newReply(r)
 		m.Answer = append(m.Answer, &dns.HINFO{
-			Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeHINFO, Class: dns.ClassINET, Ttl: anyMinimalTTL},
-			Cpu: "RFC8482",
-			Os:  "",
+			Hdr:   dns.Header{Name: q.Name, Class: dns.ClassINET, TTL: anyMinimalTTL},
+			HINFO: rdata.HINFO{Cpu: "RFC8482", Os: ""},
 		})
 		h.Stats.Allowed.Add(1)
 		h.record(client, qname, q, "minimal", "rfc8482-any", "", start, m)
@@ -699,14 +705,24 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	if h.DHCPHosts != nil {
 		if ips, ok := h.DHCPHosts.LookupHost(q.Name); ok && len(ips) > 0 {
 			m := getMsg()
-			m.SetReply(r)
+			dnsutil.SetReply(m, r)
 			m.Authoritative = true
 			for _, ip := range ips {
 				switch {
 				case q.Qtype == dns.TypeA && ip.To4() != nil:
-					m.Answer = append(m.Answer, &dns.A{Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: dhcpHostTTL}, A: ip.To4()})
+					if addr, ok := netip.AddrFromSlice(ip.To4()); ok {
+						m.Answer = append(m.Answer, &dns.A{
+							Hdr: dns.Header{Name: q.Name, Class: dns.ClassINET, TTL: dhcpHostTTL},
+							A:   rdata.A{Addr: addr},
+						})
+					}
 				case q.Qtype == dns.TypeAAAA && ip.To4() == nil && ip.To16() != nil:
-					m.Answer = append(m.Answer, &dns.AAAA{Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: dhcpHostTTL}, AAAA: ip.To16()})
+					if addr, ok := netip.AddrFromSlice(ip.To16()); ok {
+						m.Answer = append(m.Answer, &dns.AAAA{
+							Hdr:  dns.Header{Name: q.Name, Class: dns.ClassINET, TTL: dhcpHostTTL},
+							AAAA: rdata.AAAA{Addr: addr},
+						})
+					}
 				}
 			}
 			h.Stats.Allowed.Add(1)
@@ -729,11 +745,11 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			if ip := reverseNameIP(q.Name); ip != nil {
 				if host, ok := h.DHCPHosts.LookupPTR(ip.String()); ok {
 					m := getMsg()
-					m.SetReply(r)
+					dnsutil.SetReply(m, r)
 					m.Authoritative = true
 					m.Answer = append(m.Answer, &dns.PTR{
-						Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypePTR, Class: dns.ClassINET, Ttl: dhcpHostTTL},
-						Ptr: host + ".",
+						Hdr: dns.Header{Name: q.Name, Class: dns.ClassINET, TTL: dhcpHostTTL},
+						PTR: rdata.PTR{Ptr: host + "."},
 					})
 					h.Stats.Allowed.Add(1)
 					h.record(client, qname, q, "rewrite", "dhcp-host-ptr", "", start, m)
@@ -773,8 +789,8 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 		h.Stats.Blocked.Add(1)
 		h.record(client, qname, q, "blocked", decision.Reason, "", start, blocked)
-		if r.IsEdns0() != nil {
-			blocked = attachEDE(blocked, dns.ExtendedErrorCodeBlocked, decision.Reason)
+		if r.UDPSize > 0 {
+			blocked = attachEDE(blocked, dns.ExtendedErrorBlocked, decision.Reason)
 		}
 		_ = h.write(w, blocked, r, proto)
 		return
@@ -851,31 +867,11 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	// upstream in cooldown fails fast into serve-stale/SERVFAIL below.
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	upstreamQuery := r.Copy()
-	// Replace the client's EDNS OPT rather than layering a second one on:
-	// miekg/dns's SetEdns0 appends, and a query carrying two OPT records is
-	// malformed (RFC 6891 §6.1.1: "it MUST be the only OPT RR in that
-	// message"). Strict resolvers (Quad9 in particular) reject it with
-	// FORMERR, which the client sees as a resolution failure. The client's
-	// own advertisement is superseded by the EDNS one below anyway, so
-	// drop every OPT (always last in practice, but filtered regardless) and
-	// preserve any other additional records (e.g. TSIG).
-	extra := upstreamQuery.Extra[:0]
-	for _, rr := range upstreamQuery.Extra {
-		if rr.Header().Rrtype != dns.TypeOPT {
-			extra = append(extra, rr)
-		}
-	}
-	upstreamQuery.Extra = extra
-	upstreamQuery.SetEdns0(ednsUDPSize, dnssecEnabled)
-	// Fresh transaction ID per upstream hop (crypto/rand-backed, dns.Id()):
-	// forwarding the client's own ID unchanged means an off-path attacker
-	// who already knows/guesses the client's ID (weak stub resolvers exist)
-	// gets it for free against the upstream hop too. Meaningful mainly for
-	// a plain UDP/TCP upstream — DoT/DoH/DoQ already can't be blindly
-	// spoofed. The response's ID is remapped back to the client's own
-	// before it's ever written out (see the resp.Id reset below), so this
-	// is invisible to the client.
-	upstreamQuery.Id = dns.Id()
+	upstreamQuery.Pseudo = nil
+	upstreamQuery.UDPSize = ednsUDPSize
+	upstreamQuery.Security = dnssecEnabled
+	upstreamQuery.Data = nil
+	upstreamQuery.ID = dns.ID()
 
 	// No stale entry to race against (the overwhelmingly common case): there
 	// is nothing to select on, so resolve inline instead of paying for a
@@ -920,13 +916,13 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		h.finishResolve(w, r, q, client, qname, proto, start, out.resp, out.usedUp, out.err, stale, s, engine, domainWhitelisted, false)
 	case <-timer.C:
 		if m := stale.Msg(); m != nil {
-			m.Id = r.Id
+			m.ID = r.ID
 			capTTL(m, staleServeTTL)
 			h.Stats.Cached.Add(1)
 			h.record(client, qname, q, "cached", "stale", "", start, m)
 			out := m
-			if r.IsEdns0() != nil {
-				out = attachEDE(m, dns.ExtendedErrorCodeStaleAnswer, "")
+			if r.UDPSize > 0 {
+				out = attachEDE(m, dns.ExtendedErrorStaleAnswer, "")
 			}
 			_ = h.write(w, out, r, proto)
 			putMsg(m) // fresh per-read decode, safe once written
@@ -965,7 +961,7 @@ func staleGrace(timeout time.Duration) time.Duration {
 // the raced case (a deliberate trade-off, not a bug: the alternative is a
 // log that doesn't show a background refresh happened at all).
 func (h *Handler) finishResolve(
-	w dns.ResponseWriter, r *dns.Msg, q dns.Question, client, qname, proto string, start time.Time,
+	w dns.ResponseWriter, r *dns.Msg, q dnsname.Question, client, qname, proto string, start time.Time,
 	resp *dns.Msg, usedUp string, err error, stale cache.LookupResult,
 	s *handlerSettings, engine *filter.Engine, domainWhitelisted, skipWrite bool,
 ) {
@@ -993,13 +989,13 @@ func (h *Handler) finishResolve(
 	// failure — serve stale rather than propagating the failure.
 	if err == nil && resp != nil && resp.Rcode == dns.RcodeServerFailure && len(stale.Raw) > 0 {
 		if m := stale.Msg(); m != nil {
-			m.Id = r.Id
+			m.ID = r.ID
 			capTTL(m, staleServeTTL)
 			h.Stats.Cached.Add(1)
 			h.record(client, qname, q, "cached", "stale", usedUp, start, m)
 			out := m
-			if r.IsEdns0() != nil {
-				out = attachEDE(m, dns.ExtendedErrorCodeStaleAnswer, "")
+			if r.UDPSize > 0 {
+				out = attachEDE(m, dns.ExtendedErrorStaleAnswer, "")
 			}
 			if !skipWrite {
 				_ = h.write(w, out, r, proto)
@@ -1019,13 +1015,13 @@ func (h *Handler) finishResolve(
 		// trade-off of serve-stale.
 		if len(stale.Raw) > 0 {
 			if m := stale.Msg(); m != nil {
-				m.Id = r.Id
+				m.ID = r.ID
 				capTTL(m, staleServeTTL)
 				h.Stats.Cached.Add(1)
 				h.record(client, qname, q, "cached", "stale", usedUp, start, m)
 				out := m
-				if r.IsEdns0() != nil {
-					out = attachEDE(m, dns.ExtendedErrorCodeStaleAnswer, "")
+				if r.UDPSize > 0 {
+					out = attachEDE(m, dns.ExtendedErrorStaleAnswer, "")
 				}
 				if !skipWrite {
 					_ = h.write(w, out, r, proto)
@@ -1047,10 +1043,10 @@ func (h *Handler) finishResolve(
 		}
 		h.record(client, qname, q, "error", errStr, usedUp, start, m)
 		out := m
-		if r.IsEdns0() != nil {
+		if r.UDPSize > 0 {
 			// A fresh copy for the client only — m itself may be handed to
 			// the background SetNegative write below unmodified.
-			out = attachEDE(m, dns.ExtendedErrorCodeNetworkError, errStr)
+			out = attachEDE(m, dns.ExtendedErrorNetworkError, errStr)
 		}
 		if !skipWrite {
 			_ = h.write(w, out, r, proto)
@@ -1164,8 +1160,8 @@ func (h *Handler) finishResolve(
 			blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 			h.Stats.Blocked.Add(1)
 			h.record(client, qname, q, "blocked", reason, usedUp, start, blocked)
-			if r.IsEdns0() != nil {
-				blocked = attachEDE(blocked, dns.ExtendedErrorCodeBlocked, reason)
+			if r.UDPSize > 0 {
+				blocked = attachEDE(blocked, dns.ExtendedErrorBlocked, reason)
 			}
 			if !skipWrite {
 				_ = h.write(w, blocked, r, proto)
@@ -1191,8 +1187,8 @@ func (h *Handler) finishResolve(
 			h.Stats.Blocked.Add(1)
 			reason := "cname-cloaking:" + owner + "->" + target + ":" + decision.Reason
 			h.record(client, qname, q, "blocked", reason, usedUp, start, blocked)
-			if r.IsEdns0() != nil {
-				blocked = attachEDE(blocked, dns.ExtendedErrorCodeBlocked, reason)
+			if r.UDPSize > 0 {
+				blocked = attachEDE(blocked, dns.ExtendedErrorBlocked, reason)
 			}
 			if !skipWrite {
 				_ = h.write(w, blocked, r, proto)
@@ -1205,7 +1201,7 @@ func (h *Handler) finishResolve(
 	// client's own r.Id) — restore it before this ever reaches the client
 	// or the query log; caching doesn't care (writeRaw patches the ID on
 	// every cache-hit read regardless of what was cached).
-	resp.Id = r.Id
+	resp.ID = r.ID
 	// resp is deliberately never put into msgPool: when caching is on it's
 	// handed unmodified into the background goroutine below, which keeps
 	// reading/mutating/Pack()-ing it after serve() has already returned —
@@ -1340,26 +1336,23 @@ const anyMinimalTTL = 60
 // would corrupt those flags.
 func capTTL(m *dns.Msg, max uint32) {
 	for _, rr := range m.Answer {
-		if rr.Header().Ttl > max {
-			rr.Header().Ttl = max
+		if rr.Header().TTL > max {
+			rr.Header().TTL = max
 		}
 	}
 	for _, rr := range m.Ns {
-		if rr.Header().Ttl > max {
-			rr.Header().Ttl = max
+		if rr.Header().TTL > max {
+			rr.Header().TTL = max
 		}
 	}
 	for _, rr := range m.Extra {
-		if _, ok := rr.(*dns.OPT); ok {
-			continue
-		}
-		if rr.Header().Ttl > max {
-			rr.Header().Ttl = max
+		if rr.Header().TTL > max {
+			rr.Header().TTL = max
 		}
 	}
 }
 
-func isMetaQuery(q dns.Question) bool {
+func isMetaQuery(q dnsname.Question) bool {
 	switch q.Qtype {
 	case dns.TypeAXFR, dns.TypeIXFR, dns.TypeOPT, dns.TypeTSIG, dns.TypeANY:
 		return true

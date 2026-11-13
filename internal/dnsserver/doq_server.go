@@ -8,7 +8,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
 	"github.com/quic-go/quic-go"
 )
 
@@ -132,8 +132,8 @@ func (m *Manager) handleDoQStream(stream *quic.Stream, remote net.Addr) {
 	if _, err := io.ReadFull(stream, msgBuf); err != nil {
 		return
 	}
-	req := new(dns.Msg)
-	if err := req.Unpack(msgBuf); err != nil {
+	req := &dns.Msg{Data: msgBuf}
+	if err := req.Unpack(); err != nil {
 		return
 	}
 
@@ -153,32 +153,10 @@ type doqResponseWriter struct {
 	clientIP string
 }
 
-func (w *doqResponseWriter) WriteMsg(m *dns.Msg) error {
-	buf := getPackBuf()
-	packed, err := m.PackBuffer(buf)
-	if err != nil {
-		putPackBuf(buf)
-		return err
-	}
-	// RFC 9250 prefixes each message with its 2-byte length. Two writes
-	// (instead of copying packed into a combined buffer) avoids needing to
-	// know whether PackBuffer packed into buf in place or had to allocate
-	// its own — either way packed is written and recycled untouched.
-	var lenBuf [2]byte
-	binary.BigEndian.PutUint16(lenBuf[:], uint16(len(packed)))
-	if _, err := w.stream.Write(lenBuf[:]); err != nil {
-		putPackBuf(packed)
-		return err
-	}
-	_, err = w.stream.Write(packed)
-	putPackBuf(packed)
-	return err
-}
-
 func (w *doqResponseWriter) Write(b []byte) (int, error) {
 	// RFC 9250: each message is prefixed with its 2-byte length. Write is
 	// the raw-byte path the handler's pack-once write uses, so the framing
-	// lives here (WriteMsg keeps its own packing + framing).
+	// lives here.
 	var lenBuf [2]byte
 	binary.BigEndian.PutUint16(lenBuf[:], uint16(len(b)))
 	if _, err := w.stream.Write(lenBuf[:]); err != nil {
@@ -187,9 +165,9 @@ func (w *doqResponseWriter) Write(b []byte) (int, error) {
 	return w.stream.Write(b)
 }
 
-func (w *doqResponseWriter) LocalAddr() net.Addr  { return addrOnly("") }
-func (w *doqResponseWriter) RemoteAddr() net.Addr { return addrOnly(w.clientIP) }
-func (w *doqResponseWriter) Close() error         { return nil }
-func (w *doqResponseWriter) TsigStatus() error    { return nil }
-func (w *doqResponseWriter) TsigTimersOnly(bool)  {}
-func (w *doqResponseWriter) Hijack()              {}
+func (w *doqResponseWriter) LocalAddr() net.Addr   { return addrOnly("") }
+func (w *doqResponseWriter) RemoteAddr() net.Addr  { return addrOnly(w.clientIP) }
+func (w *doqResponseWriter) Conn() net.Conn        { return nil }
+func (w *doqResponseWriter) Close() error          { return nil }
+func (w *doqResponseWriter) Session() *dns.Session { return nil }
+func (w *doqResponseWriter) Hijack()               {}

@@ -1,12 +1,16 @@
 package dnsserver
 
 import (
+	"context"
 	"net"
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/svcb"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 )
@@ -14,9 +18,9 @@ import (
 func ddrQuery(t *testing.T, h *Handler, qtype uint16) *dns.Msg {
 	t.Helper()
 	m := new(dns.Msg)
-	m.SetQuestion("_dns.resolver.arpa.", qtype)
+	dnsutil.SetQuestion(m, "_dns.resolver.arpa.", qtype)
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 	if fw.msg == nil {
 		t.Fatal("no response")
 	}
@@ -30,7 +34,7 @@ func TestDDRAnswersSVCBForEveryEncryptedTransport(t *testing.T) {
 
 	resp := ddrQuery(t, h, dns.TypeSVCB)
 	if resp.Rcode != dns.RcodeSuccess {
-		t.Fatalf("rcode = %s", dns.RcodeToString[resp.Rcode])
+		t.Fatalf("rcode = %s", dnsutil.RcodeToString(resp.Rcode))
 	}
 	// DoH+DoH3 share a record (same port), then DoT, then DoQ.
 	if len(resp.Answer) != 3 {
@@ -47,7 +51,7 @@ func TestDDRAnswersSVCBForEveryEncryptedTransport(t *testing.T) {
 		}
 		var alpn []string
 		for _, kv := range s.Value {
-			if a, ok := kv.(*dns.SVCBAlpn); ok {
+			if a, ok := kv.(*svcb.ALPN); ok {
 				alpn = a.Alpn
 			}
 		}
@@ -63,7 +67,7 @@ func TestDDRAnswersSVCBForEveryEncryptedTransport(t *testing.T) {
 	// Default ports are omitted; the non-default DoQ port is stated.
 	port := func(s *dns.SVCB) int {
 		for _, kv := range s.Value {
-			if p, ok := kv.(*dns.SVCBPort); ok {
+			if p, ok := kv.(*svcb.PORT); ok {
 				return int(p.Port)
 			}
 		}
@@ -78,7 +82,7 @@ func TestDDRAnswersSVCBForEveryEncryptedTransport(t *testing.T) {
 	// dohpath only on the HTTPS-based record, as an RFC 6570 template.
 	var path string
 	for _, kv := range doh.Value {
-		if p, ok := kv.(*dns.SVCBDoHPath); ok {
+		if p, ok := kv.(*svcb.DOHPATH); ok {
 			path = p.Template
 		}
 	}
@@ -86,22 +90,22 @@ func TestDDRAnswersSVCBForEveryEncryptedTransport(t *testing.T) {
 		t.Errorf("dohpath = %q", path)
 	}
 	// The address the query arrived on is hinted.
-	var hint net.IP
+	var hint netip.Addr
 	for _, kv := range dot.Value {
-		if h4, ok := kv.(*dns.SVCBIPv4Hint); ok && len(h4.Hint) == 1 {
+		if h4, ok := kv.(*svcb.IPV4HINT); ok && len(h4.Hint) == 1 {
 			hint = h4.Hint[0]
 		}
 	}
-	if !hint.Equal(net.IPv4(127, 0, 0, 1)) {
+	if hint != netip.MustParseAddr("127.0.0.1") {
 		t.Errorf("ipv4hint = %v, want the local address", hint)
 	}
 	// SvcParams must be in ascending key order and survive the wire.
-	packed, err := resp.Pack()
-	if err != nil {
+	resp.Data = nil
+	if err := resp.Pack(); err != nil {
 		t.Fatalf("pack: %v", err)
 	}
-	var back dns.Msg
-	if err := back.Unpack(packed); err != nil {
+	back := dns.Msg{Data: resp.Data}
+	if err := back.Unpack(); err != nil {
 		t.Fatalf("unpack: %v", err)
 	}
 	if len(back.Answer) != 3 {
@@ -118,17 +122,17 @@ type wildLocalWriter struct {
 
 func (w *wildLocalWriter) LocalAddr() net.Addr { return w.local }
 
-func ipv4HintOf(m *dns.Msg) net.IP {
+func ipv4HintOf(m *dns.Msg) netip.Addr {
 	for _, rr := range m.Answer {
 		if s, ok := rr.(*dns.SVCB); ok {
 			for _, kv := range s.Value {
-				if h, ok := kv.(*dns.SVCBIPv4Hint); ok && len(h.Hint) == 1 {
+				if h, ok := kv.(*svcb.IPV4HINT); ok && len(h.Hint) == 1 {
 					return h.Hint[0]
 				}
 			}
 		}
 	}
-	return nil
+	return netip.Addr{}
 }
 
 // The live listeners do not report a usable local address; the hint must
@@ -142,13 +146,13 @@ func TestDDRHintWhenListenerReportsNoSpecificAddress(t *testing.T) {
 		h := NewHandler(filter.NewEngine(), nil, nil, nil, "nxdomain", 600, 5*time.Second)
 		h.SetDDR(NewDDRConfig("dns.example.net", "0.0.0.0:853", "", "", "", ""))
 		m := new(dns.Msg)
-		m.SetQuestion("_dns.resolver.arpa.", dns.TypeSVCB)
+		dnsutil.SetQuestion(m, "_dns.resolver.arpa.", dns.TypeSVCB)
 		w := &wildLocalWriter{local: local} // client 127.0.0.1 -> route source 127.0.0.1
-		h.ServeDNS(w, m)
+		h.ServeDNS(context.Background(), w, m)
 		if w.msg == nil {
 			t.Fatalf("%s: no response", name)
 		}
-		if got := ipv4HintOf(w.msg); !got.Equal(net.IPv4(127, 0, 0, 1)) {
+		if got := ipv4HintOf(w.msg); got != netip.MustParseAddr("127.0.0.1") {
 			t.Errorf("%s: ipv4hint = %v, want 127.0.0.1", name, got)
 		}
 	}
@@ -171,7 +175,7 @@ func TestDDRWithoutConfigIsNODATANotForwarded(t *testing.T) {
 	for _, qt := range []uint16{dns.TypeSVCB, dns.TypeA, dns.TypeAAAA} {
 		resp := ddrQuery(t, h, qt)
 		if resp.Rcode != dns.RcodeSuccess || len(resp.Answer) != 0 {
-			t.Errorf("type %d: want NOERROR/NODATA, got %s with %d answers", qt, dns.RcodeToString[resp.Rcode], len(resp.Answer))
+			t.Errorf("type %d: want NOERROR/NODATA, got %s with %d answers", qt, dnsutil.RcodeToString(resp.Rcode), len(resp.Answer))
 		}
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -20,7 +21,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
 	"github.com/quic-go/quic-go"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cert"
@@ -28,7 +31,7 @@ import (
 
 func aQuery() *dns.Msg {
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 	return m
 }
 
@@ -65,19 +68,20 @@ func serveOneAnswer(conn net.Conn, ip string) {
 			return
 		}
 		req := new(dns.Msg)
-		if err := req.Unpack(reqBytes); err != nil {
+		req.Data = reqBytes
+		if err := req.Unpack(); err != nil {
 			return
 		}
 		resp := new(dns.Msg)
-		resp.SetReply(req)
+		dnsutil.SetReply(resp, req)
 		resp.Answer = append(resp.Answer, &dns.A{
-			Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-			A:   net.ParseIP(ip),
+			Hdr: dns.Header{Name: req.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+			A: rdata.A{Addr: netip.MustParseAddr(ip)},
 		})
-		packed, err := resp.Pack()
-		if err != nil {
+		if err := resp.Pack(); err != nil {
 			return
 		}
+		packed := resp.Data
 		if err := writeLenPrefixed(conn, packed); err != nil {
 			return
 		}
@@ -180,19 +184,20 @@ func startDoQTestServer(t *testing.T) (addr string, clientTLS *tls.Config, accep
 							return
 						}
 						req := new(dns.Msg)
-						if err := req.Unpack(reqBytes); err != nil {
+						req.Data = reqBytes
+		if err := req.Unpack(); err != nil {
 							return
 						}
 						resp := new(dns.Msg)
-						resp.SetReply(req)
+						dnsutil.SetReply(resp, req)
 						resp.Answer = append(resp.Answer, &dns.A{
-							Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-							A:   net.ParseIP("9.9.9.9"),
+							Hdr: dns.Header{Name: req.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+							A: rdata.A{Addr: netip.MustParseAddr("9.9.9.9")},
 						})
-						packed, err := resp.Pack()
-						if err != nil {
+						if err := resp.Pack(); err != nil {
 							return
 						}
+						packed := resp.Data
 						_ = writeLenPrefixed(stream, packed)
 					}()
 				}
@@ -261,26 +266,32 @@ func TestUDPUpstreamReusesSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
-			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-			A:   net.ParseIP("1.2.3.4"),
+			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+			A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
 		})
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	var dials atomic.Int32
 	u := &Upstream{Transport: UDP, Addr: pc.LocalAddr().String()}
 	u.udpPool = make(chan *pooledConn, upstreamPoolSize)
-	u.udpClient = &dns.Client{Net: "udp", Timeout: 8 * time.Second, Dialer: &net.Dialer{
-		Timeout: 8 * time.Second,
-		Control: func(network, address string, c syscall.RawConn) error {
-			dials.Add(1)
-			return nil
+	u.udpClient = &dns.Client{Transport: &dns.Transport{
+		ReadTimeout:  8 * time.Second,
+		WriteTimeout: 8 * time.Second,
+		Dialer: &net.Dialer{
+			Timeout: 8 * time.Second,
+			Control: func(network, address string, c syscall.RawConn) error {
+				dials.Add(1)
+				return nil
+			},
 		},
 	}}
 	t.Cleanup(u.Close)
@@ -386,19 +397,20 @@ func startDoQTestServerWithHang(t *testing.T) (addr string, clientTLS *tls.Confi
 						}
 						defer stream.Close()
 						req := new(dns.Msg)
-						if err := req.Unpack(reqBytes); err != nil {
+						req.Data = reqBytes
+		if err := req.Unpack(); err != nil {
 							return
 						}
 						resp := new(dns.Msg)
-						resp.SetReply(req)
+						dnsutil.SetReply(resp, req)
 						resp.Answer = append(resp.Answer, &dns.A{
-							Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-							A:   net.ParseIP("9.9.9.9"),
+							Hdr: dns.Header{Name: req.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+							A: rdata.A{Addr: netip.MustParseAddr("9.9.9.9")},
 						})
-						packed, err := resp.Pack()
-						if err != nil {
+						if err := resp.Pack(); err != nil {
 							return
 						}
+						packed := resp.Data
 						_ = writeLenPrefixed(stream, packed)
 					}()
 				}
@@ -460,18 +472,20 @@ func TestRecursiveUpstreamDispatches(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		m.Authoritative = true
 		m.Answer = append(m.Answer, &dns.A{
-			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-			A:   net.ParseIP("203.0.113.9"),
+			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+			A: rdata.A{Addr: netip.MustParseAddr("203.0.113.9")},
 		})
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	u := NewRecursive([]string{pc.LocalAddr().String()})
 	r, err := u.Query(t.Context(), aQuery())
@@ -481,7 +495,7 @@ func TestRecursiveUpstreamDispatches(t *testing.T) {
 	if len(r.Answer) != 1 {
 		t.Fatalf("answers = %d, want 1", len(r.Answer))
 	}
-	if a, ok := r.Answer[0].(*dns.A); !ok || a.A.String() != "203.0.113.9" {
+	if a, ok := r.Answer[0].(*dns.A); !ok || a.Addr.String() != "203.0.113.9" {
 		t.Fatalf("unexpected answer: %v", r.Answer[0])
 	}
 }
@@ -588,14 +602,16 @@ func TestDoHRetriesStaleConnection(t *testing.T) {
 	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		req := new(dns.Msg)
-		_ = req.Unpack(body)
+		req.Data = body
+		_ = req.Unpack()
 		resp := new(dns.Msg)
-		resp.SetReply(req)
+		dnsutil.SetReply(resp, req)
 		resp.Answer = append(resp.Answer, &dns.A{
-			Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-			A:   net.ParseIP("1.2.3.4"),
+			Hdr: dns.Header{Name: req.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+			A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
 		})
-		packed, _ := resp.Pack()
+		_ = resp.Pack()
+		packed := resp.Data
 		mu.Lock()
 		answered++
 		closeThis := closing
@@ -631,7 +647,7 @@ func TestDoHRetriesStaleConnection(t *testing.T) {
 		Timeout: 5 * time.Second,
 	}
 	q := aQuery()
-	q.SetEdns0(4096, false)
+	q.UDPSize = 4096
 	// Query 1 dials fresh and pools the connection; the server answers then
 	// closes it. Query 2 lands on that dead pooled connection — without the
 	// retry it would fail with "unexpected EOF" — and must recover on a
@@ -791,14 +807,16 @@ func TestUDPTruncatedFallsBackToTCP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen udp: %v", err)
 	}
-	udpSrv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+	started := make(chan struct{})
+	udpSrv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		m.Truncated = true
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})}
-	go func() { _ = udpSrv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = udpSrv.Shutdown() })
+	go func() { _ = udpSrv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { udpSrv.Shutdown(context.Background()) })
 
 	u := NewWithTLS(UDP, udpAddr, "", nil)
 	r, err := u.Query(t.Context(), aQuery())
@@ -808,7 +826,7 @@ func TestUDPTruncatedFallsBackToTCP(t *testing.T) {
 	if len(r.Answer) != 1 {
 		t.Fatalf("answers = %d, want 1 (the TCP fallback's answer)", len(r.Answer))
 	}
-	if a, ok := r.Answer[0].(*dns.A); !ok || !a.A.Equal(net.ParseIP("1.2.3.4")) {
+	if a, ok := r.Answer[0].(*dns.A); !ok || a.Addr != netip.MustParseAddr("1.2.3.4") {
 		t.Fatalf("answer = %v, want 1.2.3.4", r.Answer[0])
 	}
 }
@@ -824,22 +842,23 @@ func TestUDPQueryAdvertisesEDNS1232(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-		for _, rr := range r.Extra {
-			if opt, ok := rr.(*dns.OPT); ok {
-				gotSize.Store(int32(opt.UDPSize()))
-			}
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
+		_ = r.Unpack()
+		if r.UDPSize > 0 {
+			gotSize.Store(int32(r.UDPSize))
 		}
 		m := new(dns.Msg)
-		m.SetReply(r)
-		_ = w.WriteMsg(m)
+		dnsutil.SetReply(m, r)
+		_, _ = m.WriteTo(w)
 	})}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	u := NewWithTLS(UDP, pc.LocalAddr().String(), "", nil)
 	q := aQuery()
-	q.SetEdns0(1232, false)
+	q.UDPSize = 1232
 	if _, err := u.Query(t.Context(), q); err != nil {
 		t.Fatalf("query: %v", err)
 	}
@@ -901,14 +920,16 @@ func TestDoHTransportNegotiatesHTTP2(t *testing.T) {
 		protoCh <- r.ProtoMajor
 		body, _ := io.ReadAll(r.Body)
 		req := new(dns.Msg)
-		_ = req.Unpack(body)
+		req.Data = body
+		_ = req.Unpack()
 		resp := new(dns.Msg)
-		resp.SetReply(req)
+		dnsutil.SetReply(resp, req)
 		resp.Answer = append(resp.Answer, &dns.A{
-			Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-			A:   net.ParseIP("1.2.3.4"),
+			Hdr: dns.Header{Name: req.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+			A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
 		})
-		packed, _ := resp.Pack()
+		_ = resp.Pack()
+		packed := resp.Data
 		w.Header().Set("Content-Type", "application/dns-message")
 		_, _ = w.Write(packed)
 	}))
@@ -925,7 +946,7 @@ func TestDoHTransportNegotiatesHTTP2(t *testing.T) {
 		Timeout:   5 * time.Second,
 	}
 	q := aQuery()
-	q.SetEdns0(4096, false)
+	q.UDPSize = 4096
 	if r, err := u.Query(t.Context(), q); err != nil || len(r.Answer) != 1 {
 		t.Fatalf("query: %v answers=%v", err, r)
 	}

@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 
@@ -222,8 +222,8 @@ func (m *Manager) handleDoH(w http.ResponseWriter, r *http.Request, proto string
 			http.Error(w, "invalid dns parameter", http.StatusBadRequest)
 			return
 		}
-		msg = new(dns.Msg)
-		err = msg.Unpack(raw)
+		msg = &dns.Msg{Data: raw}
+		err = msg.Unpack()
 	case http.MethodPost:
 		if ct := r.Header.Get("Content-Type"); ct != "" && !strings.Contains(ct, dnsMessageContentType) {
 			http.Error(w, "unsupported content type", http.StatusUnsupportedMediaType)
@@ -252,8 +252,8 @@ func (m *Manager) handleDoH(w http.ResponseWriter, r *http.Request, proto string
 			putPackBuf(buf)
 			buf = nil
 		}
-		msg = new(dns.Msg)
-		err = msg.Unpack(body)
+		msg = &dns.Msg{Data: body}
+		err = msg.Unpack()
 		if buf != nil {
 			putPackBuf(buf)
 		}
@@ -372,33 +372,17 @@ func (w *dohResponseWriter) writeHeaders() {
 	}
 }
 
-func (w *dohResponseWriter) WriteMsg(m *dns.Msg) error {
-	buf := getPackBuf()
-	packed, err := m.PackBuffer(buf)
-	if err != nil {
-		putPackBuf(buf)
-		return err
-	}
-	w.writeHeaders()
-	w.httpW.WriteHeader(http.StatusOK)
-	// http.ResponseWriter.Write copies/sends packed synchronously before
-	// returning, so it's safe to recycle right after regardless of error.
-	_, err = w.httpW.Write(packed)
-	putPackBuf(packed)
-	return err
-}
-
 func (w *dohResponseWriter) Write(b []byte) (int, error) {
 	w.writeHeaders()
 	return w.httpW.Write(b)
 }
 
-func (w *dohResponseWriter) LocalAddr() net.Addr  { return nil }
-func (w *dohResponseWriter) RemoteAddr() net.Addr { return addrOnly(w.clientIP) }
-func (w *dohResponseWriter) Close() error         { return nil }
-func (w *dohResponseWriter) TsigStatus() error    { return nil }
-func (w *dohResponseWriter) TsigTimersOnly(bool)  {}
-func (w *dohResponseWriter) Hijack()              {}
+func (w *dohResponseWriter) LocalAddr() net.Addr   { return nil }
+func (w *dohResponseWriter) RemoteAddr() net.Addr  { return addrOnly(w.clientIP) }
+func (w *dohResponseWriter) Conn() net.Conn        { return nil }
+func (w *dohResponseWriter) Close() error          { return nil }
+func (w *dohResponseWriter) Session() *dns.Session { return nil }
+func (w *dohResponseWriter) Hijack()               {}
 
 func addrOnly(ip string) net.Addr { return &fakeAddr{ip: ip} }
 

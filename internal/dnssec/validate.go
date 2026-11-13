@@ -8,7 +8,8 @@ import (
 	"time"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -96,7 +97,7 @@ func (v *Validator) Validate(ctx context.Context, up *upstream.Upstream, resp *d
 			sigs = append(sigs, sig)
 			continue
 		}
-		byType[rr.Header().Rrtype] = append(byType[rr.Header().Rrtype], rr)
+		byType[dns.RRToType(rr)] = append(byType[dns.RRToType(rr)], rr)
 	}
 	if len(sigs) == 0 {
 		// No signed data in the Answer — either genuinely unsigned, or a
@@ -150,7 +151,7 @@ type zoneResult struct {
 }
 
 func (v *Validator) zoneKeys(ctx context.Context, up *upstream.Upstream, zone string, depth int) (keys []*dns.DNSKEY, secure bool, err error) {
-	zone = dns.Fqdn(zone)
+	zone = dnsutil.Fqdn(zone)
 	if cached, ok := v.cached(zone); ok {
 		return cached.keys, cached.secure, nil
 	}
@@ -190,7 +191,7 @@ func (v *Validator) fetchZoneKeys(ctx context.Context, up *upstream.Upstream, zo
 		// infrastructure problem, not confirmation the zone has no
 		// DNSKEY. Only a clean NOERROR response with an empty answer
 		// (handled below) means that.
-		return nil, false, fmt.Errorf("dnssec: DNSKEY query for %s returned %s", zone, dns.RcodeToString[dnskeyMsg.Rcode])
+		return nil, false, fmt.Errorf("dnssec: DNSKEY query for %s returned %s", zone, dnsutil.RcodeToString(dnskeyMsg.Rcode))
 	}
 	dnskeys, dnskeyRRset, dnskeySigs := splitAnswer[*dns.DNSKEY](dnskeyMsg.Answer, dns.TypeDNSKEY)
 	ttl := zoneKeyTTL(dnskeyMsg.Answer)
@@ -223,7 +224,7 @@ func (v *Validator) fetchZoneKeys(ctx context.Context, up *upstream.Upstream, zo
 	if dsMsg.Rcode != dns.RcodeSuccess {
 		// Same reasoning as the DNSKEY query above: a failed query is not
 		// confirmation of an insecure delegation.
-		return nil, false, fmt.Errorf("dnssec: DS query for %s returned %s", zone, dns.RcodeToString[dsMsg.Rcode])
+		return nil, false, fmt.Errorf("dnssec: DS query for %s returned %s", zone, dnsutil.RcodeToString(dsMsg.Rcode))
 	}
 	dsRecords, dsRRset, dsSigs := splitAnswer[*dns.DS](dsMsg.Answer, dns.TypeDS)
 	if len(dsRecords) == 0 {
@@ -279,9 +280,9 @@ func (v *Validator) storeZone(zone string, keys []*dns.DNSKEY, secure bool, ttl 
 // lookups get the same trust properties (encrypted transport, etc.) as the
 // query being validated.
 func queryZone(ctx context.Context, up *upstream.Upstream, name string, qtype uint16) (*dns.Msg, error) {
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(name), qtype)
-	m.SetEdns0(4096, true)
+	m := dnsutil.SetQuestion(new(dns.Msg), dnsutil.Fqdn(name), qtype)
+	m.Security = true
+	m.UDPSize = 4096
 	qctx, cancel := context.WithTimeout(ctx, queryTimeout)
 	defer cancel()
 	return up.Query(qctx, m)
@@ -306,17 +307,22 @@ func splitAnswer[T dns.RR](answer []dns.RR, typeCovered uint16) (typed []T, rrse
 	return typed, rrset, sigs
 }
 
+func validSignatureWindow(sig *dns.RRSIG, t time.Time) bool {
+	utc := uint32(t.Unix())
+	return int32(utc-sig.Inception) >= 0 && int32(sig.Expiration-utc) >= 0
+}
+
 // verifySigned reports whether sig — within its validity window — verifies
 // rrset against some key in keys matching its tag and algorithm.
 func verifySigned(sig *dns.RRSIG, rrset []dns.RR, keys []*dns.DNSKEY) bool {
-	if !sig.ValidityPeriod(time.Now()) {
+	if !validSignatureWindow(sig, time.Now()) {
 		return false
 	}
 	for _, k := range keys {
 		if k.Algorithm != sig.Algorithm || k.KeyTag() != sig.KeyTag {
 			continue
 		}
-		if err := sig.Verify(k, rrset); err == nil {
+		if err := sig.Verify(k, rrset, new(dns.SignOption)); err == nil {
 			return true
 		}
 	}
@@ -381,15 +387,15 @@ func verifyAgainstAnchors(keys []*dns.DNSKEY, sigs []*dns.RRSIG, rrset []dns.RR,
 // "com."); the root's own parent is itself, since the chain walk's
 // zone == "." branch handles the root specially and never calls this on it.
 func parentZone(zone string) string {
-	zone = dns.Fqdn(zone)
+	zone = dnsutil.Fqdn(zone)
 	if zone == "." {
 		return "."
 	}
-	labels := dns.SplitDomainName(zone)
+	labels := dnsutil.Split(zone)
 	if len(labels) <= 1 {
 		return "."
 	}
-	return dns.Fqdn(strings.Join(labels[1:], "."))
+	return dnsutil.Fqdn(strings.Join(labels[1:], "."))
 }
 
 // zoneKeyTTL derives a cache lifetime from a DNSKEY RRset's own TTL,
@@ -400,7 +406,7 @@ func zoneKeyTTL(rrs []dns.RR) time.Duration {
 		if _, ok := rr.(*dns.DNSKEY); !ok {
 			continue
 		}
-		ttl := rr.Header().Ttl
+		ttl := rr.Header().TTL
 		if min == 0 || ttl < min {
 			min = ttl
 		}

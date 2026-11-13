@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 
@@ -42,7 +42,7 @@ type protoHandler struct {
 	proto string
 }
 
-func (p protoHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+func (p protoHandler) ServeDNS(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 	p.inner.ServeDNSWithProto(w, r, p.proto)
 }
 
@@ -340,17 +340,16 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 		return
 	}
 	srv := &dns.Server{
-		Net:          "tcp",
-		Listener:     m.limitTCPListener(ln),
-		Handler:      handler,
-		ReadTimeout:  tcpReadTimeout,
-		WriteTimeout: tcpWriteTimeout,
-		IdleTimeout:  func() time.Duration { return tcpIdleTimeout },
+		Net:         "tcp",
+		Listener:    m.limitTCPListener(ln),
+		Handler:     handler,
+		ReadTimeout: tcpReadTimeout,
+		IdleTimeout: tcpIdleTimeout,
 	}
 	m.servers = append(m.servers, srv)
 	go func() {
 		slog.Info("dns listener started", "proto", proto, "addr", addr)
-		if err := srv.ActivateAndServe(); err != nil {
+		if err := srv.ListenAndServe(); err != nil {
 			slog.Error("dns listener stopped", "proto", proto, "addr", addr, "error", err)
 			m.results <- Listener{Proto: proto, Addr: addr, Err: err}
 		}
@@ -371,19 +370,18 @@ func (m *Manager) startDoT(addr string) {
 	dotTLS := m.tlsConf.Clone()
 	dotTLS.NextProtos = []string{"dot"}
 	srv := &dns.Server{
-		Addr:         addr,
-		Net:          "tcp-tls",
-		Listener:     tls.NewListener(m.limitTCPListener(ln), dotTLS),
-		TLSConfig:    dotTLS,
-		Handler:      protoHandler{m.handler, "dot"},
-		ReadTimeout:  tcpReadTimeout,
-		WriteTimeout: tcpWriteTimeout,
-		IdleTimeout:  func() time.Duration { return tcpIdleTimeout },
+		Addr:        addr,
+		Net:         "tcp-tls",
+		Listener:    tls.NewListener(m.limitTCPListener(ln), dotTLS),
+		TLSConfig:   dotTLS,
+		Handler:     protoHandler{m.handler, "dot"},
+		ReadTimeout: tcpReadTimeout,
+		IdleTimeout: tcpIdleTimeout,
 	}
 	m.servers = append(m.servers, srv)
 	go func() {
 		slog.Info("DoT listener started", "addr", addr)
-		if err := srv.ActivateAndServe(); err != nil {
+		if err := srv.ListenAndServe(); err != nil {
 			slog.Error("DoT listener stopped", "addr", addr, "error", err)
 			m.results <- Listener{Proto: "dot", Addr: addr, Err: err}
 		}
@@ -395,7 +393,7 @@ func (m *Manager) Shutdown(ctx context.Context) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, s := range m.servers {
-		_ = s.ShutdownContext(ctx)
+		s.Shutdown(ctx)
 	}
 	for _, s := range m.udpSrvs {
 		if err := s.Shutdown(ctx); err != nil {

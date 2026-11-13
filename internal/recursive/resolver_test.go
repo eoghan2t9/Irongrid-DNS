@@ -3,6 +3,7 @@ package recursive
 import (
 	"context"
 	"net"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -10,8 +11,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 )
+
+func writeTestMsg(w dns.ResponseWriter, m *dns.Msg) {
+	_, _ = m.WriteTo(w)
+}
 
 // freePort reserves an OS-assigned UDP port on loopback, then releases it —
 // the returned number is reused across several distinct 127.0.0.x addresses
@@ -84,19 +92,20 @@ func startFakeServer(t *testing.T, listenAddr string, z *fakeZone) (string, func
 	if err != nil {
 		t.Fatalf("listen %s: %v", listenAddr, err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-		q := r.Question[0]
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
+		qname, qtype := dnsutil.Question(r)
 		m := new(dns.Msg)
-		m.SetReply(r)
-		name := strings.ToLower(q.Name)
+		dnsutil.SetReply(m, r)
+		name := strings.ToLower(qname)
 		if z.onQuery != nil {
-			z.onQuery(name, q.Qtype)
+			z.onQuery(name, qtype)
 		}
 
 		if rrs, ok := z.answers[name]; ok {
 			m.Authoritative = true
 			m.Answer = rrs
-			_ = w.WriteMsg(m)
+			writeTestMsg(w, m)
 			return
 		}
 		var ns []dns.RR
@@ -111,31 +120,34 @@ func startFakeServer(t *testing.T, listenAddr string, z *fakeZone) (string, func
 			// nameservers in one referral — the real-world shape the
 			// nameserver-racing path depends on.
 			matched = true
-			rr, _ := dns.NewRR(d.childName + " 300 IN NS " + d.ns)
+			rr, _ := dns.New(d.childName + " 300 IN NS " + d.ns)
 			ns = append(ns, rr)
 			if !d.noGlue {
 				host, _, _ := net.SplitHostPort(d.addr)
-				a, _ := dns.NewRR(d.ns + " 300 IN A " + host)
+				a, _ := dns.New(d.ns + " 300 IN A " + host)
 				extra = append(extra, a)
 			}
 		}
 		if matched {
 			m.Ns = ns
 			m.Extra = extra
-			_ = w.WriteMsg(m)
+			writeTestMsg(w, m)
 			return
 		}
 		// NXDOMAIN with an authoritative SOA, like a real authoritative
 		// server would answer for an unknown name in its own zone.
 		m.Authoritative = true
 		m.Rcode = dns.RcodeNameError
-		soa, _ := dns.NewRR(z.name + " 300 IN SOA ns.invalid. admin.invalid. 1 3600 900 604800 300")
+		soa, _ := dns.New(z.name + " 300 IN SOA ns.invalid. admin.invalid. 1 3600 900 604800 300")
 		m.Ns = []dns.RR{soa}
-		_ = w.WriteMsg(m)
+		writeTestMsg(w, m)
 	})}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
-	return pc.LocalAddr().String(), func() { _ = srv.Shutdown() }
+	var stopOnce sync.Once
+	stop := func() { stopOnce.Do(func() { srv.Shutdown(context.Background()) }) }
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(stop)
+	return pc.LocalAddr().String(), stop
 }
 
 // buildChain wires a fake root -> fake "com." TLD -> fake "example.com."
@@ -151,9 +163,9 @@ func buildChain(t *testing.T) (rootAddr, authAddr, nsPort string) {
 	// The authoritative server is built first so its address is known
 	// ahead of time for the TLD's glue.
 	authAnswers := map[string][]dns.RR{}
-	authRR, _ := dns.NewRR("example.com. 300 IN A 93.184.216.34")
+	authRR, _ := dns.New("example.com. 300 IN A 93.184.216.34")
 	authAnswers["example.com."] = []dns.RR{authRR}
-	cnameRR, _ := dns.NewRR("www.example.com. 300 IN CNAME example.com.")
+	cnameRR, _ := dns.New("www.example.com. 300 IN CNAME example.com.")
 	authAnswers["www.example.com."] = []dns.RR{cnameRR, authRR}
 
 	authZone := &fakeZone{name: "example.com.", answers: authAnswers}
@@ -199,8 +211,8 @@ func TestResolveQNameMinimization(t *testing.T) {
 	t.Parallel()
 	nsPort := freePort(t)
 
-	authRR, _ := dns.NewRR("example.com. 300 IN A 93.184.216.34")
-	cnameRR, _ := dns.NewRR("www.example.com. 300 IN CNAME example.com.")
+	authRR, _ := dns.New("example.com. 300 IN A 93.184.216.34")
+	cnameRR, _ := dns.New("www.example.com. 300 IN CNAME example.com.")
 	authZone := &fakeZone{name: "example.com.", answers: map[string][]dns.RR{
 		"example.com.":     {authRR},
 		"www.example.com.": {cnameRR, authRR},
@@ -212,7 +224,7 @@ func TestResolveQNameMinimization(t *testing.T) {
 	record := func(dst *[]string) func(name string, qtype uint16) {
 		return func(name string, qtype uint16) {
 			mu.Lock()
-			*dst = append(*dst, name+" "+dns.TypeToString[qtype])
+			*dst = append(*dst, name+" "+dnsutil.TypeToString(qtype))
 			mu.Unlock()
 		}
 	}
@@ -241,7 +253,7 @@ func TestResolveQNameMinimization(t *testing.T) {
 
 	r := newTestResolver(rootAddr, nsPort)
 	m := new(dns.Msg)
-	m.SetQuestion("www.example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "www.example.com.", dns.TypeA)
 	resp, err := r.Resolve(t.Context(), m)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -270,7 +282,7 @@ func TestResolveQNameMinimizationFallsBackOnUnexpectedResponse(t *testing.T) {
 	t.Parallel()
 	nsPort := freePort(t)
 
-	authRR, _ := dns.NewRR("www.example.com. 300 IN A 93.184.216.34")
+	authRR, _ := dns.New("www.example.com. 300 IN A 93.184.216.34")
 	authZone := &fakeZone{name: "example.com.", answers: map[string][]dns.RR{
 		"www.example.com.": {authRR},
 	}}
@@ -286,28 +298,30 @@ func TestResolveQNameMinimizationFallsBackOnUnexpectedResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-		q := r.Question[0]
-		name := strings.ToLower(q.Name)
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
+		qname, qtype := dnsutil.Question(r)
+		name := strings.ToLower(qname)
 		m := new(dns.Msg)
-		m.SetReply(r)
-		if name == "example.com." && q.Qtype == dns.TypeNS {
+		dnsutil.SetReply(m, r)
+		if name == "example.com." && qtype == dns.TypeNS {
 			m.Authoritative = true
 			m.Rcode = dns.RcodeNameError
-			soa, _ := dns.NewRR("com. 300 IN SOA ns.invalid. admin.invalid. 1 3600 900 604800 300")
+			soa, _ := dns.New("com. 300 IN SOA ns.invalid. admin.invalid. 1 3600 900 604800 300")
 			m.Ns = []dns.RR{soa}
-			_ = w.WriteMsg(m)
+			writeTestMsg(w, m)
 			return
 		}
-		nsRR, _ := dns.NewRR("example.com. 300 IN NS ns1.example.com.")
+		nsRR, _ := dns.New("example.com. 300 IN NS ns1.example.com.")
 		host, _, _ := net.SplitHostPort(authAddr)
-		glue, _ := dns.NewRR("ns1.example.com. 300 IN A " + host)
+		glue, _ := dns.New("ns1.example.com. 300 IN A " + host)
 		m.Ns = []dns.RR{nsRR}
 		m.Extra = []dns.RR{glue}
-		_ = w.WriteMsg(m)
+		writeTestMsg(w, m)
 	})}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	rootZone := &fakeZone{
 		name:           ".",
@@ -321,7 +335,7 @@ func TestResolveQNameMinimizationFallsBackOnUnexpectedResponse(t *testing.T) {
 
 	r := newTestResolver(rootAddr, nsPort)
 	m := new(dns.Msg)
-	m.SetQuestion("www.example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "www.example.com.", dns.TypeA)
 	resp, err := r.Resolve(t.Context(), m)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -329,7 +343,7 @@ func TestResolveQNameMinimizationFallsBackOnUnexpectedResponse(t *testing.T) {
 	if len(resp.Answer) != 1 {
 		t.Fatalf("expected 1 answer despite the TLD's bogus NXDOMAIN on the minimized query, got %v", resp.Answer)
 	}
-	if a, ok := resp.Answer[0].(*dns.A); !ok || a.A.String() != "93.184.216.34" {
+	if a, ok := resp.Answer[0].(*dns.A); !ok || a.Addr.String() != "93.184.216.34" {
 		t.Fatalf("unexpected answer: %v", resp.Answer[0])
 	}
 }
@@ -340,7 +354,7 @@ func TestResolveWalksRootToAuthoritative(t *testing.T) {
 	r := newTestResolver(rootAddr, nsPort)
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 	resp, err := r.Resolve(t.Context(), m)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -349,11 +363,11 @@ func TestResolveWalksRootToAuthoritative(t *testing.T) {
 		t.Fatalf("answers = %d, want 1: %v", len(resp.Answer), resp.Answer)
 	}
 	a, ok := resp.Answer[0].(*dns.A)
-	if !ok || a.A.String() != "93.184.216.34" {
+	if !ok || a.Addr.String() != "93.184.216.34" {
 		t.Fatalf("unexpected answer: %v", resp.Answer[0])
 	}
-	if resp.Id != m.Id {
-		t.Fatalf("response Id = %d, want %d (rebased to the original query)", resp.Id, m.Id)
+	if resp.ID != m.ID {
+		t.Fatalf("response Id = %d, want %d (rebased to the original query)", resp.ID, m.ID)
 	}
 	if !resp.RecursionAvailable {
 		t.Fatal("expected RecursionAvailable set on the final response")
@@ -369,7 +383,7 @@ func TestResolveCachesDelegation(t *testing.T) {
 	r := newTestResolver(rootAddr, nsPort)
 
 	m1 := new(dns.Msg)
-	m1.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m1, "example.com.", dns.TypeA)
 	if _, err := r.Resolve(t.Context(), m1); err != nil {
 		t.Fatalf("first Resolve: %v", err)
 	}
@@ -389,7 +403,7 @@ func TestResolveChasesCNAME(t *testing.T) {
 	r := newTestResolver(rootAddr, nsPort)
 
 	m := new(dns.Msg)
-	m.SetQuestion("www.example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "www.example.com.", dns.TypeA)
 	resp, err := r.Resolve(t.Context(), m)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -422,10 +436,10 @@ func TestChaseCNAMEGetsOwnBudgetWhenParentContextExhausted(t *testing.T) {
 	// A response carrying only the CNAME hop, as if the authoritative
 	// server answered the alias without its target's own records —
 	// chaseCNAME must resolve the target itself.
-	cnameRR, _ := dns.NewRR("www.example.com. 300 IN CNAME example.com.")
+	cnameRR, _ := dns.New("www.example.com. 300 IN CNAME example.com.")
 	resp := new(dns.Msg)
 	resp.Answer = []dns.RR{cnameRR}
-	q := dns.Question{Name: "www.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	q := dnsname.Question{Name: "www.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 
 	// Simulate the alias's own referral walk having already exhausted the
 	// query's overall deadline by the time the CNAME hop is in hand.
@@ -453,7 +467,7 @@ func TestResolveNXDOMAIN(t *testing.T) {
 	r := newTestResolver(rootAddr, nsPort)
 
 	m := new(dns.Msg)
-	m.SetQuestion("nowhere.example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "nowhere.example.com.", dns.TypeA)
 	resp, err := r.Resolve(t.Context(), m)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -486,7 +500,7 @@ func TestResolveRacesNameservers(t *testing.T) {
 	pc.Close()
 
 	authAnswers := map[string][]dns.RR{}
-	authRR, _ := dns.NewRR("example.com. 300 IN A 93.184.216.34")
+	authRR, _ := dns.New("example.com. 300 IN A 93.184.216.34")
 	authAnswers["example.com."] = []dns.RR{authRR}
 	authZone := &fakeZone{name: "example.com.", answers: authAnswers}
 	liveAddr, _ := startFakeServer(t, "127.0.0.3:"+nsPort, authZone)
@@ -513,7 +527,7 @@ func TestResolveRacesNameservers(t *testing.T) {
 
 	r := newTestResolver(rootAddr, nsPort)
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -526,7 +540,7 @@ func TestResolveRacesNameservers(t *testing.T) {
 		t.Fatalf("answers = %d, want 1: %v", len(resp.Answer), resp.Answer)
 	}
 	a, ok := resp.Answer[0].(*dns.A)
-	if !ok || a.A.String() != "93.184.216.34" {
+	if !ok || a.Addr.String() != "93.184.216.34" {
 		t.Fatalf("unexpected answer: %v", resp.Answer[0])
 	}
 	// The dead server would cost perServerTimeout (3s) if it were tried
@@ -570,7 +584,7 @@ func TestResolveAllRootsUnreachable(t *testing.T) {
 
 	r := New([]string{deadAddr})
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
@@ -586,9 +600,9 @@ func TestResolveAllRootsUnreachable(t *testing.T) {
 func TestReferralParsing(t *testing.T) {
 	t.Parallel()
 	resp := new(dns.Msg)
-	ns, _ := dns.NewRR("example.com. 300 IN NS ns1.example.com.")
+	ns, _ := dns.New("example.com. 300 IN NS ns1.example.com.")
 	resp.Ns = []dns.RR{ns}
-	a, _ := dns.NewRR("ns1.example.com. 300 IN A 10.0.0.1")
+	a, _ := dns.New("ns1.example.com. 300 IN A 10.0.0.1")
 	resp.Extra = []dns.RR{a}
 
 	zone, records, ttl, hasNS := parseReferral(resp)
@@ -614,7 +628,7 @@ func TestReferralParsing(t *testing.T) {
 func TestReferralNoGlue(t *testing.T) {
 	t.Parallel()
 	resp := new(dns.Msg)
-	ns, _ := dns.NewRR("example.com. 300 IN NS ns1.example.com.")
+	ns, _ := dns.New("example.com. 300 IN NS ns1.example.com.")
 	resp.Ns = []dns.RR{ns}
 
 	zone, records, _, hasNS := parseReferral(resp)
@@ -645,9 +659,9 @@ func TestResolveGluelessOutOfBailiwickNS(t *testing.T) {
 	// some separate server: the .com TLD delegated example.com. to exactly
 	// this nameserver, so this IS the server the walk must end up querying.
 	nsHostAnswers := map[string][]dns.RR{}
-	nsA, _ := dns.NewRR("ns1.dnshost.invalid. 300 IN A 127.0.0.4")
+	nsA, _ := dns.New("ns1.dnshost.invalid. 300 IN A 127.0.0.4")
 	nsHostAnswers["ns1.dnshost.invalid."] = []dns.RR{nsA}
-	exampleRR, _ := dns.NewRR("example.com. 300 IN A 93.184.216.34")
+	exampleRR, _ := dns.New("example.com. 300 IN A 93.184.216.34")
 	nsHostAnswers["example.com."] = []dns.RR{exampleRR}
 	nsHostZone := &fakeZone{name: "dnshost.invalid.", answers: nsHostAnswers}
 	nsHostAddr, _ := startFakeServer(t, "127.0.0.4:"+nsPort, nsHostZone)
@@ -692,7 +706,7 @@ func TestResolveGluelessOutOfBailiwickNS(t *testing.T) {
 
 	r := newTestResolver(rootAddr, nsPort)
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 	resp, err := r.Resolve(t.Context(), m)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
@@ -701,7 +715,7 @@ func TestResolveGluelessOutOfBailiwickNS(t *testing.T) {
 		t.Fatalf("answers = %d, want 1: %v", len(resp.Answer), resp.Answer)
 	}
 	a, ok := resp.Answer[0].(*dns.A)
-	if !ok || a.A.String() != "93.184.216.34" {
+	if !ok || a.Addr.String() != "93.184.216.34" {
 		t.Fatalf("unexpected answer: %v", resp.Answer[0])
 	}
 }
@@ -721,18 +735,20 @@ func TestResolveCoalescesNSAddressLookups(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	nsHostSrv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+	started := make(chan struct{})
+	nsHostSrv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		nsHits.Add(1)
 		time.Sleep(300 * time.Millisecond)
 		m := new(dns.Msg)
-		m.SetReply(r)
-		a, _ := dns.NewRR("ns1.dnshost.invalid. 300 IN A 127.0.0.4")
+		dnsutil.SetReply(m, r)
+		a, _ := dns.New("ns1.dnshost.invalid. 300 IN A 127.0.0.4")
 		m.Answer = []dns.RR{a}
 		m.Authoritative = true
-		_ = w.WriteMsg(m)
+		writeTestMsg(w, m)
 	})}
-	go func() { _ = nsHostSrv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = nsHostSrv.Shutdown() })
+	go func() { _ = nsHostSrv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { nsHostSrv.Shutdown(context.Background()) })
 
 	// The invalid. TLD glues dnshost.invalid. so a nameserver-address walk
 	// ends at the DNS host above.
@@ -787,11 +803,11 @@ func TestResolveCachesNSAddress(t *testing.T) {
 	// One provider host answers its own nameserver's A record plus two
 	// unrelated customer zones, as a real DNS host serves many domains.
 	nsHostAnswers := map[string][]dns.RR{}
-	nsA, _ := dns.NewRR("ns1.dnshost.invalid. 300 IN A 127.0.0.4")
+	nsA, _ := dns.New("ns1.dnshost.invalid. 300 IN A 127.0.0.4")
 	nsHostAnswers["ns1.dnshost.invalid."] = []dns.RR{nsA}
-	exampleRR, _ := dns.NewRR("example.com. 300 IN A 93.184.216.34")
+	exampleRR, _ := dns.New("example.com. 300 IN A 93.184.216.34")
 	nsHostAnswers["example.com."] = []dns.RR{exampleRR}
-	otherRR, _ := dns.NewRR("other.com. 300 IN A 203.0.113.7")
+	otherRR, _ := dns.New("other.com. 300 IN A 203.0.113.7")
 	nsHostAnswers["other.com."] = []dns.RR{otherRR}
 	nsHostZone := &fakeZone{name: "dnshost.invalid.", answers: nsHostAnswers}
 	nsHostAddr, _ := startFakeServer(t, "127.0.0.4:"+nsPort, nsHostZone)
@@ -833,7 +849,7 @@ func TestResolveCachesNSAddress(t *testing.T) {
 	r := newTestResolver(rootAddr, nsPort)
 
 	m1 := new(dns.Msg)
-	m1.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m1, "example.com.", dns.TypeA)
 	if _, err := r.Resolve(t.Context(), m1); err != nil {
 		t.Fatalf("first Resolve: %v", err)
 	}
@@ -851,7 +867,7 @@ func TestResolveCachesNSAddress(t *testing.T) {
 	r.mu.Unlock()
 	stopInvalid()
 	m2 := new(dns.Msg)
-	m2.SetQuestion("other.com.", dns.TypeA)
+	dnsutil.SetQuestion(m2, "other.com.", dns.TypeA)
 	resp, err := r.Resolve(t.Context(), m2)
 	if err != nil {
 		t.Fatalf("second Resolve with cached NS address: %v", err)
@@ -860,7 +876,7 @@ func TestResolveCachesNSAddress(t *testing.T) {
 		t.Fatalf("answers = %d, want 1: %v", len(resp.Answer), resp.Answer)
 	}
 	a, ok := resp.Answer[0].(*dns.A)
-	if !ok || a.A.String() != "203.0.113.7" {
+	if !ok || a.Addr.String() != "203.0.113.7" {
 		t.Fatalf("unexpected answer: %v", resp.Answer[0])
 	}
 }
@@ -877,27 +893,28 @@ func TestResolverAdvertisesEDNS1232(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-		for _, rr := range r.Extra {
-			if opt, ok := rr.(*dns.OPT); ok {
-				gotSize.Store(int32(opt.UDPSize()))
-			}
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
+		_ = r.Unpack()
+		if r.UDPSize > 0 {
+			gotSize.Store(int32(r.UDPSize))
 		}
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		m.Authoritative = true
 		m.Answer = append(m.Answer, &dns.A{
-			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-			A:   net.ParseIP("203.0.113.9"),
+			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+			A:   rdata.A{Addr: netip.MustParseAddr("203.0.113.9")},
 		})
-		_ = w.WriteMsg(m)
+		writeTestMsg(w, m)
 	})}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	r := New([]string{pc.LocalAddr().String()})
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 	resp, err := r.Resolve(t.Context(), m)
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
@@ -920,19 +937,21 @@ func TestResolverConnPoolReuse(t *testing.T) {
 		t.Fatalf("listen: %v", err)
 	}
 	addr := pc.LocalAddr().String()
-	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		m.SetReply(r)
-		_ = w.WriteMsg(m)
+		dnsutil.SetReply(m, r)
+		writeTestMsg(w, m)
 	})}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	r := New([]string{addr})
 	t.Cleanup(r.Close)
 
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 	if _, err := r.exchange(t.Context(), addr, m.Copy(), "udp", time.Second); err != nil {
 		t.Fatalf("first exchange: %v", err)
 	}
@@ -965,7 +984,7 @@ func TestResolverConnPoolKeyCap(t *testing.T) {
 		c1, c2 := net.Pipe()
 		_ = c2
 		addr := "10.0.0.1:" + strconv.Itoa(i) // port varies so every key is distinct
-		r.putConn("udp", addr, &dns.Conn{Conn: c1})
+		r.putConn("udp", addr, c1)
 	}
 	if got := r.poolKeyCount.Load(); got != int64(nsConnPoolMaxKeys) {
 		t.Fatalf("poolKeyCount = %d, want exactly %d (capped)", got, nsConnPoolMaxKeys)

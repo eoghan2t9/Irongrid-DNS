@@ -9,11 +9,13 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 )
 
 const (
@@ -210,10 +212,11 @@ func lookupPTR(ctx context.Context, h *Handler, ip string) string {
 			return name
 		}
 	}
-	rev, err := dns.ReverseAddr(ip)
+	addr, err := netip.ParseAddr(ip)
 	if err != nil {
 		return ""
 	}
+	rev := dnsutil.ReverseAddr(addr)
 	msg, err := h.resolveAny(ctx, rev, dns.TypePTR)
 	if err != nil || msg == nil {
 		return ""

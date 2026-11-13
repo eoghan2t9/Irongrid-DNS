@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto"
 	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -11,7 +12,9 @@ import (
 	"time"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
 )
 
 // zoneKey is one test zone's signing key (a single combined KSK/ZSK, flags
@@ -26,7 +29,7 @@ type zoneKey struct {
 func generateZoneKey(t *testing.T, zone string) zoneKey {
 	t.Helper()
 	k := &dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: zone, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Hdr:       dns.Header{Name: zone, Class: dns.ClassINET, TTL: 3600},
 		Flags:     257, // ZONE (256) + SEP (1): usable as both KSK and ZSK
 		Protocol:  3,
 		Algorithm: dns.ECDSAP256SHA256,
@@ -48,18 +51,18 @@ func sign(t *testing.T, k zoneKey, rrset []dns.RR) *dns.RRSIG {
 	t.Helper()
 	hdr := rrset[0].Header()
 	sig := &dns.RRSIG{
-		Hdr:         dns.RR_Header{Name: hdr.Name, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: hdr.Ttl},
-		TypeCovered: hdr.Rrtype,
+		Hdr:         dns.Header{Name: hdr.Name, Class: dns.ClassINET, TTL: hdr.TTL},
+		TypeCovered: dns.RRToType(rrset[0]),
 		Algorithm:   k.dnsk.Algorithm,
-		Labels:      uint8(len(dns.SplitDomainName(hdr.Name))),
-		OrigTtl:     hdr.Ttl,
+		Labels:      uint8(len(splitLabels(hdr.Name))),
+		OrigTTL:     hdr.TTL,
 		Expiration:  uint32(time.Now().Add(24 * time.Hour).Unix()),
 		Inception:   uint32(time.Now().Add(-1 * time.Hour).Unix()),
 		KeyTag:      k.dnsk.KeyTag(),
 		SignerName:  k.zone,
 	}
-	if err := sig.Sign(k.priv, rrset); err != nil {
-		t.Fatalf("sign %s/%s: %v", hdr.Name, dns.TypeToString[hdr.Rrtype], err)
+	if err := sig.Sign(k.priv, rrset, new(dns.SignOption)); err != nil {
+		t.Fatalf("sign %s/%s: %v", hdr.Name, dnsutil.TypeToString(dns.RRToType(rrset[0])), err)
 	}
 	return sig
 }
@@ -86,8 +89,8 @@ func buildDNSSECTestZones(t *testing.T) dnssecTestZones {
 	anchor := TrustAnchor{Zone: ".", KeyTag: rootDS.KeyTag, Algorithm: rootDS.Algorithm, DigestType: rootDS.DigestType, Digest: rootDS.Digest}
 
 	a := &dns.A{
-		Hdr: dns.RR_Header{Name: "example.test.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
-		A:   net.ParseIP("192.0.2.1"),
+		Hdr: dns.Header{Name: "example.test.", Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr("192.0.2.1")},
 	}
 	aRRset := []dns.RR{a}
 	aSig := sign(t, leaf, aRRset)
@@ -100,44 +103,43 @@ func buildDNSSECTestZones(t *testing.T) dnssecTestZones {
 // needs, all signed with z's keys.
 func startDNSSECTestUpstream(t *testing.T, z dnssecTestZones) *upstream.Upstream {
 	t.Helper()
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+	handler := dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		q := r.Question[0]
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		switch {
-		case q.Name == "." && q.Qtype == dns.TypeDNSKEY:
+		case q.Header().Name == "." && dns.RRToType(q) == dns.TypeDNSKEY:
 			rrset := []dns.RR{z.root.dnsk}
 			m.Answer = append(m.Answer, z.root.dnsk, sign(t, z.root, rrset))
-		case q.Name == "test." && q.Qtype == dns.TypeDNSKEY:
+		case q.Header().Name == "test." && dns.RRToType(q) == dns.TypeDNSKEY:
 			rrset := []dns.RR{z.tld.dnsk}
 			m.Answer = append(m.Answer, z.tld.dnsk, sign(t, z.tld, rrset))
-		case q.Name == "test." && q.Qtype == dns.TypeDS:
+		case q.Header().Name == "test." && dns.RRToType(q) == dns.TypeDS:
 			ds := z.tld.dnsk.ToDS(dns.SHA256)
-			ds.Hdr = dns.RR_Header{Name: "test.", Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: 3600}
+			ds.Hdr = dns.Header{Name: "test.", Class: dns.ClassINET, TTL: 3600}
 			rrset := []dns.RR{ds}
 			m.Answer = append(m.Answer, ds, sign(t, z.root, rrset))
-		case q.Name == "example.test." && q.Qtype == dns.TypeDNSKEY:
+		case q.Header().Name == "example.test." && dns.RRToType(q) == dns.TypeDNSKEY:
 			rrset := []dns.RR{z.leaf.dnsk}
 			m.Answer = append(m.Answer, z.leaf.dnsk, sign(t, z.leaf, rrset))
-		case q.Name == "example.test." && q.Qtype == dns.TypeDS:
+		case q.Header().Name == "example.test." && dns.RRToType(q) == dns.TypeDS:
 			ds := z.leaf.dnsk.ToDS(dns.SHA256)
-			ds.Hdr = dns.RR_Header{Name: "example.test.", Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: 3600}
+			ds.Hdr = dns.Header{Name: "example.test.", Class: dns.ClassINET, TTL: 3600}
 			rrset := []dns.RR{ds}
 			m.Answer = append(m.Answer, ds, sign(t, z.tld, rrset))
-		case q.Name == "example.test." && q.Qtype == dns.TypeA:
+		case q.Header().Name == "example.test." && dns.RRToType(q) == dns.TypeA:
 			m.Answer = append(m.Answer, z.aRRset...)
 			m.Answer = append(m.Answer, z.aSig)
 		}
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: mux}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	srv := &dns.Server{PacketConn: pc, Handler: handler}
+	go func() { _ = srv.ListenAndServe() }()
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	return &upstream.Upstream{Transport: upstream.UDP, Addr: pc.LocalAddr().String()}
 }
 
@@ -145,47 +147,46 @@ func startDNSSECTestUpstream(t *testing.T, z dnssecTestZones) *upstream.Upstream
 // of DNSKEY queries received, for asserting singleflight coalescing.
 func startDNSSECTestUpstreamCounting(t *testing.T, z dnssecTestZones, dnskeyQueries *atomic.Int64) *upstream.Upstream {
 	t.Helper()
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+	handler := dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		q := r.Question[0]
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		switch {
-		case q.Name == "." && q.Qtype == dns.TypeDNSKEY:
+		case q.Header().Name == "." && dns.RRToType(q) == dns.TypeDNSKEY:
 			dnskeyQueries.Add(1)
 			rrset := []dns.RR{z.root.dnsk}
 			m.Answer = append(m.Answer, z.root.dnsk, sign(t, z.root, rrset))
-		case q.Name == "test." && q.Qtype == dns.TypeDNSKEY:
+		case q.Header().Name == "test." && dns.RRToType(q) == dns.TypeDNSKEY:
 			dnskeyQueries.Add(1)
 			rrset := []dns.RR{z.tld.dnsk}
 			m.Answer = append(m.Answer, z.tld.dnsk, sign(t, z.tld, rrset))
-		case q.Name == "test." && q.Qtype == dns.TypeDS:
+		case q.Header().Name == "test." && dns.RRToType(q) == dns.TypeDS:
 			ds := z.tld.dnsk.ToDS(dns.SHA256)
-			ds.Hdr = dns.RR_Header{Name: "test.", Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: 3600}
+			ds.Hdr = dns.Header{Name: "test.", Class: dns.ClassINET, TTL: 3600}
 			rrset := []dns.RR{ds}
 			m.Answer = append(m.Answer, ds, sign(t, z.root, rrset))
-		case q.Name == "example.test." && q.Qtype == dns.TypeDNSKEY:
+		case q.Header().Name == "example.test." && dns.RRToType(q) == dns.TypeDNSKEY:
 			dnskeyQueries.Add(1)
 			rrset := []dns.RR{z.leaf.dnsk}
 			m.Answer = append(m.Answer, z.leaf.dnsk, sign(t, z.leaf, rrset))
-		case q.Name == "example.test." && q.Qtype == dns.TypeDS:
+		case q.Header().Name == "example.test." && dns.RRToType(q) == dns.TypeDS:
 			ds := z.leaf.dnsk.ToDS(dns.SHA256)
-			ds.Hdr = dns.RR_Header{Name: "example.test.", Rrtype: dns.TypeDS, Class: dns.ClassINET, Ttl: 3600}
+			ds.Hdr = dns.Header{Name: "example.test.", Class: dns.ClassINET, TTL: 3600}
 			rrset := []dns.RR{ds}
 			m.Answer = append(m.Answer, ds, sign(t, z.tld, rrset))
-		case q.Name == "example.test." && q.Qtype == dns.TypeA:
+		case q.Header().Name == "example.test." && dns.RRToType(q) == dns.TypeA:
 			m.Answer = append(m.Answer, z.aRRset...)
 			m.Answer = append(m.Answer, z.aSig)
 		}
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: mux}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	srv := &dns.Server{PacketConn: pc, Handler: handler}
+	go func() { _ = srv.ListenAndServe() }()
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	return &upstream.Upstream{Transport: upstream.UDP, Addr: pc.LocalAddr().String()}
 }
 
@@ -225,8 +226,8 @@ func TestValidatorRejectsTamperedAnswer(t *testing.T) {
 	// signed — simulating a tampered/forged answer riding along with a
 	// legitimate signature.
 	tampered := &dns.A{
-		Hdr: dns.RR_Header{Name: "example.test.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
-		A:   net.ParseIP("198.51.100.66"), // different from the signed 192.0.2.1
+		Hdr: dns.Header{Name: "example.test.", Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr("198.51.100.66")}, // different from the signed 192.0.2.1
 	}
 	resp := new(dns.Msg)
 	resp.Answer = append(resp.Answer, tampered, z.aSig)
@@ -280,8 +281,8 @@ func TestValidatorUnsignedResponseIsNotSecureNorAnError(t *testing.T) {
 	v := NewValidator(testAnchorManager(DefaultRootAnchors[0]))
 	resp := new(dns.Msg)
 	resp.Answer = append(resp.Answer, &dns.A{
-		Hdr: dns.RR_Header{Name: "plain.example.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
-		A:   net.ParseIP("192.0.2.9"),
+		Hdr: dns.Header{Name: "plain.example.", Class: dns.ClassINET, TTL: 300},
+		A:   rdata.A{Addr: netip.MustParseAddr("192.0.2.9")},
 	})
 
 	secure, signed, err := v.Validate(context.Background(), nil, resp)
@@ -363,7 +364,7 @@ func TestZoneKeysCoalescesConcurrentCallsForSameZone(t *testing.T) {
 func nsecRR(t *testing.T, k zoneKey, owner, next string, types ...uint16) (*dns.NSEC, *dns.RRSIG) {
 	t.Helper()
 	n := &dns.NSEC{
-		Hdr:        dns.RR_Header{Name: owner, Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: 300},
+		Hdr:        dns.Header{Name: owner, Class: dns.ClassINET, TTL: 300},
 		NextDomain: next,
 		TypeBitMap: types,
 	}
@@ -384,7 +385,7 @@ func TestValidateDenialNSECProvesNXDOMAIN(t *testing.T) {
 
 	resp := new(dns.Msg)
 	resp.Rcode = dns.RcodeNameError
-	resp.Question = []dns.Question{{Name: "missing.example.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+	resp.Question = []dns.RR{&dns.A{Hdr: dns.Header{Name: "missing.example.test.", Class: dns.ClassINET}}}
 	resp.Ns = []dns.RR{coverQname, coverQnameSig, coverWildcard, coverWildcardSig}
 
 	secure, signed, err := v.Validate(context.Background(), up, resp)
@@ -416,7 +417,7 @@ func TestValidateDenialNSECCompactDenialSynthesis(t *testing.T) {
 
 	resp := new(dns.Msg)
 	resp.Rcode = dns.RcodeNameError
-	resp.Question = []dns.Question{{Name: qname, Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+	resp.Question = []dns.RR{&dns.A{Hdr: dns.Header{Name: qname, Class: dns.ClassINET}}}
 	resp.Ns = []dns.RR{n, sig}
 
 	secure, signed, err := v.Validate(context.Background(), up, resp)
@@ -442,7 +443,7 @@ func TestValidateDenialNSECProvesNODATA(t *testing.T) {
 
 	resp := new(dns.Msg)
 	resp.Rcode = dns.RcodeSuccess
-	resp.Question = []dns.Question{{Name: "example.test.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}}
+	resp.Question = []dns.RR{&dns.AAAA{Hdr: dns.Header{Name: "example.test.", Class: dns.ClassINET}}}
 	resp.Ns = []dns.RR{n, sig}
 
 	secure, signed, err := v.Validate(context.Background(), up, resp)
@@ -467,7 +468,7 @@ func TestValidateDenialNSECRejectsNonCoveringProof(t *testing.T) {
 
 	resp := new(dns.Msg)
 	resp.Rcode = dns.RcodeNameError
-	resp.Question = []dns.Question{{Name: "nowhere-near.example.test.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+	resp.Question = []dns.RR{&dns.A{Hdr: dns.Header{Name: "nowhere-near.example.test.", Class: dns.ClassINET}}}
 	resp.Ns = []dns.RR{n1, sig1, n2, sig2}
 
 	secure, signed, err := v.Validate(context.Background(), up, resp)
@@ -485,7 +486,7 @@ func TestValidateDenialNSECRejectsNonCoveringProof(t *testing.T) {
 // nsec3Hash is dns.HashName with this test's fixed algorithm/iterations/no
 // salt, used both to build owner names and to derive covering brackets.
 func nsec3Hash(name string) string {
-	return dns.HashName(name, dns.SHA1, 0, "")
+	return dnsutil.NSEC3Name(name, "", 0)
 }
 
 // base32hexAlphabet mirrors RFC 4648 §7 (no padding), as used by NSEC3 owner
@@ -527,7 +528,7 @@ func bumpBase32Hex(t *testing.T, s string, delta int) string {
 func nsec3RR(t *testing.T, k zoneKey, zone, ownerHash, nextHash string, types ...uint16) (*dns.NSEC3, *dns.RRSIG) {
 	t.Helper()
 	n := &dns.NSEC3{
-		Hdr:        dns.RR_Header{Name: ownerHash + "." + zone, Rrtype: dns.TypeNSEC3, Class: dns.ClassINET, Ttl: 300},
+		Hdr:        dns.Header{Name: ownerHash + "." + zone, Class: dns.ClassINET, TTL: 300},
 		Hash:       dns.SHA1,
 		Flags:      0,
 		Iterations: 0,
@@ -563,7 +564,7 @@ func TestValidateDenialNSEC3ProvesNXDOMAIN(t *testing.T) {
 
 	resp := new(dns.Msg)
 	resp.Rcode = dns.RcodeNameError
-	resp.Question = []dns.Question{{Name: qname, Qtype: dns.TypeA, Qclass: dns.ClassINET}}
+	resp.Question = []dns.RR{&dns.A{Hdr: dns.Header{Name: qname, Class: dns.ClassINET}}}
 	resp.Ns = []dns.RR{coverQname, coverQnameSig, ceRR, ceSig}
 
 	secure, signed, err := v.Validate(context.Background(), up, resp)
@@ -588,7 +589,7 @@ func TestValidateDenialNSEC3ProvesNODATA(t *testing.T) {
 
 	resp := new(dns.Msg)
 	resp.Rcode = dns.RcodeSuccess
-	resp.Question = []dns.Question{{Name: "example.test.", Qtype: dns.TypeAAAA, Qclass: dns.ClassINET}}
+	resp.Question = []dns.RR{&dns.AAAA{Hdr: dns.Header{Name: "example.test.", Class: dns.ClassINET}}}
 	resp.Ns = []dns.RR{n, sig}
 
 	secure, signed, err := v.Validate(context.Background(), up, resp)

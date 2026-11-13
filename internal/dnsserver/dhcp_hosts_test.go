@@ -1,13 +1,16 @@
 package dnsserver
 
 import (
+	"context"
 	"net"
+	"net/netip"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
@@ -65,46 +68,46 @@ func TestDHCPHostnameResolution(t *testing.T) {
 
 	// Bare hostname, A query.
 	m := new(dns.Msg)
-	m.SetQuestion("printer.", dns.TypeA)
+	dnsutil.SetQuestion(m, "printer.", dns.TypeA)
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 	if fw.msg == nil || len(fw.msg.Answer) != 1 {
 		t.Fatalf("printer A: got %d answers, want 1 (upstream hits=%d)", len(fw.msg.Answer), upstreamHits.Load())
 	}
-	if a, ok := fw.msg.Answer[0].(*dns.A); !ok || !a.A.Equal(net.ParseIP("192.168.1.50")) {
+	if a, ok := fw.msg.Answer[0].(*dns.A); !ok || a.A.Addr != netip.MustParseAddr("192.168.1.50") {
 		t.Fatalf("printer A = %v, want 192.168.1.50", fw.msg.Answer[0])
 	}
 
 	// Hostname with domain suffix, A query.
 	m2 := new(dns.Msg)
-	m2.SetQuestion("printer.lan.", dns.TypeA)
+	dnsutil.SetQuestion(m2, "printer.lan.", dns.TypeA)
 	fw2 := &fakeWriter{}
-	h.ServeDNS(fw2, m2)
+	h.ServeDNS(context.Background(), fw2, m2)
 	if len(fw2.msg.Answer) != 1 {
 		t.Fatalf("printer.lan A: got %d answers, want 1", len(fw2.msg.Answer))
 	}
-	if a, ok := fw2.msg.Answer[0].(*dns.A); !ok || !a.A.Equal(net.ParseIP("192.168.1.50")) {
+	if a, ok := fw2.msg.Answer[0].(*dns.A); !ok || a.A.Addr != netip.MustParseAddr("192.168.1.50") {
 		t.Fatalf("printer.lan A = %v, want 192.168.1.50", fw2.msg.Answer[0])
 	}
 
 	// IPv6 hostname, AAAA query.
 	m3 := new(dns.Msg)
-	m3.SetQuestion("nas.lan.", dns.TypeAAAA)
+	dnsutil.SetQuestion(m3, "nas.lan.", dns.TypeAAAA)
 	fw3 := &fakeWriter{}
-	h.ServeDNS(fw3, m3)
+	h.ServeDNS(context.Background(), fw3, m3)
 	if len(fw3.msg.Answer) != 1 {
 		t.Fatalf("nas.lan AAAA: got %d answers, want 1", len(fw3.msg.Answer))
 	}
-	if aaaa, ok := fw3.msg.Answer[0].(*dns.AAAA); !ok || !aaaa.AAAA.Equal(net.ParseIP("fd00::50")) {
+	if aaaa, ok := fw3.msg.Answer[0].(*dns.AAAA); !ok || aaaa.AAAA.Addr != netip.MustParseAddr("fd00::50") {
 		t.Fatalf("nas.lan AAAA = %v, want fd00::50", fw3.msg.Answer[0])
 	}
 
 	// Unknown hostname falls through to the upstream.
 	hitsBefore := upstreamHits.Load()
 	m4 := new(dns.Msg)
-	m4.SetQuestion("something.else.", dns.TypeA)
+	dnsutil.SetQuestion(m4, "something.else.", dns.TypeA)
 	fw4 := &fakeWriter{}
-	h.ServeDNS(fw4, m4)
+	h.ServeDNS(context.Background(), fw4, m4)
 	if upstreamHits.Load() == hitsBefore {
 		t.Fatal("unknown hostname did not reach the upstream")
 	}
@@ -130,9 +133,9 @@ func TestDHCPHostnameDoesNotLeakToAAAAForV4Only(t *testing.T) {
 	// AAAA for a v4-only hostname: the resolver returns a v4 address, so the
 	// handler must answer NODATA (no AAAA) instead of leaking the A.
 	m := new(dns.Msg)
-	m.SetQuestion("printer.", dns.TypeAAAA)
+	dnsutil.SetQuestion(m, "printer.", dns.TypeAAAA)
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 	if fw.msg == nil {
 		t.Fatal("no response")
 	}
@@ -162,14 +165,11 @@ func TestDHCPReverseLookup(t *testing.T) {
 	}
 
 	// PTR for the leased v4 address: answers printer.lan, no upstream hit.
-	v4rev, err := dns.ReverseAddr("192.168.1.50")
-	if err != nil {
-		t.Fatal(err)
-	}
+	v4rev := dnsutil.ReverseAddr(netip.MustParseAddr("192.168.1.50"))
 	m := new(dns.Msg)
-	m.SetQuestion(v4rev, dns.TypePTR)
+	dnsutil.SetQuestion(m, v4rev, dns.TypePTR)
 	fw := &fakeWriter{}
-	h.ServeDNS(fw, m)
+	h.ServeDNS(context.Background(), fw, m)
 	if fw.msg == nil || len(fw.msg.Answer) != 1 {
 		t.Fatalf("PTR lease: got %d answers, want 1 (upstream hits=%d)", len(fw.msg.Answer), upstreamHits.Load())
 	}
@@ -179,14 +179,11 @@ func TestDHCPReverseLookup(t *testing.T) {
 
 	// PTR for the leased v6 address (ip6.arpa nibble format), built with
 	// ReverseAddr so the 32 nibbles are guaranteed correct.
-	v6rev, err := dns.ReverseAddr("fd00::50")
-	if err != nil {
-		t.Fatal(err)
-	}
+	v6rev := dnsutil.ReverseAddr(netip.MustParseAddr("fd00::50"))
 	m6 := new(dns.Msg)
-	m6.SetQuestion(v6rev, dns.TypePTR)
+	dnsutil.SetQuestion(m6, v6rev, dns.TypePTR)
 	fw6 := &fakeWriter{}
-	h.ServeDNS(fw6, m6)
+	h.ServeDNS(context.Background(), fw6, m6)
 	if fw6.msg == nil || len(fw6.msg.Answer) != 1 {
 		t.Fatalf("PTR v6 lease: got %d answers, want 1", len(fw6.msg.Answer))
 	}
@@ -196,11 +193,11 @@ func TestDHCPReverseLookup(t *testing.T) {
 
 	// PTR for an unknown address falls through to the upstream.
 	hitsBefore := upstreamHits.Load()
-	unknownRev, _ := dns.ReverseAddr("192.168.1.51")
+	unknownRev := dnsutil.ReverseAddr(netip.MustParseAddr("192.168.1.51"))
 	m2 := new(dns.Msg)
-	m2.SetQuestion(unknownRev, dns.TypePTR)
+	dnsutil.SetQuestion(m2, unknownRev, dns.TypePTR)
 	fw2 := &fakeWriter{}
-	h.ServeDNS(fw2, m2)
+	h.ServeDNS(context.Background(), fw2, m2)
 	if upstreamHits.Load() == hitsBefore {
 		t.Fatal("unknown PTR address did not reach the upstream")
 	}
@@ -209,9 +206,9 @@ func TestDHCPReverseLookup(t *testing.T) {
 	// be intercepted either.
 	hitsBefore = upstreamHits.Load()
 	m3 := new(dns.Msg)
-	m3.SetQuestion(v4rev, dns.TypeA)
+	dnsutil.SetQuestion(m3, v4rev, dns.TypeA)
 	fw3 := &fakeWriter{}
-	h.ServeDNS(fw3, m3)
+	h.ServeDNS(context.Background(), fw3, m3)
 	if upstreamHits.Load() == hitsBefore {
 		t.Fatal("A query for a reverse name was intercepted by the PTR hook")
 	}

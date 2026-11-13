@@ -1,12 +1,14 @@
 package dnsserver
 
 import (
-	"net"
+	"context"
+	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
@@ -36,17 +38,17 @@ func TestConditionalRoutes(t *testing.T) {
 
 	query := func(name string, qtype uint16) *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion(name, qtype)
+		dnsutil.SetQuestion(m, name, qtype)
 		fw := &fakeWriter{}
-		h.ServeDNS(fw, m)
+		h.ServeDNS(context.Background(), fw, m)
 		return fw.msg
 	}
 
 	// A name under the route domain (subdomain of lan) goes to the route.
 	if msg := query("printer.lan.", dns.TypeA); msg == nil || len(msg.Answer) != 1 {
 		t.Fatalf("printer.lan: no answer (route hits=%d)", routeHits.Load())
-	} else if a := msg.Answer[0].(*dns.A); !a.A.Equal(net.ParseIP("198.51.100.9")) {
-		t.Fatalf("printer.lan answered %v, want the route's 198.51.100.9", a.A)
+	} else if a := msg.Answer[0].(*dns.A); a.A.Addr != netip.MustParseAddr("198.51.100.9") {
+		t.Fatalf("printer.lan answered %v, want the route's 198.51.100.9", a.A.Addr)
 	}
 	// The exact route domain itself also routes.
 	query("lan.", dns.TypeA)

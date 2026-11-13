@@ -16,10 +16,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 )
@@ -249,7 +251,7 @@ func (w *Warmer) run(ctx context.Context) {
 	sem := make(chan struct{}, workers)
 	var wg sync.WaitGroup
 	for _, td := range domains {
-		name := dns.Fqdn(td.Domain)
+		name := dnsutil.Fqdn(td.Domain)
 		// Blocked domains are answered from the filter engine without ever
 		// reaching the cache or an upstream — warming one would waste
 		// upstream traffic (and leak the query). Rewrites are answered
@@ -301,7 +303,7 @@ func (w *Warmer) run(ctx context.Context) {
 // double-resolves with the cache's own near-expiry prefetch).
 func (w *Warmer) warmDomain(ctx context.Context, c *cache.Cache, name string) (warmed, skipped int64, err error) {
 	for _, qt := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		q := dns.Question{Name: name, Qtype: qt, Qclass: dns.ClassINET}
+		q := dnsname.Question{Name: name, Qtype: qt, Qclass: dns.ClassINET}
 		// Fresh already: skip without counting the probe in the cache's
 		// hit/miss counters (Fresh is a quiet probe, unlike Lookup) so
 		// warming traffic doesn't skew the dashboard's cache cards.

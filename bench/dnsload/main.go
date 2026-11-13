@@ -26,7 +26,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
 )
 
 // qnames is the default query mix — a handful of real, cacheable domains.
@@ -100,7 +100,9 @@ func main() {
 		}
 		dohURL = scheme + "://" + *addr + *dohPath
 	}
-	client := &dns.Client{Net: *proto, Timeout: 3 * time.Second}
+	client := dns.NewClient()
+	client.Transport.ReadTimeout = 3 * time.Second
+	client.Transport.Dialer.Timeout = 3 * time.Second
 
 	var wg sync.WaitGroup
 	for i := range *workers {
@@ -115,14 +117,13 @@ func main() {
 				if pace > 0 {
 					time.Sleep(pace)
 				}
-				m := new(dns.Msg)
-				m.SetQuestion(mix[rnd.IntN(len(mix))], dns.TypeA)
+				m := dns.NewMsg(mix[rnd.IntN(len(mix))], dns.TypeA)
 				start := time.Now()
 				var err error
 				if *proto == "doh" {
 					err = dohExchange(dohClient, dohURL, m)
 				} else {
-					_, _, err = client.Exchange(m, *addr)
+					_, _, err = client.Exchange(ctx, m, *proto, *addr)
 				}
 				record(time.Since(start), err)
 			}
@@ -183,11 +184,10 @@ func splitNames(s string) []string {
 // dohExchange sends one RFC 8484 DoH POST (application/dns-message) and
 // returns an error if the response isn't a parseable DNS message.
 func dohExchange(c *http.Client, url string, m *dns.Msg) error {
-	raw, err := m.Pack()
-	if err != nil {
+	if err := m.Pack(); err != nil {
 		return err
 	}
-	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(m.Data))
 	if err != nil {
 		return err
 	}
@@ -206,7 +206,8 @@ func dohExchange(c *http.Client, url string, m *dns.Msg) error {
 		return err
 	}
 	r := new(dns.Msg)
-	if err := r.Unpack(buf.Bytes()); err != nil {
+	r.Data = buf.Bytes()
+	if err := r.Unpack(); err != nil {
 		return fmt.Errorf("doh decode: %w", err)
 	}
 	return nil

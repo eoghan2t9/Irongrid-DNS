@@ -7,7 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 )
@@ -34,18 +35,20 @@ func TestUDPServerWorkerPool(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	addr := pc.LocalAddr().String()
-	c := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
+	c := dns.NewClient()
 	query := func() {
 		m := new(dns.Msg)
-		m.SetQuestion("pool.test.", dns.TypeA)
-		resp, _, err := c.Exchange(m, addr)
+		dnsutil.SetQuestion(m, "pool.test.", dns.TypeA)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		resp, _, err := c.Exchange(ctx, m, "udp", addr)
 		if err != nil {
 			t.Fatalf("exchange: %v", err)
 		}
 		if len(resp.Answer) != 1 {
 			t.Fatalf("answers = %d, want 1 (rcode %d)", len(resp.Answer), resp.Rcode)
 		}
-		if a, ok := resp.Answer[0].(*dns.A); !ok || a.A.String() != "192.168.1.10" {
+		if a, ok := resp.Answer[0].(*dns.A); !ok || a.A.Addr.String() != "192.168.1.10" {
 			t.Fatalf("answer = %v, want A 192.168.1.10", resp.Answer[0])
 		}
 	}
@@ -107,15 +110,16 @@ type blockingDNSHandler struct {
 	release chan struct{}
 }
 
-func (h *blockingDNSHandler) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+func (h *blockingDNSHandler) ServeDNS(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 	select {
 	case h.entered <- struct{}{}:
 	default:
 	}
 	<-h.release
 	m := new(dns.Msg)
-	m.SetReply(r)
-	_ = w.WriteMsg(m)
+	dnsutil.SetReply(m, r)
+	_ = m.Pack()
+	_, _ = w.Write(m.Data)
 }
 
 // TestUDPServerOverloadIsMeasured verifies a blocked handler cannot stop the
@@ -141,11 +145,11 @@ func TestUDPServerOverloadIsMeasured(t *testing.T) {
 	}
 	defer client.Close()
 	m := new(dns.Msg)
-	m.SetQuestion("overload.test.", dns.TypeA)
-	wire, err := m.Pack()
-	if err != nil {
+	dnsutil.SetQuestion(m, "overload.test.", dns.TypeA)
+	if err := m.Pack(); err != nil {
 		t.Fatalf("pack: %v", err)
 	}
+	wire := m.Data
 	const packets = 16
 	for range packets {
 		if _, err := client.Write(wire); err != nil {

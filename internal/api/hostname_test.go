@@ -12,7 +12,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
 )
 
 // TestLogHostnames verifies the batch endpoint resolves PTR records through
@@ -22,8 +24,8 @@ func TestLogHostnames(t *testing.T) {
 	t.Parallel()
 	addr := startUDPDNS(t, map[string][]dns.RR{
 		"4.3.2.1.in-addr.arpa.|PTR": {&dns.PTR{
-			Hdr: dns.RR_Header{Name: "4.3.2.1.in-addr.arpa.", Rrtype: dns.TypePTR, Class: dns.ClassINET, Ttl: 300},
-			Ptr: "host.example.net.",
+			Hdr: dns.Header{Name: "4.3.2.1.in-addr.arpa.", Class: dns.ClassINET, TTL: 300},
+			PTR: rdata.PTR{Ptr: "host.example.net."},
 		}},
 	})
 	h := handlerFor(t, addr)
@@ -62,19 +64,27 @@ func TestResolveHostnameCoalescesConcurrentLookups(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-		hits.Add(1)
-		time.Sleep(300 * time.Millisecond) // keep the lookups overlapping
-		m := new(dns.Msg)
-		m.SetReply(r)
-		m.Answer = append(m.Answer, &dns.PTR{
-			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypePTR, Class: dns.ClassINET, Ttl: 300},
-			Ptr: "host.example.net.",
-		})
-		_ = w.WriteMsg(m)
-	})}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	started := make(chan struct{})
+	srv := &dns.Server{
+		PacketConn:        pc,
+		NotifyStartedFunc: func(context.Context) { close(started) },
+		Handler: dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
+			_ = r.Unpack()
+			hits.Add(1)
+			time.Sleep(300 * time.Millisecond) // keep the lookups overlapping
+			m := new(dns.Msg)
+			dnsutil.SetReply(m, r)
+			m.Answer = append(m.Answer, &dns.PTR{
+				Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 300},
+				PTR: rdata.PTR{Ptr: "host.example.net."},
+			})
+			_ = m.Pack()
+			_, _ = m.WriteTo(w)
+		}),
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 
 	h := handlerFor(t, pc.LocalAddr().String())
 

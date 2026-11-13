@@ -2,11 +2,14 @@ package dnsserver
 
 import (
 	"net"
+	"net/netip"
 	"strings"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/rdata"
 
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/vpn"
 )
 
@@ -37,7 +40,7 @@ const proxyAnswerTTL = 30
 // NODATA reply rather than falling through to real resolution — otherwise
 // a dual-stack client's Happy-Eyeballs AAAA query would get the real
 // address and connect over IPv6 directly, bypassing the relay entirely.
-func (h *Handler) tryProxyAnswer(r *dns.Msg, q dns.Question) *dns.Msg {
+func (h *Handler) tryProxyAnswer(r *dns.Msg, q dnsname.Question) *dns.Msg {
 	vr := h.vpnRouter.Load()
 	if vr == nil || (q.Qtype != dns.TypeA && q.Qtype != dns.TypeAAAA) {
 		return nil
@@ -52,15 +55,19 @@ func (h *Handler) tryProxyAnswer(r *dns.Msg, q dns.Question) *dns.Msg {
 	is4 := ip.To4() != nil
 	switch {
 	case q.Qtype == dns.TypeA && is4:
-		m.Answer = append(m.Answer, &dns.A{
-			Hdr: dns.RR_Header{Name: q.Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: proxyAnswerTTL},
-			A:   ip.To4(),
-		})
+		if addr, ok := netip.AddrFromSlice(ip.To4()); ok {
+			m.Answer = append(m.Answer, &dns.A{
+				Hdr: dns.Header{Name: q.Name, Class: dns.ClassINET, TTL: proxyAnswerTTL},
+				A:   rdata.A{Addr: addr},
+			})
+		}
 	case q.Qtype == dns.TypeAAAA && !is4:
-		m.Answer = append(m.Answer, &dns.AAAA{
-			Hdr:  dns.RR_Header{Name: q.Name, Rrtype: dns.TypeAAAA, Class: dns.ClassINET, Ttl: proxyAnswerTTL},
-			AAAA: ip.To16(),
-		})
+		if addr, ok := netip.AddrFromSlice(ip.To16()); ok {
+			m.Answer = append(m.Answer, &dns.AAAA{
+				Hdr:  dns.Header{Name: q.Name, Class: dns.ClassINET, TTL: proxyAnswerTTL},
+				AAAA: rdata.AAAA{Addr: addr},
+			})
+		}
 	}
 	return m
 }
@@ -81,20 +88,20 @@ func (h *Handler) observeVPN(r, m *dns.Msg) {
 		var ip net.IP
 		switch v := rr.(type) {
 		case *dns.A:
-			ip = v.A
+			ip = v.A.Addr.AsSlice()
 		case *dns.AAAA:
-			ip = v.AAAA
+			ip = v.AAAA.Addr.AsSlice()
 		default:
 			continue
 		}
 		ips = append(ips, ip)
-		if ttl := rr.Header().Ttl; minTTL == 0 || ttl < minTTL {
+		if ttl := rr.Header().TTL; minTTL == 0 || ttl < minTTL {
 			minTTL = ttl
 		}
 	}
 	if len(ips) == 0 {
 		return
 	}
-	name := strings.ToLower(strings.TrimSuffix(r.Question[0].Name, "."))
+	name := strings.ToLower(strings.TrimSuffix(r.Question[0].Header().Name, "."))
 	vr.Observe(vpn.Answer{Name: name, IPs: ips, TTL: time.Duration(minTTL) * time.Second})
 }

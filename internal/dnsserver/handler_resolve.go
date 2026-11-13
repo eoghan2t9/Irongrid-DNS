@@ -11,9 +11,10 @@ import (
 	"sync/atomic"
 	"time"
 
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
-	"github.com/miekg/dns"
 )
 
 // Upstream resolution: singleflight coalescing, upstream query modes, resolve-and-cache and refresh.
@@ -42,7 +43,7 @@ type flightResult struct {
 // the answer for a question is the same regardless of which upstream group
 // won, and the response cache already serves every client group from the same
 // entries.
-func (h *Handler) resolveUpstreams(ctx context.Context, r *dns.Msg, q dns.Question, upstreams []*upstream.Upstream, mode string, query *dns.Msg) (*dns.Msg, string, error) {
+func (h *Handler) resolveUpstreams(ctx context.Context, r *dns.Msg, q dnsname.Question, upstreams []*upstream.Upstream, mode string, query *dns.Msg) (*dns.Msg, string, error) {
 	if !coalesceEligible(r) {
 		return queryUpstreams(ctx, upstreams, mode, query)
 	}
@@ -76,14 +77,14 @@ func (h *Handler) resolveUpstreams(ctx context.Context, r *dns.Msg, q dns.Questi
 			// the leader, so rebase it to this request's ID so a UDP client
 			// doesn't silently drop a mismatched-ID response.
 			out := fr.resp.Copy()
-			out.Id = r.Id
+			out.ID = r.ID
 			return out, fr.up, nil
 		}
 		// No other caller shared this flight: the result is exclusively
 		// ours, so take ownership directly — rebase the ID to this request
 		// and return it without a copy, skipping the allocation the shared
 		// path must pay.
-		fr.resp.Id = r.Id
+		fr.resp.ID = r.ID
 		return fr.resp, fr.up, nil
 	case <-ctx.Done():
 		// Deadline expired while waiting on the leader: return the timeout
@@ -108,13 +109,11 @@ func coalesceEligible(r *dns.Msg) bool {
 	// Exactly one question: a degenerate multi-question message shares only
 	// its first question with an identical-looking query from another client
 	// and must never merge (its additional questions would be lost).
-	if len(r.Question) != 1 || isMetaQuery(r.Question[0]) {
+	if len(r.Question) != 1 || isMetaQuery(questionOf(r.Question[0])) {
 		return false
 	}
-	for _, rr := range r.Extra {
-		if rr.Header().Rrtype != dns.TypeOPT {
-			return false
-		}
+	if len(r.Extra) > 0 {
+		return false
 	}
 	return true
 }
@@ -122,7 +121,7 @@ func coalesceEligible(r *dns.Msg) bool {
 // flightKey is the coalescing key: the canonical lowercased question. DNS
 // names are case-insensitive, so the key must be canonicalised or two
 // clients spelling the same name differently would resolve twice.
-func flightKey(q dns.Question) string {
+func flightKey(q dnsname.Question) string {
 	var b strings.Builder
 	b.Grow(len(q.Name) + 8)
 	for _, c := range q.Name {
@@ -351,7 +350,7 @@ func raceUpstreams(ctx context.Context, ups []*upstream.Upstream, r *dns.Msg) (*
 // callback (Refresh) and the proactive cache warmer, so both mechanisms
 // resolve through the exact same path — snapshotting the hot-swappable
 // upstreams and cache at call time.
-func (h *Handler) resolveAndCache(ctx context.Context, q dns.Question) error {
+func (h *Handler) resolveAndCache(ctx context.Context, q dnsname.Question) error {
 	s := h.settings.Load()
 	ups := s.Upstreams
 	routes := s.UpstreamRoutes
@@ -371,7 +370,7 @@ func (h *Handler) resolveAndCache(ctx context.Context, q dns.Question) error {
 		return fmt.Errorf("no cache configured")
 	}
 	m := new(dns.Msg)
-	m.SetQuestion(q.Name, q.Qtype)
+	dnsutil.SetQuestion(m, q.Name, q.Qtype)
 	m.RecursionDesired = true
 	// The same strategy the query path uses (race by default) applies to
 	// prefetch and warmer resolutions, so a sequential-mode deployment
@@ -407,6 +406,6 @@ func (h *Handler) resolveAndCache(ctx context.Context, q dns.Question) error {
 // answer instead of paying an upstream round trip. Best-effort — failures
 // are dropped (the entry is expiring anyway and the normal resolution path
 // handles the next query).
-func (h *Handler) Refresh(ctx context.Context, q dns.Question) {
+func (h *Handler) Refresh(ctx context.Context, q dnsname.Question) {
 	_ = h.resolveAndCache(ctx, q)
 }

@@ -3,13 +3,16 @@ package dnsserver
 import (
 	"context"
 	"net"
+	"net/netip"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
-	"github.com/miekg/dns"
 )
 
 // startCountingUDPTestServer runs a tiny UDP DNS server that answers every
@@ -19,25 +22,27 @@ func startCountingUDPTestServer(t *testing.T) (addr string, count *atomic.Int64,
 	t.Helper()
 	count = &atomic.Int64{}
 	lastQname = &atomic.Value{}
-	mux := dns.NewServeMux()
-	mux.HandleFunc(".", func(w dns.ResponseWriter, r *dns.Msg) {
+	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		count.Add(1)
-		lastQname.Store(r.Question[0].Name)
+		qname := r.Question[0].Header().Name
+		lastQname.Store(qname)
 		m := new(dns.Msg)
-		m.SetReply(r)
+		dnsutil.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
-			Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-			A:   net.ParseIP("93.184.216.34"),
+			Hdr: dns.Header{Name: qname, Class: dns.ClassINET, TTL: 60},
+			A:   rdata.A{Addr: netip.MustParseAddr("93.184.216.34")},
 		})
-		_ = w.WriteMsg(m)
+		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: mux}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	started := make(chan struct{})
+	srv := &dns.Server{PacketConn: pc, Handler: handler, NotifyStartedFunc: func(context.Context) { close(started) }}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	return pc.LocalAddr().String(), count, lastQname
 }
 

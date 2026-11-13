@@ -14,7 +14,8 @@ import (
 	"time"
 
 	json "github.com/goccy/go-json"
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
@@ -112,8 +113,7 @@ func (h *Handler) resolveAny(ctx context.Context, name string, qtype uint16) (*d
 	ups := slices.Clone(h.Upstreams)
 	h.cfgMu.Unlock()
 
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(name), qtype)
+	m := dns.NewMsg(dnsutil.Fqdn(name), qtype)
 	m.RecursionDesired = true
 
 	var lastErr error
@@ -221,8 +221,7 @@ func (h *Handler) toolsFastest(ctx context.Context, w http.ResponseWriter, r *ht
 				if ctx.Err() != nil {
 					break
 				}
-				m := new(dns.Msg)
-				m.SetQuestion("example.com.", dns.TypeA)
+				m := dns.NewMsg("example.com.", dns.TypeA)
 				m.RecursionDesired = true
 				pctx, pcancel := context.WithTimeout(ctx, fastestProbeTimeout)
 				start := time.Now()
@@ -240,7 +239,7 @@ func (h *Handler) toolsFastest(ctx context.Context, w http.ResponseWriter, r *ht
 					break
 				}
 				if resp == nil || resp.Rcode == dns.RcodeServerFailure {
-					lastErr = fmt.Errorf("rcode %s", dns.RcodeToString[dns.RcodeServerFailure])
+					lastErr = fmt.Errorf("rcode %s", dnsutil.RcodeToString(dns.RcodeServerFailure))
 					continue
 				}
 				d := time.Since(start)
@@ -317,8 +316,8 @@ func (h *Handler) toolsResolve(ctx context.Context, w http.ResponseWriter, r *ht
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "name required"})
 		return
 	}
-	qt, ok := dns.StringToType[strings.ToUpper(strings.TrimSpace(p.Type))]
-	if !ok {
+	qt, qterr := dnsutil.StringToType(strings.ToUpper(strings.TrimSpace(p.Type)))
+	if qterr != nil {
 		qt = dns.TypeA
 	}
 	if len(p.Sources) == 0 {
@@ -357,17 +356,12 @@ func (h *Handler) toolsResolve(ctx context.Context, w http.ResponseWriter, r *ht
 			continue
 		}
 
-		m := new(dns.Msg)
-		m.SetQuestion(dns.Fqdn(name), qt)
+		m := dns.NewMsg(dnsutil.Fqdn(name), qt)
 		m.RecursionDesired = p.RD
 		m.CheckingDisabled = p.CD
 		if p.DO {
-			o := new(dns.OPT)
-			o.Hdr.Name = "."
-			o.Hdr.Rrtype = dns.TypeOPT
-			o.SetUDPSize(1232)
-			o.SetDo()
-			m.Extra = append(m.Extra, o)
+			m.UDPSize = 1232
+			m.Security = true
 		}
 
 		// Answers must be non-nil so JSON serializes it as [] — a nil slice
@@ -381,7 +375,7 @@ func (h *Handler) toolsResolve(ctx context.Context, w http.ResponseWriter, r *ht
 			resp, err := up.Query(ctx, m)
 			res.LatencyMS = time.Since(start).Milliseconds()
 			if err == nil {
-				res.Rcode = dns.RcodeToString[resp.Rcode]
+				res.Rcode = dnsutil.RcodeToString(resp.Rcode)
 				res.AA = resp.Authoritative
 				res.AD = resp.AuthenticatedData
 				res.RA = resp.RecursionAvailable
@@ -407,7 +401,7 @@ func (h *Handler) toolsResolve(ctx context.Context, w http.ResponseWriter, r *ht
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"name": name, "type": dns.TypeToString[qt], "results": out,
+		"name": name, "type": dnsutil.TypeToString(qt), "results": out,
 	})
 }
 
@@ -550,8 +544,7 @@ func (h *Handler) toolsMail(ctx context.Context, w http.ResponseWriter, r *http.
 // validDomain reports whether s is a plausible DNS name — also blocks query
 // parameter injection into URLs built from user-supplied domains.
 func validDomain(s string) bool {
-	_, ok := dns.IsDomainName(s)
-	return ok
+	return dnsutil.IsName(s)
 }
 
 // spfIssues runs the two checks that break real-world SPF records: exceeding
@@ -751,14 +744,11 @@ func (h *Handler) toolsAXFR(ctx context.Context, w http.ResponseWriter, r *http.
 // tryAXFR requests a zone transfer over TCP and reports how many records the
 // server was willing to hand over (0 with no error means a refused transfer).
 func tryAXFR(ctx context.Context, domain, addr string) (int, error) {
-	m := new(dns.Msg)
-	m.SetAxfr(dns.Fqdn(domain))
-	t := &dns.Transfer{DialTimeout: 3 * time.Second, ReadTimeout: 3 * time.Second}
-	// In (not InContext — unavailable in this miekg/dns version); the
-	// caller's toolsTimeout budget plus the ctx checks between attempts
-	// still bound the whole thing, and a single in-flight transfer can't
-	// run more than ~6s past that budget.
-	ch, err := t.In(m, net.JoinHostPort(addr, axfrPort))
+	m := dns.NewMsg(dnsutil.Fqdn(domain), dns.TypeAXFR)
+	c := dns.NewClient()
+	c.Transport.Dialer.Timeout = 3 * time.Second
+	c.Transport.ReadTimeout = 3 * time.Second
+	ch, err := c.TransferIn(ctx, m, net.JoinHostPort(addr, axfrPort), nil)
 	if err != nil {
 		return 0, err
 	}
@@ -767,7 +757,7 @@ func tryAXFR(ctx context.Context, domain, addr string) (int, error) {
 		if env.Error != nil {
 			return count, env.Error
 		}
-		count += len(env.RR)
+		count += len(env.Answer)
 	}
 	return count, nil
 }

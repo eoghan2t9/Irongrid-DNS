@@ -5,7 +5,8 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 )
 
 // upstreamHealthCheckInterval is how often each configured upstream gets a
@@ -63,7 +64,7 @@ func (h *Handler) probeUpstreams(ctx context.Context) {
 			probeCtx, cancel := context.WithTimeout(ctx, upstreamHealthCheckTimeout)
 			defer cancel()
 			m := new(dns.Msg)
-			m.SetQuestion(upstreamHealthCheckDomain, dns.TypeA)
+			dnsutil.SetQuestion(m, upstreamHealthCheckDomain, dns.TypeA)
 			if _, err := up.Query(probeCtx, m); err != nil {
 				slog.Debug("upstream health probe failed", "upstream", up.Name(), "error", err)
 			}

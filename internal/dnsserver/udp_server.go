@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
 	"golang.org/x/net/ipv4"
 	"golang.org/x/net/ipv6"
 
@@ -440,7 +440,8 @@ func (s *udpServer) handle(job udpJob) {
 		*req = dns.Msg{}
 		reqPool.Put(req)
 	}()
-	if err := req.Unpack((*job.bp)[:job.n]); err != nil {
+	req.Data = (*job.bp)[:job.n]
+	if err := req.Unpack(); err != nil {
 		// Unparseable: drop, matching miekg/dns's serveDNS (a FORMERR reply
 		// to a malformed datagram is amplification surface).
 		if s.stats != nil {
@@ -448,7 +449,7 @@ func (s *udpServer) handle(job udpJob) {
 		}
 		return
 	}
-	s.handler.ServeDNS(w, req)
+	s.handler.ServeDNS(context.Background(), w, req)
 }
 
 // udpWriteBatchSize mirrors udpReadBatchSize on the write side: the most
@@ -548,20 +549,6 @@ type udpResponseWriter struct {
 	batchWrites chan *udpWriteReq // nil unless the owning udpServer batches writes
 }
 
-func (w *udpResponseWriter) WriteMsg(m *dns.Msg) error {
-	buf := getPackBuf()
-	packed, err := m.PackBuffer(buf[:0])
-	if err != nil {
-		putPackBuf(buf)
-		return err
-	}
-	_, err = w.Write(packed)
-	if cap(packed) == cap(buf) {
-		putPackBuf(buf)
-	}
-	return err
-}
-
 func (w *udpResponseWriter) Write(b []byte) (int, error) {
 	if w.batchWrites != nil {
 		req := udpWriteReqPool.Get().(*udpWriteReq)
@@ -588,9 +575,9 @@ func (w *udpResponseWriter) Write(b []byte) (int, error) {
 	return w.pc.WriteTo(b, w.addr)
 }
 
-func (w *udpResponseWriter) LocalAddr() net.Addr  { return w.pc.LocalAddr() }
-func (w *udpResponseWriter) RemoteAddr() net.Addr { return w.addr }
-func (w *udpResponseWriter) Close() error         { return nil }
-func (w *udpResponseWriter) TsigStatus() error    { return nil }
-func (w *udpResponseWriter) TsigTimersOnly(bool)  {}
-func (w *udpResponseWriter) Hijack()              {}
+func (w *udpResponseWriter) LocalAddr() net.Addr   { return w.pc.LocalAddr() }
+func (w *udpResponseWriter) RemoteAddr() net.Addr  { return w.addr }
+func (w *udpResponseWriter) Conn() net.Conn        { return nil }
+func (w *udpResponseWriter) Close() error          { return nil }
+func (w *udpResponseWriter) Session() *dns.Session { return nil }
+func (w *udpResponseWriter) Hijack()               {}

@@ -13,7 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cert"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
@@ -156,12 +157,11 @@ func TestDoHASNHeader(t *testing.T) {
 
 	doH := func(remote string) *httptest.ResponseRecorder {
 		m := new(dns.Msg)
-		m.SetQuestion("example.com.", dns.TypeA)
-		raw, err := m.Pack()
-		if err != nil {
+		dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
+		if err := m.Pack(); err != nil {
 			t.Fatalf("pack: %v", err)
 		}
-		r := httptest.NewRequest(http.MethodGet, "/dns-query?dns="+base64.RawURLEncoding.EncodeToString(raw), nil)
+		r := httptest.NewRequest(http.MethodGet, "/dns-query?dns="+base64.RawURLEncoding.EncodeToString(m.Data), nil)
 		r.RemoteAddr = remote
 		w := httptest.NewRecorder()
 		mgr.handleDoH(w, r, "doh")
@@ -231,12 +231,11 @@ func TestDoHHandlerShared(t *testing.T) {
 	}
 	doH := func(name string) *dns.Msg {
 		m := new(dns.Msg)
-		m.SetQuestion(name, dns.TypeA)
-		raw, err := m.Pack()
-		if err != nil {
+		dnsutil.SetQuestion(m, name, dns.TypeA)
+		if err := m.Pack(); err != nil {
 			t.Fatalf("pack: %v", err)
 		}
-		b64 := base64.RawURLEncoding.EncodeToString(raw)
+		b64 := base64.RawURLEncoding.EncodeToString(m.Data)
 		srv, client := newServer()
 		defer srv.Close()
 
@@ -255,8 +254,8 @@ func TestDoHHandlerShared(t *testing.T) {
 		if _, err := body.ReadFrom(resp.Body); err != nil {
 			t.Fatalf("read body: %v", err)
 		}
-		out := new(dns.Msg)
-		if err := out.Unpack(body.Bytes()); err != nil {
+		out := &dns.Msg{Data: body.Bytes()}
+		if err := out.Unpack(); err != nil {
 			t.Fatalf("unpack: %v", err)
 		}
 		return out

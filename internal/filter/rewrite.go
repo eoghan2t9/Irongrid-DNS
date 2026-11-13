@@ -1,12 +1,14 @@
 package filter
 
 import (
-	"net"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
 )
 
 // RewriteSpec mirrors config.RewriteSpec (see ListSpec for why this package
@@ -124,26 +126,25 @@ func (rw *Rewriter) Lookup(qname string) (rules []RewriteRule, ok bool) {
 // left to the caller to render as an empty NOERROR. A CNAME rule answers any
 // query type, matching normal DNS semantics.
 func BuildAnswer(r *dns.Msg, rules []RewriteRule, qname string, qtype uint16) *dns.Msg {
-	m := new(dns.Msg)
-	m.SetReply(r)
+	m := dnsutil.SetReply(new(dns.Msg), r)
 	m.Authoritative = true
-	hdr := func(ttl uint32, rrtype uint16) dns.RR_Header {
-		return dns.RR_Header{Name: dns.Fqdn(qname), Rrtype: rrtype, Class: dns.ClassINET, Ttl: ttl}
+	hdr := func(ttl uint32) dns.Header {
+		return dns.Header{Name: dnsutil.Fqdn(qname), Class: dns.ClassINET, TTL: ttl}
 	}
 	matched := false
 	for _, ru := range rules {
 		switch {
 		case ru.Type == dns.TypeCNAME:
-			m.Answer = append(m.Answer, &dns.CNAME{Hdr: hdr(ru.TTL, dns.TypeCNAME), Target: dns.Fqdn(ru.Value)})
+			m.Answer = append(m.Answer, &dns.CNAME{Hdr: hdr(ru.TTL), CNAME: rdata.CNAME{Target: dnsutil.Fqdn(ru.Value)}})
 			matched = true
 		case ru.Type == dns.TypeA && qtype == dns.TypeA:
-			if ip := net.ParseIP(ru.Value).To4(); ip != nil {
-				m.Answer = append(m.Answer, &dns.A{Hdr: hdr(ru.TTL, dns.TypeA), A: ip})
+			if ip, err := netip.ParseAddr(ru.Value); err == nil && ip.Is4() {
+				m.Answer = append(m.Answer, &dns.A{Hdr: hdr(ru.TTL), A: rdata.A{Addr: ip}})
 				matched = true
 			}
 		case ru.Type == dns.TypeAAAA && qtype == dns.TypeAAAA:
-			if ip := net.ParseIP(ru.Value); ip != nil {
-				m.Answer = append(m.Answer, &dns.AAAA{Hdr: hdr(ru.TTL, dns.TypeAAAA), AAAA: ip})
+			if ip, err := netip.ParseAddr(ru.Value); err == nil && ip.Is6() {
+				m.Answer = append(m.Answer, &dns.AAAA{Hdr: hdr(ru.TTL), AAAA: rdata.AAAA{Addr: ip}})
 				matched = true
 			}
 		}

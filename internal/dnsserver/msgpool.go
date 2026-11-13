@@ -3,7 +3,7 @@ package dnsserver
 import (
 	"sync"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
 )
 
 // msgPool recycles *dns.Msg for reply construction whose lifetime is

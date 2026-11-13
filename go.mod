@@ -1,8 +1,9 @@
 module github.com/eoghan2t9/Irongrid-DNS
 
-go 1.27
+go 1.27.0
 
 require (
+	codeberg.org/miekg/dns v0.6.133
 	github.com/ProtonMail/go-crypto v1.5.2
 	github.com/alicebob/miniredis/v2 v2.40.0
 	github.com/andybalholm/brotli v1.3.0
@@ -14,7 +15,6 @@ require (
 	github.com/insomniacslk/dhcp v0.0.0-20261014062924-c6bb46ad3f3a
 	github.com/klauspost/compress v1.20.4
 	github.com/klauspost/cpuid/v2 v2.4.2
-	github.com/miekg/dns v1.1.73
 	github.com/quic-go/quic-go v0.65.0
 	github.com/redis/rueidis v1.0.79
 	golang.org/x/crypto v0.59.0
@@ -64,6 +64,7 @@ require (
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
 	github.com/mattn/go-runewidth v0.0.31 // indirect
+	github.com/miekg/dns v1.1.73 // indirect
 	github.com/mitchellh/hashstructure/v2 v2.0.2 // indirect
 	github.com/muesli/ansi v0.0.0-20230316100256-276c6243b2f6 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect

@@ -1,16 +1,20 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"reflect"
 	"strings"
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
@@ -25,29 +29,37 @@ func startUDPDNS(t *testing.T, rrs map[string][]dns.RR) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: zoneHandler(rrs)}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = pc.Close() })
+	started := make(chan struct{})
+	srv := &dns.Server{
+		PacketConn:        pc,
+		Handler:           zoneHandler(rrs),
+		NotifyStartedFunc: func(context.Context) { close(started) },
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	return pc.LocalAddr().String()
 }
 
 func zoneHandler(rrs map[string][]dns.RR) dns.Handler {
-	return dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
+	return dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, req *dns.Msg) {
+		_ = req.Unpack()
 		m := new(dns.Msg)
-		m.SetReply(req)
+		dnsutil.SetReply(m, req)
 		q := req.Question[0]
-		key := strings.ToLower(q.Name) + "|" + dns.TypeToString[q.Qtype]
+		key := strings.ToLower(q.Header().Name) + "|" + dnsutil.TypeToString(dns.RRToType(q))
 		if got, ok := rrs[key]; ok {
 			m.Answer = got
 		} else {
 			m.Rcode = dns.RcodeNameError
 		}
-		_ = w.WriteMsg(m)
+		_ = m.Pack()
+		_, _ = m.WriteTo(w)
 	})
 }
 
 func txtRR(name, s string) *dns.TXT {
-	return &dns.TXT{Hdr: dns.RR_Header{Name: dns.Fqdn(name), Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 300}, Txt: []string{s}}
+	return &dns.TXT{Hdr: dns.Header{Name: dnsutil.Fqdn(name), Class: dns.ClassINET, TTL: 300}, TXT: rdata.TXT{Txt: []string{s}}}
 }
 
 // handlerFor sets h.Upstreams to a single upstream dialing addr, so the tools
@@ -85,7 +97,7 @@ func postTools(t *testing.T, h *Handler, path, body string) (int, []byte) {
 func TestToolsResolve(t *testing.T) {
 	t.Parallel()
 	addr := startUDPDNS(t, map[string][]dns.RR{
-		"test.example.|A": {&dns.A{Hdr: dns.RR_Header{Name: "test.example.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("1.2.3.4")}},
+		"test.example.|A": {&dns.A{Hdr: dns.Header{Name: "test.example.", Class: dns.ClassINET, TTL: 300}, A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")}}},
 	})
 	h := handlerFor(t, addr)
 
@@ -173,11 +185,11 @@ func TestToolsResolveBadSource(t *testing.T) {
 func TestToolsMail(t *testing.T) {
 	t.Parallel()
 	addr := startUDPDNS(t, map[string][]dns.RR{
-		"example.com.|MX":                     {&dns.MX{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeMX, Class: dns.ClassINET, Ttl: 300}, Preference: 10, Mx: "mail.example.com."}},
+		"example.com.|MX":                     {&dns.MX{Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300}, MX: rdata.MX{Preference: 10, Mx: "mail.example.com."}}},
 		"example.com.|TXT":                    {txtRR("example.com.", "v=spf1 include:spf.example.net -all")},
 		"default._domainkey.example.com.|TXT": {txtRR("default._domainkey.example.com.", "v=DKIM1; k=rsa; p=abc")},
 		"_dmarc.example.com.|TXT":             {txtRR("_dmarc.example.com.", "v=DMARC1; p=reject")},
-		"example.com.|CAA":                    {&dns.CAA{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeCAA, Class: dns.ClassINET, Ttl: 300}, Tag: "issue", Value: "letsencrypt.org"}},
+		"example.com.|CAA":                    {&dns.CAA{Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300}, CAA: rdata.CAA{Tag: "issue", Value: "letsencrypt.org"}}},
 	})
 	h := handlerFor(t, addr)
 
@@ -225,7 +237,7 @@ func TestSpfIssues(t *testing.T) {
 func TestToolsRBL(t *testing.T) {
 	t.Parallel()
 	addr := startUDPDNS(t, map[string][]dns.RR{
-		"4.3.2.1.zen.spamhaus.org.|A":   {&dns.A{Hdr: dns.RR_Header{Name: "4.3.2.1.zen.spamhaus.org.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("127.0.0.2")}},
+		"4.3.2.1.zen.spamhaus.org.|A":   {&dns.A{Hdr: dns.Header{Name: "4.3.2.1.zen.spamhaus.org.", Class: dns.ClassINET, TTL: 300}, A: rdata.A{Addr: netip.MustParseAddr("127.0.0.2")}}},
 		"4.3.2.1.zen.spamhaus.org.|TXT": {txtRR("4.3.2.1.zen.spamhaus.org.", "Spam from this IP")},
 	})
 	h := handlerFor(t, addr)
@@ -278,40 +290,50 @@ func startAXFRSrv(t *testing.T, zone string, records []dns.RR, refuse bool) stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
-		if req.Question[0].Qtype != dns.TypeAXFR || refuse {
+	h := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, req *dns.Msg) {
+		_ = req.Unpack()
+		if dns.RRToType(req.Question[0]) != dns.TypeAXFR || refuse {
 			m := new(dns.Msg)
-			m.SetRcode(req, dns.RcodeRefused)
-			_ = w.WriteMsg(m)
+			dnsutil.SetReply(m, req)
+			m.Rcode = dns.RcodeRefused
+			_ = m.Pack()
+			_, _ = m.WriteTo(w)
 			return
 		}
 		for _, rr := range records {
 			m := new(dns.Msg)
-			m.SetReply(req)
+			dnsutil.SetReply(m, req)
 			m.Authoritative = true
 			m.Answer = []dns.RR{rr}
-			_ = w.WriteMsg(m)
+			_ = m.Pack()
+			_, _ = m.WriteTo(w)
 		}
 	})
-	srv := &dns.Server{Listener: ln, Handler: h}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = ln.Close() })
+	started := make(chan struct{})
+	srv := &dns.Server{
+		Listener:          ln,
+		Handler:           h,
+		NotifyStartedFunc: func(context.Context) { close(started) },
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	return ln.Addr().String()
 }
 
 func TestToolsAXFR(t *testing.T) {
 	zoneRRs := []dns.RR{
-		&dns.SOA{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 300}, Ns: "ns1.example.com.", Mbox: "hostmaster.example.com."},
-		&dns.A{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("1.2.3.4")},
-		&dns.SOA{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeSOA, Class: dns.ClassINET, Ttl: 300}, Ns: "ns1.example.com.", Mbox: "hostmaster.example.com."},
+		&dns.SOA{Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300}, SOA: rdata.SOA{Ns: "ns1.example.com.", Mbox: "hostmaster.example.com."}},
+		&dns.A{Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300}, A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")}},
+		&dns.SOA{Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300}, SOA: rdata.SOA{Ns: "ns1.example.com.", Mbox: "hostmaster.example.com."}},
 	}
 	axfrAddr := startAXFRSrv(t, "example.com.", zoneRRs, false)
 
 	// Resolution server: NS for the zone points at a nameserver resolving to
 	// 127.0.0.1 (the AXFR server is reached via the swappable axfrPort).
 	addr := startUDPDNS(t, map[string][]dns.RR{
-		"example.com.|NS":       {&dns.NS{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 300}, Ns: "ns1.example.com."}},
-		"ns1.example.com.|A":    {&dns.A{Hdr: dns.RR_Header{Name: "ns1.example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("127.0.0.1")}},
+		"example.com.|NS":       {&dns.NS{Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300}, NS: rdata.NS{Ns: "ns1.example.com."}}},
+		"ns1.example.com.|A":    {&dns.A{Hdr: dns.Header{Name: "ns1.example.com.", Class: dns.ClassINET, TTL: 300}, A: rdata.A{Addr: netip.MustParseAddr("127.0.0.1")}}},
 		"ns1.example.com.|AAAA": {},
 	})
 	h := handlerFor(t, addr)
@@ -346,8 +368,8 @@ func TestToolsAXFR(t *testing.T) {
 func TestToolsAXFRRefused(t *testing.T) {
 	axfrAddr := startAXFRSrv(t, "example.com.", nil, true)
 	addr := startUDPDNS(t, map[string][]dns.RR{
-		"example.com.|NS":       {&dns.NS{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 300}, Ns: "ns1.example.com."}},
-		"ns1.example.com.|A":    {&dns.A{Hdr: dns.RR_Header{Name: "ns1.example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("127.0.0.1")}},
+		"example.com.|NS":       {&dns.NS{Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300}, NS: rdata.NS{Ns: "ns1.example.com."}}},
+		"ns1.example.com.|A":    {&dns.A{Hdr: dns.Header{Name: "ns1.example.com.", Class: dns.ClassINET, TTL: 300}, A: rdata.A{Addr: netip.MustParseAddr("127.0.0.1")}}},
 		"ns1.example.com.|AAAA": {},
 	})
 	h := handlerFor(t, addr)
@@ -533,15 +555,23 @@ func startDelayedUDPDNS(t *testing.T, delay time.Duration) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	srv := &dns.Server{PacketConn: pc, Handler: dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
-		time.Sleep(delay)
-		m := new(dns.Msg)
-		m.SetReply(req)
-		m.Answer = []dns.RR{&dns.A{Hdr: dns.RR_Header{Name: req.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("1.2.3.4")}}
-		_ = w.WriteMsg(m)
-	})}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = pc.Close() })
+	started := make(chan struct{})
+	srv := &dns.Server{
+		PacketConn:        pc,
+		NotifyStartedFunc: func(context.Context) { close(started) },
+		Handler: dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, req *dns.Msg) {
+			_ = req.Unpack()
+			time.Sleep(delay)
+			m := new(dns.Msg)
+			dnsutil.SetReply(m, req)
+			m.Answer = []dns.RR{&dns.A{Hdr: dns.Header{Name: req.Question[0].Header().Name, Class: dns.ClassINET, TTL: 300}, A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")}}}
+			_ = m.Pack()
+			_, _ = m.WriteTo(w)
+		}),
+	}
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	return pc.LocalAddr().String()
 }
 
@@ -574,7 +604,7 @@ func TestCanonicalUpstreamKey(t *testing.T) {
 // unreachable candidates with an error instead of dropping them.
 func TestToolsFastest(t *testing.T) {
 	fastAddr := startUDPDNS(t, map[string][]dns.RR{
-		"example.com.|A": {&dns.A{Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("1.2.3.4")}},
+		"example.com.|A": {&dns.A{Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: 300}, A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")}}},
 	})
 	slowAddr := startDelayedUDPDNS(t, 120*time.Millisecond)
 	// A dead address: bind a port then release it, so dialing fails fast.

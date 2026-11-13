@@ -5,7 +5,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
 )
 
 // failWriter is a dns.ResponseWriter whose writes fail or succeed on demand.
@@ -14,32 +14,27 @@ type failWriter struct {
 	err error
 }
 
-func (f *failWriter) WriteMsg(*dns.Msg) error     { return f.err }
 func (f *failWriter) Write(b []byte) (int, error) { return len(b), f.err }
 
 // TestStatsWriterCountsWriteErrors: the wrapper still records transport write
-// failures on both write paths, and only failures.
+// failures, and only failures.
 func TestStatsWriterCountsWriteErrors(t *testing.T) {
 	var errs atomic.Int64
 	fw := &failWriter{err: errors.New("boom")}
 	sw := getStatsWriter(fw, &errs)
 	defer putStatsWriter(sw)
 
-	if err := sw.WriteMsg(new(dns.Msg)); err == nil {
-		t.Fatal("WriteMsg should surface the underlying error")
-	}
 	if _, err := sw.Write([]byte{1}); err == nil {
 		t.Fatal("Write should surface the underlying error")
 	}
-	if got := errs.Load(); got != 2 {
-		t.Fatalf("write errors = %d, want 2", got)
+	if got := errs.Load(); got != 1 {
+		t.Fatalf("write errors = %d, want 1", got)
 	}
 
 	fw.err = nil
-	_ = sw.WriteMsg(new(dns.Msg))
 	_, _ = sw.Write([]byte{1})
-	if got := errs.Load(); got != 2 {
-		t.Fatalf("successful writes must not count: errors = %d, want 2", got)
+	if got := errs.Load(); got != 1 {
+		t.Fatalf("successful writes must not count: errors = %d, want 1", got)
 	}
 }
 

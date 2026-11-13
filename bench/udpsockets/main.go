@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"net"
+	"net/netip"
 	"os"
 	"slices"
 	"strconv"
@@ -26,7 +27,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
@@ -40,14 +43,16 @@ var names = []string{"example.com.", "google.com.", "github.com.", "wikipedia.or
 // exactly the part server.udp_sockets changes.
 type canned struct{}
 
-func (canned) ServeDNS(w dns.ResponseWriter, r *dns.Msg) {
+func (canned) ServeDNS(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
+	_ = r.Unpack()
 	m := new(dns.Msg)
-	m.SetReply(r)
+	dnsutil.SetReply(m, r)
 	m.Answer = append(m.Answer, &dns.A{
-		Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-		A:   net.ParseIP("192.0.2.1"),
+		Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+		A:   rdata.A{Addr: netip.MustParseAddr("192.0.2.1")},
 	})
-	_ = w.WriteMsg(m)
+	_ = m.Pack()
+	_, _ = m.WriteTo(w)
 }
 
 // bindSockets mirrors dnsserver.newUDPListeners: n SO_REUSEPORT sockets on a
@@ -107,9 +112,9 @@ func run(sockets int, dur time.Duration, workers int) result {
 
 	// One dns.Server per socket, like the production listener.
 	for _, pc := range pcs {
-		srv := &dns.Server{Net: "udp", PacketConn: pc, UDPSize: 4096, Handler: canned{}}
+		srv := &dns.Server{Net: "udp", PacketConn: pc, Handler: canned{}}
 		go func() {
-			_ = srv.ActivateAndServe()
+			_ = srv.ListenAndServe()
 		}()
 	}
 	time.Sleep(200 * time.Millisecond) // let the servers come up
@@ -120,7 +125,9 @@ func run(sockets int, dur time.Duration, workers int) result {
 	ctx, cancel := context.WithTimeout(context.Background(), dur)
 	defer cancel()
 
-	client := &dns.Client{Net: "udp", Timeout: 2 * time.Second}
+	client := dns.NewClient()
+	client.Transport.ReadTimeout = 2 * time.Second
+	client.Transport.Dialer.Timeout = 2 * time.Second
 	var wg sync.WaitGroup
 	for i := range workers {
 		wg.Go(func() {
@@ -131,10 +138,9 @@ func run(sockets int, dur time.Duration, workers int) result {
 					return
 				default:
 				}
-				m := new(dns.Msg)
-				m.SetQuestion(names[rnd.IntN(len(names))], dns.TypeA)
+				m := dns.NewMsg(names[rnd.IntN(len(names))], dns.TypeA)
 				start := time.Now()
-				_, _, err := client.Exchange(m, addr.String())
+				_, _, err := client.Exchange(ctx, m, "udp", addr.String())
 				sent.Add(1)
 				if err == nil {
 					ok.Add(1)

@@ -4,16 +4,20 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
-	"net"
+	"net/netip"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
 
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
 	"github.com/alicebob/miniredis/v2"
-	"github.com/miekg/dns"
 	"github.com/redis/rueidis"
+
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 )
 
 func testRueidisOption(addr string) rueidis.ClientOption {
@@ -38,24 +42,22 @@ func l1onlyCache(ttl, negTTL time.Duration) *Cache {
 	return &Cache{client: nil, l1: newL1(512, 0), prefix: "irongrid:dns:", ttl: ttl, negativeTTL: negTTL}
 }
 
-func aQuestion() dns.Question {
-	return dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+func aQuestion() dnsname.Question {
+	return dnsname.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 }
 
 func aResponse(ip string, ttl uint32) *dns.Msg {
-	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	m := dnsutil.SetQuestion(new(dns.Msg), "example.com.", dns.TypeA)
 	m.Response = true
 	m.Answer = append(m.Answer, &dns.A{
-		Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: ttl},
-		A:   net.ParseIP(ip),
+		Hdr: dns.Header{Name: "example.com.", Class: dns.ClassINET, TTL: ttl},
+		A:   rdata.A{Addr: netip.MustParseAddr(ip)},
 	})
 	return m
 }
 
 func emptyResponse() *dns.Msg {
-	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	m := dnsutil.SetQuestion(new(dns.Msg), "example.com.", dns.TypeA)
 	m.Response = true
 	return m
 }
@@ -72,7 +74,7 @@ func TestL1GetSet(t *testing.T) {
 	if len(got.Answer) != 1 {
 		t.Fatalf("answers = %d, want 1", len(got.Answer))
 	}
-	if a, ok := got.Answer[0].(*dns.A); !ok || !a.A.Equal(net.ParseIP("1.2.3.4")) {
+	if a, ok := got.Answer[0].(*dns.A); !ok || a.Addr != netip.MustParseAddr("1.2.3.4") {
 		t.Fatalf("unexpected answer: %v", got.Answer[0])
 	}
 }
@@ -86,15 +88,14 @@ func TestSetPreservesNonSuccessRcode(t *testing.T) {
 	t.Parallel()
 	c := l1onlyCache(time.Hour, time.Minute)
 	ctx := t.Context()
-	m := new(dns.Msg)
-	m.SetQuestion("dead-alias.example.com.", dns.TypeA)
+	m := dnsutil.SetQuestion(new(dns.Msg), "dead-alias.example.com.", dns.TypeA)
 	m.Response = true
 	m.Rcode = dns.RcodeNameError
 	m.Answer = append(m.Answer, &dns.CNAME{
-		Hdr:    dns.RR_Header{Name: "dead-alias.example.com.", Rrtype: dns.TypeCNAME, Class: dns.ClassINET, Ttl: 300},
-		Target: "gone.example.net.",
+		Hdr:   dns.Header{Name: "dead-alias.example.com.", Class: dns.ClassINET, TTL: 300},
+		CNAME: rdata.CNAME{Target: "gone.example.net."},
 	})
-	q := dns.Question{Name: "dead-alias.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	q := dnsname.Question{Name: "dead-alias.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	c.Set(ctx, q, m, 0)
 	got := c.Get(ctx, q)
 	if got == nil {
@@ -119,11 +120,11 @@ func TestL1TTLRebase(t *testing.T) {
 			t.Fatal("expected a hit")
 		}
 		a := got.Answer[0].(*dns.A)
-		if a.Hdr.Ttl >= 3600 {
-			t.Fatalf("TTL %d was not rebased down", a.Hdr.Ttl)
+		if a.Hdr.TTL >= 3600 {
+			t.Fatalf("TTL %d was not rebased down", a.Hdr.TTL)
 		}
-		if a.Hdr.Ttl < 3599 {
-			t.Fatalf("TTL %d rebased too far after 1s", a.Hdr.Ttl)
+		if a.Hdr.TTL < 3599 {
+			t.Fatalf("TTL %d rebased too far after 1s", a.Hdr.TTL)
 		}
 	})
 }
@@ -217,7 +218,7 @@ func TestL1Counters(t *testing.T) {
 	}
 
 	// Get (positive-only path) on an unknown question counts a miss.
-	other := dns.Question{Name: "other.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	other := dnsname.Question{Name: "other.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	if got := c.Get(ctx, other); got != nil {
 		t.Fatal("expected a miss")
 	}
@@ -252,10 +253,10 @@ func TestCloseFlushesAllWriterShards(t *testing.T) {
 		t.Skip("writerShardCount() < 2 on this box; sharding has nothing to exercise")
 	}
 
-	questions := make([]dns.Question, n)
+	questions := make([]dnsname.Question, n)
 	for shard := range n {
 		for i := 0; ; i++ {
-			q := dns.Question{Name: fmt.Sprintf("shard%d-%d.example.com.", shard, i), Qtype: dns.TypeA, Qclass: dns.ClassINET}
+			q := dnsname.Question{Name: fmt.Sprintf("shard%d-%d.example.com.", shard, i), Qtype: dns.TypeA, Qclass: dns.ClassINET}
 			if int(keyHash(q)%uint64(n)) == shard {
 				questions[shard] = q
 				break
@@ -375,7 +376,7 @@ func BenchmarkCacheSetThroughput(b *testing.B) {
 		ctx := context.Background()
 		i := 0
 		for pb.Next() {
-			q := dns.Question{Name: fmt.Sprintf("bench-%d.example.com.", i), Qtype: dns.TypeA, Qclass: dns.ClassINET}
+			q := dnsname.Question{Name: fmt.Sprintf("bench-%d.example.com.", i), Qtype: dns.TypeA, Qclass: dns.ClassINET}
 			c.Set(ctx, q, aResponse("1.2.3.4", 30), 0)
 			i++
 		}
@@ -529,8 +530,8 @@ func TestPrefetchNearExpiry(t *testing.T) {
 		c := l1onlyCache(5*time.Second, time.Minute) // lead = 1s
 		ctx := t.Context()
 
-		prefetched := make(chan dns.Question, 1)
-		c.EnablePrefetch(func(cctx context.Context, q dns.Question) {
+		prefetched := make(chan dnsname.Question, 1)
+		c.EnablePrefetch(func(cctx context.Context, q dnsname.Question) {
 			prefetched <- q
 		})
 
@@ -669,8 +670,8 @@ func TestNegativePrefetch(t *testing.T) {
 		c := l1onlyCache(5*time.Second, negTTL)
 		ctx := t.Context()
 
-		prefetched := make(chan dns.Question, 2)
-		c.EnablePrefetch(func(cctx context.Context, q dns.Question) {
+		prefetched := make(chan dnsname.Question, 2)
+		c.EnablePrefetch(func(cctx context.Context, q dnsname.Question) {
 			prefetched <- q
 		})
 
@@ -795,7 +796,7 @@ func TestLookupRawPositive(t *testing.T) {
 		t.Fatalf("Msg() = %v, want one answer", m)
 	}
 	a, ok := m.Answer[0].(*dns.A)
-	if !ok || a.A.String() != "1.2.3.4" {
+	if !ok || a.Addr.String() != "1.2.3.4" {
 		t.Fatalf("answer = %v, want A 1.2.3.4", m.Answer[0])
 	}
 }
@@ -822,22 +823,20 @@ func TestLookupRawNegative(t *testing.T) {
 // every Answer-section TTL is located and reads its original value.
 func TestLookupRawMultiAnswerTTLOffsets(t *testing.T) {
 	t.Parallel()
-	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeTXT)
+	m := dnsutil.SetQuestion(new(dns.Msg), "example.com.", dns.TypeTXT)
 	m.Response = true
 	for i := range 8 {
 		m.Answer = append(m.Answer, &dns.TXT{
-			Hdr: dns.RR_Header{Name: fmt.Sprintf("txt%d.example.com.", i), Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60},
+			Hdr: dns.Header{Name: fmt.Sprintf("txt%d.example.com.", i), Class: dns.ClassINET, TTL: 60},
 			// RFC 1035 caps each TXT character-string at 255 bytes, so split
 			// 400 chars across two strings (240 + 160) like real records.
-			Txt: []string{strings.Repeat("0123456789abcdef", 15), strings.Repeat("0123456789abcdef", 10)},
+			TXT: rdata.TXT{Txt: []string{strings.Repeat("0123456789abcdef", 15), strings.Repeat("0123456789abcdef", 10)}},
 		})
 	}
-	m.Compress = true
-	packed, err := m.Pack()
-	if err != nil {
+	if err := m.Pack(); err != nil {
 		t.Fatalf("pack: %v", err)
 	}
+	packed := m.Data
 	off := ttlOffsets(packed)
 	if len(off) != 8 {
 		t.Fatalf("offsets = %v, want 8", off)
@@ -870,7 +869,7 @@ func TestLookupRawMsgRebasesTTL(t *testing.T) {
 		if m == nil || len(m.Answer) != 1 {
 			t.Fatalf("Msg() = %v, want one answer", m)
 		}
-		ttl := m.Answer[0].Header().Ttl
+		ttl := m.Answer[0].Header().TTL
 		if ttl >= 3600 || ttl < 3590 {
 			t.Fatalf("rebased TTL = %d, want ~3599 (elapsed ~1s)", ttl)
 		}
@@ -928,11 +927,10 @@ func TestL1RehydrationHonorsRealRemainingTTL(t *testing.T) {
 	h := keyHash(q)
 
 	m := aResponse("1.2.3.4", 30)
-	m.Compress = true
-	packed, err := m.Pack()
-	if err != nil {
+	if err := m.Pack(); err != nil {
 		t.Fatalf("pack: %v", err)
 	}
+	packed := m.Data
 	buf := make([]byte, cacheEntryPrefixLen+len(packed))
 	binary.BigEndian.PutUint64(buf[:cacheEntryPrefixLen], uint64(time.Now().Unix()))
 	copy(buf[cacheEntryPrefixLen:], packed)
@@ -976,7 +974,7 @@ func TestL1RewarmFromL2HonoursRecordTTL(t *testing.T) {
 		t.Cleanup(func() { _ = c.Close() })
 		return c
 	}
-	q := dns.Question{Name: "short-ttl.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	q := dnsname.Question{Name: "short-ttl.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	writer := mk()
 	writer.Set(t.Context(), q, aResponse("1.2.3.4", 60), 0)
 	if err := writer.Close(); err != nil { // flush the queued L2 write
@@ -998,17 +996,16 @@ func TestL1RewarmFromL2HonoursRecordTTL(t *testing.T) {
 
 // prefetchTestCache builds an L1-only cache whose prefetch callback counts
 // invocations, with one positive entry stored `age` ago with lifetime ttl.
-func prefetchTestCache(t *testing.T, q dns.Question, ttl, age time.Duration) (*Cache, *atomic.Int64) {
+func prefetchTestCache(t *testing.T, q dnsname.Question, ttl, age time.Duration) (*Cache, *atomic.Int64) {
 	t.Helper()
 	c := &Cache{l1: newL1(64, 0), prefix: "irongrid:dns:", ttl: 6 * time.Hour, negativeTTL: time.Minute}
 	var calls atomic.Int64
-	c.EnablePrefetch(func(context.Context, dns.Question) { calls.Add(1) })
+	c.EnablePrefetch(func(context.Context, dnsname.Question) { calls.Add(1) })
 	m := aResponse("1.2.3.4", uint32(ttl.Seconds()))
-	m.Compress = true
-	packed, err := m.Pack()
-	if err != nil {
+	if err := m.Pack(); err != nil {
 		t.Fatal(err)
 	}
+	packed := m.Data
 	now := time.Now().Add(-age)
 	buf := make([]byte, cacheEntryPrefixLen+len(packed))
 	binary.BigEndian.PutUint64(buf[:cacheEntryPrefixLen], uint64(now.Unix()))
@@ -1023,7 +1020,7 @@ func prefetchTestCache(t *testing.T, q dns.Question, ttl, age time.Duration) (*C
 // on every single hit.
 func TestPrefetchNotTriggeredFarFromExpiry(t *testing.T) {
 	t.Parallel()
-	q := dns.Question{Name: "short.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	q := dnsname.Question{Name: "short.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	c, calls := prefetchTestCache(t, q, 60*time.Second, 5*time.Second) // 55s left of 60s
 	for range 200 {
 		if res := c.Lookup(q); len(res.Raw) == 0 {
@@ -1039,7 +1036,7 @@ func TestPrefetchNotTriggeredFarFromExpiry(t *testing.T) {
 // ...but one genuinely close to expiry (last fifth of its life) is refreshed.
 func TestPrefetchTriggeredNearExpiry(t *testing.T) {
 	t.Parallel()
-	q := dns.Question{Name: "near.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	q := dnsname.Question{Name: "near.example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
 	c, calls := prefetchTestCache(t, q, 60*time.Second, 55*time.Second) // 5s left of 60s (< 12s lead)
 	if res := c.Lookup(q); len(res.Raw) == 0 {
 		t.Fatal("expected an L1 hit")

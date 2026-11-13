@@ -7,7 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cert"
@@ -64,7 +65,7 @@ func TestDoQRoundTrip(t *testing.T) {
 	// Allowed path: without an upstream configured this returns SERVFAIL,
 	// which still proves the DoQ transport round-trips.
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 	resp, err := client.Query(t.Context(), m)
 	if err != nil {
 		t.Fatalf("doq query failed: %v", err)
@@ -76,7 +77,7 @@ func TestDoQRoundTrip(t *testing.T) {
 
 	// Blocked path: the filter answers NXDOMAIN before upstream is used.
 	m2 := new(dns.Msg)
-	m2.SetQuestion("doubleclick.net.", dns.TypeA)
+	dnsutil.SetQuestion(m2, "doubleclick.net.", dns.TypeA)
 	resp2, err := client.Query(t.Context(), m2)
 	if err != nil {
 		t.Fatalf("doq blocked query failed: %v", err)
@@ -90,19 +91,19 @@ func TestDoQRoundTrip(t *testing.T) {
 	// background cache write, then resolve again — the second answer comes
 	// from the stored packed bytes over the raw DoQ write path.
 	warm := new(dns.Msg)
-	warm.SetQuestion("cached.example.com.", dns.TypeA)
+	dnsutil.SetQuestion(warm, "cached.example.com.", dns.TypeA)
 	if resp3, err := client.Query(t.Context(), warm); err != nil || resp3 == nil || len(resp3.Answer) == 0 {
 		t.Fatalf("cache-warm query failed: resp=%v err=%v", resp3, err)
 	}
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if c.Lookup(warm.Question[0]).Msg() != nil {
+		if c.Lookup(questionOf(warm.Question[0])).Msg() != nil {
 			break
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 	hit := new(dns.Msg)
-	hit.SetQuestion("cached.example.com.", dns.TypeA)
+	dnsutil.SetQuestion(hit, "cached.example.com.", dns.TypeA)
 	resp4, err := client.Query(t.Context(), hit)
 	if err != nil {
 		t.Fatalf("cache-hit query failed: %v", err)
@@ -110,7 +111,7 @@ func TestDoQRoundTrip(t *testing.T) {
 	if resp4 == nil || len(resp4.Answer) == 0 {
 		t.Fatalf("expected a cached answer, got %v", resp4)
 	}
-	if a, ok := resp4.Answer[0].(*dns.A); !ok || a.A.String() != "9.9.9.9" {
+	if a, ok := resp4.Answer[0].(*dns.A); !ok || a.A.Addr.String() != "9.9.9.9" {
 		t.Fatalf("cached answer = %v, want A 9.9.9.9", resp4.Answer[0])
 	}
 	t.Log("cache-hit path answered from the raw packed bytes over DoQ")

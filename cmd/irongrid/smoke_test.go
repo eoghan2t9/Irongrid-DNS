@@ -26,6 +26,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,7 +36,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
+	"codeberg.org/miekg/dns/svcb"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 )
@@ -99,25 +103,31 @@ func (s *syncBuf) String() string {
 func fakeUpstream(t *testing.T, ip string) int {
 	t.Helper()
 	port := freePort(t)
-	h := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+	h := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
+		_ = r.Unpack()
 		m := new(dns.Msg)
-		m.SetReply(r)
-		if len(r.Question) > 0 && r.Question[0].Qtype == dns.TypeA {
+		dnsutil.SetReply(m, r)
+		if len(r.Question) > 0 && dns.RRToType(r.Question[0]) == dns.TypeA {
 			m.Answer = append(m.Answer, &dns.A{
-				Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-				A:   net.ParseIP(ip),
+				Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+				A:   rdata.A{Addr: netip.MustParseAddr(ip)},
 			})
 		}
-		_ = w.WriteMsg(m)
+		_ = m.Pack()
+		_, _ = m.WriteTo(w)
 	})
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	for _, netw := range []string{"udp", "tcp"} {
-		srv := &dns.Server{Addr: addr, Net: netw, Handler: h}
 		started := make(chan struct{})
-		srv.NotifyStartedFunc = func() { close(started) }
+		srv := &dns.Server{
+			Addr:              addr,
+			Net:               netw,
+			Handler:           h,
+			NotifyStartedFunc: func(context.Context) { close(started) },
+		}
 		go func() { _ = srv.ListenAndServe() }()
 		<-started
-		t.Cleanup(func() { _ = srv.Shutdown() })
+		t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	}
 	return port
 }
@@ -167,13 +177,15 @@ func buildBinary(t *testing.T) string {
 
 func query(t *testing.T, netw, addr, name string, qtype uint16) (*dns.Msg, error) {
 	t.Helper()
-	c := &dns.Client{Net: netw, Timeout: 3 * time.Second}
+	c := dns.NewClient()
+	c.Transport.ReadTimeout = 3 * time.Second
+	c.Transport.Dialer.Timeout = 3 * time.Second
 	if netw == "tcp-tls" {
 		c.TLSConfig = &tls.Config{InsecureSkipVerify: true}
+		netw = "tcp"
 	}
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(name), qtype)
-	r, _, err := c.Exchange(m, addr)
+	m := dns.NewMsg(dnsutil.Fqdn(name), qtype)
+	r, _, err := c.Exchange(context.Background(), m, netw, addr)
 	return r, err
 }
 
@@ -368,7 +380,7 @@ func runSmoke(t *testing.T, shared bool) {
 				t.Errorf("DDR target = %q", s.Target)
 			}
 			for _, kv := range s.Value {
-				if a, ok := kv.(*dns.SVCBAlpn); ok {
+				if a, ok := kv.(*svcb.ALPN); ok {
 					switch strings.Join(a.Alpn, ",") {
 					case "h2":
 						sawDoH = true
@@ -384,9 +396,9 @@ func runSmoke(t *testing.T, shared bool) {
 	})
 
 	t.Run("doh-over-http2", func(t *testing.T) {
-		m := new(dns.Msg)
-		m.SetQuestion("ok-doh.smoke.test.", dns.TypeA)
-		wire, _ := m.Pack()
+		m := dns.NewMsg("ok-doh.smoke.test.", dns.TypeA)
+		_ = m.Pack()
+		wire := m.Data
 		req, _ := http.NewRequest(http.MethodPost, fmt.Sprintf("https://127.0.0.1:%d/dns-query", e.doh), bytes.NewReader(wire))
 		req.Header.Set("Content-Type", "application/dns-message")
 		req.Header.Set("Accept", "application/dns-message")
@@ -400,7 +412,8 @@ func runSmoke(t *testing.T, shared bool) {
 		}
 		body, _ := io.ReadAll(resp.Body)
 		var ans dns.Msg
-		if err := ans.Unpack(body); err != nil || firstA(&ans) != "198.51.100.10" {
+		ans.Data = body
+		if err := ans.Unpack(); err != nil || firstA(&ans) != "198.51.100.10" {
 			t.Fatalf("DoH answer %q err=%v status=%d", firstA(&ans), err, resp.StatusCode)
 		}
 	})
@@ -449,10 +462,11 @@ func runSmoke(t *testing.T, shared bool) {
 		if r, err := query(t, "tcp", fmt.Sprintf("127.0.0.1:%d", newTCP), "after-reload-tcp.smoke.test", dns.TypeA); err != nil || firstA(r) != "198.51.100.20" {
 			t.Fatalf("new TCP listener after reload: %q err=%v", firstA(r), err)
 		}
-		c := &dns.Client{Net: "udp", Timeout: 800 * time.Millisecond}
-		m := new(dns.Msg)
-		m.SetQuestion("old-port.smoke.test.", dns.TypeA)
-		if r, _, err := c.Exchange(m, udpAddr); err == nil && r != nil {
+		c := dns.NewClient()
+		c.Transport.ReadTimeout = 800 * time.Millisecond
+		c.Transport.Dialer.Timeout = 800 * time.Millisecond
+		m := dns.NewMsg("old-port.smoke.test.", dns.TypeA)
+		if r, _, err := c.Exchange(context.Background(), m, "udp", udpAddr); err == nil && r != nil {
 			t.Fatalf("old UDP listener still answering after reload")
 		}
 		if r, err := query(t, "udp", newUDPAddr, "blocked.smoke.test", dns.TypeA); err != nil || r.Rcode != dns.RcodeNameError {
@@ -522,10 +536,11 @@ func runSmoke(t *testing.T, shared bool) {
 		addr := fmt.Sprintf("127.0.0.1:%d", e.curUDP)
 		limited := 0
 		for i := range 12 {
-			c := &dns.Client{Net: "udp", Timeout: 300 * time.Millisecond}
-			m := new(dns.Msg)
-			m.SetQuestion(fmt.Sprintf("rl-%d.smoke.test.", i), dns.TypeA)
-			r, _, err := c.Exchange(m, addr)
+			c := dns.NewClient()
+			c.Transport.ReadTimeout = 300 * time.Millisecond
+			c.Transport.Dialer.Timeout = 300 * time.Millisecond
+			m := dns.NewMsg(fmt.Sprintf("rl-%d.smoke.test.", i), dns.TypeA)
+			r, _, err := c.Exchange(context.Background(), m, "udp", addr)
 			if err != nil || r.Rcode == dns.RcodeRefused {
 				limited++
 			}

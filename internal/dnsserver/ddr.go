@@ -2,11 +2,16 @@ package dnsserver
 
 import (
 	"net"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
+	"codeberg.org/miekg/dns/svcb"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 )
 
 // ddrName is the special-use name a client queries to discover the encrypted
@@ -88,38 +93,42 @@ func isDDRQuery(qname string) bool {
 // 9462 §6.4 prescribes for a resolver that has no designation to offer.
 // local is the address the query arrived on; it becomes the ipv4hint /
 // ipv6hint so a client can reach the designated resolver without a lookup.
-func ddrAnswer(r *dns.Msg, q dns.Question, cfg *DDRConfig, local net.IP) *dns.Msg {
+func ddrAnswer(r *dns.Msg, q dnsname.Question, cfg *DDRConfig, local net.IP) *dns.Msg {
 	m := newReply(r)
 	if cfg == nil || q.Qtype != dns.TypeSVCB {
 		return m
 	}
-	target := dns.Fqdn(cfg.Host)
+	target := dnsutil.Fqdn(cfg.Host)
 
-	var hints []dns.SVCBKeyValue
+	var hints []svcb.Pair
 	if len(local) > 0 && !local.IsUnspecified() {
 		if v4 := local.To4(); v4 != nil {
-			hints = append(hints, &dns.SVCBIPv4Hint{Hint: []net.IP{v4}})
-		} else {
-			hints = append(hints, &dns.SVCBIPv6Hint{Hint: []net.IP{local}})
+			if addr, ok := netip.AddrFromSlice(v4); ok {
+				hints = append(hints, &svcb.IPV4HINT{Hint: []netip.Addr{addr}})
+			}
+		} else if addr, ok := netip.AddrFromSlice(local); ok {
+			hints = append(hints, &svcb.IPV6HINT{Hint: []netip.Addr{addr}})
 		}
 	}
 
 	add := func(prio uint16, alpn []string, port, defPort int, dohPath string) {
-		kv := []dns.SVCBKeyValue{&dns.SVCBAlpn{Alpn: alpn}}
+		kv := []svcb.Pair{&svcb.ALPN{Alpn: alpn}}
 		if port != defPort {
-			kv = append(kv, &dns.SVCBPort{Port: uint16(port)})
+			kv = append(kv, &svcb.PORT{Port: uint16(port)})
 		}
 		kv = append(kv, hints...)
 		if dohPath != "" {
-			kv = append(kv, &dns.SVCBDoHPath{Template: dohPath + "{?dns}"})
+			kv = append(kv, &svcb.DOHPATH{Template: dohPath + "{?dns}"})
 		}
 		// SvcParams must be in ascending key order on the wire.
-		sort.Slice(kv, func(i, j int) bool { return kv[i].Key() < kv[j].Key() })
+		sort.Slice(kv, func(i, j int) bool { return svcb.PairToKey(kv[i]) < svcb.PairToKey(kv[j]) })
 		m.Answer = append(m.Answer, &dns.SVCB{
-			Hdr:      dns.RR_Header{Name: q.Name, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: ddrTTL},
-			Priority: prio,
-			Target:   target,
-			Value:    kv,
+			Hdr: dns.Header{Name: q.Name, Class: dns.ClassINET, TTL: ddrTTL},
+			SVCB: rdata.SVCB{
+				Priority: prio,
+				Target:   target,
+				Value:    kv,
+			},
 		})
 	}
 

@@ -4,11 +4,13 @@ import (
 	"testing"
 	"time"
 
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 	"github.com/alicebob/miniredis/v2"
-	"github.com/miekg/dns"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
@@ -82,13 +84,13 @@ func TestWarmerWarmsActiveDomains(t *testing.T) {
 	// field was removed when settings became an atomic pointer).
 	cache := h.settings.Load().Cache
 	for _, qt := range []uint16{dns.TypeA, dns.TypeAAAA} {
-		q := dns.Question{Name: "warm.com.", Qtype: qt, Qclass: dns.ClassINET}
+		q := dnsname.Question{Name: "warm.com.", Qtype: qt, Qclass: dns.ClassINET}
 		if got := cache.Get(t.Context(), q); got == nil || len(got.Answer) == 0 {
-			t.Fatalf("warm.com %s not cached after warming: %v", dns.TypeToString[qt], got)
+			t.Fatalf("warm.com %s not cached after warming: %v", dnsutil.TypeToString(qt), got)
 		}
 	}
 	// The blacklisted domain must never have been resolved/warmed.
-	if got := cache.Get(t.Context(), dns.Question{Name: "blocked.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}); got != nil {
+	if got := cache.Get(t.Context(), dnsname.Question{Name: "blocked.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}); got != nil {
 		t.Fatalf("blacklisted domain was warmed: %v", got)
 	}
 

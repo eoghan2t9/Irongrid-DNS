@@ -3,7 +3,8 @@ package filter
 import (
 	"testing"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 )
 
 func TestRewriterExactAndWildcard(t *testing.T) {
@@ -49,8 +50,7 @@ func TestRewriterBuildAnswerTypeMismatchIsNoMatch(t *testing.T) {
 	if !ok {
 		t.Fatal("expected a match")
 	}
-	r := new(dns.Msg)
-	r.SetQuestion("nas.home.", dns.TypeAAAA)
+	r := dnsutil.SetQuestion(new(dns.Msg), "nas.home.", dns.TypeAAAA)
 	ans := BuildAnswer(r, rules, "nas.home.", dns.TypeAAAA)
 	if ans != nil {
 		t.Fatalf("querying AAAA against an A-only rule should yield no answer (NODATA), got %v", ans)
@@ -62,14 +62,13 @@ func TestRewriterBuildAnswerA(t *testing.T) {
 	rw := NewRewriter()
 	rw.Set([]RewriteSpec{{Domain: "nas.home", Type: "A", Value: "192.168.1.10", TTL: 300}})
 	rules, _ := rw.Lookup("nas.home.")
-	r := new(dns.Msg)
-	r.SetQuestion("nas.home.", dns.TypeA)
+	r := dnsutil.SetQuestion(new(dns.Msg), "nas.home.", dns.TypeA)
 	ans := BuildAnswer(r, rules, "nas.home.", dns.TypeA)
 	if ans == nil || len(ans.Answer) != 1 {
 		t.Fatalf("expected one answer, got %v", ans)
 	}
 	a, ok := ans.Answer[0].(*dns.A)
-	if !ok || a.A.String() != "192.168.1.10" {
+	if !ok || a.Addr.String() != "192.168.1.10" {
 		t.Fatalf("unexpected answer: %v", ans.Answer[0])
 	}
 }
@@ -82,8 +81,7 @@ func TestRewriterCNAMEAnswersAnyQtype(t *testing.T) {
 	if !ok {
 		t.Fatal("expected a match")
 	}
-	r := new(dns.Msg)
-	r.SetQuestion("web.home.", dns.TypeA)
+	r := dnsutil.SetQuestion(new(dns.Msg), "web.home.", dns.TypeA)
 	ans := BuildAnswer(r, rules, "web.home.", dns.TypeA)
 	if ans == nil || len(ans.Answer) != 1 {
 		t.Fatalf("expected a CNAME answer even for an A query, got %v", ans)

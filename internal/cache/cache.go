@@ -15,9 +15,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
 	"github.com/redis/rueidis"
 
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
@@ -81,7 +82,7 @@ type Cache struct {
 	// EnablePrefetch must be called before the cache is published to serving
 	// goroutines (it is: at construction, and before SetCache swaps a
 	// replacement in) — the field is read lock-free on the lookup path.
-	prefetch       func(ctx context.Context, q dns.Question)
+	prefetch       func(ctx context.Context, q dnsname.Question)
 	prefetching    sync.Map // msgKey -> struct{}: one in-flight refresh per key
 	prefetchSem    chan struct{}
 	prefetchCtx    context.Context
@@ -556,7 +557,7 @@ func (c *Cache) budget() time.Duration {
 // adversarial input) and cost real CPU on every single query; hashing the
 // name byte-by-byte also skips the strings.ToLower + concatenation
 // allocations the old key built on every call.
-func keyHash(q dns.Question) uint64 {
+func keyHash(q dnsname.Question) uint64 {
 	const (
 		offset64 = 14695981039346656037
 		prime64  = 1099511628211
@@ -663,7 +664,7 @@ const cacheEntryPrefixLen = 8
 // Get returns a cached response for q, or nil when absent/expired. The L1
 // memory cache is consulted first; L2 (Dragonfly) only on an L1 miss, and a
 // hit is then re-warmed into L1.
-func (c *Cache) Get(ctx context.Context, q dns.Question) *dns.Msg {
+func (c *Cache) Get(ctx context.Context, q dnsname.Question) *dns.Msg {
 	return c.getPositive(ctx, keyHash(q))
 }
 
@@ -752,7 +753,7 @@ const prefetchTimeout = 15 * time.Second
 //
 // Call it before the cache is handed to serving goroutines: the prefetch
 // field is read without a lock on the lookup path.
-func (c *Cache) EnablePrefetch(fn func(ctx context.Context, q dns.Question)) {
+func (c *Cache) EnablePrefetch(fn func(ctx context.Context, q dnsname.Question)) {
 	c.prefetch = fn
 }
 
@@ -764,7 +765,7 @@ func (c *Cache) EnablePrefetch(fn func(ctx context.Context, q dns.Question)) {
 // hash (prefetching sync.Map), and the goroutine is fully best-effort — a
 // failure just leaves the now-stale entry to serve-stale or upstream on the
 // next miss.
-func (c *Cache) maybePrefetch(q dns.Question, h uint64, remaining, lifetime time.Duration, neg bool) {
+func (c *Cache) maybePrefetch(q dnsname.Question, h uint64, remaining, lifetime time.Duration, neg bool) {
 	if c.prefetch == nil || remaining <= 0 {
 		return
 	}
@@ -855,13 +856,13 @@ func (c *Cache) negPrefetchLead() time.Duration {
 // fresh L2 entry wins over the stale one. Only when neither layer has fresh
 // data is the stale entry reported (LookupResult.Stale) so the handler can
 // answer from it if re-resolution fails.
-func (c *Cache) Lookup(q dns.Question) LookupResult {
+func (c *Cache) Lookup(q dnsname.Question) LookupResult {
 	return c.LookupAt(q, time.Now())
 }
 
 // LookupAt is Lookup with a caller-supplied timestamp so the handler can
 // reuse a single time.Now() across rate-limit, cache, and TTL-rebase checks.
-func (c *Cache) LookupAt(q dns.Question, now time.Time) LookupResult {
+func (c *Cache) LookupAt(q dnsname.Question, now time.Time) LookupResult {
 	h := keyHash(q)
 
 	var stale LookupResult
@@ -1007,7 +1008,7 @@ func rcodeOf(raw []byte) int {
 // traffic must not skew the dashboard's cache hit-rate cards, and a
 // near-expiry entry should be refreshed by the warmer (or prefetch) rather
 // than have the probe itself trigger a refresh and then get skipped.
-func (c *Cache) Fresh(q dns.Question) bool {
+func (c *Cache) Fresh(q dnsname.Question) bool {
 	h := keyHash(q)
 	now := time.Now()
 	if c.l1 != nil {
@@ -1089,16 +1090,16 @@ func unpackEntry(raw []byte, now time.Time) *dns.Msg {
 		return nil
 	}
 	stored := int64(binary.BigEndian.Uint64(raw[:cacheEntryPrefixLen]))
-	m := new(dns.Msg)
-	if err := m.Unpack(raw[cacheEntryPrefixLen:]); err != nil {
+	m := &dns.Msg{Data: raw[cacheEntryPrefixLen:]}
+	if err := m.Unpack(); err != nil {
 		return nil
 	}
 	elapsed := now.Unix() - stored
 	for _, rr := range m.Answer {
-		if elapsed > 0 && rr.Header().Ttl > uint32(elapsed) {
-			rr.Header().Ttl -= uint32(elapsed)
+		if elapsed > 0 && rr.Header().TTL > uint32(elapsed) {
+			rr.Header().TTL -= uint32(elapsed)
 		} else {
-			rr.Header().Ttl = 1
+			rr.Header().TTL = 1
 		}
 	}
 	return m
@@ -1108,14 +1109,14 @@ func unpackEntry(raw []byte, now time.Time) *dns.Msg {
 // default cap (cache.ttl) applies; the stored TTL is the minimum of the
 // record TTLs and that cap. The entry goes to L1 immediately and L2 for the
 // fleet.
-func (c *Cache) Set(ctx context.Context, q dns.Question, m *dns.Msg, capTTL time.Duration) {
+func (c *Cache) Set(ctx context.Context, q dnsname.Question, m *dns.Msg, capTTL time.Duration) {
 	if m == nil || len(m.Answer) == 0 {
 		return
 	}
 	var min = ^uint32(0)
 	for _, rr := range m.Answer {
-		if rr.Header().Ttl < min {
-			min = rr.Header().Ttl
+		if rr.Header().TTL < min {
+			min = rr.Header().TTL
 		}
 	}
 	ttl := time.Duration(min) * time.Second
@@ -1128,18 +1129,12 @@ func (c *Cache) Set(ctx context.Context, q dns.Question, m *dns.Msg, capTTL time
 	if ttl <= 0 {
 		return
 	}
-	// Compress before packing so the stored bytes match what the handler
-	// would send on the wire. m.SetReply(m) used to sit here too, but
-	// calling it with the message as its own argument is a no-op for every
-	// field except Rcode, which it unconditionally forces to NOERROR — a
-	// CNAME chain that legitimately terminates in NXDOMAIN (RFC 2308) has a
-	// non-empty Answer and a non-success Rcode, and that call silently
-	// cached it as a successful answer for every future hit.
-	m.Compress = true
-	packed, err := m.Pack()
-	if err != nil {
+	mc := m.Copy()
+	mc.Data = nil
+	if err := mc.Pack(); err != nil {
 		return
 	}
+	packed := mc.Data
 	buf := make([]byte, cacheEntryPrefixLen+len(packed))
 	now := time.Now()
 	binary.BigEndian.PutUint64(buf[:cacheEntryPrefixLen], uint64(now.Unix()))
@@ -1158,7 +1153,7 @@ func (c *Cache) Set(ctx context.Context, q dns.Question, m *dns.Msg, capTTL time
 // SetNegative caches an empty (NXDOMAIN/NOERROR/SERVFAIL) result briefly so
 // repeated blocked or failing queries are cheap. A zero ttl uses the
 // configured negative TTL.
-func (c *Cache) SetNegative(ctx context.Context, q dns.Question, m *dns.Msg, ttl time.Duration) {
+func (c *Cache) SetNegative(ctx context.Context, q dnsname.Question, m *dns.Msg, ttl time.Duration) {
 	if m == nil || len(m.Answer) != 0 {
 		return
 	}
@@ -1180,10 +1175,11 @@ func (c *Cache) SetNegative(ctx context.Context, q dns.Question, m *dns.Msg, ttl
 	if ttl <= 0 {
 		return
 	}
-	raw, err := m.Pack()
-	if err != nil {
+	if err := m.Pack(); err != nil {
 		return
 	}
+	raw := make([]byte, len(m.Data))
+	copy(raw, m.Data)
 	h := keyHash(q)
 	now := time.Now()
 	if c.l1 != nil {
@@ -1193,7 +1189,7 @@ func (c *Cache) SetNegative(ctx context.Context, q dns.Question, m *dns.Msg, ttl
 }
 
 // GetNegative returns a cached empty response, if any (L1 first, then L2).
-func (c *Cache) GetNegative(ctx context.Context, q dns.Question) *dns.Msg {
+func (c *Cache) GetNegative(ctx context.Context, q dnsname.Question) *dns.Msg {
 	return c.getNegative(ctx, keyHash(q))
 }
 
@@ -1227,8 +1223,8 @@ func (c *Cache) getNegative(ctx context.Context, h uint64) *dns.Msg {
 // unpackNegative decodes a stored negative entry (no TTL rebasing needed;
 // the Redis expiry already bounds it).
 func unpackNegative(raw []byte) *dns.Msg {
-	m := new(dns.Msg)
-	if err := m.Unpack(raw); err != nil {
+	m := &dns.Msg{Data: raw}
+	if err := m.Unpack(); err != nil {
 		return nil
 	}
 	return m

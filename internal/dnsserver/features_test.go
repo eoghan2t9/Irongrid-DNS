@@ -4,7 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 )
@@ -22,14 +23,10 @@ func TestDNSCookies(t *testing.T) {
 	clientCookie := "1234567890abcdef" // 8 bytes, hex
 	newQuery := func(cookie string) *dns.Msg {
 		q := new(dns.Msg)
-		q.SetQuestion("example.com.", dns.TypeA)
+		dnsutil.SetQuestion(q, "example.com.", dns.TypeA)
 		if cookie != "" {
-			opt := new(dns.OPT)
-			opt.Hdr.Name = "."
-			opt.Hdr.Rrtype = dns.TypeOPT
-			opt.SetUDPSize(4096)
-			opt.Option = append(opt.Option, &dns.EDNS0_COOKIE{Code: dns.EDNS0COOKIE, Cookie: cookie})
-			q.Extra = append(q.Extra, opt)
+			q.UDPSize = 4096
+			q.Pseudo = append(q.Pseudo, &dns.COOKIE{Cookie: cookie})
 		}
 		return q
 	}
@@ -86,12 +83,8 @@ func TestEDNSPadding(t *testing.T) {
 	h.SetPadding(true)
 
 	hasPadding := func(m *dns.Msg) bool {
-		opt := m.IsEdns0()
-		if opt == nil {
-			return false
-		}
-		for _, o := range opt.Option {
-			if o.Option() == dns.EDNS0PADDING {
+		for _, rr := range m.Pseudo {
+			if _, ok := rr.(*dns.PADDING); ok {
 				return true
 			}
 		}
@@ -101,7 +94,7 @@ func TestEDNSPadding(t *testing.T) {
 	// DoH (encrypted stream transport) → padded to a 128-byte multiple.
 	w := &fakeWriter{}
 	q := new(dns.Msg)
-	q.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(q, "example.com.", dns.TypeA)
 	h.ServeDNSFromContext(w, q, "127.0.0.1", "doh")
 	if w.msg == nil {
 		t.Fatal("no DoH response")
@@ -109,18 +102,18 @@ func TestEDNSPadding(t *testing.T) {
 	if !hasPadding(w.msg) {
 		t.Fatal("no EDNS0_PADDING option in padded response")
 	}
-	packed, err := w.msg.Pack()
-	if err != nil {
+	w.msg.Data = nil
+	if err := w.msg.Pack(); err != nil {
 		t.Fatalf("pack padded response: %v", err)
 	}
-	if len(packed)%128 != 0 {
-		t.Fatalf("padded response length %d is not a multiple of 128", len(packed))
+	if len(w.msg.Data)%128 != 0 {
+		t.Fatalf("padded response length %d is not a multiple of 128", len(w.msg.Data))
 	}
 
 	// Plain UDP → no padding option.
 	w2 := &fakeWriter{}
 	q2 := new(dns.Msg)
-	q2.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(q2, "example.com.", dns.TypeA)
 	h.ServeDNSWithProto(w2, q2, "udp")
 	if w2.msg == nil {
 		t.Fatal("no UDP response")
@@ -133,7 +126,7 @@ func TestEDNSPadding(t *testing.T) {
 	h.SetPadding(false)
 	w3 := &fakeWriter{}
 	q3 := new(dns.Msg)
-	q3.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(q3, "example.com.", dns.TypeA)
 	h.ServeDNSFromContext(w3, q3, "127.0.0.1", "doh")
 	if w3.msg == nil {
 		t.Fatal("no DoH response")
@@ -149,7 +142,7 @@ func TestEDNSPadding(t *testing.T) {
 // to the background cache writer right after the write).
 func TestCookieAndPadCopyInvariant(t *testing.T) {
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
 
 	c := attachCookie(m, "1234567890abcdef1234567890abcdef")
 	if requestCookieValue(c) == "" {
@@ -160,10 +153,10 @@ func TestCookieAndPadCopyInvariant(t *testing.T) {
 	}
 
 	p := padMessage(m, 128)
-	if p.IsEdns0() == nil {
+	if p.UDPSize == 0 {
 		t.Fatal("padded copy has no OPT")
 	}
-	if m.IsEdns0() != nil {
+	if m.UDPSize != 0 {
 		t.Fatal("padMessage mutated its input")
 	}
 }

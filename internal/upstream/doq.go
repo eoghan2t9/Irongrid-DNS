@@ -8,7 +8,7 @@ import (
 	"net"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
 	"github.com/quic-go/quic-go"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
@@ -149,10 +149,10 @@ func doQStream(ctx context.Context, conn *quic.Conn, m *dns.Msg) (*dns.Msg, erro
 		return nil, fmt.Errorf("doq set deadline: %w", err)
 	}
 
-	packed, err := m.Pack()
-	if err != nil {
+	if err := m.Pack(); err != nil {
 		return nil, err
 	}
+	packed := m.Data
 	buf := make([]byte, 2+len(packed))
 	binary.BigEndian.PutUint16(buf[:2], uint16(len(packed)))
 	copy(buf[2:], packed)
@@ -184,8 +184,8 @@ func doQStream(ctx context.Context, conn *quic.Conn, m *dns.Msg) (*dns.Msg, erro
 		stream.CancelRead(0)
 		return nil, fmt.Errorf("doq read message: %w", err)
 	}
-	r := new(dns.Msg)
-	if err := r.Unpack(msgBuf); err != nil {
+	r := &dns.Msg{Data: msgBuf}
+	if err := r.Unpack(); err != nil {
 		return nil, err
 	}
 	return r, nil

@@ -15,7 +15,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
@@ -290,8 +291,7 @@ func (r *Relay) forward(clientConn net.Conn, peeked []byte, addr string) {
 // resolveIP looks up hostname's first A record via r.resolver — a fixed
 // upstream, never Irongrid's own resolution path (see NewRelay).
 func (r *Relay) resolveIP(hostname string) (net.IP, error) {
-	msg := new(dns.Msg)
-	msg.SetQuestion(dns.Fqdn(hostname), dns.TypeA)
+	msg := dnsutil.SetQuestion(new(dns.Msg), dnsutil.Fqdn(hostname), dns.TypeA)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	resp, err := r.resolver.Query(ctx, msg)
@@ -300,7 +300,7 @@ func (r *Relay) resolveIP(hostname string) (net.IP, error) {
 	}
 	for _, rr := range resp.Answer {
 		if a, ok := rr.(*dns.A); ok {
-			return a.A, nil
+			return a.Addr.AsSlice(), nil
 		}
 	}
 	return nil, fmt.Errorf("no A record for %s", hostname)

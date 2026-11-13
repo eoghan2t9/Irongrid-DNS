@@ -12,7 +12,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 	"github.com/quic-go/quic-go"
 	"github.com/quic-go/quic-go/http3"
 
@@ -72,12 +73,11 @@ func TestDoH3RoundTrip(t *testing.T) {
 	doh3Query := func(name string, qtype uint16) *dns.Msg {
 		t.Helper()
 		m := new(dns.Msg)
-		m.SetQuestion(name, qtype)
-		packed, err := m.Pack()
-		if err != nil {
+		dnsutil.SetQuestion(m, name, qtype)
+		if err := m.Pack(); err != nil {
 			t.Fatalf("pack query: %v", err)
 		}
-		url := "https://" + addr + "/dns-query?dns=" + base64.RawURLEncoding.EncodeToString(packed)
+		url := "https://" + addr + "/dns-query?dns=" + base64.RawURLEncoding.EncodeToString(m.Data)
 		req, err := http.NewRequestWithContext(t.Context(), http.MethodGet, url, nil)
 		if err != nil {
 			t.Fatalf("request: %v", err)
@@ -94,12 +94,12 @@ func TestDoH3RoundTrip(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read body: %v", err)
 		}
-		out := new(dns.Msg)
-		if err := out.Unpack(body); err != nil {
+		out := &dns.Msg{Data: body}
+		if err := out.Unpack(); err != nil {
 			t.Fatalf("unpack DoH3 response: %v", err)
 		}
-		if out.Id != m.Id {
-			t.Fatalf("response ID %d != query ID %d", out.Id, m.Id)
+		if out.ID != m.ID {
+			t.Fatalf("response ID %d != query ID %d", out.ID, m.ID)
 		}
 		return out
 	}

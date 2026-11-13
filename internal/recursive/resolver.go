@@ -11,9 +11,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 	"golang.org/x/sync/singleflight"
 
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
@@ -138,7 +140,7 @@ type Resolver struct {
 // to the pool, so getConn can evict connections that sat idle too long.
 // Mirrors upstream.pooledConn.
 type nsPooledConn struct {
-	conn     *dns.Conn
+	conn     net.Conn
 	pooledAt time.Time
 }
 
@@ -177,16 +179,22 @@ func (r *Resolver) Resolve(ctx context.Context, m *dns.Msg) (*dns.Msg, error) {
 	if len(m.Question) == 0 {
 		return nil, fmt.Errorf("recursive: query has no question")
 	}
-	resp, err := r.resolve(ctx, m.Question[0], 0, 0)
+	qRR := m.Question[0]
+	q := dnsname.Question{
+		Name:   qRR.Header().Name,
+		Qtype:  dns.RRToType(qRR),
+		Qclass: qRR.Header().Class,
+	}
+	resp, err := r.resolve(ctx, q, 0, 0)
 	if err != nil {
 		return nil, err
 	}
-	resp.Id = m.Id
+	resp.ID = m.ID
 	resp.RecursionAvailable = true
 	return resp, nil
 }
 
-func (r *Resolver) resolve(ctx context.Context, q dns.Question, cnameDepth, nsDepth int) (*dns.Msg, error) {
+func (r *Resolver) resolve(ctx context.Context, q dnsname.Question, cnameDepth, nsDepth int) (*dns.Msg, error) {
 	if cnameDepth > maxCNAMEChain {
 		return nil, fmt.Errorf("recursive: CNAME chain too long resolving %s", q.Name)
 	}
@@ -212,7 +220,7 @@ func (r *Resolver) resolve(ctx context.Context, q dns.Question, cnameDepth, nsDe
 		minimized := false
 		if !full {
 			if next, ok := nextMinimizedLabel(zone, q.Name); ok && !strings.EqualFold(next, q.Name) {
-				askQ = dns.Question{Name: next, Qtype: dns.TypeNS, Qclass: q.Qclass}
+				askQ = dnsname.Question{Name: next, Qtype: dns.TypeNS, Qclass: q.Qclass}
 				minimized = true
 			}
 		}
@@ -276,19 +284,26 @@ func (r *Resolver) resolve(ctx context.Context, q dns.Question, cnameDepth, nsDe
 // isn't an ancestor of qname with fewer labels (defensive: bestDelegation's
 // own walk always returns a true ancestor, so this should never happen in
 // practice — falling back to the unminimized qname is always safe).
+func splitLabels(s string) []string {
+	if s == "." {
+		return nil
+	}
+	return dnsutil.Split(s)
+}
+
 func nextMinimizedLabel(zone, qname string) (next string, ok bool) {
-	zone = strings.ToLower(dns.Fqdn(zone))
-	qname = strings.ToLower(dns.Fqdn(qname))
+	zone = strings.ToLower(dnsutil.Fqdn(zone))
+	qname = strings.ToLower(dnsutil.Fqdn(qname))
 	if zone == qname {
 		return "", false
 	}
-	qLabels := dns.SplitDomainName(qname)
-	zLabels := dns.SplitDomainName(zone)
+	qLabels := splitLabels(qname)
+	zLabels := splitLabels(zone)
 	if len(zLabels) >= len(qLabels) {
 		return "", false
 	}
 	keep := qLabels[len(qLabels)-len(zLabels)-1:]
-	return dns.Fqdn(strings.Join(keep, ".")), true
+	return dnsutil.Fqdn(strings.Join(keep, ".")), true
 }
 
 // isFinal reports whether resp answers the query (positively or as an
@@ -308,13 +323,13 @@ func isFinal(resp *dns.Msg) bool {
 // chaseCNAME follows a CNAME in resp's answer to its target when the client
 // asked for a different type and the target's own records weren't already
 // included, merging the target's answer onto the CNAME hop.
-func (r *Resolver) chaseCNAME(ctx context.Context, q dns.Question, resp *dns.Msg, cnameDepth, nsDepth int) (*dns.Msg, error) {
+func (r *Resolver) chaseCNAME(ctx context.Context, q dnsname.Question, resp *dns.Msg, cnameDepth, nsDepth int) (*dns.Msg, error) {
 	if q.Qtype == dns.TypeCNAME {
 		return resp, nil
 	}
 	var target string
 	for _, rr := range resp.Answer {
-		if rr.Header().Rrtype == q.Qtype {
+		if dns.RRToType(rr) == q.Qtype {
 			return resp, nil // already has the actual answer alongside the CNAME
 		}
 		if cn, ok := rr.(*dns.CNAME); ok && strings.EqualFold(cn.Header().Name, q.Name) {
@@ -339,7 +354,7 @@ func (r *Resolver) chaseCNAME(ctx context.Context, q dns.Question, resp *dns.Msg
 			defer cancel()
 		}
 	}
-	follow, err := r.resolve(followCtx, dns.Question{Name: target, Qtype: q.Qtype, Qclass: q.Qclass}, cnameDepth+1, nsDepth)
+	follow, err := r.resolve(followCtx, dnsname.Question{Name: target, Qtype: q.Qtype, Qclass: q.Qclass}, cnameDepth+1, nsDepth)
 	if err != nil {
 		// Return the CNAME hop we do have rather than failing the whole
 		// query over a downstream failure resolving its target — but log
@@ -369,16 +384,14 @@ func (r *Resolver) chaseCNAME(ctx context.Context, q dns.Question, resp *dns.Msg
 // channel buffered for every server, so nothing leaks; the losers' exchanges
 // run on a deadline (perServerTimeout) rather than being interrupted the
 // instant the winner returns, exactly like raceUpstreams.
-func (r *Resolver) queryServers(ctx context.Context, servers []string, q dns.Question) (*dns.Msg, error) {
-	m := new(dns.Msg)
-	m.SetQuestion(q.Name, q.Qtype)
-	m.Question[0].Qclass = q.Qclass
+func (r *Resolver) queryServers(ctx context.Context, servers []string, q dnsname.Question) (*dns.Msg, error) {
+	m := dnsutil.SetQuestion(new(dns.Msg), q.Name, q.Qtype, q.Qclass)
 	m.RecursionDesired = false
 	// Advertise the DNS Flag Day 2020 recommended 1232-byte UDP payload
 	// (see dnsserver.ednsUDPSize): large enough for realistic answers
 	// without risking IP fragmentation, with anything bigger flowing over
 	// the TCP fallback on truncation.
-	m.SetEdns0(ednsUDPSize, false)
+	m.UDPSize = ednsUDPSize
 
 	qctx, qcancel := context.WithCancel(ctx)
 	defer qcancel()
@@ -435,9 +448,15 @@ func (r *Resolver) queryServers(ctx context.Context, servers []string, q dns.Que
 func (r *Resolver) exchange(ctx context.Context, addr string, m *dns.Msg, network string, timeout time.Duration) (*dns.Msg, error) {
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	c := &dns.Client{Net: network, Timeout: timeout}
+	c := &dns.Client{
+		Transport: &dns.Transport{
+			Dialer:       &net.Dialer{Timeout: timeout, KeepAlive: -1},
+			ReadTimeout:  timeout,
+			WriteTimeout: timeout,
+		},
+	}
 	if conn := r.getConn(network, addr); conn != nil {
-		resp, _, err := c.ExchangeWithConnContext(cctx, m, conn)
+		resp, _, err := c.ExchangeWithConn(cctx, m, conn)
 		if err == nil {
 			r.putConn(network, addr, conn)
 			return resp, nil
@@ -447,11 +466,11 @@ func (r *Resolver) exchange(ctx context.Context, addr string, m *dns.Msg, networ
 		// nameserver closed it, a NAT dropped it) — fall through to a fresh
 		// dial rather than failing the query over a warm-connection hiccup.
 	}
-	conn, err := c.DialContext(cctx, addr)
+	conn, err := c.Dialer.DialContext(cctx, network, addr)
 	if err != nil {
 		return nil, err
 	}
-	resp, _, err := c.ExchangeWithConnContext(cctx, m, conn)
+	resp, _, err := c.ExchangeWithConn(cctx, m, conn)
 	if err != nil {
 		conn.Close()
 		return nil, err
@@ -465,7 +484,7 @@ func (r *Resolver) exchange(ctx context.Context, addr string, m *dns.Msg, networ
 // that key). A connection that sat idle longer than nsPoolMaxIdle is
 // presumed stale and closed instead of returned, so reuse never wastes a
 // query on a guaranteed EOF.
-func (r *Resolver) getConn(network, addr string) *dns.Conn {
+func (r *Resolver) getConn(network, addr string) net.Conn {
 	v, ok := r.connPools.Load(network + "|" + addr)
 	if !ok {
 		return nil
@@ -488,7 +507,7 @@ func (r *Resolver) getConn(network, addr string) *dns.Conn {
 // putConn returns a connection to the pool for (network, addr), closing it
 // instead if the per-key pool is full or the key cap (nsConnPoolMaxKeys) has
 // already been reached for a brand-new key.
-func (r *Resolver) putConn(network, addr string, c *dns.Conn) {
+func (r *Resolver) putConn(network, addr string, c net.Conn) {
 	key := network + "|" + addr
 	v, ok := r.connPools.Load(key)
 	if !ok {
@@ -555,8 +574,8 @@ func parseReferral(resp *dns.Msg) (zone string, ns []nsInfo, ttl time.Duration, 
 		}
 		zone = strings.ToLower(nsRR.Header().Name)
 		nsNames = append(nsNames, strings.ToLower(nsRR.Ns))
-		if minTTL == 0 || nsRR.Header().Ttl < minTTL {
-			minTTL = nsRR.Header().Ttl
+		if minTTL == 0 || nsRR.Header().TTL < minTTL {
+			minTTL = nsRR.Header().TTL
 		}
 	}
 	if len(nsNames) == 0 {
@@ -568,10 +587,10 @@ func parseReferral(resp *dns.Msg) (zone string, ns []nsInfo, ttl time.Duration, 
 		switch v := rr.(type) {
 		case *dns.A:
 			name := strings.ToLower(v.Header().Name)
-			glue[name] = append(glue[name], v.A.String())
+			glue[name] = append(glue[name], v.Addr.String())
 		case *dns.AAAA:
 			name := strings.ToLower(v.Header().Name)
-			glue[name] = append(glue[name], v.AAAA.String())
+			glue[name] = append(glue[name], v.Addr.String())
 		}
 	}
 	for _, name := range nsNames {
@@ -676,18 +695,18 @@ type nsAddrResult struct {
 // address (see resolveNSAddr for the coalescing wrapper).
 func (r *Resolver) resolveNSAddrWalk(ctx context.Context, host string, nsDepth int) (string, bool) {
 	for _, qtype := range [...]uint16{dns.TypeA, dns.TypeAAAA} {
-		resp, err := r.resolve(ctx, dns.Question{Name: host, Qtype: qtype, Qclass: dns.ClassINET}, 0, nsDepth)
+		resp, err := r.resolve(ctx, dnsname.Question{Name: host, Qtype: qtype, Qclass: dns.ClassINET}, 0, nsDepth)
 		if err != nil {
 			continue
 		}
 		for _, rr := range resp.Answer {
 			switch v := rr.(type) {
 			case *dns.A:
-				addr := net.JoinHostPort(v.A.String(), r.nsPort)
+				addr := net.JoinHostPort(v.Addr.String(), r.nsPort)
 				r.cacheNSAddr(host, addr, nsAnswerTTL(resp))
 				return addr, true
 			case *dns.AAAA:
-				addr := net.JoinHostPort(v.AAAA.String(), r.nsPort)
+				addr := net.JoinHostPort(v.Addr.String(), r.nsPort)
 				r.cacheNSAddr(host, addr, nsAnswerTTL(resp))
 				return addr, true
 			}
@@ -701,11 +720,12 @@ func (r *Resolver) resolveNSAddrWalk(ctx context.Context, host string, nsDepth i
 func nsAnswerTTL(resp *dns.Msg) time.Duration {
 	var min uint32
 	for _, rr := range resp.Answer {
-		if rr.Header().Rrtype != dns.TypeA && rr.Header().Rrtype != dns.TypeAAAA {
+		rrtype := dns.RRToType(rr)
+		if rrtype != dns.TypeA && rrtype != dns.TypeAAAA {
 			continue
 		}
-		if min == 0 || rr.Header().Ttl < min {
-			min = rr.Header().Ttl
+		if min == 0 || rr.Header().TTL < min {
+			min = rr.Header().TTL
 		}
 	}
 	if min == 0 {

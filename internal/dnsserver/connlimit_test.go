@@ -1,12 +1,16 @@
 package dnsserver
 
 import (
+	"context"
 	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
 )
 
 func TestConnLimiterCapsPerIP(t *testing.T) {
@@ -62,23 +66,25 @@ func startLimitedTCPServer(t *testing.T, max int) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = ln.Close() })
+	started := make(chan struct{})
 	srv := &dns.Server{
-		Net:          "tcp",
-		Listener:     &limitListener{Listener: ln, lim: newConnLimiter(max)},
-		ReadTimeout:  2 * time.Second,
-		WriteTimeout: 2 * time.Second,
-		Handler: dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
+		Net:               "tcp",
+		Listener:          &limitListener{Listener: ln, lim: newConnLimiter(max)},
+		ReadTimeout:       2 * time.Second,
+		NotifyStartedFunc: func(context.Context) { close(started) },
+		Handler: dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 			m := new(dns.Msg)
-			m.SetReply(r)
+			dnsutil.SetReply(m, r)
 			m.Answer = append(m.Answer, &dns.A{
-				Hdr: dns.RR_Header{Name: r.Question[0].Name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 60},
-				A:   net.ParseIP("1.2.3.4"),
+				Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
+				A:   rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
 			})
-			_ = w.WriteMsg(m)
+			_, _ = m.WriteTo(w)
 		}),
 	}
-	go func() { _ = srv.ActivateAndServe() }()
-	t.Cleanup(func() { _ = srv.Shutdown() })
+	go func() { _ = srv.ListenAndServe() }()
+	<-started
+	t.Cleanup(func() { srv.Shutdown(context.Background()) })
 	return ln.Addr().String()
 }
 
@@ -86,10 +92,12 @@ func startLimitedTCPServer(t *testing.T, max int) string {
 // answer (true) or the connection was refused/rejected (false).
 func queryTCP(t *testing.T, addr string) bool {
 	t.Helper()
-	c := &dns.Client{Net: "tcp", Timeout: 3 * time.Second}
+	c := dns.NewClient()
 	m := new(dns.Msg)
-	m.SetQuestion("example.com.", dns.TypeA)
-	_, _, err := c.Exchange(m, addr)
+	dnsutil.SetQuestion(m, "example.com.", dns.TypeA)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_, _, err := c.Exchange(ctx, m, "tcp", addr)
 	return err == nil
 }
 

@@ -6,14 +6,17 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
-	"github.com/miekg/dns"
 )
 
 // Wire-level helpers: stats writer, query recording, EDNS cookies/EDE/padding and response writing.
@@ -48,14 +51,6 @@ func putStatsWriter(sw *statsResponseWriter) {
 	statsWriterPool.Put(sw)
 }
 
-func (w *statsResponseWriter) WriteMsg(m *dns.Msg) error {
-	err := w.ResponseWriter.WriteMsg(m)
-	if err != nil {
-		w.writeErrors.Add(1)
-	}
-	return err
-}
-
 func (w *statsResponseWriter) Write(b []byte) (int, error) {
 	n, err := w.ResponseWriter.Write(b)
 	if err != nil {
@@ -64,10 +59,10 @@ func (w *statsResponseWriter) Write(b []byte) (int, error) {
 	return n, err
 }
 
-func (h *Handler) record(client, qname string, q dns.Question, action, reason, upstreamName string, start time.Time, m *dns.Msg) {
+func (h *Handler) record(client, qname string, q dnsname.Question, action, reason, upstreamName string, start time.Time, m *dns.Msg) {
 	rcode, answers := dns.RcodeServerFailure, 0
 	if m != nil {
-		rcode = m.Rcode
+		rcode = int(m.Rcode)
 		answers = len(m.Answer)
 	}
 	h.recordEntry(client, qname, q, action, reason, upstreamName, start, rcode, answers)
@@ -76,7 +71,7 @@ func (h *Handler) record(client, qname string, q dns.Question, action, reason, u
 // recordRaw is record for a cache hit served from packed bytes: the rcode
 // and answer count are header fields, read off the wire form without
 // decoding the message into a dns.Msg.
-func (h *Handler) recordRaw(client, qname string, q dns.Question, action, reason, upstreamName string, start time.Time, raw []byte) {
+func (h *Handler) recordRaw(client, qname string, q dnsname.Question, action, reason, upstreamName string, start time.Time, raw []byte) {
 	h.recordEntry(client, qname, q, action, reason, upstreamName, start, packedRcode(raw), packedAnCount(raw))
 }
 
@@ -129,11 +124,11 @@ func qtypeString(t uint16) string {
 	case dns.TypeDS:
 		return "DS"
 	default:
-		return dns.TypeToString[t]
+		return dnsutil.TypeToString(t)
 	}
 }
 
-func (h *Handler) recordEntry(client, qname string, q dns.Question, action, reason, upstreamName string, start time.Time, rcode, answers int) {
+func (h *Handler) recordEntry(client, qname string, q dnsname.Question, action, reason, upstreamName string, start time.Time, rcode, answers int) {
 	elapsed := time.Since(start)
 	h.latency.record(elapsed)
 	if h.Log == nil {
@@ -165,12 +160,8 @@ func (h *Handler) recordEntry(client, qname string, q dns.Question, action, reas
 // for legacy clients that send no OPT record. A nil request (the FORMERR
 // path, where the query was unparseable) is treated as a legacy client.
 func clientUDPSize(r *dns.Msg) int {
-	if r != nil {
-		if opt := r.IsEdns0(); opt != nil {
-			if s := int(opt.UDPSize()); s >= dns.MinMsgSize {
-				return s
-			}
-		}
+	if r != nil && int(r.UDPSize) >= dns.MinMsgSize {
+		return int(r.UDPSize)
 	}
 	return dns.MinMsgSize
 }
@@ -187,12 +178,8 @@ func requestCookieValue(r *dns.Msg) string {
 	if r == nil {
 		return ""
 	}
-	opt := r.IsEdns0()
-	if opt == nil {
-		return ""
-	}
-	for _, o := range opt.Option {
-		if c, ok := o.(*dns.EDNS0_COOKIE); ok {
+	for _, rr := range r.Pseudo {
+		if c, ok := rr.(*dns.COOKIE); ok {
 			return c.Cookie
 		}
 	}
@@ -230,44 +217,36 @@ func (h *Handler) serverCookie(clientIP, clientCookie string) string {
 // mutated.
 func attachCookie(m *dns.Msg, cookie string) *dns.Msg {
 	c := m.Copy()
-	opt := c.IsEdns0()
-	if opt == nil {
-		opt = &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
-		opt.SetUDPSize(udpMaxPacketSize)
-		c.Extra = append(c.Extra, opt)
+	if c.UDPSize < dns.MinMsgSize {
+		c.UDPSize = udpMaxPacketSize
 	}
-	keep := opt.Option[:0]
-	for _, o := range opt.Option {
-		if o.Option() != dns.EDNS0COOKIE {
-			keep = append(keep, o)
+	keep := c.Pseudo[:0]
+	for _, rr := range c.Pseudo {
+		if _, ok := rr.(*dns.COOKIE); !ok {
+			keep = append(keep, rr)
 		}
 	}
-	opt.Option = keep
-	opt.Option = append(opt.Option, &dns.EDNS0_COOKIE{Code: dns.EDNS0COOKIE, Cookie: cookie})
+	c.Pseudo = append(keep, &dns.COOKIE{Cookie: cookie})
 	return c
 }
 
 // attachEDE returns a copy of m carrying an Extended DNS Error option (RFC
 // 8914) with the given info code and human-readable extra text, replacing
 // any existing EDE option. Only meaningful for a client that sent its own
-// OPT record — callers gate on r.IsEdns0() != nil before calling this, the
+// OPT record — callers gate on r.UDPSize > 0 before calling this, the
 // same convention attachCookie's caller uses for the COOKIE option.
 func attachEDE(m *dns.Msg, code uint16, extra string) *dns.Msg {
 	c := m.Copy()
-	opt := c.IsEdns0()
-	if opt == nil {
-		opt = &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
-		opt.SetUDPSize(udpMaxPacketSize)
-		c.Extra = append(c.Extra, opt)
+	if c.UDPSize < dns.MinMsgSize {
+		c.UDPSize = udpMaxPacketSize
 	}
-	keep := opt.Option[:0]
-	for _, o := range opt.Option {
-		if o.Option() != dns.EDNS0EDE {
-			keep = append(keep, o)
+	keep := c.Pseudo[:0]
+	for _, rr := range c.Pseudo {
+		if _, ok := rr.(*dns.EDE); !ok {
+			keep = append(keep, rr)
 		}
 	}
-	opt.Option = keep
-	opt.Option = append(opt.Option, &dns.EDNS0_EDE{InfoCode: code, ExtraText: extra})
+	c.Pseudo = append(keep, &dns.EDE{InfoCode: code, ExtraText: extra})
 	return c
 }
 
@@ -279,25 +258,26 @@ func attachEDE(m *dns.Msg, code uint16, extra string) *dns.Msg {
 // must not be stored for every other client.
 func padMessage(m *dns.Msg, block int) *dns.Msg {
 	c := m.Copy()
-	c.Compress = true
-	opt := c.IsEdns0()
-	if opt == nil {
-		opt = &dns.OPT{Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT}}
-		opt.SetUDPSize(udpMaxPacketSize)
-		c.Extra = append(c.Extra, opt)
+	if c.UDPSize < dns.MinMsgSize {
+		c.UDPSize = udpMaxPacketSize
 	}
-	keep := opt.Option[:0]
-	for _, o := range opt.Option {
-		if o.Option() != dns.EDNS0PADDING {
-			keep = append(keep, o)
+	keep := c.Pseudo[:0]
+	for _, rr := range c.Pseudo {
+		if _, ok := rr.(*dns.PADDING); !ok {
+			keep = append(keep, rr)
 		}
 	}
-	opt.Option = keep
-	// The padding option costs 4 bytes of framing (code + length fields)
-	// once added; size its data so the total lands on the boundary.
-	base := c.Len() + 4
-	if need := block - (base % block); need != block {
-		opt.Option = append(opt.Option, &dns.EDNS0_PADDING{Padding: make([]byte, need)})
+	c.Pseudo = keep
+	// Pack once without padding to get the exact wire length (including the
+	// OPT pseudo-RR header), then size PADDING (4 bytes of framing + data)
+	// so the packed total lands on a multiple of block.
+	c.Data = nil
+	if err := c.Pack(); err == nil {
+		base := len(c.Data) + 4
+		if need := block - (base % block); need != block {
+			c.Pseudo = append(c.Pseudo, &dns.PADDING{Padding: strings.Repeat("00", need)})
+		}
+		c.Data = nil
 	}
 	return c
 }
@@ -334,31 +314,26 @@ func padMessage(m *dns.Msg, block int) *dns.Msg {
 // answer must not be stored for every other client.
 func (h *Handler) write(w dns.ResponseWriter, m *dns.Msg, r *dns.Msg, proto string) error {
 	h.observeVPN(r, m)
-	m.Compress = true
-	// Fast path: pack the response once into a pooled buffer and hand the
-	// bytes straight to the transport. This is the every-query path — the
-	// old code packed once for the m.Len() size check and again inside
-	// WriteMsg (and a third time for a UDP truncation). Only the rare
-	// per-client transformations below (an oversized datagram for a
-	// small-buffer client, RFC 7830 padding, RFC 7873 cookie attachment)
-	// fall back to the decoded-message path, which copies the message so
-	// the caller's — resp about to be handed to the background cache
-	// writer — is never mutated.
+	// Fast path: pack the response once and hand the bytes straight to the
+	// transport. Only the rare per-client transformations below (an oversized
+	// datagram for a small-buffer client, RFC 7830 padding, RFC 7873 cookie
+	// attachment) fall back to the copy path, so the caller's message (resp
+	// about to be handed to the background cache writer) is never mutated.
 	pad := h.Padding.Load() && (proto == "dot" || proto == "doh" || proto == "doh3" || proto == "doq")
 	cookie := h.Cookies.Load() && requestClientCookie(r) != ""
 	if !pad && !cookie {
-		buf := getPackBuf()
-		packed, err := m.PackBuffer(buf)
-		if err != nil {
-			putPackBuf(buf)
+		m.Data = nil
+		if err := m.Pack(); err != nil {
 			return err
 		}
-		if proto != "udp" || len(packed) <= clientUDPSize(r) {
-			_, werr := w.Write(packed)
-			putPackBuf(packed)
+		if proto != "udp" || len(m.Data) <= clientUDPSize(r) {
+			if w.Conn() != nil {
+				_, werr := m.WriteTo(w)
+				return werr
+			}
+			_, werr := w.Write(m.Data)
 			return werr
 		}
-		putPackBuf(buf)
 	}
 	// Slow path: a per-client transformation is needed. Padding only helps
 	// where the stream is encrypted anyway — on plain UDP the padded
@@ -368,7 +343,7 @@ func (h *Handler) write(w dns.ResponseWriter, m *dns.Msg, r *dns.Msg, proto stri
 	if proto == "udp" {
 		if limit := clientUDPSize(r); m.Len() > limit {
 			c := m.Copy()
-			c.Truncate(limit)
+			dnsutil.Truncate(c)
 			out = c
 		}
 	}
@@ -379,20 +354,18 @@ func (h *Handler) write(w dns.ResponseWriter, m *dns.Msg, r *dns.Msg, proto stri
 		cc := requestClientCookie(r)
 		out = attachCookie(out, cc+h.serverCookie(clientIPOf(w.RemoteAddr()), cc))
 	}
-	return w.WriteMsg(out)
+	out.Data = nil
+	if w.Conn() != nil {
+		_, err := out.WriteTo(w)
+		return err
+	}
+	if err := out.Pack(); err != nil {
+		return err
+	}
+	_, err := w.Write(out.Data)
+	return err
 }
 
-// writeRaw serves a cache hit straight from its stored packed bytes,
-// skipping the Unpack→re-Pack round trip entirely: the query ID is patched
-// (bytes 0-1) and positive-entry answer TTLs are rebased to their remaining
-// lifetime at the precomputed byte offsets, all in a private pooled copy
-// that is written out and recycled. The stored bytes are never mutated.
-//
-// The few responses that need a real message fall back to the decoded path
-// (write): RFC 7830 padding, RFC 7873 cookie attachment, and a UDP datagram
-// that exceeds the client's advertised buffer (truncation needs the RR
-// structure). An L2-sourced hit without TTL offsets also decodes — its
-// re-warm into L1 records them, so every later hit is raw.
 func (h *Handler) writeRaw(w dns.ResponseWriter, res cache.LookupResult, r *dns.Msg, proto string, nowUnix int64) error {
 	raw := res.Raw
 	pad := h.Padding.Load() && (proto == "dot" || proto == "doh" || proto == "doh3" || proto == "doq")
@@ -403,10 +376,10 @@ func (h *Handler) writeRaw(w dns.ResponseWriter, res cache.LookupResult, r *dns.
 		if m == nil {
 			return nil // corrupt entry: answer nothing rather than garbage
 		}
-		m.Id = r.Id
+		m.ID = r.ID
 		return h.write(w, m, r, proto)
 	}
-	return h.writeRawPacked(w, res, r.Id, nowUnix)
+	return h.writeRawPacked(w, res, r.ID, nowUnix)
 }
 
 // writeRawPacked patches the query ID and rebases positive-entry answer TTLs
@@ -440,6 +413,11 @@ func (h *Handler) writeRawPacked(w dns.ResponseWriter, res cache.LookupResult, i
 			binary.BigEndian.PutUint32(buf[off:off+4], ttl)
 		}
 	}
+	if w.Conn() != nil {
+		_, err := (&dns.Msg{Data: buf[:n]}).WriteTo(w)
+		putPackBuf(buf)
+		return err
+	}
 	_, err := w.Write(buf[:n])
 	putPackBuf(buf)
 	return err
@@ -451,20 +429,20 @@ func (h *Handler) writeRawPacked(w dns.ResponseWriter, res cache.LookupResult, i
 // questions, non-zero answer/authority, >1 additional RR, compression pointers,
 // non-zero EDNS version, or an RFC 7873 cookie when cookies are enabled) so
 // the caller falls back to full dns.Msg.Unpack.
-func parseUDPFastQuery(pkt []byte, checkCookie bool) (id uint16, q dns.Question, udpSize int, ok bool) {
+func parseUDPFastQuery(pkt []byte, checkCookie bool) (id uint16, q dnsname.Question, udpSize int, ok bool) {
 	if len(pkt) < 17 {
-		return 0, dns.Question{}, 0, false
+		return 0, dnsname.Question{}, 0, false
 	}
 	flags := binary.BigEndian.Uint16(pkt[2:4])
 	if (flags & 0xF800) != 0 { // must be QR=0 and Opcode=QUERY(0)
-		return 0, dns.Question{}, 0, false
+		return 0, dnsname.Question{}, 0, false
 	}
 	qd := binary.BigEndian.Uint16(pkt[4:6])
 	an := binary.BigEndian.Uint16(pkt[6:8])
 	ns := binary.BigEndian.Uint16(pkt[8:10])
 	ar := binary.BigEndian.Uint16(pkt[10:12])
 	if qd != 1 || an != 0 || ns != 0 || ar > 1 {
-		return 0, dns.Question{}, 0, false
+		return 0, dnsname.Question{}, 0, false
 	}
 
 	var nameBuf [256]byte
@@ -472,7 +450,7 @@ func parseUDPFastQuery(pkt []byte, checkCookie bool) (id uint16, q dns.Question,
 	n := 0
 	for {
 		if off >= len(pkt) {
-			return 0, dns.Question{}, 0, false
+			return 0, dnsname.Question{}, 0, false
 		}
 		l := int(pkt[off])
 		off++
@@ -484,7 +462,7 @@ func parseUDPFastQuery(pkt []byte, checkCookie bool) (id uint16, q dns.Question,
 			break
 		}
 		if l >= 64 || off+l > len(pkt) || n+l+1 >= len(nameBuf) {
-			return 0, dns.Question{}, 0, false
+			return 0, dnsname.Question{}, 0, false
 		}
 		for i := range l {
 			b := pkt[off+i]
@@ -499,9 +477,9 @@ func parseUDPFastQuery(pkt []byte, checkCookie bool) (id uint16, q dns.Question,
 		off += l
 	}
 	if off+4 > len(pkt) {
-		return 0, dns.Question{}, 0, false
+		return 0, dnsname.Question{}, 0, false
 	}
-	q = dns.Question{
+	q = dnsname.Question{
 		Name:   string(nameBuf[:n]),
 		Qtype:  binary.BigEndian.Uint16(pkt[off : off+2]),
 		Qclass: binary.BigEndian.Uint16(pkt[off+2 : off+4]),
@@ -511,35 +489,35 @@ func parseUDPFastQuery(pkt []byte, checkCookie bool) (id uint16, q dns.Question,
 	udpSize = dns.MinMsgSize
 	if ar == 0 {
 		if off != len(pkt) {
-			return 0, dns.Question{}, 0, false
+			return 0, dnsname.Question{}, 0, false
 		}
 		return binary.BigEndian.Uint16(pkt[0:2]), q, udpSize, true
 	}
 
 	// Single additional RR: must be root-named OPT (RFC 6891).
 	if off+11 > len(pkt) || pkt[off] != 0 || binary.BigEndian.Uint16(pkt[off+1:off+3]) != dns.TypeOPT {
-		return 0, dns.Question{}, 0, false
+		return 0, dnsname.Question{}, 0, false
 	}
 	if pkt[off+6] != 0 { // EDNS version != 0 -> BADVERS via full path
-		return 0, dns.Question{}, 0, false
+		return 0, dnsname.Question{}, 0, false
 	}
 	rdlen := int(binary.BigEndian.Uint16(pkt[off+9 : off+11]))
 	if off+11+rdlen != len(pkt) {
-		return 0, dns.Question{}, 0, false
+		return 0, dnsname.Question{}, 0, false
 	}
 	if checkCookie && rdlen > 0 {
 		optEnd := off + 11 + rdlen
 		for p := off + 11; p < optEnd; {
 			if p+4 > optEnd {
-				return 0, dns.Question{}, 0, false
+				return 0, dnsname.Question{}, 0, false
 			}
 			code := binary.BigEndian.Uint16(pkt[p : p+2])
 			olen := int(binary.BigEndian.Uint16(pkt[p+2 : p+4]))
 			if p+4+olen > optEnd {
-				return 0, dns.Question{}, 0, false
+				return 0, dnsname.Question{}, 0, false
 			}
-			if code == dns.EDNS0COOKIE {
-				return 0, dns.Question{}, 0, false
+			if code == dns.CodeCOOKIE {
+				return 0, dnsname.Question{}, 0, false
 			}
 			p += 4 + olen
 		}
@@ -648,9 +626,14 @@ func (h *Handler) ServeUDPRaw(w dns.ResponseWriter, pkt []byte) bool {
 // never has a safety concern, only Put does. Whether a given caller may also
 // putMsg it back afterward depends on that call site's own lifetime; see the
 // safety comment at each one.
+func questionOf(rr dns.RR) dnsname.Question {
+	h := rr.Header()
+	return dnsname.Question{Name: h.Name, Qtype: dns.RRToType(rr), Qclass: h.Class}
+}
+
 func newReply(r *dns.Msg) *dns.Msg {
 	m := getMsg()
-	m.SetReply(r)
+	dnsutil.SetReply(m, r)
 	m.RecursionAvailable = true
 	return m
 }
@@ -663,9 +646,9 @@ func answerIPs(m *dns.Msg) []net.IP {
 	for _, rr := range m.Answer {
 		switch v := rr.(type) {
 		case *dns.A:
-			ips = append(ips, v.A)
+			ips = append(ips, v.A.Addr.AsSlice())
 		case *dns.AAAA:
-			ips = append(ips, v.AAAA)
+			ips = append(ips, v.AAAA.Addr.AsSlice())
 		}
 	}
 	return ips

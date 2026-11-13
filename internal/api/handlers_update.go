@@ -14,7 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/miekg/dns"
+	"codeberg.org/miekg/dns"
+	"codeberg.org/miekg/dns/dnsutil"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/update"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/version"
@@ -168,14 +169,12 @@ func (h *Handler) diagDNS(ctx context.Context, w http.ResponseWriter, r *http.Re
 	if qtype == "" {
 		qtype = "A"
 	}
-	t, ok := dns.StringToType[strings.ToUpper(qtype)]
-	if !ok {
+	t, err := dnsutil.StringToType(strings.ToUpper(qtype))
+	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad qtype"})
 		return
 	}
-	q := dns.Question{Name: dns.Fqdn(name), Qtype: t, Qclass: dns.ClassINET}
-	msg := new(dns.Msg)
-	msg.SetQuestion(q.Name, q.Qtype)
+	msg := dns.NewMsg(dnsutil.Fqdn(name), t)
 	cctx, cancel := context.WithTimeout(ctx, 8*time.Second)
 	defer cancel()
 	h.cfgMu.Lock()
@@ -216,9 +215,9 @@ func extractIPs(m *dns.Msg) []net.IP {
 	for _, rr := range m.Answer {
 		switch v := rr.(type) {
 		case *dns.A:
-			ips = append(ips, v.A)
+			ips = append(ips, v.A.Addr.AsSlice())
 		case *dns.AAAA:
-			ips = append(ips, v.AAAA)
+			ips = append(ips, v.AAAA.Addr.AsSlice())
 		}
 	}
 	return ips
