@@ -10,7 +10,6 @@ import (
 	"cmp"
 	"container/heap"
 	"context"
-	"encoding/json"
 	"fmt"
 	"iter"
 	"log/slog"
@@ -22,6 +21,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/goccy/go-json"
 	"github.com/redis/rueidis"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/safego"

@@ -9,7 +9,6 @@ package geoip
 import (
 	"bytes"
 	"cmp"
-	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -23,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/klauspost/compress/gzip"
 	"golang.org/x/sync/errgroup"
 )
 

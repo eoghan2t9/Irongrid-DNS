@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
-	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 	"github.com/miekg/dns"
@@ -102,7 +101,8 @@ func packedAnCount(raw []byte) int {
 }
 
 func (h *Handler) recordEntry(client, qname string, q dns.Question, action, reason, upstreamName string, start time.Time, rcode, answers int) {
-	h.latency.record(time.Since(start))
+	elapsed := time.Since(start)
+	h.latency.record(elapsed)
 	if h.Log == nil {
 		return
 	}
@@ -120,7 +120,7 @@ func (h *Handler) recordEntry(client, qname string, q dns.Question, action, reas
 		Action:         action,
 		Reason:         reason,
 		Upstream:       upstreamName,
-		ResponseTimeMS: time.Since(start).Milliseconds(),
+		ResponseTimeMS: elapsed.Milliseconds(),
 		Rcode:          rcode,
 		Answers:        answers,
 		ASN:            asn,
@@ -453,7 +453,13 @@ func parseUDPFastQuery(pkt []byte, checkCookie bool) (id uint16, q dns.Question,
 		if l >= 64 || off+l > len(pkt) || n+l+1 >= len(nameBuf) {
 			return 0, dns.Question{}, 0, false
 		}
-		copy(nameBuf[n:n+l], pkt[off:off+l])
+		for i := range l {
+			b := pkt[off+i]
+			if b >= 'A' && b <= 'Z' {
+				b += 'a' - 'A'
+			}
+			nameBuf[n+i] = b
+		}
 		n += l
 		nameBuf[n] = '.'
 		n++
@@ -529,7 +535,12 @@ func (h *Handler) ServeUDPRaw(w dns.ResponseWriter, pkt []byte) bool {
 	if s.ClientRouter != nil && s.ClientRouter.Resolve(client) != nil {
 		return false
 	}
-	qname := dnsname.CanonicalDomain(q.Name)
+	// q.Name is already ASCII-lowercased and trailing-dot-terminated by
+	// parseUDPFastQuery, so qname is a zero-alloc slice of q.Name.
+	qname := ""
+	if len(q.Name) > 1 {
+		qname = q.Name[:len(q.Name)-1]
+	}
 	if qname == "_dns.resolver.arpa" {
 		return false
 	}

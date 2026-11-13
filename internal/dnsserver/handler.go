@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"log/slog"
 	"net"
 	"runtime/debug"
@@ -1366,6 +1367,29 @@ func isMetaQuery(q dns.Question) bool {
 	return false
 }
 
+type ipv4CacheEntry struct {
+	addr uint32
+	str  string
+}
+
+// ipv4StringCache is a lock-free direct-mapped cache of IPv4 -> string so
+// repeat queries from the same client avoid net.IP.String() heap allocations.
+var ipv4StringCache [256]atomic.Pointer[ipv4CacheEntry]
+
+func cachedIPString(ip net.IP) string {
+	if ip4 := ip.To4(); ip4 != nil {
+		key := binary.BigEndian.Uint32(ip4)
+		slot := &ipv4StringCache[uint8(key^(key>>8)^(key>>16)^(key>>24))]
+		if e := slot.Load(); e != nil && e.addr == key {
+			return e.str
+		}
+		s := ip4.String()
+		slot.Store(&ipv4CacheEntry{addr: key, str: s})
+		return s
+	}
+	return ip.String()
+}
+
 func clientIPOf(addr net.Addr) string {
 	if addr == nil {
 		return ""
@@ -1379,9 +1403,9 @@ func clientIPOf(addr net.Addr) string {
 	// every socket transport.
 	switch a := addr.(type) {
 	case *net.UDPAddr:
-		return a.IP.String()
+		return cachedIPString(a.IP)
 	case *net.TCPAddr:
-		return a.IP.String()
+		return cachedIPString(a.IP)
 	}
 	host, _, err := net.SplitHostPort(addr.String())
 	if err != nil {
