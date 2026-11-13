@@ -82,6 +82,16 @@ func installSystemd(w *wizard, deployDir, dataDir string) {
 	}
 	fmt.Fprintln(w.out)
 	fmt.Fprintln(w.out, "  Installing the systemd service …")
+	sysctlSrc := filepath.Join(deployDir, "99-irongrid.conf")
+	if _, err := os.Stat(sysctlSrc); err == nil {
+		if err := runPrivileged("cp", sysctlSrc, "/etc/sysctl.d/99-irongrid.conf"); err != nil {
+			fmt.Fprintf(w.out, "  ⚠ sysctl drop-in copy failed (non-fatal): %v\n", err)
+		} else if err := runPrivileged("sysctl", "--system"); err != nil {
+			fmt.Fprintf(w.out, "  ⚠ sysctl --system failed (non-fatal): %v\n", err)
+		} else {
+			fmt.Fprintln(w.out, "  ✓ kernel network/memory sysctls applied (/etc/sysctl.d/99-irongrid.conf)")
+		}
+	}
 	steps := [][]string{
 		{"cp", src, "/etc/systemd/system/"},
 		{"systemctl", "daemon-reload"},
@@ -214,12 +224,27 @@ WantedBy=multi-user.target
 	if err := os.WriteFile(f, []byte(unit), 0o600); err != nil {
 		return nil, err
 	}
+	sysctlConf := `# Irongrid DNS host network & memory tuning
+net.core.rmem_max = 4194304
+net.core.wmem_max = 4194304
+net.core.somaxconn = 65535
+net.core.netdev_max_backlog = 16384
+net.core.netdev_budget = 600
+net.ipv4.ip_local_port_range = 1024 65535
+net.ipv4.tcp_fastopen = 3
+vm.swappiness = 1
+`
+	sf := filepath.Join(dir, "99-irongrid.conf")
+	if err := os.WriteFile(sf, []byte(sysctlConf), 0o644); err != nil { //nolint:gosec // G306: sysctl.d drop-in must be world-readable
+		return nil, err
+	}
 	fmt.Fprintln(w.out)
-	fmt.Fprintln(w.out, "  systemd unit written. To install it:")
+	fmt.Fprintln(w.out, "  systemd unit + sysctl drop-in written. To install:")
 	fmt.Fprintf(w.out, "    sudo cp %s /etc/systemd/system/\n", f)
+	fmt.Fprintf(w.out, "    sudo cp %s /etc/sysctl.d/99-irongrid.conf && sudo sysctl --system\n", sf)
 	fmt.Fprintln(w.out, "    sudo systemctl daemon-reload")
 	fmt.Fprintln(w.out, "    sudo systemctl enable --now irongrid")
-	return []string{f}, nil
+	return []string{f, sf}, nil
 }
 
 func writeLaunchd(w *wizard, dir, configPath, dataDir string) ([]string, error) {
