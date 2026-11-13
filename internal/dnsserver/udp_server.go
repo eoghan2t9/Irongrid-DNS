@@ -11,6 +11,7 @@ import (
 
 	"github.com/miekg/dns"
 	"golang.org/x/net/ipv4"
+	"golang.org/x/net/ipv6"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
@@ -35,6 +36,11 @@ const dnsHeaderLen = 12
 // with respect to the socket: every goroutine-safe facility it touches
 // (cache, filters, rate limiter, singleflight, message/buffer pools, query
 // log) is already shared across the per-packet goroutines miekg spawned.
+type batchPacketConn interface {
+	ReadBatch(ms []ipv4.Message, flags int) (int, error)
+	WriteBatch(ms []ipv4.Message, flags int) (int, error)
+}
+
 type udpServer struct {
 	pc      net.PacketConn
 	conn    *net.UDPConn // nil when pc isn't a *net.UDPConn (never today)
@@ -56,7 +62,7 @@ type udpServer struct {
 	// original single-message path for now). readLoop dispatches on this
 	// field; nothing else about the worker pool, response writer, or stats
 	// changes — only how datagrams are pulled off the socket.
-	batchPC *ipv4.PacketConn
+	batchPC batchPacketConn
 	// writes is the batching writer's input queue (see udpServer.batchWriter);
 	// nil on the same conditions as batchPC. A worker's udpResponseWriter.Write
 	// pushes a request here and blocks on its own result channel — the actual
@@ -130,8 +136,12 @@ func newUDPServer(pc net.PacketConn, handler dns.Handler, stats *Stats, workers 
 		s.conn = c
 	}
 	if runtime.GOOS == "linux" {
-		if udpAddr, ok := pc.LocalAddr().(*net.UDPAddr); ok && udpAddr.IP.To4() != nil {
-			s.batchPC = ipv4.NewPacketConn(pc)
+		if udpAddr, ok := pc.LocalAddr().(*net.UDPAddr); ok {
+			if udpAddr.IP.To4() != nil {
+				s.batchPC = ipv4.NewPacketConn(pc)
+			} else {
+				s.batchPC = ipv6.NewPacketConn(pc)
+			}
 			s.writes = make(chan *udpWriteReq, workers*udpQueuePerWorker)
 		}
 	}
@@ -539,11 +549,16 @@ type udpResponseWriter struct {
 }
 
 func (w *udpResponseWriter) WriteMsg(m *dns.Msg) error {
-	packed, err := m.Pack()
+	buf := getPackBuf()
+	packed, err := m.PackBuffer(buf[:0])
 	if err != nil {
+		putPackBuf(buf)
 		return err
 	}
 	_, err = w.Write(packed)
+	if cap(packed) == cap(buf) {
+		putPackBuf(buf)
+	}
 	return err
 }
 

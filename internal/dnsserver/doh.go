@@ -229,13 +229,34 @@ func (m *Manager) handleDoH(w http.ResponseWriter, r *http.Request, proto string
 			http.Error(w, "unsupported content type", http.StatusUnsupportedMediaType)
 			return
 		}
-		body, rerr := io.ReadAll(io.LimitReader(r.Body, 65536))
-		if rerr != nil {
+		buf := getPackBuf()
+		n, rerr := io.ReadFull(io.LimitReader(r.Body, 65536), buf)
+		var body []byte
+		switch {
+		case rerr == io.EOF || rerr == io.ErrUnexpectedEOF:
+			body = buf[:n]
+		case rerr != nil:
+			putPackBuf(buf)
 			http.Error(w, "read error", http.StatusBadRequest)
 			return
+		default:
+			rest, rerr := io.ReadAll(io.LimitReader(r.Body, 65536-int64(n)))
+			if rerr != nil {
+				putPackBuf(buf)
+				http.Error(w, "read error", http.StatusBadRequest)
+				return
+			}
+			body = make([]byte, n+len(rest))
+			copy(body, buf[:n])
+			copy(body[n:], rest)
+			putPackBuf(buf)
+			buf = nil
 		}
 		msg = new(dns.Msg)
 		err = msg.Unpack(body)
+		if buf != nil {
+			putPackBuf(buf)
+		}
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
