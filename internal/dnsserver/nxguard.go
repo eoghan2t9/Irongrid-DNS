@@ -92,11 +92,16 @@ func (g *NXGuard) shard(prefix string) *nxShard {
 // rate-limited client. An empty prefix (no address available) is always
 // allowed.
 func (g *NXGuard) Allow(prefix string) bool {
+	return g.AllowAt(prefix, time.Now())
+}
+
+// AllowAt is Allow with a caller-supplied timestamp to avoid redundant
+// time.Now() calls on the DNS hot path.
+func (g *NXGuard) AllowAt(prefix string, now time.Time) bool {
 	if prefix == "" {
 		return true
 	}
 	s := g.shard(prefix)
-	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.entries[prefix]

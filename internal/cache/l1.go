@@ -154,7 +154,9 @@ func (c *l1Cache) get(h uint64, neg bool, now time.Time) (raw []byte, remaining,
 	// evictToCap) spares it instead of dropping it in strict insertion
 	// order. The atomic store needs no lock beyond the RLock already taken
 	// above, so a cache hit still costs exactly one map lookup.
-	e.referenced.Store(true)
+	if !e.referenced.Load() {
+		e.referenced.Store(true)
+	}
 	if now.Before(e.expires) {
 		return e.raw, e.expires.Sub(now), e.lifetime, false, e.ttlOff, true
 	}

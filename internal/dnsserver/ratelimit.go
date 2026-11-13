@@ -105,11 +105,16 @@ func (rl *RateLimiter) shard(key string) *rlShard {
 // nothing to key a bucket on. A client currently under an auto-block is
 // refused regardless of how many tokens it has accumulated.
 func (rl *RateLimiter) Allow(client string) bool {
+	return rl.AllowAt(client, time.Now())
+}
+
+// AllowAt is Allow with a caller-supplied timestamp to avoid redundant
+// time.Now() calls on the DNS hot path.
+func (rl *RateLimiter) AllowAt(client string, now time.Time) bool {
 	if client == "" {
 		return true
 	}
 	s := rl.shard(client)
-	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	b, ok := s.buckets[client]

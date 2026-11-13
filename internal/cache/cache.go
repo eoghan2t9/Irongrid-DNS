@@ -856,8 +856,13 @@ func (c *Cache) negPrefetchLead() time.Duration {
 // data is the stale entry reported (LookupResult.Stale) so the handler can
 // answer from it if re-resolution fails.
 func (c *Cache) Lookup(q dns.Question) LookupResult {
+	return c.LookupAt(q, time.Now())
+}
+
+// LookupAt is Lookup with a caller-supplied timestamp so the handler can
+// reuse a single time.Now() across rate-limit, cache, and TTL-rebase checks.
+func (c *Cache) LookupAt(q dns.Question, now time.Time) LookupResult {
 	h := keyHash(q)
-	now := time.Now()
 
 	var stale LookupResult
 

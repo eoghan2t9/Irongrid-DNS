@@ -476,7 +476,13 @@ func (e *Engine) HasIPRules() bool { return e.hasIPRules.Load() }
 // lock, and even that never blocks a reader — Load always returns the
 // previously published snapshot until the new one is stored).
 func (e *Engine) DecideDomain(qname string) Decision {
-	qname = normalizeDomain(qname)
+	return e.DecideCanonical(normalizeDomain(qname))
+}
+
+// DecideCanonical evaluates an already-canonicalized domain name (lowercase,
+// no leading/trailing whitespace, no trailing dot), skipping normalizeDomain
+// on the DNS hot path.
+func (e *Engine) DecideCanonical(qname string) Decision {
 	if qname == "" {
 		return Decision{Action: Allow}
 	}

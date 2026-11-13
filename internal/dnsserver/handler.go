@@ -439,7 +439,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	//    answering at all hands a spoofed source IP amplification, however
 	//    small. Connection-oriented protocols (TCP/DoT/DoH/DoQ) already
 	//    required a real handshake, so REFUSED is safe there.
-	if rateLimiter != nil && !rateLimiter.Allow(client) {
+	if rateLimiter != nil && !rateLimiter.AllowAt(client, start) {
 		h.Stats.Errors.Add(1)
 		if proto == "udp" {
 			return
@@ -455,7 +455,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	//    flood is refused the same way as a rate-limited client — silent UDP
 	//    drop, REFUSED on the stream transports. The check runs before any
 	//    real work so a blocked prefix can't burn cache/upstream resources.
-	if nxGuard != nil && !nxGuard.Allow(clientPrefix(client)) {
+	if nxGuard != nil && !nxGuard.AllowAt(clientPrefix(client), start) {
 		h.Stats.Errors.Add(1)
 		if proto == "udp" {
 			return
@@ -768,7 +768,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	}
 
 	// 3. Filtering: whitelist overrides everything; blocklists stop the query.
-	decision := engine.DecideDomain(q.Name)
+	decision := engine.DecideCanonical(qname)
 	if decision.Action == filter.Block {
 		blocked := filter.BuildBlockResponse(r, blockResp, blockTTL)
 		h.Stats.Blocked.Add(1)
@@ -803,7 +803,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		// packed bytes — writeRaw patches the query ID and rebases the
 		// answer TTLs in a private copy, so no Unpack and no re-pack ever
 		// happens on the hit path.
-		hit := cch.Lookup(q)
+		hit := cch.LookupAt(q, start)
 		if len(hit.Raw) > 0 && !hit.Stale {
 			h.Stats.Cached.Add(1)
 			reason := "cache"
@@ -819,7 +819,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			// record needs the rcode and answer count; both are header
 			// fields, read off the packed bytes without decoding.
 			h.recordRaw(client, qname, q, "cached", reason, "", start, hit.Raw)
-			_ = h.writeRaw(w, hit, r, proto)
+			_ = h.writeRaw(w, hit, r, proto, start.Unix())
 			return
 		}
 		// A stale entry is kept as the serve-stale fallback only when it

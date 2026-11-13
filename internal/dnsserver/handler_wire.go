@@ -100,6 +100,39 @@ func packedAnCount(raw []byte) int {
 	return int(binary.BigEndian.Uint16(raw[6:8]))
 }
 
+func qtypeString(t uint16) string {
+	switch t {
+	case dns.TypeA:
+		return "A"
+	case dns.TypeAAAA:
+		return "AAAA"
+	case dns.TypeHTTPS:
+		return "HTTPS"
+	case dns.TypePTR:
+		return "PTR"
+	case dns.TypeTXT:
+		return "TXT"
+	case dns.TypeMX:
+		return "MX"
+	case dns.TypeSRV:
+		return "SRV"
+	case dns.TypeCNAME:
+		return "CNAME"
+	case dns.TypeNS:
+		return "NS"
+	case dns.TypeSOA:
+		return "SOA"
+	case dns.TypeSVCB:
+		return "SVCB"
+	case dns.TypeDNSKEY:
+		return "DNSKEY"
+	case dns.TypeDS:
+		return "DS"
+	default:
+		return dns.TypeToString[t]
+	}
+}
+
 func (h *Handler) recordEntry(client, qname string, q dns.Question, action, reason, upstreamName string, start time.Time, rcode, answers int) {
 	elapsed := time.Since(start)
 	h.latency.record(elapsed)
@@ -116,7 +149,7 @@ func (h *Handler) recordEntry(client, qname string, q dns.Question, action, reas
 		Time:           start,
 		Client:         client,
 		Domain:         qname,
-		Type:           dns.TypeToString[q.Qtype],
+		Type:           qtypeString(q.Qtype),
 		Action:         action,
 		Reason:         reason,
 		Upstream:       upstreamName,
@@ -360,7 +393,7 @@ func (h *Handler) write(w dns.ResponseWriter, m *dns.Msg, r *dns.Msg, proto stri
 // that exceeds the client's advertised buffer (truncation needs the RR
 // structure). An L2-sourced hit without TTL offsets also decodes — its
 // re-warm into L1 records them, so every later hit is raw.
-func (h *Handler) writeRaw(w dns.ResponseWriter, res cache.LookupResult, r *dns.Msg, proto string) error {
+func (h *Handler) writeRaw(w dns.ResponseWriter, res cache.LookupResult, r *dns.Msg, proto string, nowUnix int64) error {
 	raw := res.Raw
 	pad := h.Padding.Load() && (proto == "dot" || proto == "doh" || proto == "doh3" || proto == "doq")
 	cookie := h.Cookies.Load() && requestClientCookie(r) != ""
@@ -373,13 +406,13 @@ func (h *Handler) writeRaw(w dns.ResponseWriter, res cache.LookupResult, r *dns.
 		m.Id = r.Id
 		return h.write(w, m, r, proto)
 	}
-	return h.writeRawPacked(w, res, r.Id)
+	return h.writeRawPacked(w, res, r.Id, nowUnix)
 }
 
 // writeRawPacked patches the query ID and rebases positive-entry answer TTLs
 // in a private pooled copy of res.Raw, then writes it out and recycles the
 // buffer. Shared by writeRaw and ServeUDPRaw.
-func (h *Handler) writeRawPacked(w dns.ResponseWriter, res cache.LookupResult, id uint16) error {
+func (h *Handler) writeRawPacked(w dns.ResponseWriter, res cache.LookupResult, id uint16, nowUnix int64) error {
 	raw := res.Raw
 	buf := getPackBuf()
 	if len(raw) > len(buf) {
@@ -393,7 +426,7 @@ func (h *Handler) writeRawPacked(w dns.ResponseWriter, res cache.LookupResult, i
 		// Rebase every answer TTL to its remaining lifetime, floor 1 so a
 		// client never caches a zero-TTL answer as immortal — the same
 		// arithmetic unpackEntry performs on the decoded path.
-		elapsed := time.Now().Unix() - res.StoredAt
+		elapsed := nowUnix - res.StoredAt
 		for _, off := range res.TTLOffsets {
 			if int(off)+4 > n {
 				break
@@ -560,13 +593,14 @@ func (h *Handler) ServeUDPRaw(w dns.ResponseWriter, pkt []byte) bool {
 			return false
 		}
 	}
-	if d := h.Engine.DecideDomain(qname); d.Action != filter.Allow {
+	if d := h.Engine.DecideCanonical(qname); d.Action != filter.Allow {
 		return false
 	}
 
+	start := time.Now()
 	if (s.ACL != nil && client != "" && !s.ACL.Allowed(client)) ||
-		(s.RateLimiter != nil && !s.RateLimiter.Allow(client)) ||
-		(s.NXGuard != nil && !s.NXGuard.Allow(clientPrefix(client))) {
+		(s.RateLimiter != nil && !s.RateLimiter.AllowAt(client, start)) ||
+		(s.NXGuard != nil && !s.NXGuard.AllowAt(clientPrefix(client), start)) {
 		h.Stats.Total.Add(1)
 		if p, ok := h.Stats.ByProtocol["udp"]; ok {
 			p.Add(1)
@@ -575,7 +609,7 @@ func (h *Handler) ServeUDPRaw(w dns.ResponseWriter, pkt []byte) bool {
 		return true
 	}
 
-	hit := s.Cache.Lookup(q)
+	hit := s.Cache.LookupAt(q, start)
 	if len(hit.Raw) == 0 || hit.Stale {
 		return false
 	}
@@ -584,7 +618,6 @@ func (h *Handler) ServeUDPRaw(w dns.ResponseWriter, pkt []byte) bool {
 		return false
 	}
 
-	start := time.Now()
 	sw := getStatsWriter(w, &h.Stats.WriteErrors)
 	defer putStatsWriter(sw)
 
@@ -601,7 +634,7 @@ func (h *Handler) ServeUDPRaw(w dns.ResponseWriter, pkt []byte) bool {
 		}
 	}
 	h.recordRaw(client, qname, q, "cached", reason, "", start, hit.Raw)
-	_ = h.writeRawPacked(sw, hit, id)
+	_ = h.writeRawPacked(sw, hit, id, start.Unix())
 	return true
 }
 
