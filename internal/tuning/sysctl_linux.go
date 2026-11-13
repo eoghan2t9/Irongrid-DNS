@@ -23,6 +23,10 @@ var (
 		// somaxconn is the listen backlog ceiling; a busy public listener
 		// (or a DoH endpoint behind a slow client) can exceed the default.
 		{"somaxconn", 65535},
+		// netdev_max_backlog bounds packets queued between the NIC driver and
+		// the kernel IP stack; the 1000 default drops UDP bursts before
+		// recvmmsg can drain them.
+		{"netdev_max_backlog", 16384},
 	}
 )
 

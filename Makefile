@@ -25,7 +25,7 @@ smoke:
 ## pgo-profile: collect a CPU profile from the query-path benchmarks (PGO input)
 pgo-profile:
 	go test ./internal/dnsserver -run '^$$' \
-		-bench 'BenchmarkHandler(UpstreamMiss|CacheHit)$$' -benchtime=20s \
+		-bench 'BenchmarkHandler(UpstreamMiss|UDPRawCacheHit|CacheHit)$$' -benchtime=20s \
 		-cpuprofile pgo.pprof
 
 ## build-pgo: build with profile-guided optimization (collects the profile first)
