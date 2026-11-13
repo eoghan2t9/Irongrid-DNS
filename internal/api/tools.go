@@ -3,7 +3,6 @@ package api
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	json "github.com/goccy/go-json"
 	"github.com/miekg/dns"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"

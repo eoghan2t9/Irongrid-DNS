@@ -490,6 +490,7 @@ func (a *app) setupAPI() {
 		ConfigPath: a.configPath,
 		SaveConfig: saveConfig,
 		WebFS:      webFS,
+		KV:         a.dfly,
 	}
 	a.apiHandler = &api.Handler{
 		Cfg:        a.cfg,

@@ -3,7 +3,6 @@ package api
 
 import (
 	"bytes"
-	"compress/gzip"
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
@@ -11,7 +10,6 @@ import (
 	"embed"
 	"encoding/base64"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"io/fs"
@@ -25,11 +23,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/andybalholm/brotli"
+	json "github.com/goccy/go-json"
+	"github.com/klauspost/compress/gzip"
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/andybalholm/brotli"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 )
+
+// KVStore is an optional Dragonfly-backed key/value store for persisting
+// dashboard enrichment caches and login lockouts across restarts.
+type KVStore interface {
+	GetKV(ctx context.Context, key string) ([]byte, bool)
+	SetKV(ctx context.Context, key string, val []byte, ttl time.Duration)
+	DelKV(ctx context.Context, key string)
+}
 
 // App bundles every dependency the API exposes.
 type App struct {
@@ -46,6 +54,7 @@ type App struct {
 	WebFS      fs.FS // embedded frontend build
 	ConfigPath string
 	SaveConfig func() error
+	KV         KVStore
 
 	// loginGuard throttles failed login attempts; lazily created on first
 	// use so callers don't need to wire it up, and preserved across the
@@ -203,7 +212,7 @@ func (a *App) authorize(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 
-	a.loginGuardOnce.Do(func() { a.loginGuard = NewLoginGuard() })
+	a.loginGuardOnce.Do(func() { a.loginGuard = NewLoginGuardWithStore(a.KV) })
 	client := clientIPFromRequest(r)
 	if locked, remaining := a.loginGuard.Locked(client); locked {
 		w.Header().Set("Retry-After", strconv.Itoa(int(remaining.Seconds())+1))

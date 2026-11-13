@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -40,11 +42,18 @@ type loginShard struct {
 // course, or a fast-enough guesser could brute-force through it.
 type LoginGuard struct {
 	shards [loginGuardShards]*loginShard
+	store  KVStore
 }
 
 // NewLoginGuard returns an empty guard (no client is locked out).
 func NewLoginGuard() *LoginGuard {
-	g := &LoginGuard{}
+	return NewLoginGuardWithStore(nil)
+}
+
+// NewLoginGuardWithStore returns a guard that mirrors active lockouts to store
+// so they survive restarts and apply across replicas.
+func NewLoginGuardWithStore(store KVStore) *LoginGuard {
+	g := &LoginGuard{store: store}
 	for i := range g.shards {
 		g.shards[i] = &loginShard{entries: make(map[string]*loginEntry, 64)}
 	}
@@ -63,13 +72,30 @@ func (g *LoginGuard) Locked(client string) (bool, time.Duration) {
 	}
 	s := g.shard(client)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	e, ok := s.entries[client]
-	if !ok {
-		return false, 0
+	now := time.Now()
+	if ok && now.Before(e.lockedUntil) {
+		rem := e.lockedUntil.Sub(now)
+		s.mu.Unlock()
+		return true, rem
 	}
-	if now := time.Now(); now.Before(e.lockedUntil) {
-		return true, e.lockedUntil.Sub(now)
+	s.mu.Unlock()
+
+	if g.store != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), kvLookupTimeout)
+		raw, found := g.store.GetKV(ctx, "lockout:"+client)
+		cancel()
+		if found {
+			if nsec, err := strconv.ParseInt(string(raw), 10, 64); err == nil {
+				until := time.Unix(0, nsec)
+				if now.Before(until) {
+					s.mu.Lock()
+					s.entries[client] = &loginEntry{failures: loginMaxFailures, firstFailure: now, lockedUntil: until, lastSeen: now}
+					s.mu.Unlock()
+					return true, until.Sub(now)
+				}
+			}
+		}
 	}
 	return false, 0
 }
@@ -83,7 +109,6 @@ func (g *LoginGuard) RecordFailure(client string) {
 	s := g.shard(client)
 	now := time.Now()
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if len(s.entries) >= loginGuardMaxPerShard {
 		for k, e := range s.entries {
 			if now.Sub(e.lastSeen) > loginGuardIdleEvict {
@@ -98,8 +123,16 @@ func (g *LoginGuard) RecordFailure(client string) {
 	}
 	e.failures++
 	e.lastSeen = now
+	var lockedUntil time.Time
 	if e.failures >= loginMaxFailures {
 		e.lockedUntil = now.Add(loginLockoutFor)
+		lockedUntil = e.lockedUntil
+	}
+	s.mu.Unlock()
+	if !lockedUntil.IsZero() && g.store != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), kvLookupTimeout)
+		g.store.SetKV(ctx, "lockout:"+client, strconv.AppendInt(nil, lockedUntil.UnixNano(), 10), loginLockoutFor)
+		cancel()
 	}
 }
 
@@ -113,8 +146,13 @@ func (g *LoginGuard) RecordSuccess(client string) {
 	}
 	s := g.shard(client)
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	delete(s.entries, client)
+	s.mu.Unlock()
+	if g.store != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), kvLookupTimeout)
+		g.store.DelKV(ctx, "lockout:"+client)
+		cancel()
+	}
 }
 
 // clientIPFromRequest returns the real client IP for a dashboard request.

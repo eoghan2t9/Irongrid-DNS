@@ -35,11 +35,14 @@ const (
 	hostTimeout = 6 * time.Second
 )
 
+const kvLookupTimeout = 200 * time.Millisecond
+
 // hostCache remembers PTR results per client IP (positive and negative).
 type hostCache struct {
-	mu  sync.Mutex
-	pos map[string]hostEntry // ip -> resolved name
-	neg map[string]time.Time // ip -> valid-until (no PTR record)
+	mu    sync.Mutex
+	pos   map[string]hostEntry // ip -> resolved name
+	neg   map[string]time.Time // ip -> valid-until (no PTR record)
+	store KVStore
 }
 
 type hostEntry struct {
@@ -48,25 +51,42 @@ type hostEntry struct {
 }
 
 func newHostCache() *hostCache {
-	return &hostCache{pos: map[string]hostEntry{}, neg: map[string]time.Time{}}
+	return newHostCacheWithStore(nil)
+}
+
+func newHostCacheWithStore(store KVStore) *hostCache {
+	return &hostCache{pos: map[string]hostEntry{}, neg: map[string]time.Time{}, store: store}
 }
 
 // get returns the cached name and true for a live entry — including a
 // negative hit (name == ""). ok is false when nothing is cached.
 func (c *hostCache) get(ip string, now time.Time) (string, bool) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if e, ok := c.pos[ip]; ok && now.Sub(e.at) < hostPosTTL {
+		c.mu.Unlock()
 		return e.name, true
 	}
 	if until, ok := c.neg[ip]; ok && now.Before(until) {
+		c.mu.Unlock()
 		return "", true
+	}
+	store := c.store
+	c.mu.Unlock()
+
+	if store != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), kvLookupTimeout)
+		raw, ok := store.GetKV(ctx, "rdns:"+ip)
+		cancel()
+		if ok {
+			name := strings.TrimPrefix(string(raw), "+")
+			c.putMem(ip, name, now)
+			return name, true
+		}
 	}
 	return "", false
 }
 
-// put records a result; name == "" records a negative hit.
-func (c *hostCache) put(ip, name string, now time.Time) {
+func (c *hostCache) putMem(ip, name string, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.pos)+len(c.neg) >= hostCap {
@@ -80,9 +100,31 @@ func (c *hostCache) put(ip, name string, now time.Time) {
 	}
 }
 
+// put records a result; name == "" records a negative hit.
+func (c *hostCache) put(ip, name string, now time.Time) {
+	c.putMem(ip, name, now)
+	if c.store != nil {
+		ttl := hostPosTTL
+		val := []byte("+" + name)
+		if name == "" {
+			ttl = hostNegTTL
+			val = nil
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), kvLookupTimeout)
+		c.store.SetKV(ctx, "rdns:"+ip, val, ttl)
+		cancel()
+	}
+}
+
 // hostCache returns the Handler's shared cache, creating it on first use.
 func (h *Handler) hostCache() *hostCache {
-	h.hostOnce.Do(func() { h.hosts = newHostCache() })
+	h.hostOnce.Do(func() {
+		var store KVStore
+		if h.Cache != nil {
+			store = h.Cache
+		}
+		h.hosts = newHostCacheWithStore(store)
+	})
 	return h.hosts
 }
 

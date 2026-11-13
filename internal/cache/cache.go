@@ -374,6 +374,37 @@ func (c *Cache) Close() error {
 // Ping returns an error if the cache is not reachable right now.
 func (c *Cache) Ping(ctx context.Context) error { return c.client.Ping(ctx).Err() }
 
+// GetKV reads a raw value from Dragonfly (returns nil, false on miss, error,
+// or when running local-only without an L2 client).
+func (c *Cache) GetKV(ctx context.Context, key string) ([]byte, bool) {
+	if c == nil || c.client == nil {
+		return nil, false
+	}
+	b, err := c.client.Get(ctx, c.prefix+key).Bytes()
+	if err != nil {
+		return nil, false
+	}
+	return b, true
+}
+
+// SetKV writes a raw value to Dragonfly with ttl. Best-effort; errors are
+// ignored and calls on a local-only cache are no-ops.
+func (c *Cache) SetKV(ctx context.Context, key string, val []byte, ttl time.Duration) {
+	if c == nil || c.client == nil {
+		return
+	}
+	_ = c.client.Set(ctx, c.prefix+key, val, ttl).Err()
+}
+
+// DelKV removes a key from Dragonfly. Best-effort; calls on a local-only
+// cache are no-ops.
+func (c *Cache) DelKV(ctx context.Context, key string) {
+	if c == nil || c.client == nil {
+		return
+	}
+	_ = c.client.Del(ctx, c.prefix+key).Err()
+}
+
 // Stats returns basic usage counters for the dashboard.
 func (c *Cache) Stats(ctx context.Context) (map[string]string, error) {
 	info, err := c.client.Info(ctx, "stats").Result()

@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 const (
@@ -34,9 +36,10 @@ const (
 // asnCache remembers RIPEstat owner info per client IP (positive and the
 // definitive "no routing information" outcome).
 type asnCache struct {
-	mu  sync.Mutex
-	pos map[string]asnEntry
-	neg map[string]time.Time
+	mu    sync.Mutex
+	pos   map[string]asnEntry
+	neg   map[string]time.Time
+	store KVStore
 }
 
 type asnEntry struct {
@@ -45,25 +48,44 @@ type asnEntry struct {
 }
 
 func newASNCache() *asnCache {
-	return &asnCache{pos: map[string]asnEntry{}, neg: map[string]time.Time{}}
+	return newASNCacheWithStore(nil)
+}
+
+func newASNCacheWithStore(store KVStore) *asnCache {
+	return &asnCache{pos: map[string]asnEntry{}, neg: map[string]time.Time{}, store: store}
 }
 
 // get returns the cached info and true for a live entry — including a
 // negative hit (zero asnInfo). ok is false when nothing is cached.
 func (c *asnCache) get(ip string, now time.Time) (asnInfo, bool) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	if e, ok := c.pos[ip]; ok && now.Sub(e.at) < asnTTL {
+		c.mu.Unlock()
 		return e.info, true
 	}
 	if until, ok := c.neg[ip]; ok && now.Before(until) {
+		c.mu.Unlock()
 		return asnInfo{}, true
+	}
+	store := c.store
+	c.mu.Unlock()
+
+	if store != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), kvLookupTimeout)
+		raw, ok := store.GetKV(ctx, "asn:"+ip)
+		cancel()
+		if ok {
+			var info asnInfo
+			if len(raw) == 0 || json.Unmarshal(raw, &info) == nil {
+				c.putMem(ip, info, now)
+				return info, true
+			}
+		}
 	}
 	return asnInfo{}, false
 }
 
-// put records a result; a zero asnInfo records a negative hit.
-func (c *asnCache) put(ip string, info asnInfo, now time.Time) {
+func (c *asnCache) putMem(ip string, info asnInfo, now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if len(c.pos)+len(c.neg) >= asnCap {
@@ -77,9 +99,33 @@ func (c *asnCache) put(ip string, info asnInfo, now time.Time) {
 	}
 }
 
+// put records a result; a zero asnInfo records a negative hit.
+func (c *asnCache) put(ip string, info asnInfo, now time.Time) {
+	c.putMem(ip, info, now)
+	if c.store != nil {
+		var val []byte
+		if info.ASN != "" {
+			b, err := json.Marshal(info)
+			if err != nil {
+				return
+			}
+			val = b
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), kvLookupTimeout)
+		c.store.SetKV(ctx, "asn:"+ip, val, asnTTL)
+		cancel()
+	}
+}
+
 // asnCache returns the Handler's shared cache, creating it on first use.
 func (h *Handler) asnCache() *asnCache {
-	h.asnOnce.Do(func() { h.asns = newASNCache() })
+	h.asnOnce.Do(func() {
+		var store KVStore
+		if h.Cache != nil {
+			store = h.Cache
+		}
+		h.asns = newASNCacheWithStore(store)
+	})
 	return h.asns
 }
 

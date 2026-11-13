@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"encoding/csv"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -13,6 +12,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	json "github.com/goccy/go-json"
 )
 
 // Endpoints are package vars so tests can point them at httptest servers.
