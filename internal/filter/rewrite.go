@@ -4,6 +4,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/miekg/dns"
 )
@@ -30,7 +31,8 @@ type RewriteRule struct {
 // Safe for concurrent use; Set fully replaces the rule set so config reloads
 // are atomic from a reader's perspective.
 type Rewriter struct {
-	mu sync.RWMutex
+	mu    sync.RWMutex
+	empty atomic.Bool
 	// exact holds non-wildcard rules keyed by domain; wildcard holds "*."
 	// rules keyed by the suffix (without the "*.").
 	exact    map[string][]RewriteRule
@@ -39,7 +41,9 @@ type Rewriter struct {
 
 // NewRewriter returns an empty rewriter (Lookup always misses).
 func NewRewriter() *Rewriter {
-	return &Rewriter{exact: map[string][]RewriteRule{}, wildcard: map[string][]RewriteRule{}}
+	rw := &Rewriter{exact: map[string][]RewriteRule{}, wildcard: map[string][]RewriteRule{}}
+	rw.empty.Store(true)
+	return rw
 }
 
 // Set replaces the whole rule set. Malformed specs (bad type, empty domain
@@ -79,6 +83,7 @@ func (rw *Rewriter) Set(specs []RewriteSpec) {
 	rw.mu.Lock()
 	rw.exact = exact
 	rw.wildcard = wildcard
+	rw.empty.Store(len(exact) == 0 && len(wildcard) == 0)
 	rw.mu.Unlock()
 }
 
@@ -86,22 +91,28 @@ func (rw *Rewriter) Set(specs []RewriteSpec) {
 // to fall through to cache/upstream. Exact matches win over wildcard subtree
 // matches.
 func (rw *Rewriter) Lookup(qname string) (rules []RewriteRule, ok bool) {
+	if rw.empty.Load() {
+		return nil, false
+	}
 	qname = normalizeDomain(qname)
 	if qname == "" {
 		return nil, false
 	}
 	rw.mu.RLock()
 	defer rw.mu.RUnlock()
-	if len(rw.exact) == 0 && len(rw.wildcard) == 0 {
+	if len(rw.exact) > 0 {
+		if rules, found := rw.exact[qname]; found {
+			return rules, true
+		}
+	}
+	if len(rw.wildcard) == 0 {
 		return nil, false
 	}
-	if rules, found := rw.exact[qname]; found {
-		return rules, true
-	}
-	labels := strings.Split(qname, ".")
-	for i := 1; i < len(labels); i++ {
-		suffix := strings.Join(labels[i:], ".")
-		if rules, found := rw.wildcard[suffix]; found {
+	for i := 0; i < len(qname); i++ {
+		if qname[i] != '.' {
+			continue
+		}
+		if rules, found := rw.wildcard[qname[i+1:]]; found {
 			return rules, true
 		}
 	}

@@ -496,19 +496,23 @@ func (e *Engine) DecideDomain(qname string) Decision {
 	// whitelist entry — e.g. a curated device whitelist meant only to
 	// protect against the downloaded blocklists' false positives, not
 	// against a domain the operator has specifically decided to block.
-	if _, ok := rs.userBlockExact[qname]; ok {
-		return Decision{Action: Block, Reason: "blacklist:" + qname}
-	}
-	if _, ok := rs.userBlockDomains[qname]; ok {
-		return Decision{Action: Block, Reason: "blacklist:" + qname}
-	}
-	for i := range lastDot {
-		if qname[i] != '.' {
-			continue
+	if len(rs.userBlockExact) > 0 {
+		if _, ok := rs.userBlockExact[qname]; ok {
+			return Decision{Action: Block, Reason: "blacklist:" + qname}
 		}
-		parent := qname[i+1:]
-		if _, ok := rs.userBlockDomains[parent]; ok {
-			return Decision{Action: Block, Reason: "blacklist:" + parent}
+	}
+	if len(rs.userBlockDomains) > 0 {
+		if _, ok := rs.userBlockDomains[qname]; ok {
+			return Decision{Action: Block, Reason: "blacklist:" + qname}
+		}
+		for i := range lastDot {
+			if qname[i] != '.' {
+				continue
+			}
+			parent := qname[i+1:]
+			if _, ok := rs.userBlockDomains[parent]; ok {
+				return Decision{Action: Block, Reason: "blacklist:" + parent}
+			}
 		}
 	}
 
@@ -516,19 +520,23 @@ func (e *Engine) DecideDomain(qname string) Decision {
 	// lookups — same shape as the blocklist walk below — instead of scanning
 	// every whitelist entry with domainMatch, which used to cost O(len(allowDomains))
 	// per query regardless of whether it hit.
-	if _, ok := rs.allowExact[qname]; ok {
-		return Decision{Action: Allow, Reason: "whitelist:" + qname}
-	}
-	if _, ok := rs.allowDomains[qname]; ok {
-		return Decision{Action: Allow, Reason: "whitelist:" + qname}
-	}
-	for i := range lastDot {
-		if qname[i] != '.' {
-			continue
+	if len(rs.allowExact) > 0 {
+		if _, ok := rs.allowExact[qname]; ok {
+			return Decision{Action: Allow, Reason: "whitelist:" + qname}
 		}
-		parent := qname[i+1:]
-		if _, ok := rs.allowDomains[parent]; ok {
-			return Decision{Action: Allow, Reason: "whitelist:" + parent}
+	}
+	if len(rs.allowDomains) > 0 {
+		if _, ok := rs.allowDomains[qname]; ok {
+			return Decision{Action: Allow, Reason: "whitelist:" + qname}
+		}
+		for i := range lastDot {
+			if qname[i] != '.' {
+				continue
+			}
+			parent := qname[i+1:]
+			if _, ok := rs.allowDomains[parent]; ok {
+				return Decision{Action: Allow, Reason: "whitelist:" + parent}
+			}
 		}
 	}
 	// Whitelist regexes (AdGuard @@/pattern/ exceptions) override block

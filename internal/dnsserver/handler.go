@@ -654,7 +654,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	//    entry is a stronger signal of intent than any blocklist or cache,
 	//    and it's global (not per-client-group) so it's checked up front.
 	if rewriter != nil {
-		if rules, ok := rewriter.Lookup(q.Name); ok {
+		if rules, ok := rewriter.Lookup(qname); ok {
 			if ans := filter.BuildAnswer(r, rules, q.Name, q.Qtype); ans != nil {
 				h.Stats.Allowed.Add(1)
 				h.record(client, qname, q, "rewrite", "local-dns", "", start, ans)
