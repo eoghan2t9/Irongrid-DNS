@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 	"github.com/miekg/dns"
@@ -372,6 +373,14 @@ func (h *Handler) writeRaw(w dns.ResponseWriter, res cache.LookupResult, r *dns.
 		m.Id = r.Id
 		return h.write(w, m, r, proto)
 	}
+	return h.writeRawPacked(w, res, r.Id)
+}
+
+// writeRawPacked patches the query ID and rebases positive-entry answer TTLs
+// in a private pooled copy of res.Raw, then writes it out and recycles the
+// buffer. Shared by writeRaw and ServeUDPRaw.
+func (h *Handler) writeRawPacked(w dns.ResponseWriter, res cache.LookupResult, id uint16) error {
+	raw := res.Raw
 	buf := getPackBuf()
 	if len(raw) > len(buf) {
 		buf = make([]byte, len(raw))
@@ -379,7 +388,7 @@ func (h *Handler) writeRaw(w dns.ResponseWriter, res cache.LookupResult, r *dns.
 	n := copy(buf, raw)
 	// Rebase the query ID to this request's (the stored bytes carry the
 	// original query's ID).
-	buf[0], buf[1] = byte(r.Id>>8), byte(r.Id)
+	buf[0], buf[1] = byte(id>>8), byte(id)
 	if !res.Negative {
 		// Rebase every answer TTL to its remaining lifetime, floor 1 so a
 		// client never caches a zero-TTL answer as immortal — the same
@@ -401,6 +410,188 @@ func (h *Handler) writeRaw(w dns.ResponseWriter, res cache.LookupResult, r *dns.
 	_, err := w.Write(buf[:n])
 	putPackBuf(buf)
 	return err
+}
+
+// parseUDPFastQuery extracts the query ID, single Question, and advertised
+// EDNS0 UDP buffer size straight from a raw DNS query datagram without
+// allocating a *dns.Msg. Returns ok=false for anything non-standard (multiple
+// questions, non-zero answer/authority, >1 additional RR, compression pointers,
+// non-zero EDNS version, or an RFC 7873 cookie when cookies are enabled) so
+// the caller falls back to full dns.Msg.Unpack.
+func parseUDPFastQuery(pkt []byte, checkCookie bool) (id uint16, q dns.Question, udpSize int, ok bool) {
+	if len(pkt) < 17 {
+		return 0, dns.Question{}, 0, false
+	}
+	flags := binary.BigEndian.Uint16(pkt[2:4])
+	if (flags & 0xF800) != 0 { // must be QR=0 and Opcode=QUERY(0)
+		return 0, dns.Question{}, 0, false
+	}
+	qd := binary.BigEndian.Uint16(pkt[4:6])
+	an := binary.BigEndian.Uint16(pkt[6:8])
+	ns := binary.BigEndian.Uint16(pkt[8:10])
+	ar := binary.BigEndian.Uint16(pkt[10:12])
+	if qd != 1 || an != 0 || ns != 0 || ar > 1 {
+		return 0, dns.Question{}, 0, false
+	}
+
+	var nameBuf [256]byte
+	off := 12
+	n := 0
+	for {
+		if off >= len(pkt) {
+			return 0, dns.Question{}, 0, false
+		}
+		l := int(pkt[off])
+		off++
+		if l == 0 {
+			if n == 0 {
+				nameBuf[0] = '.'
+				n = 1
+			}
+			break
+		}
+		if l >= 64 || off+l > len(pkt) || n+l+1 >= len(nameBuf) {
+			return 0, dns.Question{}, 0, false
+		}
+		copy(nameBuf[n:n+l], pkt[off:off+l])
+		n += l
+		nameBuf[n] = '.'
+		n++
+		off += l
+	}
+	if off+4 > len(pkt) {
+		return 0, dns.Question{}, 0, false
+	}
+	q = dns.Question{
+		Name:   string(nameBuf[:n]),
+		Qtype:  binary.BigEndian.Uint16(pkt[off : off+2]),
+		Qclass: binary.BigEndian.Uint16(pkt[off+2 : off+4]),
+	}
+	off += 4
+
+	udpSize = dns.MinMsgSize
+	if ar == 0 {
+		if off != len(pkt) {
+			return 0, dns.Question{}, 0, false
+		}
+		return binary.BigEndian.Uint16(pkt[0:2]), q, udpSize, true
+	}
+
+	// Single additional RR: must be root-named OPT (RFC 6891).
+	if off+11 > len(pkt) || pkt[off] != 0 || binary.BigEndian.Uint16(pkt[off+1:off+3]) != dns.TypeOPT {
+		return 0, dns.Question{}, 0, false
+	}
+	if pkt[off+6] != 0 { // EDNS version != 0 -> BADVERS via full path
+		return 0, dns.Question{}, 0, false
+	}
+	rdlen := int(binary.BigEndian.Uint16(pkt[off+9 : off+11]))
+	if off+11+rdlen != len(pkt) {
+		return 0, dns.Question{}, 0, false
+	}
+	if checkCookie && rdlen > 0 {
+		optEnd := off + 11 + rdlen
+		for p := off + 11; p < optEnd; {
+			if p+4 > optEnd {
+				return 0, dns.Question{}, 0, false
+			}
+			code := binary.BigEndian.Uint16(pkt[p : p+2])
+			olen := int(binary.BigEndian.Uint16(pkt[p+2 : p+4]))
+			if p+4+olen > optEnd {
+				return 0, dns.Question{}, 0, false
+			}
+			if code == dns.EDNS0COOKIE {
+				return 0, dns.Question{}, 0, false
+			}
+			p += 4 + olen
+		}
+	}
+	if sz := int(binary.BigEndian.Uint16(pkt[off+3 : off+5])); sz >= dns.MinMsgSize {
+		udpSize = sz
+	}
+	return binary.BigEndian.Uint16(pkt[0:2]), q, udpSize, true
+}
+
+// ServeUDPRaw attempts to answer a UDP datagram directly from the L1/L2 cache
+// without unpacking the packet into a *dns.Msg. Returns true if the datagram
+// was handled (answered from cache or silently dropped by ACL/rate/flood
+// guards); returns false when the caller should fall back to dns.Msg.Unpack
+// and ServeDNS.
+func (h *Handler) ServeUDPRaw(w dns.ResponseWriter, pkt []byte) bool {
+	s := h.settings.Load()
+	if s.Cache == nil || s.Geo != nil || s.RepeatGuard != nil || len(s.UpstreamRoutes) > 0 {
+		return false
+	}
+	id, q, udpSize, ok := parseUDPFastQuery(pkt, h.Cookies.Load())
+	if !ok || isMetaQuery(q) || q.Qtype == dns.TypeANY {
+		return false
+	}
+	client := clientIPOf(w.RemoteAddr())
+	if s.ClientRouter != nil && s.ClientRouter.Resolve(client) != nil {
+		return false
+	}
+	qname := dnsname.CanonicalDomain(q.Name)
+	if qname == "_dns.resolver.arpa" {
+		return false
+	}
+	if s.IPBanner != nil && s.IPBanner.LookupHoneypot(qname) {
+		return false
+	}
+	if s.Rewriter != nil {
+		if _, found := s.Rewriter.Lookup(q.Name); found {
+			return false
+		}
+	}
+	if h.DHCPHosts != nil {
+		if q.Qtype == dns.TypePTR {
+			return false
+		}
+		if _, found := h.DHCPHosts.LookupHost(q.Name); found {
+			return false
+		}
+	}
+	if d := h.Engine.DecideDomain(qname); d.Action != filter.Allow {
+		return false
+	}
+
+	if (s.ACL != nil && client != "" && !s.ACL.Allowed(client)) ||
+		(s.RateLimiter != nil && !s.RateLimiter.Allow(client)) ||
+		(s.NXGuard != nil && !s.NXGuard.Allow(clientPrefix(client))) {
+		h.Stats.Total.Add(1)
+		if p, ok := h.Stats.ByProtocol["udp"]; ok {
+			p.Add(1)
+		}
+		h.Stats.Errors.Add(1)
+		return true
+	}
+
+	hit := s.Cache.Lookup(q)
+	if len(hit.Raw) == 0 || hit.Stale {
+		return false
+	}
+	rebaseOK := hit.Negative || len(hit.TTLOffsets) > 0
+	if !rebaseOK || len(hit.Raw) > udpSize {
+		return false
+	}
+
+	start := time.Now()
+	sw := getStatsWriter(w, &h.Stats.WriteErrors)
+	defer putStatsWriter(sw)
+
+	h.Stats.Total.Add(1)
+	if p, ok := h.Stats.ByProtocol["udp"]; ok {
+		p.Add(1)
+	}
+	h.Stats.Cached.Add(1)
+	reason := "cache"
+	if hit.Negative {
+		reason = "cache-negative"
+		if s.NXGuard != nil && packedRcode(hit.Raw) == dns.RcodeNameError {
+			s.NXGuard.NoteNX(clientPrefix(client))
+		}
+	}
+	h.recordRaw(client, qname, q, "cached", reason, "", start, hit.Raw)
+	_ = h.writeRawPacked(sw, hit, id)
+	return true
 }
 
 // newReply allocates the empty response skeleton used by the error, NODATA

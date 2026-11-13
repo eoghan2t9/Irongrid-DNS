@@ -410,8 +410,21 @@ var udpWriterPool = sync.Pool{New: func() any { return new(udpResponseWriter) }}
 // handle unpacks one datagram and runs the handler, then returns the read
 // buffer and request to their pools. Unpack copies every name and record
 // into the *dns.Msg, so the buffer is free the moment it returns.
+type udpRawHandler interface {
+	ServeUDPRaw(dns.ResponseWriter, []byte) bool
+}
+
 func (s *udpServer) handle(job udpJob) {
 	defer s.bufs.Put(job.bp)
+	w := udpWriterPool.Get().(*udpResponseWriter)
+	w.conn, w.pc, w.addr, w.batchWrites = s.conn, s.pc, job.addr, s.writes
+	defer func() {
+		w.conn, w.pc, w.addr, w.batchWrites = nil, nil, nil, nil
+		udpWriterPool.Put(w)
+	}()
+	if rh, ok := s.handler.(udpRawHandler); ok && rh.ServeUDPRaw(w, (*job.bp)[:job.n]) {
+		return
+	}
 	req := reqPool.Get().(*dns.Msg)
 	defer func() {
 		*req = dns.Msg{}
@@ -425,12 +438,6 @@ func (s *udpServer) handle(job udpJob) {
 		}
 		return
 	}
-	w := udpWriterPool.Get().(*udpResponseWriter)
-	w.conn, w.pc, w.addr, w.batchWrites = s.conn, s.pc, job.addr, s.writes
-	defer func() {
-		w.conn, w.pc, w.addr, w.batchWrites = nil, nil, nil, nil
-		udpWriterPool.Put(w)
-	}()
 	s.handler.ServeDNS(w, req)
 }
 

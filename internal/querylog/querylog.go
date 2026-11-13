@@ -12,9 +12,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/eoghan2t9/Irongrid-DNS/internal/safego"
 	"iter"
 	"log/slog"
+	"net"
 	"slices"
 	"strconv"
 	"strings"
@@ -22,8 +22,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/redis/go-redis/v9"
+	"github.com/redis/rueidis"
 
+	"github.com/eoghan2t9/Irongrid-DNS/internal/safego"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
@@ -121,7 +122,7 @@ type Entry struct {
 // pipelined batches (one round trip per flush), so per-query Redis traffic
 // never sits on the DNS hot path.
 type Log struct {
-	client    *redis.Client
+	client    rueidis.Client
 	retention time.Duration
 	batchSize int
 
@@ -156,17 +157,21 @@ type Log struct {
 // the log. batchSize is the number of entries committed per pipelined flush;
 // <= 0 uses the default.
 func New(addr, password string, db, retentionDays, batchSize int) (*Log, error) {
-	client := redis.NewClient(&redis.Options{
-		Addr:         addr,
-		Password:     password,
-		DB:           db,
-		DialTimeout:  5 * time.Second,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 5 * time.Second,
+	client, err := rueidis.NewClient(rueidis.ClientOption{
+		InitAddress:      []string{addr},
+		Password:         password,
+		SelectDB:         db,
+		Dialer:           net.Dialer{Timeout: 5 * time.Second},
+		ConnWriteTimeout: 5 * time.Second,
+		DisableCache:     true,
 	})
+	if err != nil {
+		return nil, fmt.Errorf("dragonfly query log unreachable at %s: %w", addr, err)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := client.Ping(ctx).Err(); err != nil {
+	if err := client.Do(ctx, client.B().Ping().Build()).Error(); err != nil {
+		client.Close()
 		return nil, fmt.Errorf("dragonfly query log unreachable at %s: %w", addr, err)
 	}
 	bs := logBatchSize
@@ -316,26 +321,33 @@ func (l *Log) writeBatch(entries []Entry) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	pipe := l.client.Pipeline()
+	cmds := make([]rueidis.Completed, 0, len(entries)+1)
 	for i := range entries {
 		v, err := json.Marshal(&entries[i])
 		if err != nil {
 			continue
 		}
-		pipe.XAdd(ctx, &redis.XAddArgs{Stream: streamKey, Values: map[string]any{"v": v}})
+		cmds = append(cmds, l.client.B().Xadd().Key(streamKey).Id("*").FieldValue().FieldValue("v", string(v)).Build())
 	}
 	// Keep the stream bounded even if the hourly retention pruner is
 	// delayed; in Dragonfly's cache mode an unbounded stream could otherwise
 	// eat the whole 512MB budget.
-	pipe.XTrimMaxLen(ctx, streamKey, maxStreamEntries)
-	if _, err := pipe.Exec(ctx); err != nil {
+	cmds = append(cmds, l.client.B().Xtrim().Key(streamKey).Maxlen().Threshold(strconv.Itoa(maxStreamEntries)).Build())
+	var flushErr error
+	for _, r := range l.client.DoMulti(ctx, cmds...) {
+		if err := r.Error(); err != nil {
+			flushErr = err
+			break
+		}
+	}
+	if flushErr != nil {
 		// Rate-limited: a down Dragonfly would otherwise log every ~100ms.
 		// The entries are dropped either way — logging must never break DNS.
 		now := time.Now().UnixNano()
 		last := l.lastFlushErr.Load()
 		if last == 0 || now-last > int64(time.Minute) {
 			l.lastFlushErr.Store(now)
-			slog.Error("querylog stream flush failed", "error", err)
+			slog.Error("querylog stream flush failed", "error", flushErr)
 		}
 		return
 	}
@@ -378,11 +390,11 @@ func (l *Log) seedAggregate(ctx context.Context) {
 // entryFromMessage decodes a stream message into an Entry. The message ID
 // becomes the entry's stable ID; the payload is the JSON body stored at
 // write time. ok is false for malformed messages, which are skipped.
-func entryFromMessage(e *Entry, m redis.XMessage) bool {
+func entryFromMessage(e *Entry, m rueidis.XRangeEntry) bool {
 	if m.ID == "" {
 		return false
 	}
-	raw, ok := m.Values["v"].(string)
+	raw, ok := m.FieldValues["v"]
 	if !ok {
 		return false
 	}
@@ -407,8 +419,8 @@ func entryFromMessage(e *Entry, m redis.XMessage) bool {
 // methods guard first — but the guard is kept so the helper itself can't
 // nil-deref. A yielded error is always the last value the iterator produces;
 // callers must check it before using the message.
-func (l *Log) walkStream(ctx context.Context, reverse bool, start, stop string, max, page int) iter.Seq2[redis.XMessage, error] {
-	return func(yield func(redis.XMessage, error) bool) {
+func (l *Log) walkStream(ctx context.Context, reverse bool, start, stop string, max, page int) iter.Seq2[rueidis.XRangeEntry, error] {
+	return func(yield func(rueidis.XRangeEntry, error) bool) {
 		if l.client == nil {
 			return
 		}
@@ -416,16 +428,16 @@ func (l *Log) walkStream(ctx context.Context, reverse bool, start, stop string, 
 		scanned := 0
 		for scanned < max {
 			var (
-				msgs []redis.XMessage
+				msgs []rueidis.XRangeEntry
 				err  error
 			)
 			if reverse {
-				msgs, err = l.client.XRevRangeN(ctx, streamKey, start, stop, int64(page+1)).Result()
+				msgs, err = l.client.Do(ctx, l.client.B().Xrevrange().Key(streamKey).End(start).Start(stop).Count(int64(page+1)).Build()).AsXRange()
 			} else {
-				msgs, err = l.client.XRangeN(ctx, streamKey, start, stop, int64(page+1)).Result()
+				msgs, err = l.client.Do(ctx, l.client.B().Xrange().Key(streamKey).Start(start).End(stop).Count(int64(page+1)).Build()).AsXRange()
 			}
 			if err != nil {
-				yield(redis.XMessage{}, err)
+				yield(rueidis.XRangeEntry{}, err)
 				return
 			}
 			begin := 0
@@ -920,7 +932,7 @@ func (l *Log) Clear(ctx context.Context) error {
 	if l.agg != nil {
 		l.agg.clear()
 	}
-	return l.client.Del(ctx, streamKey).Err()
+	return l.client.Do(ctx, l.client.B().Del().Key(streamKey).Build()).Error()
 }
 
 // Prune removes entries older than the retention window. The stream's
@@ -931,7 +943,7 @@ func (l *Log) Prune(ctx context.Context) {
 		return
 	}
 	cutoff := fmt.Sprintf("%d-0", time.Now().Add(-l.retention).UnixMilli())
-	if err := l.client.XTrimMinID(ctx, streamKey, cutoff).Err(); err != nil {
+	if err := l.client.Do(ctx, l.client.B().Xtrim().Key(streamKey).Minid().Threshold(cutoff).Build()).Error(); err != nil {
 		slog.Error("querylog prune failed", "error", err)
 	}
 }
@@ -962,7 +974,7 @@ func (l *Log) Close() error {
 	close(l.done) // writer drains the queue and flushes the final batch
 	l.wg.Wait()
 	if l.client != nil {
-		return l.client.Close()
+		l.client.Close()
 	}
 	return nil
 }

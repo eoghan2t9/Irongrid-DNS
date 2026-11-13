@@ -13,8 +13,24 @@ import (
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/miekg/dns"
-	"github.com/redis/go-redis/v9"
+	"github.com/redis/rueidis"
 )
+
+func testRueidisOption(addr string) rueidis.ClientOption {
+	return rueidis.ClientOption{
+		InitAddress:  []string{addr},
+		DisableCache: true,
+	}
+}
+
+func testRueidisClient(tb testing.TB, addr string) rueidis.Client {
+	tb.Helper()
+	client, err := rueidis.NewClient(testRueidisOption(addr))
+	if err != nil {
+		tb.Fatalf("rueidis.NewClient: %v", err)
+	}
+	return client
+}
 
 // l1onlyCache builds a Cache with only the in-memory L1 layer (nil Redis
 // client), so the fast path is fully exercised offline.
@@ -224,7 +240,7 @@ func TestCloseFlushesAllWriterShards(t *testing.T) {
 	t.Parallel()
 	mr := miniredis.RunT(t)
 	c := &Cache{
-		client:      redis.NewClient(&redis.Options{Addr: mr.Addr()}),
+		client:      testRueidisClient(t, mr.Addr()),
 		l1:          newL1(64, 0),
 		prefix:      "irongrid:dns:",
 		ttl:         6 * time.Hour,
@@ -257,7 +273,7 @@ func TestCloseFlushesAllWriterShards(t *testing.T) {
 	// L1) so every read is forced through L2 — a get straight from this
 	// process's own L1 would prove nothing about whether the write actually
 	// reached Dragonfly.
-	verify := &Cache{client: redis.NewClient(&redis.Options{Addr: mr.Addr()}), prefix: "irongrid:dns:", ttl: 6 * time.Hour}
+	verify := &Cache{client: testRueidisClient(t, mr.Addr()), prefix: "irongrid:dns:", ttl: 6 * time.Hour}
 	t.Cleanup(func() { _ = verify.Close() })
 	for shard, q := range questions {
 		if got := verify.Get(t.Context(), q); got == nil {
@@ -269,13 +285,13 @@ func TestCloseFlushesAllWriterShards(t *testing.T) {
 func TestPingUntilReadySucceedsImmediately(t *testing.T) {
 	t.Parallel()
 	mr := miniredis.RunT(t)
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
 
 	start := time.Now()
-	if err := pingUntilReady(client, 5*time.Second); err != nil {
-		t.Fatalf("pingUntilReady: %v", err)
+	client, err := connectUntilReady(testRueidisOption(mr.Addr()), 5*time.Second)
+	if err != nil {
+		t.Fatalf("connectUntilReady: %v", err)
 	}
+	t.Cleanup(func() { client.Close() })
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Errorf("took %v to succeed against a healthy server — should return on the first ping", elapsed)
 	}
@@ -285,8 +301,6 @@ func TestPingUntilReadyRetriesOnLoading(t *testing.T) {
 	t.Parallel()
 	mr := miniredis.RunT(t)
 	mr.SetError("LOADING Redis is loading the dataset in memory")
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
 
 	go func() {
 		time.Sleep(600 * time.Millisecond)
@@ -294,9 +308,11 @@ func TestPingUntilReadyRetriesOnLoading(t *testing.T) {
 	}()
 
 	start := time.Now()
-	if err := pingUntilReady(client, 5*time.Second); err != nil {
-		t.Fatalf("pingUntilReady: %v", err)
+	client, err := connectUntilReady(testRueidisOption(mr.Addr()), 5*time.Second)
+	if err != nil {
+		t.Fatalf("connectUntilReady: %v", err)
 	}
+	t.Cleanup(func() { client.Close() })
 	if elapsed := time.Since(start); elapsed < 600*time.Millisecond {
 		t.Errorf("succeeded after %v — expected it to keep retrying until the LOADING error cleared", elapsed)
 	}
@@ -306,13 +322,11 @@ func TestPingUntilReadyFailsFastOnNonLoadingError(t *testing.T) {
 	t.Parallel()
 	mr := miniredis.RunT(t)
 	mr.SetError("NOAUTH Authentication required")
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
 
 	start := time.Now()
-	err := pingUntilReady(client, 5*time.Second)
+	_, err := connectUntilReady(testRueidisOption(mr.Addr()), 5*time.Second)
 	if err == nil || !strings.Contains(err.Error(), "NOAUTH") {
-		t.Fatalf("pingUntilReady: got %v, want a NOAUTH error", err)
+		t.Fatalf("connectUntilReady: got %v, want a NOAUTH error", err)
 	}
 	if elapsed := time.Since(start); elapsed > time.Second {
 		t.Errorf("took %v to fail on a non-LOADING error — should give up on the first ping instead of retrying for the full budget", elapsed)
@@ -323,14 +337,12 @@ func TestPingUntilReadyGivesUpAfterBudget(t *testing.T) {
 	t.Parallel()
 	mr := miniredis.RunT(t)
 	mr.SetError("LOADING Redis is loading the dataset in memory")
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
 
 	start := time.Now()
-	err := pingUntilReady(client, 700*time.Millisecond)
+	_, err := connectUntilReady(testRueidisOption(mr.Addr()), 700*time.Millisecond)
 	elapsed := time.Since(start)
 	if err == nil || !strings.Contains(err.Error(), "LOADING") {
-		t.Fatalf("pingUntilReady: got %v, want a LOADING error once the budget is exhausted", err)
+		t.Fatalf("connectUntilReady: got %v, want a LOADING error once the budget is exhausted", err)
 	}
 	if elapsed < 700*time.Millisecond || elapsed > 3*time.Second {
 		t.Errorf("gave up after %v — expected roughly the 700ms budget, not immediately and not much longer", elapsed)
@@ -348,7 +360,7 @@ func TestPingUntilReadyGivesUpAfterBudget(t *testing.T) {
 func BenchmarkCacheSetThroughput(b *testing.B) {
 	mr := miniredis.RunT(b)
 	c := &Cache{
-		client:      redis.NewClient(&redis.Options{Addr: mr.Addr()}),
+		client:      testRueidisClient(b, mr.Addr()),
 		l1:          newL1(4096, 0),
 		prefix:      "irongrid:dns:",
 		ttl:         6 * time.Hour,
@@ -707,24 +719,38 @@ func TestNegativePrefetch(t *testing.T) {
 	})
 }
 
-// TestDecodeMGetResult exercises the MGET response parsing in isolation
-// (posKey, negKey order, as Lookup calls MGet) without needing a real Redis
-// connection — go-redis returns a present key as a string and a missing key
-// as nil in the result slice.
+// TestDecodeMGetResult exercises the pipelined GET pair response parsing
+// (posKey, negKey order, as Lookup calls DoMulti) against miniredis — rueidis
+// returns a present key with AsBytes() err == nil and a missing key with
+// rueidis.Nil.
 func TestDecodeMGetResult(t *testing.T) {
 	t.Parallel()
+	mr := miniredis.RunT(t)
+	client := testRueidisClient(t, mr.Addr())
+	t.Cleanup(func() { client.Close() })
+
+	_ = mr.Set("pos", "pos-bytes")
+	_ = mr.Set("neg", "neg-bytes")
+
+	mget := func(k1, k2 string) []rueidis.RedisResult {
+		return client.DoMulti(t.Context(),
+			client.B().Get().Key(k1).Build(),
+			client.B().Get().Key(k2).Build(),
+		)
+	}
+
 	cases := []struct {
 		name    string
-		vals    []any
+		vals    []rueidis.RedisResult
 		wantPos []byte
 		wantNeg []byte
 		wantOK  bool
 	}{
-		{"both missing", []any{nil, nil}, nil, nil, false},
-		{"positive present", []any{"pos-bytes", nil}, []byte("pos-bytes"), nil, true},
-		{"negative present", []any{nil, "neg-bytes"}, nil, []byte("neg-bytes"), true},
-		{"both present positive wins", []any{"pos-bytes", "neg-bytes"}, []byte("pos-bytes"), nil, true},
-		{"wrong length", []any{"only-one"}, nil, nil, false},
+		{"both missing", mget("miss1", "miss2"), nil, nil, false},
+		{"positive present", mget("pos", "miss"), []byte("pos-bytes"), nil, true},
+		{"negative present", mget("miss", "neg"), nil, []byte("neg-bytes"), true},
+		{"both present positive wins", mget("pos", "neg"), []byte("pos-bytes"), nil, true},
+		{"wrong length", []rueidis.RedisResult{{}}, nil, nil, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -890,7 +916,7 @@ func TestL1RehydrationHonorsRealRemainingTTL(t *testing.T) {
 	// test seeds L2 directly and never calls Set, so the batched writer
 	// New would start is unneeded.
 	c := &Cache{
-		client:      redis.NewClient(&redis.Options{Addr: mr.Addr()}),
+		client:      testRueidisClient(t, mr.Addr()),
 		l1:          newL1(64, 0),
 		prefix:      "irongrid:dns:",
 		ttl:         6 * time.Hour,
@@ -940,7 +966,7 @@ func TestL1RewarmFromL2HonoursRecordTTL(t *testing.T) {
 	mr := miniredis.RunT(t)
 	mk := func() *Cache {
 		c := &Cache{
-			client:      redis.NewClient(&redis.Options{Addr: mr.Addr()}),
+			client:      testRueidisClient(t, mr.Addr()),
 			l1:          newL1(64, 0),
 			prefix:      "irongrid:dns:",
 			ttl:         6 * time.Hour,

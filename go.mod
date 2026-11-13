@@ -9,12 +9,14 @@ require (
 	github.com/charmbracelet/huh v1.0.0
 	github.com/creack/pty v1.1.24
 	github.com/go-acme/lego/v4 v4.35.2
+	github.com/goccy/go-json v0.12.0
 	github.com/goccy/go-yaml v1.19.2
 	github.com/insomniacslk/dhcp v0.0.0-20261014062924-c6bb46ad3f3a
+	github.com/klauspost/compress v1.20.4
 	github.com/klauspost/cpuid/v2 v2.4.2
 	github.com/miekg/dns v1.1.73
 	github.com/quic-go/quic-go v0.65.0
-	github.com/redis/go-redis/v9 v9.23.0
+	github.com/redis/rueidis v1.0.79
 	golang.org/x/crypto v0.59.0
 	golang.org/x/net v0.62.0
 	golang.org/x/sync v0.25.0
@@ -43,7 +45,6 @@ require (
 	github.com/aymanbagabas/go-udiff v0.4.1 // indirect
 	github.com/catppuccin/go v0.3.0 // indirect
 	github.com/cenkalti/backoff/v5 v5.0.3 // indirect
-	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/charmbracelet/bubbles v1.0.0 // indirect
 	github.com/charmbracelet/bubbletea v1.3.10 // indirect
 	github.com/charmbracelet/colorprofile v0.4.3 // indirect
@@ -59,8 +60,6 @@ require (
 	github.com/dustin/go-humanize v1.1.0 // indirect
 	github.com/erikgeiser/coninput v0.0.0-20211004153227-1c3628e74d0f // indirect
 	github.com/go-jose/go-jose/v4 v4.1.9 // indirect
-	github.com/goccy/go-json v0.12.0 // indirect
-	github.com/klauspost/compress v1.20.4 // indirect
 	github.com/lucasb-eyer/go-colorful v1.4.1 // indirect
 	github.com/mattn/go-isatty v0.0.24 // indirect
 	github.com/mattn/go-localereader v0.0.1 // indirect
@@ -75,7 +74,6 @@ require (
 	github.com/u-root/uio v0.0.0-20240224005618-d2acac8f3701 // indirect
 	github.com/xo/terminfo v1.3.1 // indirect
 	github.com/yuin/gopher-lua v1.1.2 // indirect
-	go.uber.org/atomic v1.12.0 // indirect
 	go.uber.org/mock v0.6.0 // indirect
 	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/oauth2 v0.38.0 // indirect

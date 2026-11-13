@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
+	"net"
 	"strconv"
 	"strings"
 	"sync"
@@ -15,7 +16,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/redis/go-redis/v9"
+	"github.com/redis/rueidis"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
@@ -61,7 +62,7 @@ const (
 // Dragonfly/Redis L2. The L2 is authoritative for the fleet (and survives
 // restarts); the L1 makes local hits a pure map lookup.
 type Cache struct {
-	client      *redis.Client
+	client      rueidis.Client
 	l1          *l1Cache // carries the serve-stale window (l1Cache.staleTTL)
 	prefix      string
 	ttl         time.Duration
@@ -140,24 +141,24 @@ func NewLocalOnly(ttl, negativeTTL time.Duration, l1Entries int, serveStale time
 // an L1 entry remains answerable past its expiry (RFC 8767); 0 disables
 // serve-stale.
 func New(addr, password string, db int, ttl, negativeTTL, serveStale time.Duration, l1Entries int) (*Cache, error) {
-	client := redis.NewClient(&redis.Options{
-		Addr:         addr,
-		Password:     password,
-		DB:           db,
-		DialTimeout:  5 * time.Second,
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 5 * time.Second,
-	})
-
-	if err := pingUntilReady(client, pingLoadingBudget); err != nil {
+	client, err := connectUntilReady(rueidis.ClientOption{
+		InitAddress:      []string{addr},
+		Password:         password,
+		SelectDB:         db,
+		Dialer:           net.Dialer{Timeout: 5 * time.Second},
+		ConnWriteTimeout: 5 * time.Second,
+		DisableCache:     true,
+	}, pingLoadingBudget)
+	if err != nil {
 		return nil, fmt.Errorf("dragonfly cache unreachable at %s: %w", addr, err)
 	}
 
 	// Sanity check that the connected server is actually Dragonfly or Redis.
 	infoCtx, infoCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	info, err := client.Info(infoCtx, "server").Result()
+	info, err := client.Do(infoCtx, client.B().Info().Section("server").Build()).ToString()
 	infoCancel()
 	if err != nil {
+		client.Close()
 		return nil, fmt.Errorf("dragonfly cache info failed: %w", err)
 	}
 	slog.Info("cache connected", "server", summarizeServerInfo(info))
@@ -185,19 +186,25 @@ func New(addr, password string, db int, ttl, negativeTTL, serveStale time.Durati
 // connection) still fails immediately below.
 const pingLoadingBudget = 20 * time.Second
 
-// pingUntilReady pings client, retrying on a "LOADING" response for up to
-// budget before giving up. Any non-LOADING error returns immediately.
-func pingUntilReady(client *redis.Client, budget time.Duration) error {
+// connectUntilReady connects and pings, retrying on a "LOADING" response for
+// up to budget before giving up (rueidis also runs HELLO/AUTH inside NewClient,
+// which Dragonfly rejects with LOADING while restoring). Any non-LOADING error
+// returns immediately.
+func connectUntilReady(opt rueidis.ClientOption, budget time.Duration) (rueidis.Client, error) {
 	deadline := time.Now().Add(budget)
 	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		err := client.Ping(ctx).Err()
-		cancel()
+		client, err := rueidis.NewClient(opt)
 		if err == nil {
-			return nil
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err = client.Do(ctx, client.B().Ping().Build()).Error()
+			cancel()
+			if err == nil {
+				return client, nil
+			}
+			client.Close()
 		}
 		if !strings.Contains(err.Error(), "LOADING") || time.Now().After(deadline) {
-			return err
+			return nil, err
 		}
 		slog.Warn("dragonfly still loading dataset, retrying", "error", err)
 		time.Sleep(500 * time.Millisecond)
@@ -247,18 +254,25 @@ func (c *Cache) startWriter() {
 // must never lose an entry. h is the question hash (already computed by the
 // caller) used to pick the shard; it need not match the key being written
 // (the caller ensures it does).
+func setCmd(client rueidis.Client, key string, val []byte, ttl time.Duration) rueidis.Completed {
+	if ttl > 0 {
+		return client.B().Set().Key(key).Value(rueidis.BinaryString(val)).Ex(ttl).Build()
+	}
+	return client.B().Set().Key(key).Value(rueidis.BinaryString(val)).Build()
+}
+
 func (c *Cache) enqueueL2(ctx context.Context, h uint64, key string, val []byte, ttl time.Duration) {
 	if c.client == nil {
 		return
 	}
 	if c.writes == nil || c.wclosed.Load() {
-		c.client.Set(ctx, key, val, ttl)
+		_ = c.client.Do(ctx, setCmd(c.client, key, val, ttl)).Error()
 		return
 	}
 	select {
 	case c.writeShard(h) <- l2Write{key: key, val: val, ttl: ttl}:
 	default:
-		c.client.Set(ctx, key, val, ttl)
+		_ = c.client.Do(ctx, setCmd(c.client, key, val, ttl)).Error()
 	}
 }
 
@@ -320,16 +334,19 @@ func (c *Cache) writeBatchL2(batch []l2Write) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), writeFlushTimeout)
 	defer cancel()
-	pipe := c.client.Pipeline()
+	cmds := make([]rueidis.Completed, len(batch))
 	for i := range batch {
-		pipe.Set(ctx, batch[i].key, batch[i].val, batch[i].ttl)
+		cmds[i] = setCmd(c.client, batch[i].key, batch[i].val, batch[i].ttl)
 	}
-	if _, err := pipe.Exec(ctx); err != nil {
-		now := time.Now().UnixNano()
-		last := c.lastWriteErr.Load()
-		if last == 0 || now-last > int64(time.Minute) {
-			c.lastWriteErr.Store(now)
-			slog.Error("cache L2 batch write failed", "entries", len(batch), "error", err)
+	for _, res := range c.client.DoMulti(ctx, cmds...) {
+		if err := res.Error(); err != nil {
+			now := time.Now().UnixNano()
+			last := c.lastWriteErr.Load()
+			if last == 0 || now-last > int64(time.Minute) {
+				c.lastWriteErr.Store(now)
+				slog.Error("cache L2 batch write failed", "entries", len(batch), "error", err)
+			}
+			break
 		}
 	}
 }
@@ -366,13 +383,15 @@ func (c *Cache) Close() error {
 		}
 	}
 	if c.client != nil {
-		return c.client.Close()
+		c.client.Close()
 	}
 	return nil
 }
 
 // Ping returns an error if the cache is not reachable right now.
-func (c *Cache) Ping(ctx context.Context) error { return c.client.Ping(ctx).Err() }
+func (c *Cache) Ping(ctx context.Context) error {
+	return c.client.Do(ctx, c.client.B().Ping().Build()).Error()
+}
 
 // GetKV reads a raw value from Dragonfly (returns nil, false on miss, error,
 // or when running local-only without an L2 client).
@@ -380,7 +399,7 @@ func (c *Cache) GetKV(ctx context.Context, key string) ([]byte, bool) {
 	if c == nil || c.client == nil {
 		return nil, false
 	}
-	b, err := c.client.Get(ctx, c.prefix+key).Bytes()
+	b, err := c.client.Do(ctx, c.client.B().Get().Key(c.prefix+key).Build()).AsBytes()
 	if err != nil {
 		return nil, false
 	}
@@ -393,7 +412,7 @@ func (c *Cache) SetKV(ctx context.Context, key string, val []byte, ttl time.Dura
 	if c == nil || c.client == nil {
 		return
 	}
-	_ = c.client.Set(ctx, c.prefix+key, val, ttl).Err()
+	_ = c.client.Do(ctx, setCmd(c.client, c.prefix+key, val, ttl)).Error()
 }
 
 // DelKV removes a key from Dragonfly. Best-effort; calls on a local-only
@@ -402,12 +421,12 @@ func (c *Cache) DelKV(ctx context.Context, key string) {
 	if c == nil || c.client == nil {
 		return
 	}
-	_ = c.client.Del(ctx, c.prefix+key).Err()
+	_ = c.client.Do(ctx, c.client.B().Del().Key(c.prefix+key).Build()).Error()
 }
 
 // Stats returns basic usage counters for the dashboard.
 func (c *Cache) Stats(ctx context.Context) (map[string]string, error) {
-	info, err := c.client.Info(ctx, "stats").Result()
+	info, err := c.client.Do(ctx, c.client.B().Info().Section("stats").Build()).ToString()
 	if err != nil {
 		return nil, err
 	}
@@ -440,7 +459,7 @@ func (c *Cache) L2Stats(ctx context.Context) (L2Stats, error) {
 	if c.client == nil {
 		return s, fmt.Errorf("no L2 cache")
 	}
-	info, err := c.client.Info(ctx).Result()
+	info, err := c.client.Do(ctx, c.client.B().Info().Build()).ToString()
 	if err != nil {
 		return s, err
 	}
@@ -462,7 +481,7 @@ func (c *Cache) L2Stats(ctx context.Context) (L2Stats, error) {
 			}
 		}
 	}
-	if n, err := c.client.DBSize(ctx).Result(); err == nil {
+	if n, err := c.client.Do(ctx, c.client.B().Dbsize().Build()).AsInt64(); err == nil {
 		s.Keys = n
 	}
 	return s, nil
@@ -477,7 +496,7 @@ func (c *Cache) ServerVersion(ctx context.Context) (string, error) {
 	if c.client == nil {
 		return "", fmt.Errorf("no L2 cache")
 	}
-	info, err := c.client.Info(ctx, "server").Result()
+	info, err := c.client.Do(ctx, c.client.B().Info().Section("server").Build()).ToString()
 	if err != nil {
 		return "", err
 	}
@@ -504,7 +523,7 @@ func (c *Cache) Snapshot(ctx context.Context) error {
 	if c.client == nil {
 		return fmt.Errorf("no L2 cache")
 	}
-	return c.client.Save(ctx).Err()
+	return c.client.Do(ctx, c.client.B().Save().Build()).Error()
 }
 
 // L1Counters returns the in-process cache layer's hit/miss counts since
@@ -885,10 +904,10 @@ func (c *Cache) Lookup(q dns.Question) LookupResult {
 	// tier can't stall the query beyond the budget.
 	ctx, cancel := context.WithTimeout(context.Background(), c.budget())
 	defer cancel()
-	vals, err := c.client.MGet(ctx, c.msgKey(h), c.negKey(h)).Result()
-	if err != nil {
-		return stale
-	}
+	vals := c.client.DoMulti(ctx,
+		c.client.B().Get().Key(c.msgKey(h)).Build(),
+		c.client.B().Get().Key(c.negKey(h)).Build(),
+	)
 	posRaw, negRaw, ok := decodeMGetResult(vals)
 	if !ok {
 		return stale
@@ -1001,31 +1020,31 @@ func (c *Cache) Fresh(q dns.Question) bool {
 	// present L2 key is fresh by construction (Redis expires it at its TTL).
 	ctx, cancel := context.WithTimeout(context.Background(), c.budget())
 	defer cancel()
-	vals, err := c.client.MGet(ctx, c.msgKey(h), c.negKey(h)).Result()
-	if err != nil {
-		return false
-	}
+	vals := c.client.DoMulti(ctx,
+		c.client.B().Get().Key(c.msgKey(h)).Build(),
+		c.client.B().Get().Key(c.negKey(h)).Build(),
+	)
 	for _, v := range vals {
-		if v != nil {
+		if err := v.Error(); err == nil {
 			return true
 		}
 	}
 	return false
 }
 
-// decodeMGetResult interprets the [positive, negative] result of an MGET
-// against the two keys for one question, as go-redis returns it: a present
-// key comes back as a string, a missing key as nil. ok is false when
+// decodeMGetResult interprets the [positive, negative] result of a pipelined
+// GET pair against the two keys for one question: a present key has AsBytes()
+// error == nil, while a missing key returns rueidis.Nil. ok is false when
 // neither key was present, or the result didn't have the expected shape.
-func decodeMGetResult(vals []any) (posRaw, negRaw []byte, ok bool) {
+func decodeMGetResult(vals []rueidis.RedisResult) (posRaw, negRaw []byte, ok bool) {
 	if len(vals) != 2 {
 		return nil, nil, false
 	}
-	if s, isStr := vals[0].(string); isStr {
-		return []byte(s), nil, true
+	if b, err := vals[0].AsBytes(); err == nil {
+		return b, nil, true
 	}
-	if s, isStr := vals[1].(string); isStr {
-		return nil, []byte(s), true
+	if b, err := vals[1].AsBytes(); err == nil {
+		return nil, b, true
 	}
 	return nil, nil, false
 }
@@ -1040,17 +1059,18 @@ func (c *Cache) l2Get(ctx context.Context, key string) ([]byte, time.Duration, b
 	if c.client == nil {
 		return nil, 0, false
 	}
-	pipe := c.client.Pipeline()
-	getCmd := pipe.Get(ctx, key)
-	ttlCmd := pipe.PTTL(ctx, key)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return nil, 0, false
-	}
-	raw, err := getCmd.Bytes()
+	resps := c.client.DoMulti(ctx,
+		c.client.B().Get().Key(key).Build(),
+		c.client.B().Pttl().Key(key).Build(),
+	)
+	raw, err := resps[0].AsBytes()
 	if err != nil {
 		return nil, 0, false
 	}
-	ttl := max(ttlCmd.Val(), 0)
+	var ttl time.Duration
+	if ms, err := resps[1].AsInt64(); err == nil && ms > 0 {
+		ttl = time.Duration(ms) * time.Millisecond
+	}
 	return raw, ttl, true
 }
 
@@ -1219,9 +1239,27 @@ func (c *Cache) FlushAll(ctx context.Context) (int64, error) {
 		return 0, nil
 	}
 	var n int64
-	iter := c.client.Scan(ctx, 0, c.prefix+"*", 1000).Iterator()
-	for iter.Next(ctx) {
-		n += c.client.Del(ctx, iter.Val()).Val()
+	var cursor uint64
+	for {
+		entry, err := c.client.Do(ctx, c.client.B().Scan().Cursor(cursor).Match(c.prefix+"*").Count(1000).Build()).AsScanEntry()
+		if err != nil {
+			return n, err
+		}
+		if len(entry.Elements) > 0 {
+			cmds := make([]rueidis.Completed, len(entry.Elements))
+			for i, k := range entry.Elements {
+				cmds[i] = c.client.B().Del().Key(k).Build()
+			}
+			for _, r := range c.client.DoMulti(ctx, cmds...) {
+				if deleted, err := r.AsInt64(); err == nil {
+					n += deleted
+				}
+			}
+		}
+		cursor = entry.Cursor
+		if cursor == 0 {
+			break
+		}
 	}
-	return n, iter.Err()
+	return n, nil
 }

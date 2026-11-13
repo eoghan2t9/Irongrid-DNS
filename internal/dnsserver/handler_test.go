@@ -2430,3 +2430,115 @@ func TestClientIPOf(t *testing.T) {
 		}
 	}
 }
+
+func TestServeUDPRaw(t *testing.T) {
+	c := cache.NewLocalOnly(time.Hour, time.Minute, 512, 0)
+	h := NewHandler(filter.NewEngine(), c, nil, nil, "nxdomain", 600, 5*time.Second)
+
+	// Seed positive cache entry.
+	resp := new(dns.Msg)
+	resp.SetReply(&dns.Msg{Question: []dns.Question{{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}}})
+	resp.Answer = []dns.RR{&dns.A{
+		Hdr: dns.RR_Header{Name: "example.com.", Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300},
+		A:   net.ParseIP("93.184.216.34").To4(),
+	}}
+	c.Set(t.Context(), dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}, resp, 0)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if c.Lookup(dns.Question{Name: "example.com.", Qtype: dns.TypeA, Qclass: dns.ClassINET}).Msg() != nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// Plain query + EDNS0 query should hit ServeUDPRaw and patch the query ID.
+	qPlain := new(dns.Msg)
+	qPlain.SetQuestion("example.com.", dns.TypeA)
+	qPlain.Id = 0xBEEF
+	pktPlain, err := qPlain.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fw := &fakeWriter{}
+	if !h.ServeUDPRaw(fw, pktPlain) {
+		t.Fatal("expected ServeUDPRaw to handle cached plain UDP query")
+	}
+	if fw.msg == nil || fw.msg.Id != 0xBEEF || len(fw.msg.Answer) != 1 {
+		t.Fatalf("unexpected plain response: %+v", fw.msg)
+	}
+
+	// Query with EDNS0 OPT record (no cookie) should also hit ServeUDPRaw.
+	qEDNS := new(dns.Msg)
+	qEDNS.SetQuestion("example.com.", dns.TypeA)
+	qEDNS.Id = 0xCAFE
+	qEDNS.SetEdns0(1232, false)
+	pktEDNS, err := qEDNS.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fwEDNS := &fakeWriter{}
+	if !h.ServeUDPRaw(fwEDNS, pktEDNS) {
+		t.Fatal("expected ServeUDPRaw to handle cached EDNS0 UDP query")
+	}
+	if fwEDNS.msg == nil || fwEDNS.msg.Id != 0xCAFE {
+		t.Fatalf("unexpected EDNS0 response: %+v", fwEDNS.msg)
+	}
+
+	// Query with EDNS0 cookie when cookies are enabled must fall back (return false).
+	h.Cookies.Store(true)
+	qCookie := new(dns.Msg)
+	qCookie.SetQuestion("example.com.", dns.TypeA)
+	qCookie.SetEdns0(1232, false)
+	opt := qCookie.IsEdns0()
+	opt.Option = append(opt.Option, &dns.EDNS0_COOKIE{Code: dns.EDNS0COOKIE, Cookie: "0123456789abcdef"})
+	pktCookie, err := qCookie.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.ServeUDPRaw(&fakeWriter{}, pktCookie) {
+		t.Fatal("expected ServeUDPRaw to fall back when cookies are enabled and query carries a cookie")
+	}
+	h.Cookies.Store(false)
+
+	// Uncached domain must fall back.
+	qMiss := new(dns.Msg)
+	qMiss.SetQuestion("miss.example.com.", dns.TypeA)
+	pktMiss, err := qMiss.Pack()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.ServeUDPRaw(&fakeWriter{}, pktMiss) {
+		t.Fatal("expected ServeUDPRaw to return false on cache miss")
+	}
+
+	// Malformed/truncated packet must fall back.
+	if h.ServeUDPRaw(&fakeWriter{}, []byte{0, 1, 2}) {
+		t.Fatal("expected ServeUDPRaw to return false on truncated packet")
+	}
+}
+
+func BenchmarkHandlerUDPRawCacheHit(b *testing.B) {
+	c := cache.NewLocalOnly(time.Hour, time.Minute, 512, 0)
+	h := NewHandler(filter.NewEngine(), c, nil, nil, "nxdomain", 600, 5*time.Second)
+	m := new(dns.Msg)
+	m.SetQuestion("example.com.", dns.TypeA)
+	m.SetEdns0(1232, false)
+	h.ServeDNS(&fakeWriter{}, m)
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if c.Lookup(m.Question[0]).Msg() != nil {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	pkt, err := m.Pack()
+	if err != nil {
+		b.Fatal(err)
+	}
+	for b.Loop() {
+		fw := &fakeWriter{}
+		if !h.ServeUDPRaw(fw, pkt) || fw.msg == nil {
+			b.Fatal("expected raw cache hit")
+		}
+	}
+}
