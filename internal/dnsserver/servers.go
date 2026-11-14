@@ -31,8 +31,9 @@ const (
 	tcpReadTimeout  = 5 * time.Second
 	tcpWriteTimeout = 5 * time.Second
 	// tcpIdleTimeout bounds how long a connection may sit idle between
-	// queries (miekg/dns default: 8s per RFC 5966). Kept at the default.
-	tcpIdleTimeout = 8 * time.Second
+	// queries. 120s keeps persistent DoT sessions (e.g. Android Private DNS)
+	// alive across normal browsing pauses without constant TLS reconnects.
+	tcpIdleTimeout = 120 * time.Second
 )
 
 // protoHandler tags every query with the listener's protocol so stats stay
