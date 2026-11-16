@@ -348,15 +348,7 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 			IdleTimeout:   tcpIdleTimeout,
 			MaxTCPQueries: -1,
 		}
-		m.mu.Lock()
-		m.servers = append(m.servers, srv)
-		m.mu.Unlock()
-		go func() {
-			if err := srv.ListenAndServe(); err != nil {
-				slog.Error("dns listener stopped", "proto", proto, "addr", addr, "error", err)
-				m.results <- Listener{Proto: proto, Addr: addr, Err: err}
-			}
-		}()
+		m.serveTCPServer(proto, addr, srv)
 	}
 }
 
@@ -383,16 +375,31 @@ func (m *Manager) startDoT(addr string) {
 			IdleTimeout:   tcpIdleTimeout,
 			MaxTCPQueries: -1,
 		}
-		m.mu.Lock()
-		m.servers = append(m.servers, srv)
-		m.mu.Unlock()
-		go func() {
-			if err := srv.ListenAndServe(); err != nil {
-				slog.Error("DoT listener stopped", "addr", addr, "error", err)
-				m.results <- Listener{Proto: "dot", Addr: addr, Err: err}
-			}
-		}()
+		m.serveTCPServer("dot", addr, srv)
 	}
+}
+
+// serveTCPServer registers srv, starts ListenAndServe in a goroutine, and waits
+// until miekg/dns has finished initializing srv.ctx/srv.shutdown/srv.exited
+// (via NotifyStartedFunc) so an immediate Shutdown cannot race with srv.init.
+func (m *Manager) serveTCPServer(proto, addr string, srv *dns.Server) {
+	started := make(chan struct{})
+	var startOnce sync.Once
+	signalStarted := func() { startOnce.Do(func() { close(started) }) }
+	srv.NotifyStartedFunc = func(context.Context) { signalStarted() }
+
+	m.mu.Lock()
+	m.servers = append(m.servers, srv)
+	m.mu.Unlock()
+
+	go func() {
+		defer signalStarted()
+		if err := srv.ListenAndServe(); err != nil {
+			slog.Error("dns listener stopped", "proto", proto, "addr", addr, "error", err)
+			m.results <- Listener{Proto: proto, Addr: addr, Err: err}
+		}
+	}()
+	<-started
 }
 
 // Shutdown gracefully stops all listeners.
