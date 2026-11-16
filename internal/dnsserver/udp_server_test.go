@@ -297,7 +297,7 @@ func TestUDPServerServeStaleRaceNoPoolCorruption(t *testing.T) {
 	go func() { done <- srv.Serve() }()
 	defer func() {
 		srv.Close()
-		<-done
+		_ = <-done
 	}()
 
 	cl := &upstream.Upstream{Transport: upstream.UDP, Addr: pc.LocalAddr().String()}

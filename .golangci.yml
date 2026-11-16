@@ -22,6 +22,9 @@ linters:
     - misspell
     - gosec
   settings:
+    modernize:
+      disable:
+        - embedlit
     staticcheck:
       checks: ["all"]
   exclusions:

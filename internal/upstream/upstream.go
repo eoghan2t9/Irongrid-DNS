@@ -505,16 +505,14 @@ func exchangeWithConn(ctx context.Context, c *dns.Client, m *dns.Msg, conn net.C
 	var wg sync.WaitGroup
 	var deadlineTripped atomic.Bool
 	if ctxDone := ctx.Done(); ctxDone != nil {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			select {
 			case <-ctxDone:
 				deadlineTripped.Store(true)
 				_ = conn.SetDeadline(time.Now())
 			case <-done:
 			}
-		}()
+		})
 	}
 	r, _, err := c.ExchangeWithConn(ctx, m, conn)
 	close(done)
