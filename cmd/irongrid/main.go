@@ -109,7 +109,14 @@ func main() {
 	a := &app{cfg: cfg, ctx: ctx, configPath: *configPath, dataDir: *dataDir}
 	a.setupCache()
 	// Note: closes the *current* cache, which reload may have swapped.
-	defer func() { _ = a.dfly.Close() }()
+	defer func() {
+		a.dflyMu.Lock()
+		c := a.dfly
+		a.dflyMu.Unlock()
+		if c != nil {
+			_ = c.Close()
+		}
+	}()
 	a.setupRootHints()
 	a.setupUpstreams()
 	a.setupFilter()
@@ -124,9 +131,9 @@ func main() {
 	a.setupTunnelVPN()
 	a.setupAPI()
 	a.setupGeo()
+	a.setupTLSReload()
 	a.setupACME()
 	a.setupWeb()
-	a.setupTLSReload()
 	a.apiHandler.Reload = a.reload
 	a.startCloudflared()
 	a.startTunnel()

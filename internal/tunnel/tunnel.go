@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -84,6 +85,7 @@ type Manager struct {
 	logFile      string
 	binPath      string
 	cmd          *exec.Cmd
+	opMu         sync.Mutex // serializes Start and Stop
 	binaryStatus BinaryStatus
 }
 
@@ -119,6 +121,8 @@ func (m *Manager) SetBinaryStatus(s BinaryStatus) {
 // Start launches the tunnel in the given mode. origin is used for quick
 // tunnels (the local URL to expose, e.g. http://localhost:8080).
 func (m *Manager) Start(mode Mode, token, configFile, origin, hostname string) (err error) {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 	m.mu.Lock()
 	if m.running {
 		m.mu.Unlock()
@@ -237,6 +241,8 @@ func (m *Manager) failStart(msg string) {
 // process (the same signal its own shutdown handler expects), falling back
 // to SIGKILL if it hasn't exited within the grace period.
 func (m *Manager) Stop() {
+	m.opMu.Lock()
+	defer m.opMu.Unlock()
 	m.mu.Lock()
 	cmd := m.cmd
 	running := m.running
@@ -334,7 +340,16 @@ func (m *Manager) tailLog() string {
 }
 
 func tailFile(path string, n int) []string {
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	const maxTailBytes = 64 * 1024
+	if info, err := f.Stat(); err == nil && info.Size() > maxTailBytes {
+		_, _ = f.Seek(-maxTailBytes, io.SeekEnd)
+	}
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return nil
 	}

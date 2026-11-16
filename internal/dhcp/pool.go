@@ -125,11 +125,14 @@ func (s *Server) staticForClientLocked(mac net.HardwareAddr, duidHex string) *St
 // wrapping around. nil when the pool is exhausted. Callers hold mu.
 func (s *Server) nextFree4(key leaseKey) net.IP {
 	start, end := s.poolOfLocked(false)
-	if start == nil {
+	if start == nil || end == nil {
 		return nil
 	}
 	sb, eb := start.To4(), end.To4()
-	total := int(eb[3]-sb[3]) + 256*int(eb[2]-sb[2]) + 65536*int(eb[1]-sb[1]) + 16777216*int(eb[0]-sb[0])
+	if sb == nil || eb == nil {
+		return nil
+	}
+	total := (int(eb[3]) - int(sb[3])) + 256*(int(eb[2])-int(sb[2])) + 65536*(int(eb[1])-int(sb[1])) + 16777216*(int(eb[0])-int(sb[0]))
 	if total < 0 {
 		return nil
 	}
@@ -172,10 +175,13 @@ func poolAt(base net.IP, offset int) net.IP {
 // hold mu.
 func (s *Server) nextFree6(key leaseKey) net.IP {
 	start, end := s.poolOfLocked(true)
-	if start == nil {
+	if start == nil || end == nil {
 		return nil
 	}
 	sb, eb := start.To16(), end.To16()
+	if sb == nil || eb == nil {
+		return nil
+	}
 	cur := s.cursor6
 	// No cursor yet, or the pool bounds moved (a config change) and left it
 	// outside the current range: restart from the beginning.
@@ -342,6 +348,9 @@ func (s *Server) commitLocked(l *Lease) {
 	}
 	// Clear any reservation on the address once the lease owns it.
 	delete(s.reserved, l.IP)
+	if prev := s.leases[leaseKey(l.Key)]; prev != nil && prev.IP != l.IP {
+		delete(s.byIP, prev.IP)
+	}
 	old := s.byIP[l.IP]
 	if old != nil && old.Key != l.Key {
 		delete(s.leases, leaseKey(old.Key))

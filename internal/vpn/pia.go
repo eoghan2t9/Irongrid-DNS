@@ -257,6 +257,7 @@ func (p *PIA) addKey(ctx context.Context, server piaServer, token, pubKey string
 			return tlsConn, nil
 		},
 	}
+	defer transport.CloseIdleConnections()
 	client := &http.Client{Transport: transport, Timeout: 15 * time.Second}
 
 	u := fmt.Sprintf("https://%s:1337/addKey?pt=%s&pubkey=%s",

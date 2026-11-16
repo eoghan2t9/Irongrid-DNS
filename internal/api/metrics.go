@@ -59,11 +59,11 @@ func (h *Handler) Metrics(ctx context.Context, w http.ResponseWriter) {
 		fmt.Fprintf(&b, "irongrid_queries_by_protocol_total{protocol=%s} %d\n", promLabelValue(p), s.ByProtocol[p].Load())
 	}
 
-	if h.Cache != nil {
-		l1h, l1m := h.Cache.L1Counters()
+	if c := h.cacheSnapshot(); c != nil {
+		l1h, l1m := c.L1Counters()
 		writeCounter("irongrid_cache_l1_hits_total", "L1 (in-process) cache hits since restart.", l1h)
 		writeCounter("irongrid_cache_l1_misses_total", "L1 (in-process) cache misses since restart.", l1m)
-		if ls, err := h.Cache.L2Stats(ctx); err == nil {
+		if ls, err := c.L2Stats(ctx); err == nil {
 			writeCounter("irongrid_cache_l2_hits_total", "L2 (Dragonfly) cache hits since Dragonfly started.", ls.Hits)
 			writeCounter("irongrid_cache_l2_misses_total", "L2 (Dragonfly) cache misses since Dragonfly started.", ls.Misses)
 			writeCounter("irongrid_cache_l2_expired_total", "L2 keys expired since Dragonfly started.", ls.Expired)

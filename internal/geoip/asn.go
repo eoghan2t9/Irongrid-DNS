@@ -186,18 +186,19 @@ func (t *ASNTable) CIDRs() []string {
 // intermediate start+size-1 never overflows past the representable space.
 func cidrs4(start, end uint32) []string {
 	var out []string
-	for start <= end {
-		size := start & -start // largest power of two aligned to start
+	s, e := uint64(start), uint64(end)
+	for s <= e {
+		size := s & -s // largest power of two aligned to s
 		if size == 0 {
-			size = 1 << 31 // start == 0: the whole space is aligned
+			size = 1 << 32 // s == 0: whole IPv4 space (halved below if needed)
 		}
-		for start+size-1 > end {
+		for s+size-1 > e {
 			size >>= 1
 		}
-		ones := 32 - bits.TrailingZeros32(size)
-		b := [4]byte{byte(start >> 24), byte(start >> 16), byte(start >> 8), byte(start)}
+		ones := 32 - bits.TrailingZeros64(size)
+		b := [4]byte{byte(s >> 24), byte(s >> 16), byte(s >> 8), byte(s)}
 		out = append(out, netip.PrefixFrom(netip.AddrFrom4(b), ones).String())
-		start += size
+		s += size
 	}
 	return out
 }

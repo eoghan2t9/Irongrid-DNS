@@ -122,8 +122,8 @@ func (c *hostCache) put(ip, name string, now time.Time) {
 func (h *Handler) hostCache() *hostCache {
 	h.hostOnce.Do(func() {
 		var store KVStore
-		if h.Cache != nil {
-			store = h.Cache
+		if c := h.cacheSnapshot(); c != nil {
+			store = c
 		}
 		h.hosts = newHostCacheWithStore(store)
 	})

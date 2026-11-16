@@ -168,12 +168,15 @@ func (h *Handler) applyLists() {
 // ---- whitelist / blacklist ----
 
 func (h *Handler) getFilterList(w http.ResponseWriter, which string) {
-	var list []string
+	h.cfgMu.Lock()
+	var src []string
 	if which == "whitelist" {
-		list = h.Cfg.Filter.Whitelist
+		src = h.Cfg.Filter.Whitelist
 	} else {
-		list = h.Cfg.Filter.Blacklist
+		src = h.Cfg.Filter.Blacklist
 	}
+	list := append([]string(nil), src...)
+	h.cfgMu.Unlock()
 	writeJSON(w, http.StatusOK, map[string]any{which: list})
 }
 

@@ -192,10 +192,15 @@ func (a *app) reload() error {
 			slog.Error("vpn: reconcile failed", "error", err)
 		}
 	}()
+	mu := a.apiHandler.ConfigMu()
+	mu.Lock()
 	a.apiHandler.Cache = newCache
 	a.apiHandler.Upstreams = newUps
+	mu.Unlock()
+	a.dflyMu.Lock()
 	oldCache := a.dfly
 	a.dfly = newCache
+	a.dflyMu.Unlock()
 	_ = oldCache.Close()
 
 	// 6. Rebind the web server if its address or TLS mode changed. Shutdown
@@ -247,13 +252,6 @@ func (a *app) reload() error {
 			a.acmeExternalHTTP01 = wantExternal
 		}
 		a.startACME()
-		if m := a.acmeMgr.Load(); m != nil && m.OnIssued == nil {
-			m.OnIssued = func() {
-				if err := a.apiHandler.ReloadTLS(); err != nil {
-					slog.Error("acme reload after issuance failed", "error", err)
-				}
-			}
-		}
 	} else {
 		a.stopACME()
 	}

@@ -246,7 +246,8 @@ func Start() (stop func()) {
 			}
 		}
 	}()
-	return func() { close(done) }
+	var stopOnce sync.Once
+	return func() { stopOnce.Do(func() { close(done) }) }
 }
 
 // result summarizes what one detection pass found and applied.

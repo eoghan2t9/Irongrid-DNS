@@ -192,7 +192,6 @@ func (r *Relay) handleHTTP(conn net.Conn) {
 	_ = conn.SetReadDeadline(time.Now().Add(sniffTimeout))
 	br := bufio.NewReader(conn)
 	req, err := http.ReadRequest(br)
-	_ = conn.SetReadDeadline(time.Time{})
 	if err != nil {
 		slog.Debug("vpn: relay HTTP sniff failed", "remote", conn.RemoteAddr(), "error", err)
 		_ = conn.Close()
@@ -206,6 +205,15 @@ func (r *Relay) handleHTTP(conn net.Conn) {
 	if writeErr := req.Write(&peeked); writeErr != nil {
 		_ = conn.Close()
 		return
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	// Preserve any extra bytes already buffered in br (e.g. pipelined data or
+	// HTTP Upgrade payload) before spliceAndClose reads from conn directly.
+	if n := br.Buffered(); n > 0 {
+		extra := make([]byte, n)
+		if _, rerr := io.ReadFull(br, extra); rerr == nil {
+			peeked.Write(extra)
+		}
 	}
 	r.route(conn, peeked.Bytes(), host, "80")
 }

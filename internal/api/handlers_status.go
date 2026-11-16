@@ -113,10 +113,10 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 	// (counters reset on restart), L2 is Dragonfly's cumulative INFO counters
 	// (since the Dragonfly process started).
 	cacheStats := map[string]any{"l1": nil, "l2": nil}
-	if h.Cache != nil {
-		l1h, l1m := h.Cache.L1Counters()
+	if c := h.cacheSnapshot(); c != nil {
+		l1h, l1m := c.L1Counters()
 		cacheStats["l1"] = map[string]any{"hits": l1h, "misses": l1m}
-		if s, err := h.Cache.L2Stats(ctx); err == nil {
+		if s, err := c.L2Stats(ctx); err == nil {
 			cacheStats["l2"] = map[string]any{
 				"hits":        s.Hits,
 				"misses":      s.Misses,

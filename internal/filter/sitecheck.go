@@ -53,7 +53,7 @@ func ExtractSitePage(r io.Reader, base *url.URL) (domains []string, title string
 		if n.Type == html.ElementNode {
 			switch strings.ToLower(n.Data) {
 			case "base":
-				if href := attr(n, "href"); href != "" {
+				if href := attr(n, "href"); href != "" && base != nil {
 					if b, err := base.Parse(href); err == nil {
 						baseHref = b
 					}

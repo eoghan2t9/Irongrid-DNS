@@ -177,7 +177,8 @@ func (h *Handler) uploadTLS(w http.ResponseWriter, r *http.Request) {
 
 // issueACME triggers an immediate Let's Encrypt issuance/renewal.
 func (h *Handler) issueACME(ctx context.Context, w http.ResponseWriter) {
-	if h.ACME == nil {
+	mgr := h.acmeSnapshot()
+	if mgr == nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ACME is not enabled — set tls.acme in the config"})
 		return
 	}
@@ -190,7 +191,7 @@ func (h *Handler) issueACME(ctx context.Context, w http.ResponseWriter) {
 	// the browser would see "Failed to fetch" on a run that's still
 	// succeeding server-side.
 	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(6 * time.Minute))
-	if err := h.ACME.ForceIssue(ctx); err != nil {
+	if err := mgr.ForceIssue(ctx); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -198,7 +199,7 @@ func (h *Handler) issueACME(ctx context.Context, w http.ResponseWriter) {
 	h.cfgMu.Lock()
 	applied, applyErr := h.applyTLSReload()
 	h.cfgMu.Unlock()
-	st := h.ACME.GetStatus()
+	st := mgr.GetStatus()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok": true, "applied": applied, "apply_error": applyErr,
 		"status": h.tlsStatus(), "acme": st,

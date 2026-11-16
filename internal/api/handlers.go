@@ -141,6 +141,22 @@ type Handler struct {
 // under the same lock applyPayload uses when it rotates the session secret.
 func (h *Handler) ConfigMu() *sync.Mutex { return &h.cfgMu }
 
+func (h *Handler) cacheSnapshot() *cache.Cache {
+	h.cfgMu.Lock()
+	defer h.cfgMu.Unlock()
+	return h.Cache
+}
+
+func (h *Handler) acmeSnapshot() interface {
+	GetStatus() acme.Status
+	ForceIssue(context.Context) error
+	NeedsRenewal() bool
+} {
+	h.cfgMu.Lock()
+	defer h.cfgMu.Unlock()
+	return h.ACME
+}
+
 // HandleAPI dispatches /api/* requests.
 func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 	path := strings.TrimPrefix(r.URL.Path, "/api/")

@@ -276,8 +276,8 @@ func (s *Server) byIPOf(ip net.IP) string {
 }
 
 func (s *Server) inUse(ip net.IP, key leaseKey) bool {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.inUseLocked(ip, key)
 }
 

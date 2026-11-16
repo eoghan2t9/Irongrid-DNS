@@ -91,8 +91,11 @@ func (h *Handler) irongridStatus(ctx context.Context) *toolStatus {
 		Error:       info.Error,
 		ReleaseURL:  info.ReleaseURL,
 	}
-	if h.lastInstalledVersion != "" {
-		t.Note = h.lastInstalledVersion + " is installed and waiting for a restart"
+	installUpdateMu.Lock()
+	installedVer := h.lastInstalledVersion
+	installUpdateMu.Unlock()
+	if installedVer != "" {
+		t.Note = installedVer + " is installed and waiting for a restart"
 	}
 	return t
 }
@@ -140,8 +143,8 @@ func (h *Handler) dragonflyStatus(ctx context.Context) *toolStatus {
 		Purpose:    "Redis-compatible cache that holds DNS answers and the query log",
 		ReleaseURL: "https://github.com/" + dflyupdate.DefaultRepo + "/releases/latest",
 	}
-	if h.Cache != nil {
-		if v, err := h.Cache.ServerVersion(ctx); err == nil {
+	if c := h.cacheSnapshot(); c != nil {
+		if v, err := c.ServerVersion(ctx); err == nil {
 			t.Running = v
 		}
 	}
@@ -261,9 +264,9 @@ func (h *Handler) restartDragonfly(ctx context.Context, want string, payload map
 		payload["note"] = "Binary updated. Restart Dragonfly manually to run the new version."
 		return
 	}
-	if h.Cache != nil {
+	if c := h.cacheSnapshot(); c != nil {
 		// A fresh snapshot lets the new process reload everything it held.
-		if err := h.Cache.Snapshot(ctx); err != nil {
+		if err := c.Snapshot(ctx); err != nil {
 			slog.Warn("dragonfly update: pre-restart snapshot failed", "error", err)
 		}
 	}
@@ -278,8 +281,12 @@ func (h *Handler) restartDragonfly(ctx context.Context, want string, payload map
 	// The cache client reconnects on its own; wait for the new process to
 	// report the version we installed so the page can show the real outcome.
 	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) && h.Cache != nil {
-		if v, err := h.Cache.ServerVersion(ctx); err == nil && v != "" {
+	for time.Now().Before(deadline) {
+		c := h.cacheSnapshot()
+		if c == nil {
+			break
+		}
+		if v, err := c.ServerVersion(ctx); err == nil && v != "" {
 			payload["running_version"] = v
 			if want == "" || v == want {
 				return

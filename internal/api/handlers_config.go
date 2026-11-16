@@ -1031,6 +1031,21 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
+	// Parse conditional routes before any live-apply: a bad route spec (e.g.
+	// an unsupported upstream scheme, which Validate doesn't catch) fails the
+	// save with nothing touched. SetUpstreamRoutes takes the compiled routes,
+	// so the live-apply below can no longer fail.
+	parsedRoutes, err := dnsserver.ParseRoutes(routeSpecs(cfg.UpstreamRoutes))
+	if err != nil {
+		return nil, err
+	}
+
+	h.cfgMu.Lock()
+	defer h.cfgMu.Unlock()
+
 	users, err := resolveWebUsers(h.Cfg.Web.Users, p.Web.Users)
 	if err != nil {
 		return nil, err
@@ -1048,21 +1063,6 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 		return nil, fmt.Errorf("rotate session secret: %w", err)
 	}
 	cfg.Web.SessionSecret = secret
-
-	if err := cfg.Validate(); err != nil {
-		return nil, err
-	}
-	// Parse conditional routes before any live-apply: a bad route spec (e.g.
-	// an unsupported upstream scheme, which Validate doesn't catch) fails the
-	// save with nothing touched. SetUpstreamRoutes takes the compiled routes,
-	// so the live-apply below can no longer fail.
-	parsedRoutes, err := dnsserver.ParseRoutes(routeSpecs(cfg.UpstreamRoutes))
-	if err != nil {
-		return nil, err
-	}
-
-	h.cfgMu.Lock()
-	defer h.cfgMu.Unlock()
 
 	// Carry over what the dashboard payload cannot edit, before the diff and
 	// before *h.Cfg is replaced below.

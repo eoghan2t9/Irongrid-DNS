@@ -10,14 +10,15 @@ import (
 // ---- cache ----
 
 func (h *Handler) flushCache(ctx context.Context, w http.ResponseWriter) {
-	if h.Cache == nil {
+	c := h.cacheSnapshot()
+	if c == nil {
 		// Mirrors warmCache's guard: every production wiring sets Cache (it
 		// is a hard boot requirement), but a nil cache must return a clean
 		// error rather than panic.
 		writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "cache not configured"})
 		return
 	}
-	n, err := h.Cache.FlushAll(ctx)
+	n, err := c.FlushAll(ctx)
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

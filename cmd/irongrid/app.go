@@ -79,7 +79,9 @@ type app struct {
 	webMu         sync.Mutex
 	webSrv        *http.Server
 	webTLSServing bool
+	redirectMu    sync.Mutex
 	redirectSrv   *http.Server
+	dflyMu        sync.Mutex
 }
 
 // setupCache connects to Dragonfly, the hard requirement for the DNS cache.

@@ -259,20 +259,40 @@ func (v *Validator) fetchZoneKeys(ctx context.Context, up *upstream.Upstream, zo
 	return dnskeys, true, nil
 }
 
+const maxZoneCacheEntries = 4096
+
 func (v *Validator) cached(zone string) (zoneCacheEntry, bool) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	e, ok := v.cache[zone]
-	if !ok || time.Now().After(e.expires) {
+	if !ok {
+		return zoneCacheEntry{}, false
+	}
+	if time.Now().After(e.expires) {
+		delete(v.cache, zone)
 		return zoneCacheEntry{}, false
 	}
 	return e, true
 }
 
 func (v *Validator) storeZone(zone string, keys []*dns.DNSKEY, secure bool, ttl time.Duration) {
+	now := time.Now()
 	v.mu.Lock()
 	defer v.mu.Unlock()
-	v.cache[zone] = zoneCacheEntry{keys: keys, secure: secure, expires: time.Now().Add(ttl)}
+	if len(v.cache) >= maxZoneCacheEntries {
+		for k, e := range v.cache {
+			if now.After(e.expires) {
+				delete(v.cache, k)
+			}
+		}
+		for k := range v.cache {
+			if len(v.cache) < maxZoneCacheEntries {
+				break
+			}
+			delete(v.cache, k)
+		}
+	}
+	v.cache[zone] = zoneCacheEntry{keys: keys, secure: secure, expires: now.Add(ttl)}
 }
 
 // queryZone issues one DO-bit query for name/qtype through up — the same

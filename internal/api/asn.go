@@ -121,8 +121,8 @@ func (c *asnCache) put(ip string, info asnInfo, now time.Time) {
 func (h *Handler) asnCache() *asnCache {
 	h.asnOnce.Do(func() {
 		var store KVStore
-		if h.Cache != nil {
-			store = h.Cache
+		if c := h.cacheSnapshot(); c != nil {
+			store = c
 		}
 		h.asns = newASNCacheWithStore(store)
 	})

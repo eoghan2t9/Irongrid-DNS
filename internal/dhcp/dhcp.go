@@ -249,16 +249,18 @@ func (s *Server) Start() error {
 	}
 	cfg := s.cfg
 	duid := s.serverDUID
+	stopCh := make(chan struct{})
 	s.stopped = false
-	s.stopCh = make(chan struct{})
+	s.stopCh = stopCh
 	s.mu.Unlock()
 
-	go s.persistLoop()
+	go s.persistLoop(stopCh)
 
 	if cfg.Subnet != nil {
 		v4srv, err := server4.NewServer(cfg.Interface, &net.UDPAddr{Port: 67}, s.handleV4)
 		if err != nil {
 			slog.Error("dhcp v4 listen failed", "interface", cfg.Interface, "port", 67, "error", err)
+			s.Stop()
 			return err
 		}
 		s.mu.Lock()
@@ -276,6 +278,7 @@ func (s *Server) Start() error {
 		v6srv, err := server6.NewServer(cfg.Interface, &net.UDPAddr{Port: 547}, s.handleV6)
 		if err != nil {
 			slog.Error("dhcp v6 listen failed", "interface", cfg.Interface, "port", 547, "error", err)
+			s.Stop()
 			return err
 		}
 		s.mu.Lock()
@@ -349,12 +352,12 @@ func (s *Server) Config() Config {
 
 // persistLoop debounces lease writes: a burst of renewals (every device on
 // the LAN booting at once) collapses to one file write per interval.
-func (s *Server) persistLoop() {
+func (s *Server) persistLoop(stopCh <-chan struct{}) {
 	t := time.NewTicker(persistInterval)
 	defer t.Stop()
 	for {
 		select {
-		case <-s.stopCh:
+		case <-stopCh:
 			return
 		case <-t.C:
 			s.persistNow()

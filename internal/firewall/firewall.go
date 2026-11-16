@@ -13,6 +13,7 @@ package firewall
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
@@ -52,8 +54,12 @@ type execRunner struct{}
 
 func (execRunner) LookPath(name string) (string, error) { return exec.LookPath(name) }
 
+const execTimeout = 30 * time.Second
+
 func (execRunner) Run(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -63,7 +69,9 @@ func (execRunner) Run(name string, args ...string) error {
 }
 
 func (execRunner) RunStdin(name string, args []string, stdin []byte) error {
-	cmd := exec.Command(name, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = bytes.NewReader(stdin)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -166,6 +174,8 @@ func (m *Manager) Apply(countries, allowlist, ipBlocks []string, dir string) (st
 	if err == nil {
 		m.applied = true
 		m.pending = nil
+	} else {
+		m.applied = false
 	}
 	return backend, err
 }
@@ -387,8 +397,12 @@ func (m *Manager) applyIptables(v4, v6, a4, a6 []string) error {
 	for _, s := range []struct{ name, family string }{
 		{ipsetV4, "inet"}, {ipsetV6, "inet6"}, {ipsetAllowV4, "inet"}, {ipsetAllowV6, "inet6"},
 	} {
-		_ = m.runner.Run("ipset", "create", s.name, "hash:net", "family", s.family, "hashsize", "4096", "maxelem", "131072", "-exist")
-		_ = m.runner.Run("ipset", "flush", s.name)
+		if err := m.runner.Run("ipset", "create", s.name, "hash:net", "family", s.family, "hashsize", "4096", "maxelem", "131072", "-exist"); err != nil {
+			return err
+		}
+		if err := m.runner.Run("ipset", "flush", s.name); err != nil {
+			return err
+		}
 	}
 	if err := m.restoreIpset(ipsetV4, v4); err != nil {
 		return err
@@ -405,26 +419,40 @@ func (m *Manager) applyIptables(v4, v6, a4, a6 []string) error {
 
 	// One dedicated chain per family, jumped from INPUT; rebuilt each Apply.
 	for _, bin := range []string{"iptables", "ip6tables"} {
-		_ = m.runner.Run(bin, "-N", iptChain)
-		_ = m.runner.Run(bin, "-F", iptChain)
+		_ = m.runner.Run(bin, "-N", iptChain) // errors when chain already exists
+		if err := m.runner.Run(bin, "-F", iptChain); err != nil {
+			return err
+		}
 	}
 	// Same ordering as the nft backend: country DROPs before the
 	// established/related ACCEPT, so a pre-existing conntrack flow can't
 	// exempt a blocked client forever (each REFUSED reply would refresh the
 	// flow timer and keep it matching the accept).
 	if len(a4) > 0 {
-		_ = m.runner.Run("iptables", "-A", iptChain, "-m", "set", "--match-set", ipsetAllowV4, "src", "-j", "ACCEPT")
+		if err := m.runner.Run("iptables", "-A", iptChain, "-m", "set", "--match-set", ipsetAllowV4, "src", "-j", "ACCEPT"); err != nil {
+			return err
+		}
 	}
 	if len(a6) > 0 {
-		_ = m.runner.Run("ip6tables", "-A", iptChain, "-m", "set", "--match-set", ipsetAllowV6, "src", "-j", "ACCEPT")
+		if err := m.runner.Run("ip6tables", "-A", iptChain, "-m", "set", "--match-set", ipsetAllowV6, "src", "-j", "ACCEPT"); err != nil {
+			return err
+		}
 	}
 	// The DROP rules always reference their sets, even when empty at Apply
 	// time, so incremental AddIP calls (honeypot auto-blocks) take effect
 	// immediately. Empty sets match nothing, so this is harmless.
-	_ = m.runner.Run("iptables", "-A", iptChain, "-m", "set", "--match-set", ipsetV4, "src", "-j", "DROP")
-	_ = m.runner.Run("ip6tables", "-A", iptChain, "-m", "set", "--match-set", ipsetV6, "src", "-j", "DROP")
-	_ = m.runner.Run("iptables", "-A", iptChain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
-	_ = m.runner.Run("ip6tables", "-A", iptChain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT")
+	if err := m.runner.Run("iptables", "-A", iptChain, "-m", "set", "--match-set", ipsetV4, "src", "-j", "DROP"); err != nil {
+		return err
+	}
+	if err := m.runner.Run("ip6tables", "-A", iptChain, "-m", "set", "--match-set", ipsetV6, "src", "-j", "DROP"); err != nil {
+		return err
+	}
+	if err := m.runner.Run("iptables", "-A", iptChain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"); err != nil {
+		return err
+	}
+	if err := m.runner.Run("ip6tables", "-A", iptChain, "-m", "conntrack", "--ctstate", "ESTABLISHED,RELATED", "-j", "ACCEPT"); err != nil {
+		return err
+	}
 	// Single jump from INPUT; -C check keeps it idempotent across applies.
 	if err := m.runner.Run("iptables", "-C", "INPUT", "-j", iptChain); err != nil {
 		if err := m.runner.Run("iptables", "-I", "INPUT", "1", "-j", iptChain); err != nil {

@@ -134,6 +134,7 @@ type Resolver struct {
 	// by poolKeyCount. See exchange/getConn/putConn.
 	connPools    sync.Map
 	poolKeyCount atomic.Int64
+	closed       atomic.Bool
 }
 
 // nsPooledConn is a warm connection tagged with the moment it was returned
@@ -508,6 +509,10 @@ func (r *Resolver) getConn(network, addr string) net.Conn {
 // instead if the per-key pool is full or the key cap (nsConnPoolMaxKeys) has
 // already been reached for a brand-new key.
 func (r *Resolver) putConn(network, addr string, c net.Conn) {
+	if r.closed.Load() {
+		c.Close()
+		return
+	}
 	key := network + "|" + addr
 	v, ok := r.connPools.Load(key)
 	if !ok {
@@ -525,6 +530,9 @@ func (r *Resolver) putConn(network, addr string, c net.Conn) {
 	pool := v.(chan *nsPooledConn)
 	select {
 	case pool <- &nsPooledConn{conn: c, pooledAt: time.Now()}:
+		if r.closed.Load() {
+			r.drainPools()
+		}
 	default:
 		c.Close()
 	}
@@ -534,6 +542,11 @@ func (r *Resolver) putConn(network, addr string, c net.Conn) {
 // replaces the recursive upstream (and with it, this Resolver) so warm
 // connections from the outgoing instance don't leak.
 func (r *Resolver) Close() {
+	r.closed.Store(true)
+	r.drainPools()
+}
+
+func (r *Resolver) drainPools() {
 	r.connPools.Range(func(key, v any) bool {
 		pool := v.(chan *nsPooledConn)
 	drain:
@@ -667,7 +680,12 @@ func (r *Resolver) resolveNSAddr(ctx context.Context, host string, nsDepth int) 
 		if addr, ok := r.cachedNSAddr(host); ok {
 			return nsAddrResult{addr: addr, ok: true}, nil
 		}
-		addr, ok := r.resolveNSAddrWalk(ctx, host, nsDepth)
+		// Detach from the leader's cancellation so one waiter timing out
+		// doesn't abort the walk for other coalesced waiters, while still
+		// bounding the background walk.
+		walkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		addr, ok := r.resolveNSAddrWalk(walkCtx, host, nsDepth)
 		return nsAddrResult{addr: addr, ok: ok}, nil
 	})
 	select {
@@ -745,10 +763,26 @@ func (r *Resolver) cachedNSAddr(host string) (string, bool) {
 	return "", false
 }
 
+const maxResolverCacheEntries = 10000
+
 // cacheNSAddr records a nameserver hostname's resolved address for ttl.
 func (r *Resolver) cacheNSAddr(host, addr string, ttl time.Duration) {
+	now := time.Now()
 	r.mu.Lock()
-	r.nsAddrs[host] = nsAddr{addr: addr, expiry: time.Now().Add(ttl)}
+	if len(r.nsAddrs) >= maxResolverCacheEntries {
+		for k, e := range r.nsAddrs {
+			if !now.Before(e.expiry) {
+				delete(r.nsAddrs, k)
+			}
+		}
+		for k := range r.nsAddrs {
+			if len(r.nsAddrs) < maxResolverCacheEntries {
+				break
+			}
+			delete(r.nsAddrs, k)
+		}
+	}
+	r.nsAddrs[host] = nsAddr{addr: addr, expiry: now.Add(ttl)}
 	r.mu.Unlock()
 }
 
@@ -788,7 +822,21 @@ func (r *Resolver) bestDelegation(qname string) (zone string, servers []string) 
 }
 
 func (r *Resolver) cacheDelegation(zone string, servers []string, ttl time.Duration) {
+	now := time.Now()
 	r.mu.Lock()
-	r.delegations[zone] = delegation{servers: servers, expiry: time.Now().Add(ttl)}
+	if len(r.delegations) >= maxResolverCacheEntries {
+		for k, d := range r.delegations {
+			if !now.Before(d.expiry) {
+				delete(r.delegations, k)
+			}
+		}
+		for k := range r.delegations {
+			if len(r.delegations) < maxResolverCacheEntries {
+				break
+			}
+			delete(r.delegations, k)
+		}
+	}
+	r.delegations[zone] = delegation{servers: servers, expiry: now.Add(ttl)}
 	r.mu.Unlock()
 }

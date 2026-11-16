@@ -97,17 +97,21 @@ func (l *limitListener) Accept() (net.Conn, error) {
 	return rejectedConn{}, nil
 }
 
-// trackedConn releases its limiter slot when the connection closes.
+// trackedConn releases its limiter slot once when the connection closes.
 type trackedConn struct {
 	net.Conn
-	lim *connLimiter
-	ip  string
+	lim       *connLimiter
+	ip        string
+	closeOnce sync.Once
+	closeErr  error
 }
 
 func (c *trackedConn) Close() error {
-	err := c.Conn.Close()
-	c.lim.release(c.ip)
-	return err
+	c.closeOnce.Do(func() {
+		c.closeErr = c.Conn.Close()
+		c.lim.release(c.ip)
+	})
+	return c.closeErr
 }
 
 // rejectedConn is handed to the server for a connection that exceeded the

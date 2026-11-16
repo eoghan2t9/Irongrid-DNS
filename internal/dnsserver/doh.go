@@ -254,6 +254,9 @@ func (m *Manager) handleDoH(w http.ResponseWriter, r *http.Request, proto string
 		}
 		msg = &dns.Msg{Data: body}
 		err = msg.Unpack()
+		// Clear msg.Data before returning buf to packBufPool: Handler.serve
+		// re-unpacks r.Data when a non-EDNS query has empty Answer/Ns/Extra/Pseudo.
+		msg.Data = nil
 		if buf != nil {
 			putPackBuf(buf)
 		}

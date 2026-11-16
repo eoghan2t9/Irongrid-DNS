@@ -2,9 +2,11 @@ package vpn
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 )
 
 // Runner abstracts process execution so tests can record the exact commands
@@ -20,8 +22,12 @@ type execRunner struct{}
 
 func (execRunner) LookPath(name string) (string, error) { return exec.LookPath(name) }
 
+const execTimeout = 30 * time.Second
+
 func (execRunner) Run(name string, args ...string) error {
-	cmd := exec.Command(name, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
@@ -31,7 +37,9 @@ func (execRunner) Run(name string, args ...string) error {
 }
 
 func (execRunner) RunStdin(name string, args []string, stdin []byte) error {
-	cmd := exec.Command(name, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	cmd.Stdin = bytes.NewReader(stdin)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr

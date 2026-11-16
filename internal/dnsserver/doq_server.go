@@ -111,12 +111,18 @@ func (m *Manager) handleDoQConn(conn *quic.Conn) {
 	}
 }
 
+// doqServerStreamTimeout bounds a single DoQ stream's read/write so a client
+// that opens a stream and stalls mid-frame cannot hold a goroutine until the
+// connection's 60s MaxIdleTimeout expires.
+const doqServerStreamTimeout = 10 * time.Second
+
 func (m *Manager) handleDoQStream(stream *quic.Stream, remote net.Addr) {
 	defer stream.Close()
 	// Handler.serve recovers panics from the handler call below, but
 	// req.Unpack runs before that — this covers the gap the same way the
 	// UDP worker's handleRecovered does.
 	defer recoverPanic("DoQ stream handler")
+	_ = stream.SetDeadline(time.Now().Add(doqServerStreamTimeout))
 	// RFC 9250: each message is prefixed with a 2-byte length field.
 	var lenBuf [2]byte
 	if _, err := io.ReadFull(stream, lenBuf[:]); err != nil {
@@ -156,13 +162,29 @@ type doqResponseWriter struct {
 func (w *doqResponseWriter) Write(b []byte) (int, error) {
 	// RFC 9250: each message is prefixed with its 2-byte length. Write is
 	// the raw-byte path the handler's pack-once write uses, so the framing
-	// lives here.
-	var lenBuf [2]byte
-	binary.BigEndian.PutUint16(lenBuf[:], uint16(len(b)))
-	if _, err := w.stream.Write(lenBuf[:]); err != nil {
+	// lives here; send length + payload in a single stream.Write.
+	total := 2 + len(b)
+	buf := getPackBuf()
+	if total > cap(buf) {
+		putPackBuf(buf)
+		buf = make([]byte, total)
+		binary.BigEndian.PutUint16(buf[:2], uint16(len(b)))
+		copy(buf[2:], b)
+		n, err := w.stream.Write(buf)
+		if n > 2 {
+			return n - 2, err
+		}
 		return 0, err
 	}
-	return w.stream.Write(b)
+	buf = buf[:total]
+	binary.BigEndian.PutUint16(buf[:2], uint16(len(b)))
+	copy(buf[2:], b)
+	n, err := w.stream.Write(buf)
+	putPackBuf(buf)
+	if n > 2 {
+		return n - 2, err
+	}
+	return 0, err
 }
 
 func (w *doqResponseWriter) LocalAddr() net.Addr   { return addrOnly("") }

@@ -3,6 +3,7 @@ package tuning
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -97,16 +98,15 @@ func inspectDragonfly(addr string) (*DragonflyState, error) {
 // Uses python3 as a portable Redis protocol client to avoid importing net
 // in the tuning package.
 func redisCommand(addr, cmd string) (string, error) {
-	host, port, ok := strings.Cut(addr, ":")
-	if !ok {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
 		host = "127.0.0.1"
 		port = "6379"
 	}
 
 	script := fmt.Sprintf(`import socket, time
-s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s = socket.create_connection((%q, int(%s)), timeout=3)
 s.settimeout(3)
-s.connect(('%s', %s))
 s.send(b'*1\r\n$%d\r\n%s\r\n')
 time.sleep(0.3)
 data = s.recv(65536)

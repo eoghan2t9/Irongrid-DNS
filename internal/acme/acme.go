@@ -52,6 +52,7 @@ type Manager struct {
 	// tokenHandler is installed by Serve: it answers /.well-known/acme-challenge/<token>.
 	tokens   map[string]string
 	tokensMu sync.Mutex
+	issueMu  sync.Mutex
 	srv      *http.Server
 	ln       net.Listener
 
@@ -183,7 +184,7 @@ func (m *Manager) Serve() error {
 		return fmt.Errorf("acme: cannot listen on %s for the HTTP-01 challenge (Let's Encrypt validates your domain on port 80): %w", addr, err)
 	}
 	m.ln = ln
-	m.srv = &http.Server{
+	srv := &http.Server{
 		ReadHeaderTimeout: 10 * time.Second, // gosec G112: bound slow-header clients
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if !m.HandleChallenge(w, r) {
@@ -191,9 +192,10 @@ func (m *Manager) Serve() error {
 			}
 		}),
 	}
+	m.srv = srv
 	go func() {
 		defer safego.Recover("acme challenge listener")
-		if err := m.srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			slog.Error("acme challenge server stopped", "addr", addr, "error", err)
 		}
 	}()
@@ -255,6 +257,9 @@ func (m *Manager) clearTokens() {
 // resulting certificate chain to cert.pem/key.pem in the cert dir. It is safe
 // to call repeatedly (renewal does the same thing).
 func (m *Manager) Issue(ctx context.Context) error {
+	m.issueMu.Lock()
+	defer m.issueMu.Unlock()
+
 	m.mu.Lock()
 	attempt := time.Now()
 	m.Status.LastAttempt = &attempt
@@ -437,11 +442,21 @@ func (m *Manager) Issue(ctx context.Context) error {
 	return nil
 }
 
+// SetOnIssued installs the callback invoked after a successful issuance.
+func (m *Manager) SetOnIssued(fn func()) {
+	m.mu.Lock()
+	m.OnIssued = fn
+	m.mu.Unlock()
+}
+
 // notifyIssued fires OnIssued (wired in main to rebind listeners with the
 // fresh certificate). Called only after a successful issuance.
 func (m *Manager) notifyIssued() {
-	if m.OnIssued != nil {
-		m.OnIssued()
+	m.mu.Lock()
+	fn := m.OnIssued
+	m.mu.Unlock()
+	if fn != nil {
+		fn()
 	}
 }
 

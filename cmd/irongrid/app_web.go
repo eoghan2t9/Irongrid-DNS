@@ -84,7 +84,23 @@ func (a *app) startACME() {
 		ExternalHTTP01:  a.acmeExternalHTTP01,
 	})
 	a.acmeMgr.Store(m)
-	a.apiHandler.ACME = m
+	if a.apiHandler != nil {
+		a.apiHandler.ConfigMu().Lock()
+		a.apiHandler.ACME = m
+		a.apiHandler.ConfigMu().Unlock()
+	}
+	m.SetOnIssued(func() {
+		if a.apiHandler == nil || a.apiHandler.ReloadTLS == nil {
+			return
+		}
+		mu := a.apiHandler.ConfigMu()
+		mu.Lock()
+		err := a.apiHandler.ReloadTLS()
+		mu.Unlock()
+		if err != nil {
+			slog.Error("acme reload after issuance failed", "error", err)
+		}
+	})
 	if a.cfg.TLS.CertDir == "" {
 		a.cfg.TLS.CertDir = "data/certs"
 	}
@@ -191,6 +207,8 @@ func (a *app) startRedirect() {
 		port = 80
 	}
 	addr := fmt.Sprintf(":%d", port)
+	a.redirectMu.Lock()
+	defer a.redirectMu.Unlock()
 	// Already serving the right thing — nothing to do.
 	if want && a.redirectSrv != nil && a.redirectSrv.Addr == addr {
 		return
@@ -294,12 +312,5 @@ func (a *app) setupTLSReload() {
 		}
 		return nil
 	}
-	// After a successful ACME issuance, rebind everything with the new cert.
-	if m := a.acmeMgr.Load(); m != nil {
-		m.OnIssued = func() {
-			if err := a.apiHandler.ReloadTLS(); err != nil {
-				slog.Error("acme reload after issuance failed", "error", err)
-			}
-		}
-	}
+	// OnIssued is wired in startACME() before RunLoop starts.
 }
