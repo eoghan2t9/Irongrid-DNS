@@ -3,14 +3,19 @@ package dnsserver
 import (
 	"context"
 	"net"
+	"net/netip"
 	"sync"
 	"testing"
 	"time"
 
 	"codeberg.org/miekg/dns"
 	"codeberg.org/miekg/dns/dnsutil"
+	"codeberg.org/miekg/dns/rdata"
 
+	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
 
 // TestUDPServerWorkerPool verifies the worker-pool UDP listener serves real
@@ -239,4 +244,81 @@ func TestUDPServerWriteSingle(t *testing.T) {
 	if got := string(buf[:n]); got != string(want) {
 		t.Fatalf("received %q, want %q", got, want)
 	}
+}
+
+// TestUDPServerServeStaleRaceNoPoolCorruption verifies that when serve-stale's
+// grace timer fires on a UDP query and ServeDNS returns while the background
+// upstream resolution is still running, recycling req (reqPool) and w
+// (udpWriterPool) in the UDP worker does not race with or panic the background
+// goroutines.
+func TestUDPServerServeStaleRaceNoPoolCorruption(t *testing.T) {
+	// Slow upstream that takes longer than staleGrace(1s) = 500ms, then fails.
+	upPC, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen upstream: %v", err)
+	}
+	defer upPC.Close()
+	upDone := make(chan struct{})
+	defer close(upDone)
+	go func() {
+		buf := make([]byte, 512)
+		for {
+			_, _, rerr := upPC.ReadFrom(buf)
+			if rerr != nil {
+				return
+			}
+			// Never reply: force the background resolution to wait out the
+			// 1s upstream timeout after staleGrace (500ms) has already returned.
+		}
+	}()
+
+	c := cache.NewLocalOnly(10*time.Millisecond, time.Minute, 64, 5*time.Minute)
+	q := dnsname.Question{Name: "stale-race.example.", Qtype: dns.TypeA, Qclass: dns.ClassINET}
+	seed := new(dns.Msg)
+	dnsutil.SetQuestion(seed, q.Name, q.Qtype)
+	seed.Response = true
+	seed.Answer = append(seed.Answer, &dns.A{
+		Hdr: dns.Header{Name: q.Name, Class: dns.ClassINET, TTL: 1},
+		A:   rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
+	})
+	c.Set(t.Context(), q, seed, 10*time.Millisecond)
+	time.Sleep(25 * time.Millisecond) // expire into the serve-stale window
+
+	h := NewHandler(filter.NewEngine(), c, []*upstream.Upstream{
+		{Transport: upstream.UDP, Addr: upPC.LocalAddr().String()},
+	}, nil, "nxdomain", 600, 1*time.Second)
+
+	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	srv := newUDPServer(pc, h, h.Stats, 2)
+	done := make(chan error, 1)
+	go func() { done <- srv.Serve() }()
+	defer func() {
+		srv.Close()
+		<-done
+	}()
+
+	cl := &upstream.Upstream{Transport: upstream.UDP, Addr: pc.LocalAddr().String()}
+	req := new(dns.Msg)
+	dnsutil.SetQuestion(req, q.Name, q.Qtype)
+	resp, err := cl.Query(t.Context(), req)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	if len(resp.Answer) == 0 {
+		t.Fatalf("expected stale answer, got empty response")
+	}
+
+	// Immediately send another query so the worker reuses reqPool/udpWriterPool
+	// while the first query's background resolution is still in flight.
+	req2 := new(dns.Msg)
+	dnsutil.SetQuestion(req2, "other.example.", dns.TypeA)
+	ctx2, cancel2 := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	_, _ = cl.Query(ctx2, req2)
+	cancel2()
+
+	// Wait for the background stale-race resolution (1s timeout) to finish.
+	time.Sleep(1100 * time.Millisecond)
 }

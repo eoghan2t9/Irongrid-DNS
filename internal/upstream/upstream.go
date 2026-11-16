@@ -502,19 +502,31 @@ func exchangeWithConn(ctx context.Context, c *dns.Client, m *dns.Msg, conn net.C
 		return nil, err
 	}
 	done := make(chan struct{})
-	defer close(done)
+	var wg sync.WaitGroup
+	var deadlineTripped atomic.Bool
 	if ctxDone := ctx.Done(); ctxDone != nil {
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			select {
 			case <-ctxDone:
+				deadlineTripped.Store(true)
 				_ = conn.SetDeadline(time.Now())
 			case <-done:
 			}
 		}()
 	}
 	r, _, err := c.ExchangeWithConn(ctx, m, conn)
+	close(done)
+	wg.Wait()
 	if err != nil && ctx.Err() != nil {
 		return nil, ctx.Err()
+	}
+	// If the watcher tripped conn.SetDeadline(time.Now()) right as the
+	// exchange finished, clear the deadline before the caller can return conn
+	// to the pool (ExchangeWithConn only resets ReadDeadline, not WriteDeadline).
+	if err == nil && deadlineTripped.Load() {
+		_ = conn.SetDeadline(time.Time{})
 	}
 	return r, err
 }

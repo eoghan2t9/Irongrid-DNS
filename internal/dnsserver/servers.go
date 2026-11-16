@@ -341,11 +341,12 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 		return
 	}
 	srv := &dns.Server{
-		Net:         "tcp",
-		Listener:    m.limitTCPListener(ln),
-		Handler:     handler,
-		ReadTimeout: tcpReadTimeout,
-		IdleTimeout: tcpIdleTimeout,
+		Net:           "tcp",
+		Listener:      m.limitTCPListener(ln),
+		Handler:       handler,
+		ReadTimeout:   tcpReadTimeout,
+		IdleTimeout:   tcpIdleTimeout,
+		MaxTCPQueries: -1,
 	}
 	m.servers = append(m.servers, srv)
 	go func() {
@@ -371,13 +372,14 @@ func (m *Manager) startDoT(addr string) {
 	dotTLS := m.tlsConf.Clone()
 	dotTLS.NextProtos = []string{"dot"}
 	srv := &dns.Server{
-		Addr:        addr,
-		Net:         "tcp-tls",
-		Listener:    tls.NewListener(m.limitTCPListener(ln), dotTLS),
-		TLSConfig:   dotTLS,
-		Handler:     protoHandler{m.handler, "dot"},
-		ReadTimeout: tcpReadTimeout,
-		IdleTimeout: tcpIdleTimeout,
+		Addr:          addr,
+		Net:           "tcp-tls",
+		Listener:      tls.NewListener(m.limitTCPListener(ln), dotTLS),
+		TLSConfig:     dotTLS,
+		Handler:       protoHandler{m.handler, "dot"},
+		ReadTimeout:   tcpReadTimeout,
+		IdleTimeout:   tcpIdleTimeout,
+		MaxTCPQueries: -1,
 	}
 	m.servers = append(m.servers, srv)
 	go func() {

@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -305,15 +306,7 @@ func (h *Handler) ServeDNSFromContext(w dns.ResponseWriter, r *dns.Msg, clientIP
 func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) {
 	sw := getStatsWriter(w, &h.Stats.WriteErrors)
 	w = sw
-	// retained is set when a goroutine outlives serve() still holding w; the
-	// wrapper must then not be recycled. Registered before the recover defer
-	// below so it runs after it (which still writes through w).
-	retained := false
-	defer func() {
-		if !retained {
-			putStatsWriter(sw)
-		}
-	}()
+	defer putStatsWriter(sw)
 	// Every listener (UDP/TCP/DoT/DoH/DoH3/DoQ) funnels into this one
 	// function in this one process — an unrecovered panic anywhere in the
 	// pipeline below (filter engine, cache, upstream, DHCP host lookups, …)
@@ -903,9 +896,20 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 		usedUp string
 		err    error
 	}
+	// Copy r before launching the race goroutines: if staleGrace expires,
+	// serve() returns while the background resolution and finishResolve are
+	// still running, and the UDP worker recycles/zeroes r (reqPool) and w
+	// (udpWriterPool) the moment ServeDNS returns.
+	reqCopy := r.Copy()
 	resCh := make(chan resolveOutcome, 1)
 	go func() {
-		resp, usedUp, err := h.resolveUpstreams(ctx, r, q, upstreams, upstreamMode, upstreamQuery)
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("recovered panic in stale-race resolve", "qname", qname, "panic", rec, "stack", string(debug.Stack()))
+				resCh <- resolveOutcome{err: fmt.Errorf("panic resolving %s: %v", qname, rec)}
+			}
+		}()
+		resp, usedUp, err := h.resolveUpstreams(ctx, reqCopy, q, upstreams, upstreamMode, upstreamQuery)
 		resCh <- resolveOutcome{resp, usedUp, err}
 	}()
 	timer := time.NewTimer(staleGrace(timeout))
@@ -927,12 +931,11 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			_ = h.write(w, out, r, proto)
 			putMsg(m) // fresh per-read decode, safe once written
 		}
-		retained = true // this goroutine keeps using w after serve() returns
 		go func() {
 			defer recoverPanic("background stale-race resolve")
 			defer cancel()
 			out := <-resCh
-			h.finishResolve(w, r, q, client, qname, proto, start, out.resp, out.usedUp, out.err, stale, s, engine, domainWhitelisted, true)
+			h.finishResolve(nil, reqCopy, q, client, qname, proto, start, out.resp, out.usedUp, out.err, stale, s, engine, domainWhitelisted, true)
 		}()
 	}
 }
