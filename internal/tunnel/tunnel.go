@@ -163,9 +163,12 @@ func (m *Manager) Start(mode Mode, token, configFile, origin, hostname string) (
 	// update a moment later.
 	runVersion := cfupdate.BinaryVersion(context.Background(), m.binPath)
 
-	args := buildArgs(mode, token, configFile, origin, m.logFile)
+	args := buildArgs(mode, configFile, origin, m.logFile)
 	cmd := exec.Command(m.binPath, args...)
 	cmd.Env = append(os.Environ(), "QUIC_GO_DISABLE_ECN=1")
+	if mode == ModeToken && token != "" {
+		cmd.Env = append(cmd.Env, "TUNNEL_TOKEN="+token)
+	}
 	if startErr := cmd.Start(); startErr != nil {
 		m.failStart(fmt.Sprintf("failed to start cloudflared: %v", startErr))
 		return fmt.Errorf("start cloudflared: %w", startErr)
@@ -209,7 +212,7 @@ func (m *Manager) Start(mode Mode, token, configFile, origin, hostname string) (
 // --logfile as app-level flags, not as flags of the `tunnel run` subcommand
 // (which defines only credentials and proxy flags). Passing them after
 // `tunnel run ...` fails with "flag provided but not defined: -no-autoupdate".
-func buildArgs(mode Mode, token, configFile, origin, logFile string) []string {
+func buildArgs(mode Mode, configFile, origin, logFile string) []string {
 	args := []string{"--no-autoupdate"}
 	if logFile != "" {
 		args = append(args, "--logfile", logFile)
@@ -221,7 +224,7 @@ func buildArgs(mode Mode, token, configFile, origin, logFile string) []string {
 		}
 		args = append(args, "tunnel", "--url", origin)
 	case ModeToken:
-		args = append(args, "tunnel", "run", "--token", token)
+		args = append(args, "tunnel", "run")
 	case ModeConfig:
 		args = append(args, "tunnel", "run", "--config", configFile)
 	default:

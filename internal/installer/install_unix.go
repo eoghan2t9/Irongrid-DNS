@@ -3,12 +3,16 @@
 package installer
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
 
 	"golang.org/x/term"
 )
+
+const privilegedCmdTimeout = 60 * time.Second
 
 // runPrivileged executes a command as root — directly when already root,
 // otherwise via sudo (non-interactive first, then prompting when stdin is a
@@ -18,12 +22,17 @@ import (
 //nolint:gosec // G204: args are package-literal commands (systemctl etc.),
 func runPrivileged(args ...string) error {
 	if os.Geteuid() == 0 {
-		return exec.Command(args[0], args[1:]...).Run()
+		ctx, cancel := context.WithTimeout(context.Background(), privilegedCmdTimeout)
+		defer cancel()
+		return exec.CommandContext(ctx, args[0], args[1:]...).Run()
 	}
 	// Note: a slice spread must be the only argument filling the variadic
 	// parameter, so prefix arguments are folded into the slice first.
 	sudoN := append([]string{"sudo", "-n"}, args...)
-	if err := exec.Command(sudoN[0], sudoN[1:]...).Run(); err == nil {
+	ctx, cancel := context.WithTimeout(context.Background(), privilegedCmdTimeout)
+	err := exec.CommandContext(ctx, sudoN[0], sudoN[1:]...).Run()
+	cancel()
+	if err == nil {
 		return nil
 	}
 	if term.IsTerminal(int(os.Stdin.Fd())) {

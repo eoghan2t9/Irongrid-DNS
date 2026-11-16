@@ -231,7 +231,7 @@ func (r *Resolver) resolve(ctx context.Context, q dnsname.Question, cnameDepth, 
 			return nil, err
 		}
 
-		nextZone, nsRecords, ttl, hasNS := parseReferral(resp)
+		nextZone, nsRecords, ttl, hasNS := parseReferral(resp, zone)
 		if hasNS {
 			nextServers := r.resolveNameservers(ctx, nsRecords, nsDepth)
 			if len(nextServers) == 0 {
@@ -577,7 +577,16 @@ type nsInfo struct {
 // (e.g. a domain hosted on Cloudflare/Route53/DNSimple-style DNS, whose
 // hostname lives outside the zone being delegated), which the parent has no
 // glue obligation for.
-func parseReferral(resp *dns.Msg) (zone string, ns []nsInfo, ttl time.Duration, hasNS bool) {
+func isInBailiwick(name, zone string) bool {
+	n := strings.ToLower(dnsutil.Fqdn(name))
+	z := strings.ToLower(dnsutil.Fqdn(zone))
+	if z == "." {
+		return n != ""
+	}
+	return n == z || strings.HasSuffix(n, "."+z)
+}
+
+func parseReferral(resp *dns.Msg, parentZone string) (zone string, ns []nsInfo, ttl time.Duration, hasNS bool) {
 	var nsNames []string
 	var minTTL uint32
 	for _, rr := range resp.Ns {
@@ -585,7 +594,15 @@ func parseReferral(resp *dns.Msg) (zone string, ns []nsInfo, ttl time.Duration, 
 		if !ok {
 			continue
 		}
-		zone = strings.ToLower(nsRR.Header().Name)
+		candZone := strings.ToLower(nsRR.Header().Name)
+		if !isInBailiwick(candZone, parentZone) {
+			continue
+		}
+		if zone == "" {
+			zone = candZone
+		} else if candZone != zone {
+			continue
+		}
 		nsNames = append(nsNames, strings.ToLower(nsRR.Ns))
 		if minTTL == 0 || nsRR.Header().TTL < minTTL {
 			minTTL = nsRR.Header().TTL
@@ -595,15 +612,23 @@ func parseReferral(resp *dns.Msg) (zone string, ns []nsInfo, ttl time.Duration, 
 		return "", nil, 0, false
 	}
 
+	nsSet := make(map[string]struct{}, len(nsNames))
+	for _, n := range nsNames {
+		nsSet[n] = struct{}{}
+	}
 	glue := map[string][]string{}
 	for _, rr := range resp.Extra {
 		switch v := rr.(type) {
 		case *dns.A:
 			name := strings.ToLower(v.Header().Name)
-			glue[name] = append(glue[name], v.Addr.String())
+			if _, isNS := nsSet[name]; isNS && isInBailiwick(name, parentZone) {
+				glue[name] = append(glue[name], v.Addr.String())
+			}
 		case *dns.AAAA:
 			name := strings.ToLower(v.Header().Name)
-			glue[name] = append(glue[name], v.Addr.String())
+			if _, isNS := nsSet[name]; isNS && isInBailiwick(name, parentZone) {
+				glue[name] = append(glue[name], v.Addr.String())
+			}
 		}
 	}
 	for _, name := range nsNames {

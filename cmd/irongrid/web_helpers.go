@@ -3,6 +3,7 @@ package main
 import (
 	"net"
 	"net/http"
+	"strings"
 )
 
 // HTTPS redirect and web-listen address helpers.
@@ -17,15 +18,21 @@ func httpsRedirect(httpsPort string) http.HandlerFunc {
 		if h, _, err := net.SplitHostPort(r.Host); err == nil {
 			host = h
 		}
+		if host == "" || strings.ContainsAny(host, "/\\@?# \t\r\n") {
+			http.Error(w, "invalid host", http.StatusBadRequest)
+			return
+		}
 		target := "https://" + host
 		if httpsPort != "443" && httpsPort != "" {
 			target += ":" + httpsPort
 		}
-		target += r.URL.RequestURI()
-		//nolint:gosec // G710 open redirect: the target host is the Host
-		// header the client itself sent, so this can only ever redirect a
-		// client to the host it already asked for — not an attacker-chosen
-		// site.
+		reqURI := r.URL.RequestURI()
+		for strings.HasPrefix(reqURI, "//") {
+			reqURI = reqURI[1:]
+		}
+		target += reqURI
+		//nolint:gosec // G710 open redirect: the target host is validated above
+		// (no slashes, @, ?, #, or whitespace) and comes from the Host header.
 		http.Redirect(w, r, target, http.StatusMovedPermanently)
 	}
 }

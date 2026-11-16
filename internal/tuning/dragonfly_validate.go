@@ -2,11 +2,12 @@ package tuning
 
 import (
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
-	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // DragonflyState holds the current configuration of a running Dragonfly instance,
@@ -94,30 +95,26 @@ func inspectDragonfly(addr string) (*DragonflyState, error) {
 	return state, nil
 }
 
-// redisCommand sends a Redis command via a subprocess and returns the response.
-// Uses python3 as a portable Redis protocol client to avoid importing net
-// in the tuning package.
+// redisCommand sends a Redis command directly over TCP and returns the response.
 func redisCommand(addr, cmd string) (string, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		host = "127.0.0.1"
-		port = "6379"
+	if _, _, err := net.SplitHostPort(addr); err != nil {
+		addr = "127.0.0.1:6379"
 	}
-
-	script := fmt.Sprintf(`import socket, time
-s = socket.create_connection((%q, int(%s)), timeout=3)
-s.settimeout(3)
-s.send(b'*1\r\n$%d\r\n%s\r\n')
-time.sleep(0.3)
-data = s.recv(65536)
-s.close()
-print(data.decode('latin-1', errors='replace'))`, host, port, len(cmd), cmd)
-
-	out, err := exec.Command("python3", "-c", script).CombinedOutput()
+	conn, err := net.DialTimeout("tcp", addr, 3*time.Second)
 	if err != nil {
-		return "", fmt.Errorf("redis %s to %s failed: %w (output: %s)", cmd, addr, err, string(out))
+		return "", fmt.Errorf("redis %s to %s failed: %w", cmd, addr, err)
 	}
-	return string(out), nil
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(3 * time.Second))
+	req := fmt.Sprintf("*1\r\n$%d\r\n%s\r\n", len(cmd), cmd)
+	if _, err := conn.Write([]byte(req)); err != nil {
+		return "", fmt.Errorf("redis %s to %s write failed: %w", cmd, addr, err)
+	}
+	// Brief read deadline after first chunk since RESP bulk strings may not
+	// close the connection.
+	_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	data, _ := io.ReadAll(io.LimitReader(conn, 65536))
+	return string(data), nil
 }
 
 // parseMemoryString converts "2917mb" or "2gb" to bytes.

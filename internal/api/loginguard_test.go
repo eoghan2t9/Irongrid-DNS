@@ -85,13 +85,14 @@ func TestClientIPFromRequestTrustsXFFOnlyFromLoopback(t *testing.T) {
 		t.Fatalf("clientIPFromRequest = %q, want the real peer 203.0.113.9 (XFF must be ignored from a non-loopback peer)", got)
 	}
 
-	// Through the tunnel (cloudflared connects over loopback): XFF is the
-	// real visitor IP and must be trusted.
+	// Through the tunnel (cloudflared connects over loopback): the rightmost
+	// XFF hop appended by the trusted proxy is the real visitor IP (a client
+	// can spoof earlier entries on the left).
 	req2 := httptest.NewRequest(http.MethodGet, "/api/status", nil)
 	req2.RemoteAddr = "127.0.0.1:41000"
-	req2.Header.Set("X-Forwarded-For", "198.51.100.7, 10.0.0.1")
+	req2.Header.Set("X-Forwarded-For", "10.0.0.1, 198.51.100.7")
 	if got := clientIPFromRequest(req2); got != "198.51.100.7" {
-		t.Fatalf("clientIPFromRequest = %q, want the first XFF hop 198.51.100.7 when the peer is loopback", got)
+		t.Fatalf("clientIPFromRequest = %q, want the rightmost XFF hop 198.51.100.7 when the peer is loopback", got)
 	}
 }
 

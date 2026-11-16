@@ -1034,6 +1034,9 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
+	if err := h.validateConfigURLs(cfg); err != nil {
+		return nil, err
+	}
 	// Parse conditional routes before any live-apply: a bad route spec (e.g.
 	// an unsupported upstream scheme, which Validate doesn't catch) fails the
 	// save with nothing touched. SetUpstreamRoutes takes the compiled routes,
@@ -1103,10 +1106,30 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	return restart, nil
 }
 
-func (h *Handler) getConfig(w http.ResponseWriter) {
+func (h *Handler) getConfig(w http.ResponseWriter, r *http.Request) {
 	h.cfgMu.Lock()
-	defer h.cfgMu.Unlock()
-	writeJSON(w, http.StatusOK, payloadFromConfig(h.Cfg))
+	p := payloadFromConfig(h.Cfg)
+	h.cfgMu.Unlock()
+	if isReadOnlyRequest(r) {
+		redactConfigSecrets(&p)
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
+func redactConfigSecrets(p *configPayload) {
+	p.Cache.Password = ""
+	p.TLS.ACME.DNS01.CloudflareToken = ""
+	p.TLS.ACME.DNS01.DigitalOceanToken = ""
+	p.TLS.ACME.DNS01.HetznerToken = ""
+	p.TLS.ACME.DNS01.GoDaddyKey = ""
+	p.TLS.ACME.DNS01.GoDaddySecret = ""
+	p.TLS.ACME.DNS01.AWSAccessKeyID = ""
+	p.TLS.ACME.DNS01.AWSSecretAccessKey = ""
+	p.Tunnel.Token = ""
+	p.VPN.Providers.NordVPN.Token = ""
+	p.VPN.Providers.PIA.Username = ""
+	p.VPN.Providers.PIA.Password = ""
+	p.Abuse.AbuseIPDBKey = ""
 }
 
 func (h *Handler) putConfig(w http.ResponseWriter, r *http.Request) {

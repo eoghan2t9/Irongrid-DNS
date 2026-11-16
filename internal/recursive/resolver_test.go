@@ -509,8 +509,8 @@ func TestResolveRacesNameservers(t *testing.T) {
 		name:    "com.",
 		answers: map[string][]dns.RR{},
 		delegates: []delegateEntry{
-			{suffix: "example.com.", ns: "ns1.dead.invalid.", addr: deadAddr, childName: "example.com."},
-			{suffix: "example.com.", ns: "ns2.live.invalid.", addr: liveAddr, childName: "example.com."},
+			{suffix: "example.com.", ns: "ns1.dead.example.com.", addr: deadAddr, childName: "example.com."},
+			{suffix: "example.com.", ns: "ns2.live.example.com.", addr: liveAddr, childName: "example.com."},
 		},
 	}
 	tldAddr, _ := startFakeServer(t, "127.0.0.2:"+nsPort, tldZone)
@@ -605,7 +605,7 @@ func TestReferralParsing(t *testing.T) {
 	a, _ := dns.New("ns1.example.com. 300 IN A 10.0.0.1")
 	resp.Extra = []dns.RR{a}
 
-	zone, records, ttl, hasNS := parseReferral(resp)
+	zone, records, ttl, hasNS := parseReferral(resp, ".")
 	if !hasNS {
 		t.Fatal("expected hasNS = true")
 	}
@@ -631,7 +631,7 @@ func TestReferralNoGlue(t *testing.T) {
 	ns, _ := dns.New("example.com. 300 IN NS ns1.example.com.")
 	resp.Ns = []dns.RR{ns}
 
-	zone, records, _, hasNS := parseReferral(resp)
+	zone, records, _, hasNS := parseReferral(resp, ".")
 	if !hasNS {
 		t.Fatal("expected hasNS = true even without glue")
 	}

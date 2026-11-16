@@ -1,6 +1,7 @@
 package installer
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -142,8 +143,12 @@ func installLaunchd(w *wizard, deployDir string) {
 		fmt.Fprintf(w.out, "    do it manually: cp %s %s && launchctl load %s\n", src, dst, dst)
 		return
 	}
-	_ = exec.Command("launchctl", "unload", dst).Run() // ignore if not loaded yet
-	if err := exec.Command("launchctl", "load", dst).Run(); err != nil {
+	unloadCtx, unloadCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	_ = exec.CommandContext(unloadCtx, "launchctl", "unload", dst).Run() // ignore if not loaded yet
+	unloadCancel()
+	loadCtx, loadCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer loadCancel()
+	if err := exec.CommandContext(loadCtx, "launchctl", "load", dst).Run(); err != nil {
 		fmt.Fprintf(w.out, "  ⚠ launchctl load failed: %v\n", err)
 		fmt.Fprintf(w.out, "    do it manually: launchctl load %s\n", dst)
 		return
@@ -161,7 +166,9 @@ func installWindowsService(w *wizard, deployDir string) {
 	}
 	fmt.Fprintln(w.out)
 	fmt.Fprintln(w.out, "  Installing the Windows startup task (needs Administrator) …")
-	cmd := exec.Command("cmd", "/c", bat)
+	winCtx, winCancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer winCancel()
+	cmd := exec.CommandContext(winCtx, "cmd", "/c", bat)
 	cmd.Stdout = w.out
 	cmd.Stderr = w.out
 	if err := cmd.Run(); err != nil {

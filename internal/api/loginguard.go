@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -169,9 +170,12 @@ func clientIPFromRequest(r *http.Request) string {
 	}
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			first := strings.TrimSpace(strings.Split(xff, ",")[0])
-			if net.ParseIP(first) != nil {
-				return first
+			parts := strings.Split(xff, ",")
+			for _, part := range slices.Backward(parts) {
+				candidate := strings.TrimSpace(part)
+				if net.ParseIP(candidate) != nil {
+					return candidate
+				}
 			}
 		}
 	}

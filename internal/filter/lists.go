@@ -95,7 +95,18 @@ func NewListManager(engine *Engine, dir string) *ListManager {
 		store:  map[string]*StoredList{},
 		engine: engine,
 		dir:    dir,
-		client: &http.Client{Timeout: 60 * time.Second},
+		client: &http.Client{
+			Timeout: 60 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				if len(via) >= 10 {
+					return errors.New("too many redirects")
+				}
+				if req.URL.Scheme != "http" && req.URL.Scheme != "https" {
+					return fmt.Errorf("refusing redirect to %s://", req.URL.Scheme)
+				}
+				return nil
+			},
+		},
 	}
 }
 

@@ -3,11 +3,15 @@ package api
 import (
 	"cmp"
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/catalog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
@@ -41,6 +45,10 @@ func (h *Handler) addList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "id, url required"})
 		return
 	}
+	if err := validateExternalURL(p.URL); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		return
+	}
 	h.Cfg.Filter.Blocklists = append(h.Cfg.Filter.Blocklists, config.BlocklistSpec{
 		ID:      p.ID,
 		Name:    p.Name,
@@ -61,6 +69,12 @@ func (h *Handler) updateList(w http.ResponseWriter, r *http.Request, id string) 
 	var p listPayload
 	if !decodeJSON(w, r, &p) {
 		return
+	}
+	if p.URL != "" {
+		if err := validateExternalURL(p.URL); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 	}
 	changed := false
 	for i := range h.Cfg.Filter.Blocklists {
@@ -271,4 +285,70 @@ func (h *Handler) checkFilter(w http.ResponseWriter, r *http.Request) {
 		"reason":  d.Reason,
 		"list":    d.ListName,
 	})
+}
+
+func validateExternalURLScheme(rawURL string) (string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid url: %w", err)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", fmt.Errorf("unsupported url scheme %q (only http and https are allowed)", u.Scheme)
+	}
+	host := u.Hostname()
+	if host == "" {
+		return "", errors.New("url host is required")
+	}
+	return host, nil
+}
+
+func validateExternalURL(rawURL string) error {
+	host, err := validateExternalURLScheme(rawURL)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_, err = resolvePublicIP(ctx, host)
+	return err
+}
+
+func (h *Handler) validateConfigURLs(cfg *config.Config) error {
+	existingLists := make(map[string]struct{}, len(h.Cfg.Filter.Blocklists))
+	for _, bl := range h.Cfg.Filter.Blocklists {
+		existingLists[bl.URL] = struct{}{}
+	}
+	for _, bl := range cfg.Filter.Blocklists {
+		if bl.URL == "" {
+			continue
+		}
+		if _, known := existingLists[bl.URL]; known {
+			if _, err := validateExternalURLScheme(bl.URL); err != nil {
+				return fmt.Errorf("blocklist %q: %w", bl.ID, err)
+			}
+			continue
+		}
+		if err := validateExternalURL(bl.URL); err != nil {
+			return fmt.Errorf("blocklist %q: %w", bl.ID, err)
+		}
+	}
+	if cfg.GeoBlock.BaseURL != "" {
+		if cfg.GeoBlock.BaseURL != h.Cfg.GeoBlock.BaseURL {
+			if err := validateExternalURL(cfg.GeoBlock.BaseURL); err != nil {
+				return fmt.Errorf("geo_block.base_url: %w", err)
+			}
+		} else if _, err := validateExternalURLScheme(cfg.GeoBlock.BaseURL); err != nil {
+			return fmt.Errorf("geo_block.base_url: %w", err)
+		}
+	}
+	if cfg.GeoBlock.ASNBaseURL != "" {
+		if cfg.GeoBlock.ASNBaseURL != h.Cfg.GeoBlock.ASNBaseURL {
+			if err := validateExternalURL(cfg.GeoBlock.ASNBaseURL); err != nil {
+				return fmt.Errorf("geo_block.asn_base_url: %w", err)
+			}
+		} else if _, err := validateExternalURLScheme(cfg.GeoBlock.ASNBaseURL); err != nil {
+			return fmt.Errorf("geo_block.asn_base_url: %w", err)
+		}
+	}
+	return nil
 }

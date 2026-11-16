@@ -100,7 +100,7 @@ func main() {
 	slog.SetDefault(newLogger(cfg.Logging))
 	if cfg.Web.Password == "" {
 		cfg.Web.Password = "irongrid"
-		slog.Warn("using default password — change it", "password", cfg.Web.Password, "config_path", *configPath)
+		slog.Warn("using default password — change it immediately", "config_path", *configPath)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)

@@ -54,7 +54,9 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	_, cerr := io.Copy(out, in)
-	_ = out.Close()
+	if closeErr := out.Close(); closeErr != nil && cerr == nil {
+		cerr = closeErr
+	}
 	return cerr
 }
 

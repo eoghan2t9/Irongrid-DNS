@@ -421,7 +421,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			// timing-sensitive — the value travels in cleartext inside the
 			// cookie itself — so EqualFold (hex is case-insensitive) is fine.
 			if len(reqCookie) > clientCookieHexLen &&
-				!strings.EqualFold(reqCookie[:2*clientCookieHexLen], expected) {
+				(len(reqCookie) < 2*clientCookieHexLen || !strings.EqualFold(reqCookie[:2*clientCookieHexLen], expected)) {
 				m := newReply(r)
 				m.Rcode = dns.RcodeBadCookie
 				// attachCookie returns a fresh Copy(), so m itself is unused

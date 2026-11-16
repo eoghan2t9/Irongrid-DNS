@@ -17,6 +17,7 @@ import (
 	"mime"
 	"net/http"
 	"net/http/pprof"
+	"net/url"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -71,6 +72,9 @@ type App struct {
 	// preserved across router rebuilds for the same reason as loginGuard.
 	apiRateLimiterOnce sync.Once
 	apiRateLimiter     *APIRateLimiter
+
+	revokedMu sync.Mutex
+	revoked   map[string]int64
 }
 
 // APIHandler is implemented by the API to reach into the running services.
@@ -94,6 +98,11 @@ func NewRouter(a *App) http.Handler {
 		}
 		if !a.allowAPIRequest(w, r) {
 			return
+		}
+		if r.URL.Path == "/api/logout" && r.Method == http.MethodPost {
+			if c, err := r.Cookie(sessionCookie); err == nil && c.Value != "" {
+				a.revokeSession(c.Value)
+			}
 		}
 		a.Handler.HandleAPI(w, r)
 	})
@@ -129,7 +138,21 @@ func NewRouter(a *App) http.Handler {
 		serveFromFS(w, r, webRoot)
 	})
 
-	return logRequests(mux)
+	return securityHeaders(logRequests(mux))
+}
+
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Content-Security-Policy", "frame-ancestors 'none'")
+		h.Set("Referrer-Policy", "same-origin")
+		if r.TLS != nil {
+			h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // registerPprof mounts the standard net/http/pprof handlers at their usual
@@ -194,9 +217,20 @@ func userByUsername(users []config.WebUser, username string) *config.WebUser {
 func (a *App) authorize(w http.ResponseWriter, r *http.Request) bool {
 	users, tokens, secret, secure := a.authSnapshot()
 	if u := a.validSession(r, users, secret); u != nil {
-		if u.Role == "viewer" && r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.Error(w, "viewer account cannot make a "+r.Method+" request", http.StatusForbidden)
+		if !verifyCSRF(r) {
+			http.Error(w, "cross-site request blocked", http.StatusForbidden)
 			return false
+		}
+		if u.Role == "viewer" {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				http.Error(w, "viewer account cannot make a "+r.Method+" request", http.StatusForbidden)
+				return false
+			}
+			if isAdminOnlyPath(r.URL.Path) {
+				http.Error(w, "admin access required", http.StatusForbidden)
+				return false
+			}
+			*r = *r.WithContext(ctxWithReadOnly(r.Context(), true))
 		}
 		return true
 	}
@@ -205,9 +239,16 @@ func (a *App) authorize(w http.ResponseWriter, r *http.Request) bool {
 	// token isn't a guessable-password attack), and a read-only token is
 	// scoped to GET/HEAD only.
 	if tokenOK, readOnly := validToken(r, tokens); tokenOK {
-		if readOnly && r.Method != http.MethodGet && r.Method != http.MethodHead {
-			http.Error(w, "read-only API token cannot make a "+r.Method+" request", http.StatusForbidden)
-			return false
+		if readOnly {
+			if r.Method != http.MethodGet && r.Method != http.MethodHead {
+				http.Error(w, "read-only API token cannot make a "+r.Method+" request", http.StatusForbidden)
+				return false
+			}
+			if isAdminOnlyPath(r.URL.Path) {
+				http.Error(w, "admin access required", http.StatusForbidden)
+				return false
+			}
+			*r = *r.WithContext(ctxWithReadOnly(r.Context(), true))
 		}
 		return true
 	}
@@ -227,9 +268,16 @@ func (a *App) authorize(w http.ResponseWriter, r *http.Request) bool {
 		if u := userByUsername(users, user); u != nil && passwordMatches(pass, u.Password) {
 			a.loginGuard.RecordSuccess(client)
 			a.issueSessionWith(w, user, secret, secure)
-			if u.Role == "viewer" && r.Method != http.MethodGet && r.Method != http.MethodHead {
-				http.Error(w, "viewer account cannot make a "+r.Method+" request", http.StatusForbidden)
-				return false
+			if u.Role == "viewer" {
+				if r.Method != http.MethodGet && r.Method != http.MethodHead {
+					http.Error(w, "viewer account cannot make a "+r.Method+" request", http.StatusForbidden)
+					return false
+				}
+				if isAdminOnlyPath(r.URL.Path) {
+					http.Error(w, "admin access required", http.StatusForbidden)
+					return false
+				}
+				*r = *r.WithContext(ctxWithReadOnly(r.Context(), true))
 			}
 			return true
 		}
@@ -335,7 +383,99 @@ func (a *App) validSession(r *http.Request, users []config.WebUser, secret strin
 	if !hmac.Equal([]byte(sig), []byte(hex.EncodeToString(mac.Sum(nil)))) {
 		return nil
 	}
+	if a.isSessionRevoked(c.Value) {
+		return nil
+	}
 	return userByUsername(users, user)
+}
+
+type readOnlyCtxKey struct{}
+
+func ctxWithReadOnly(ctx context.Context, v bool) context.Context {
+	return context.WithValue(ctx, readOnlyCtxKey{}, v)
+}
+
+func isReadOnlyRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	v, _ := r.Context().Value(readOnlyCtxKey{}).(bool)
+	return v
+}
+
+func isAdminOnlyPath(p string) bool {
+	return strings.TrimSuffix(p, "/") == "/api/config/backup"
+}
+
+func verifyCSRF(r *http.Request) bool {
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return true
+	}
+	if sfs := r.Header.Get("Sec-Fetch-Site"); sfs != "" {
+		switch sfs {
+		case "same-origin", "same-site", "none":
+		default:
+			return false
+		}
+	}
+	if origin := r.Header.Get("Origin"); origin != "" {
+		u, err := url.Parse(origin)
+		if err != nil || !strings.EqualFold(u.Host, r.Host) {
+			return false
+		}
+	}
+	return true
+}
+
+func sessionTokenHash(val string) string {
+	sum := sha256.Sum256([]byte(val))
+	return hex.EncodeToString(sum[:])
+}
+
+func (a *App) revokeSession(val string) {
+	if val == "" {
+		return
+	}
+	exp := time.Now().Add(sessionLifetime).Unix()
+	if payload, _, ok := strings.Cut(val, "."); ok {
+		if raw, err := base64.RawURLEncoding.DecodeString(payload); err == nil {
+			if _, expStr, ok := strings.CutLast(string(raw), "."); ok {
+				if parsed, err := strconv.ParseInt(expStr, 10, 64); err == nil {
+					exp = parsed
+				}
+			}
+		}
+	}
+	key := sessionTokenHash(val)
+	now := time.Now().Unix()
+	a.revokedMu.Lock()
+	if a.revoked == nil {
+		a.revoked = make(map[string]int64)
+	}
+	for k, v := range a.revoked {
+		if v <= now {
+			delete(a.revoked, k)
+		}
+	}
+	a.revoked[key] = exp
+	a.revokedMu.Unlock()
+}
+
+func (a *App) isSessionRevoked(val string) bool {
+	if val == "" {
+		return false
+	}
+	key := sessionTokenHash(val)
+	now := time.Now().Unix()
+	a.revokedMu.Lock()
+	exp, ok := a.revoked[key]
+	if ok && exp <= now {
+		delete(a.revoked, key)
+		ok = false
+	}
+	a.revokedMu.Unlock()
+	return ok
 }
 
 // passwordMatches compares a plaintext password against a stored value that

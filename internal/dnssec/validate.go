@@ -86,18 +86,37 @@ func NewValidator(anchors *AnchorManager) *Validator {
 // cryptographic mismatch was found (see the distinct error wrapping for
 // "did not verify" cases below, which callers may want to key off of if
 // they need to tell the two apart).
+// isSubdomainOrEqual reports whether child is equal to or a subdomain of parent
+// (case-insensitive, FQDN-normalized).
+func isSubdomainOrEqual(child, parent string) bool {
+	c := strings.ToLower(dnsutil.Fqdn(child))
+	p := strings.ToLower(dnsutil.Fqdn(parent))
+	if p == "." {
+		return c != ""
+	}
+	return c == p || strings.HasSuffix(c, "."+p)
+}
+
 func (v *Validator) Validate(ctx context.Context, up *upstream.Upstream, resp *dns.Msg) (secure, signed bool, err error) {
 	if resp == nil {
 		return false, false, nil
 	}
-	byType := make(map[uint16][]dns.RR)
+	type rrsetKey struct {
+		name  string
+		rtype uint16
+	}
+	byRRset := make(map[rrsetKey][]dns.RR)
 	var sigs []*dns.RRSIG
 	for _, rr := range resp.Answer {
 		if sig, ok := rr.(*dns.RRSIG); ok {
 			sigs = append(sigs, sig)
 			continue
 		}
-		byType[dns.RRToType(rr)] = append(byType[dns.RRToType(rr)], rr)
+		k := rrsetKey{
+			name:  strings.ToLower(dnsutil.Fqdn(rr.Header().Name)),
+			rtype: dns.RRToType(rr),
+		}
+		byRRset[k] = append(byRRset[k], rr)
 	}
 	if len(sigs) == 0 {
 		// No signed data in the Answer — either genuinely unsigned, or a
@@ -109,13 +128,23 @@ func (v *Validator) Validate(ctx context.Context, up *upstream.Upstream, resp *d
 		return false, false, nil
 	}
 
+	covered := make(map[rrsetKey]bool, len(byRRset))
 	for _, sig := range sigs {
-		rrset := byType[sig.TypeCovered]
+		k := rrsetKey{
+			name:  strings.ToLower(dnsutil.Fqdn(sig.Header().Name)),
+			rtype: sig.TypeCovered,
+		}
+		rrset := byRRset[k]
 		if len(rrset) == 0 {
 			// An RRSIG with nothing in the answer for it to cover — not
 			// itself a validation failure (e.g. a signature that arrived
 			// for a type this handler stripped), just nothing to check.
 			continue
+		}
+		// RFC 4035 §5.3.1: SignerName must be the zone containing the RRset
+		// (equal to or an ancestor of the RRset's owner name).
+		if !isSubdomainOrEqual(k.name, sig.SignerName) {
+			return false, true, nil
 		}
 		keys, zoneSecure, kerr := v.zoneKeys(ctx, up, sig.SignerName, 0)
 		if kerr != nil {
@@ -130,6 +159,12 @@ func (v *Validator) Validate(ctx context.Context, up *upstream.Upstream, resp *d
 			// failure: err stays nil so the caller fails closed on
 			// secure=false rather than treating this the same as a
 			// DNSKEY/DS query that simply couldn't be completed.
+			return false, true, nil
+		}
+		covered[k] = true
+	}
+	for k := range byRRset {
+		if !covered[k] {
 			return false, true, nil
 		}
 	}

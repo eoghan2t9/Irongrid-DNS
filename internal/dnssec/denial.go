@@ -86,6 +86,9 @@ func (v *Validator) verifyDenialRR(ctx context.Context, up *upstream.Upstream, r
 		if !strings.EqualFold(strings.ToLower(sig.Header().Name), owner) {
 			continue
 		}
+		if !isSubdomainOrEqual(owner, sig.SignerName) {
+			continue
+		}
 		keys, secure, err := v.zoneKeys(ctx, up, sig.SignerName, 0)
 		if err != nil || !secure {
 			continue

@@ -242,7 +242,7 @@ func (h *Handler) HandleAPI(w http.ResponseWriter, r *http.Request) {
 	case len(parts) == 2 && parts[0] == "vpn" && parts[1] == "status" && r.Method == http.MethodGet:
 		h.vpnStatus(w)
 	case len(parts) == 1 && parts[0] == "config" && r.Method == http.MethodGet:
-		h.getConfig(w)
+		h.getConfig(w, r)
 	case len(parts) == 1 && parts[0] == "config" && r.Method == http.MethodPut:
 		h.putConfig(w, r)
 	case len(parts) == 2 && parts[0] == "config" && parts[1] == "reload" && r.Method == http.MethodPost:

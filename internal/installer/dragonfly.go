@@ -242,11 +242,15 @@ func ensureDragonflyDocker(addr string, out io.Writer) error {
 			"    docker run -d --name dragonfly --restart unless-stopped -p 127.0.0.1:%s:6379 %s",
 			runtime.GOOS, port, dflyImage)
 	}
-	_ = exec.Command("docker", "rm", "-f", "dragonfly").Run()
+	rmCtx, rmCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	_ = exec.CommandContext(rmCtx, "docker", "rm", "-f", "dragonfly").Run()
+	rmCancel()
 	fmt.Fprintf(out, "  … starting Dragonfly in Docker (port %s)\n", port)
 	dfly := tuning.AutoDragonflyFlags()
+	runCtx, runCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer runCancel()
 	//nolint:gosec // fixed docker command, literal args, no shell interpolation
-	cmd := exec.Command("docker", "run", "-d", "--name", "dragonfly", "--restart", "unless-stopped",
+	cmd := exec.CommandContext(runCtx, "docker", "run", "-d", "--name", "dragonfly", "--restart", "unless-stopped",
 		"-p", "127.0.0.1:"+port+":6379", dflyImage,
 		"--cache_mode=true",
 		"--maxmemory="+dfly.MaxMemory,

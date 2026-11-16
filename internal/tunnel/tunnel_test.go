@@ -18,7 +18,7 @@ import (
 func TestBuildArgsFlagOrdering(t *testing.T) {
 	t.Parallel()
 	logFile := filepath.Join(t.TempDir(), "cloudflared.log")
-	args := buildArgs(ModeToken, "definitely-not-a-valid-tunnel-token", "", "", logFile)
+	args := buildArgs(ModeToken, "", "", logFile)
 
 	tunnelIdx := slices.Index(args, "tunnel")
 	if tunnelIdx < 0 {
