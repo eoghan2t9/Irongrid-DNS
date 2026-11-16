@@ -4,6 +4,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/sys/cpu"
 )
 
 // L1 is a small in-process, TTL-based response cache layered in front of the
@@ -64,6 +66,7 @@ type l1Shard struct {
 	// deleted/expired linger as dead slots until they reach the head;
 	// compact() bounds that growth. Never appended when cap == 0.
 	queue []l1Key
+	_     cpu.CacheLinePad
 }
 
 type l1Cache struct {

@@ -329,66 +329,70 @@ func (m *Manager) startClassic(proto, addr string, tcp bool) {
 		}
 		return
 	}
-	// TCP: create the listener ourselves with a tuned ListenConfig so the
-	// socket buffers are raised here too (accepted connections inherit them).
-	// Handing the pre-built listener to the dns.Server means ActivateAndServe
-	// must serve it (ListenAndServe would replace it with its own socket).
-	// When a per-IP connection cap is configured, the listener is wrapped so
-	// connections past the cap are closed at accept without a reply.
-	ln, err := tuning.ListenConfig().Listen(context.Background(), "tcp", addr)
+	// TCP: create SO_REUSEPORT listeners (one per CPU core) with a tuned
+	// ListenConfig so each core has its own kernel accept queue and raised
+	// socket buffers; falls back to a single listener when SO_REUSEPORT is
+	// unavailable or an ephemeral :0 port is requested.
+	lns, err := newTCPListeners(addr, m.udpSocketCount())
 	if err != nil {
 		m.results <- Listener{Proto: proto, Addr: addr, Err: err}
 		return
 	}
-	srv := &dns.Server{
-		Net:           "tcp",
-		Listener:      m.limitTCPListener(ln),
-		Handler:       handler,
-		ReadTimeout:   tcpReadTimeout,
-		IdleTimeout:   tcpIdleTimeout,
-		MaxTCPQueries: -1,
-	}
-	m.servers = append(m.servers, srv)
-	go func() {
-		slog.Info("dns listener started", "proto", proto, "addr", addr)
-		if err := srv.ListenAndServe(); err != nil {
-			slog.Error("dns listener stopped", "proto", proto, "addr", addr, "error", err)
-			m.results <- Listener{Proto: proto, Addr: addr, Err: err}
+	slog.Info("dns listener started", "proto", proto, "addr", addr, "sockets", len(lns))
+	for _, ln := range lns {
+		srv := &dns.Server{
+			Net:           "tcp",
+			Listener:      m.limitTCPListener(ln),
+			Handler:       handler,
+			ReadTimeout:   tcpReadTimeout,
+			IdleTimeout:   tcpIdleTimeout,
+			MaxTCPQueries: -1,
 		}
-	}()
+		m.mu.Lock()
+		m.servers = append(m.servers, srv)
+		m.mu.Unlock()
+		go func() {
+			if err := srv.ListenAndServe(); err != nil {
+				slog.Error("dns listener stopped", "proto", proto, "addr", addr, "error", err)
+				m.results <- Listener{Proto: proto, Addr: addr, Err: err}
+			}
+		}()
+	}
 }
 
 func (m *Manager) startDoT(addr string) {
-	// Same tuned socket as plain TCP; miekg/dns serves a Listener we hand it
-	// as-is, so the TLS wrapping is done here before it is passed along. The
-	// per-IP connection cap wraps the raw TCP listener (before TLS), so a
-	// rejected connection never even starts a handshake.
-	ln, err := tuning.ListenConfig().Listen(context.Background(), "tcp", addr)
+	// Same SO_REUSEPORT + tuned socket setup as plain TCP; each listener gets
+	// its own TLS accept loop while sharing the per-IP connection limiter.
+	lns, err := newTCPListeners(addr, m.udpSocketCount())
 	if err != nil {
 		m.results <- Listener{Proto: "dot", Addr: addr, Err: err}
 		return
 	}
-	// RFC 7858 §9.2: a DoT server SHOULD support the "dot" ALPN identifier.
-	dotTLS := m.tlsConf.Clone()
-	dotTLS.NextProtos = []string{"dot"}
-	srv := &dns.Server{
-		Addr:          addr,
-		Net:           "tcp-tls",
-		Listener:      tls.NewListener(m.limitTCPListener(ln), dotTLS),
-		TLSConfig:     dotTLS,
-		Handler:       protoHandler{m.handler, "dot"},
-		ReadTimeout:   tcpReadTimeout,
-		IdleTimeout:   tcpIdleTimeout,
-		MaxTCPQueries: -1,
-	}
-	m.servers = append(m.servers, srv)
-	go func() {
-		slog.Info("DoT listener started", "addr", addr)
-		if err := srv.ListenAndServe(); err != nil {
-			slog.Error("DoT listener stopped", "addr", addr, "error", err)
-			m.results <- Listener{Proto: "dot", Addr: addr, Err: err}
+	slog.Info("DoT listener started", "addr", addr, "sockets", len(lns))
+	for _, ln := range lns {
+		// RFC 7858 §9.2: a DoT server SHOULD support the "dot" ALPN identifier.
+		dotTLS := m.tlsConf.Clone()
+		dotTLS.NextProtos = []string{"dot"}
+		srv := &dns.Server{
+			Addr:          addr,
+			Net:           "tcp-tls",
+			Listener:      tls.NewListener(m.limitTCPListener(ln), dotTLS),
+			TLSConfig:     dotTLS,
+			Handler:       protoHandler{m.handler, "dot"},
+			ReadTimeout:   tcpReadTimeout,
+			IdleTimeout:   tcpIdleTimeout,
+			MaxTCPQueries: -1,
 		}
-	}()
+		m.mu.Lock()
+		m.servers = append(m.servers, srv)
+		m.mu.Unlock()
+		go func() {
+			if err := srv.ListenAndServe(); err != nil {
+				slog.Error("DoT listener stopped", "addr", addr, "error", err)
+				m.results <- Listener{Proto: "dot", Addr: addr, Err: err}
+			}
+		}()
+	}
 }
 
 // Shutdown gracefully stops all listeners.
@@ -508,6 +512,43 @@ func reuseportUDPListeners(addr string, n int) ([]net.PacketConn, error) {
 		pcs = append(pcs, pc)
 	}
 	return pcs, nil
+}
+
+// newTCPListeners binds addr from n SO_REUSEPORT TCP listeners with raised
+// socket buffers, falling back to a single listener when n <= 1, when addr uses
+// an ephemeral ":0" port (so tests get a single deterministic address), or when
+// SO_REUSEPORT is unavailable on the platform.
+func newTCPListeners(addr string, n int) ([]net.Listener, error) {
+	if n > 1 {
+		if _, port, err := net.SplitHostPort(addr); err != nil || port != "0" {
+			lns, err := reuseportTCPListeners(addr, n)
+			if err == nil {
+				return lns, nil
+			}
+			slog.Warn("reuseport TCP unavailable, using a single socket", "addr", addr, "error", err)
+		}
+	}
+	ln, err := tuning.ListenConfig().Listen(context.Background(), "tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	return []net.Listener{ln}, nil
+}
+
+func reuseportTCPListeners(addr string, n int) ([]net.Listener, error) {
+	lc := tuning.ReuseportListenConfig()
+	lns := make([]net.Listener, 0, n)
+	for range n {
+		ln, err := lc.Listen(context.Background(), "tcp", addr)
+		if err != nil {
+			for _, l := range lns {
+				_ = l.Close()
+			}
+			return nil, err
+		}
+		lns = append(lns, ln)
+	}
+	return lns, nil
 }
 
 // ensureTLSListener helper for DoT uses the shared TLS config.

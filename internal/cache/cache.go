@@ -116,10 +116,8 @@ type Cache struct {
 	l1Misses atomic.Int64
 }
 
-const prefetchConcurrency = 32
-
 func (c *Cache) initPrefetch() {
-	c.prefetchSem = make(chan struct{}, prefetchConcurrency)
+	c.prefetchSem = make(chan struct{}, tuning.ScaleByCores(8, 32, 256))
 	c.prefetchCtx, c.prefetchCancel = context.WithCancel(context.Background())
 }
 

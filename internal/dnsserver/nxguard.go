@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sys/cpu"
+
 	"github.com/eoghan2t9/Irongrid-DNS/internal/shardutil"
 )
 
@@ -49,6 +51,7 @@ type NXGuard struct {
 type nxShard struct {
 	mu      sync.Mutex
 	entries map[string]*nxEntry
+	_       cpu.CacheLinePad
 }
 
 type nxEntry struct {

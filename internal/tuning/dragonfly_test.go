@@ -47,7 +47,14 @@ func TestDragonflyFlagsForSystem(t *testing.T) {
 			cpus:     16,
 			memBytes: 64 * gib,
 			wantMem:  "16gb", // 25% of 64 GiB = 16 GiB (within 256mb–32gb range)
-			wantThrd: 8,      // capped at maxProactors
+			wantThrd: 16,
+		},
+		{
+			name:     "high-core server (48 CPU, 128 GiB)",
+			cpus:     48,
+			memBytes: 128 * gib,
+			wantMem:  "32gb", // 25% of 128 GiB = 32 GiB
+			wantThrd: 32,     // capped at maxProactors
 		},
 		{
 			name:     "no memory info (0 bytes)",

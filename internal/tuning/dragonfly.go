@@ -25,7 +25,7 @@ func DragonflyFlagsForSystem(cpus int, memBytes uint64) DragonflyFlags {
 		minMemory    = 256 * mib
 		maxMemory    = 32 * gib
 		minProactors = 2
-		maxProactors = 8
+		maxProactors = 32
 		memPerThread = 256 * mib // Dragonfly requires ≥256 MiB per proactor thread
 	)
 

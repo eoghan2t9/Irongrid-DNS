@@ -4,6 +4,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sys/cpu"
+
 	"github.com/eoghan2t9/Irongrid-DNS/internal/shardutil"
 )
 
@@ -53,6 +55,7 @@ type RepeatGuard struct {
 type rqShard struct {
 	mu      sync.Mutex
 	entries map[string]*rqEntry
+	_       cpu.CacheLinePad
 }
 
 type rqEntry struct {

@@ -79,6 +79,20 @@ func ListenConfig() *net.ListenConfig {
 	return &net.ListenConfig{Control: SocketControl}
 }
 
+// ReuseportListenConfig returns a net.ListenConfig with both SO_REUSEPORT
+// (per-core kernel accept/receive queues) and SocketControl (2 MiB socket
+// buffers).
+func ReuseportListenConfig() *net.ListenConfig {
+	return &net.ListenConfig{
+		Control: func(network, address string, c syscall.RawConn) error {
+			if err := ReuseportControl(network, address, c); err != nil {
+				return err
+			}
+			return SocketControl(network, address, c)
+		},
+	}
+}
+
 // SetPacketBuffers raises the receive/send buffers of a packet socket (the
 // UDP DNS listener and the DoQ QUIC socket) to SocketBufferSize. Best-effort:
 // a kernel that refuses (e.g. a macOS sockbuf ceiling) keeps the OS default

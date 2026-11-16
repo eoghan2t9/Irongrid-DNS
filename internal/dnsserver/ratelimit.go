@@ -5,6 +5,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sys/cpu"
+
 	"github.com/eoghan2t9/Irongrid-DNS/internal/shardutil"
 )
 
@@ -45,6 +47,7 @@ type rlBucket struct {
 type rlShard struct {
 	mu      sync.Mutex
 	buckets map[string]*rlBucket
+	_       cpu.CacheLinePad
 }
 
 // RateLimiter is a per-client-IP token bucket. It exists to blunt abuse (a
