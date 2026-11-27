@@ -2,7 +2,10 @@ package kvstore
 
 import (
 	"encoding/binary"
+	"errors"
+	"fmt"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -154,11 +157,48 @@ func (st *Stream) Clear() error {
 	return err
 }
 
+// ErrBadID is returned for a record ID that is not of the form "<ms>-<seq>".
+var ErrBadID = errors.New("kvstore: malformed stream ID")
+
+// parseID splits a "<ms>-<seq>" record ID.
+func parseID(id string) (ms, seq uint64, err error) {
+	a, b, ok := strings.Cut(id, "-")
+	if !ok {
+		return 0, 0, fmt.Errorf("%w: %q", ErrBadID, id)
+	}
+	if ms, err = strconv.ParseUint(a, 10, 64); err != nil {
+		return 0, 0, fmt.Errorf("%w: %q", ErrBadID, id)
+	}
+	if seq, err = strconv.ParseUint(b, 10, 64); err != nil {
+		return 0, 0, fmt.Errorf("%w: %q", ErrBadID, id)
+	}
+	return ms, seq, nil
+}
+
 // Walk visits records with ms >= sinceMs (0 = from the beginning): oldest-first
 // when reverse is false, newest-first when true. At most limit records are
 // visited (limit <= 0 is unbounded). fn receives the record ID and its value;
 // the value is only valid during the call. Returning false stops the walk.
 func (st *Stream) Walk(reverse bool, sinceMs int64, limit int, fn func(id string, val []byte) bool) error {
+	return st.walk(reverse, sinceMs, limit, nil, fn)
+}
+
+// WalkBefore visits records newest-first that are strictly older than the
+// record beforeID (the cursor a previous page ended on), down to sinceMs. It is
+// how a reader pages backwards through the stream at constant cost per page: it
+// seeks straight to the cursor instead of rescanning from the newest record. A
+// malformed beforeID returns ErrBadID.
+func (st *Stream) WalkBefore(beforeID string, sinceMs int64, limit int, fn func(id string, val []byte) bool) error {
+	ms, seq, err := parseID(beforeID)
+	if err != nil {
+		return err
+	}
+	return st.walk(true, sinceMs, limit, st.key(ms, seq), fn)
+}
+
+// walk is the shared iterator. A non-nil before (reverse walks only) starts the
+// scan at that key and excludes it.
+func (st *Stream) walk(reverse bool, sinceMs int64, limit int, before []byte, fn func(id string, val []byte) bool) error {
 	return st.s.db.View(func(txn *badger.Txn) error {
 		opt := badger.DefaultIteratorOptions
 		opt.Prefix = st.prefix
@@ -170,7 +210,9 @@ func (st *Stream) Walk(reverse bool, sinceMs int64, limit int, fn func(id string
 		if sinceMs > 0 {
 			lo = uint64(sinceMs)
 		}
-		if reverse {
+		if reverse && before != nil {
+			it.Seek(before)
+		} else if reverse {
 			top := make([]byte, len(st.prefix)+16)
 			copy(top, st.prefix)
 			for i := len(st.prefix); i < len(top); i++ {
@@ -187,6 +229,9 @@ func (st *Stream) Walk(reverse bool, sinceMs int64, limit int, fn func(id string
 			k := item.Key()
 			if len(k) != len(st.prefix)+16 {
 				continue
+			}
+			if before != nil && string(k) == string(before) {
+				continue // the cursor record itself was on the previous page
 			}
 			ms := binary.BigEndian.Uint64(k[len(st.prefix):])
 			if reverse && ms < lo {

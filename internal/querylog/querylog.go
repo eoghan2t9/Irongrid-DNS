@@ -396,13 +396,31 @@ const ctxCheckEvery = 256
 // the public methods guard first — but the guard is kept so the helper itself
 // can't nil-deref.
 func (l *Log) walkStream(ctx context.Context, reverse bool, sinceMs int64, max int) iter.Seq2[streamMsg, error] {
+	return l.iterate(ctx, func(fn func(id string, val []byte) bool) error {
+		return l.stream.Walk(reverse, sinceMs, max, fn)
+	})
+}
+
+// walkBefore is walkStream's newest-first walk resumed strictly before the
+// record beforeID (a cursor from QueryPage), at constant cost however deep the
+// cursor is.
+func (l *Log) walkBefore(ctx context.Context, beforeID string, max int) iter.Seq2[streamMsg, error] {
+	return l.iterate(ctx, func(fn func(id string, val []byte) bool) error {
+		return l.stream.WalkBefore(beforeID, 0, max, fn)
+	})
+}
+
+// iterate adapts a stream walk (run) into the iterator shape every query uses:
+// it checks the context periodically and yields any store or context error as
+// the final value.
+func (l *Log) iterate(ctx context.Context, run func(fn func(id string, val []byte) bool) error) iter.Seq2[streamMsg, error] {
 	return func(yield func(streamMsg, error) bool) {
 		if l.stream == nil {
 			return
 		}
 		n := 0
 		var stopErr error
-		err := l.stream.Walk(reverse, sinceMs, max, func(id string, val []byte) bool {
+		err := run(func(id string, val []byte) bool {
 			n++
 			if n%ctxCheckEvery == 0 {
 				if stopErr = ctx.Err(); stopErr != nil {
@@ -489,6 +507,69 @@ func (l *Log) Query(ctx context.Context, limit, offset int, action, domain, qtyp
 	}
 	end := min(offset+limit, len(matches))
 	return matches[offset:end], nil
+}
+
+// ErrBadCursor is returned by QueryPage for a cursor that is not a valid ID.
+var ErrBadCursor = kvstore.ErrBadID
+
+// QueryPage returns one page of up to limit entries matching the filters,
+// newest first, resuming strictly before the cursor ID before ("" = start at
+// the newest entry). next is the cursor for the following page, or "" when the
+// log is exhausted.
+//
+// Unlike offset paging it never rescans what earlier pages covered, so every
+// stored entry is reachable at constant cost per page. Each request examines at
+// most maxQueryScan entries: a filter that matches sparsely can therefore come
+// back short (even empty) with a non-empty next, meaning "keep going from here"
+// rather than "no more matches". next is the last entry examined, not the last
+// one returned, so the next page resumes exactly where this one stopped.
+func (l *Log) QueryPage(ctx context.Context, limit int, before, action, domain, qtype, client string) (entries []Entry, next string, err error) {
+	return l.queryPage(ctx, maxQueryScan, limit, before, action, domain, qtype, client)
+}
+
+// queryPage is QueryPage with the per-request scan bound as a parameter, so
+// tests can exercise the bound without writing maxQueryScan entries.
+func (l *Log) queryPage(ctx context.Context, scanMax, limit int, before, action, domain, qtype, client string) (entries []Entry, next string, err error) {
+	entries = []Entry{}
+	if l.stream == nil {
+		return entries, "", nil
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 100
+	}
+	domainLower := strings.ToLower(domain)
+
+	var seq iter.Seq2[streamMsg, error]
+	if before == "" {
+		seq = l.walkStream(ctx, true, 0, scanMax)
+	} else {
+		seq = l.walkBefore(ctx, before, scanMax)
+	}
+	scanned, lastID, full := 0, "", false
+	for m, werr := range seq {
+		if werr != nil {
+			return nil, "", werr
+		}
+		scanned++
+		lastID = m.ID
+		var e Entry
+		if !entryFromMessage(&e, m) {
+			continue
+		}
+		if matchesFilter(e, action, domainLower, qtype, client) {
+			entries = append(entries, e)
+			if len(entries) >= limit {
+				full = true
+				break
+			}
+		}
+	}
+	// More may remain if the page filled up, or the scan bound cut the walk
+	// short before the stream ran out.
+	if full || scanned >= scanMax {
+		next = lastID
+	}
+	return entries, next, nil
 }
 
 // TopDomain is a domain (or client) with a count, used for the "top

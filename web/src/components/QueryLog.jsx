@@ -3,6 +3,7 @@ import { api } from '../api'
 import { useToast } from '../toast-context'
 import { EmptyState } from './ui'
 import { usePolling } from '../hooks/usePolling'
+import { PAGE_SIZE, mergeHead, appendOlder } from './queryLogPaging'
 
 const fmtTime = (iso) => {
   const d = new Date(iso)
@@ -25,6 +26,10 @@ const ACTION_LABEL = {
 export default function QueryLog() {
   const toast = useToast()
   const [entries, setEntries] = useState([])
+  // Cursor for the next (older) page; '' means the whole log is loaded. The
+  // server hands it back as "next" and takes it as "before".
+  const [cursor, setCursor] = useState('')
+  const [loadingMore, setLoadingMore] = useState(false)
   const [action, setAction] = useState('')
   const [domain, setDomain] = useState('')
   const [qtype, setQtype] = useState('')
@@ -37,6 +42,13 @@ export default function QueryLog() {
   // visibility re-fetch) don't stack duplicate fetches. A ref, not state:
   // the guard must be synchronous and the value is never rendered.
   const busyRef = useRef(false)
+  // The live refresh reads what is on screen to merge new entries on top, and
+  // "load older" must ignore a response that arrives after the list it was
+  // meant for was replaced (filter change, clear, or a refresh that had to
+  // start over): the generation counter marks each such replacement.
+  const entriesRef = useRef([])
+  const filterKeyRef = useRef('')
+  const genRef = useRef(0)
   // The domain filter input, so the global / shortcut can jump straight to
   // it (the App shell dispatches 'irongrid:focus-log-search').
   const domainRef = useRef(null)
@@ -83,17 +95,66 @@ export default function QueryLog() {
     }
   }, [entries])
 
+  useEffect(() => {
+    entriesRef.current = entries
+  }, [entries])
+
+  // load refreshes the newest page. Same filters: new entries are merged on top
+  // so older pages the user loaded stay put. Changed filters: start over.
   const load = useCallback(async () => {
     if (busyRef.current) return
     busyRef.current = true
     try {
-      const res = await api.log({ limit: 200, action, domain, qtype, client })
-      setEntries(res.entries || [])
+      const filterKey = JSON.stringify([action, domain, qtype, client])
+      const res = await api.log({ limit: PAGE_SIZE, action, domain, qtype, client })
+      const head = res.entries || []
+      const next = res.next || ''
+      if (filterKeyRef.current !== filterKey) {
+        filterKeyRef.current = filterKey
+        genRef.current++
+        entriesRef.current = head
+        setEntries(head)
+        setCursor(next)
+      } else {
+        const merged = mergeHead(entriesRef.current, head, next)
+        if (merged.cursor !== undefined) genRef.current++
+        entriesRef.current = merged.list
+        setEntries(merged.list)
+        if (merged.cursor !== undefined) setCursor(merged.cursor)
+      }
     } catch {
       /* ignore transient */
     }
     busyRef.current = false
   }, [action, domain, qtype, client])
+
+  // loadOlder appends the next page of older entries. A sparse filter can
+  // return an empty page that still carries a cursor ("keep looking"), so it
+  // keeps going a few requests before handing control back.
+  const loadOlder = async () => {
+    if (!cursor || loadingMore) return
+    const gen = genRef.current
+    setLoadingMore(true)
+    try {
+      let cur = cursor
+      let added = []
+      for (let i = 0; i < 5 && cur; i++) {
+        const res = await api.log({ limit: PAGE_SIZE, before: cur, action, domain, qtype, client })
+        if (gen !== genRef.current) return // the list was replaced meanwhile
+        added = res.entries || []
+        cur = res.next || ''
+        if (added.length) break
+      }
+      const merged = appendOlder(entriesRef.current, added)
+      entriesRef.current = merged
+      setEntries(merged)
+      setCursor(cur)
+    } catch (e) {
+      toast('Could not load older entries: ' + e.message, 'error')
+    } finally {
+      setLoadingMore(false)
+    }
+  }
 
   useEffect(() => {
     load()
@@ -288,7 +349,10 @@ export default function QueryLog() {
                     <span className={`badge badge-${e.action}`}>{ACTION_LABEL[e.action] || e.action}</span>
                   </td>
                   <td className="dim small">{e.reason || ''}</td>
-                  <td className="mono dim small" title={e.upstream || 'No upstream used (answered locally or from cache)'}>
+                  <td
+                    className="mono dim small"
+                    title={e.upstream || 'No upstream used (answered locally or from cache)'}
+                  >
                     {e.upstream || '—'}
                   </td>
                   <td className="mono dim">{e.response_time_ms}</td>
@@ -318,6 +382,20 @@ export default function QueryLog() {
               ))}
             </tbody>
           </table>
+        )}
+        {entries.length > 0 && (
+          <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', gap: 12, padding: '12px 0' }}>
+            {cursor ? (
+              <>
+                <button className="btn" type="button" onClick={loadOlder} disabled={loadingMore}>
+                  {loadingMore ? 'Loading…' : 'Load older entries'}
+                </button>
+                <span className="dim small">{entries.length.toLocaleString()} shown</span>
+              </>
+            ) : (
+              <span className="dim small">End of the log · {entries.length.toLocaleString()} entries</span>
+            )}
+          </div>
         )}
       </div>
     </div>

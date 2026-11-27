@@ -1,6 +1,7 @@
 package querylog
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -929,5 +930,128 @@ func BenchmarkTopN(b *testing.B) {
 	}
 	for b.Loop() {
 		topN(counts, 10)
+	}
+}
+
+// TestQueryPageWalksEveryEntryOnce pages the whole log with cursors: every
+// entry appears exactly once, newest first, and the last page ends the walk.
+func TestQueryPageWalksEveryEntryOnce(t *testing.T) {
+	t.Parallel()
+	l, _ := newTestLog(t, 30)
+	const total = 47
+	for i := range total {
+		l.Record(entry(fmt.Sprintf("d%03d.example.", i), "allowed"))
+	}
+	waitFor(t, l, total)
+
+	seen := map[string]bool{}
+	var order []string
+	cursor := ""
+	for pages := 0; ; pages++ {
+		if pages > 20 {
+			t.Fatal("paging did not terminate")
+		}
+		got, next, err := l.QueryPage(t.Context(), 10, cursor, "", "", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range got {
+			if seen[e.ID] {
+				t.Fatalf("entry %s returned twice", e.ID)
+			}
+			seen[e.ID] = true
+			order = append(order, e.Domain)
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if len(seen) != total {
+		t.Fatalf("paged %d entries, want %d", len(seen), total)
+	}
+	if order[0] != "d046.example." || order[total-1] != "d000.example." {
+		t.Fatalf("not newest-first: first %q last %q", order[0], order[total-1])
+	}
+}
+
+func TestQueryPageFiltersAcrossPages(t *testing.T) {
+	t.Parallel()
+	l, _ := newTestLog(t, 30)
+	for i := range 40 {
+		action := "allowed"
+		if i%4 == 0 {
+			action = "blocked"
+		}
+		l.Record(entry(fmt.Sprintf("d%03d.example.", i), action))
+	}
+	waitFor(t, l, 40)
+
+	var blocked int
+	cursor := ""
+	for range 20 {
+		got, next, err := l.QueryPage(t.Context(), 3, cursor, "blocked", "", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range got {
+			if e.Action != "blocked" {
+				t.Fatalf("filter leaked %s", e.Action)
+			}
+		}
+		blocked += len(got)
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if blocked != 10 {
+		t.Fatalf("found %d blocked entries across pages, want 10", blocked)
+	}
+}
+
+// With a tiny scan bound a sparse filter comes back short but still hands back
+// a cursor, so the caller keeps going instead of stopping early.
+func TestQueryPageScanBoundKeepsCursor(t *testing.T) {
+	t.Parallel()
+	l, _ := newTestLog(t, 30)
+	for i := range 30 {
+		action := "allowed"
+		if i == 0 {
+			action = "blocked" // the oldest entry: far from the newest
+		}
+		l.Record(entry(fmt.Sprintf("d%03d.example.", i), action))
+	}
+	waitFor(t, l, 30)
+
+	cursor, found := "", 0
+	for range 10 {
+		got, next, err := l.queryPage(t.Context(), 7, 5, cursor, "blocked", "", "", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		found += len(got)
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+	if found != 1 {
+		t.Fatalf("found %d blocked entries, want the 1 old one reached through cursors", found)
+	}
+}
+
+func TestQueryPageBadCursorAndEmptyLog(t *testing.T) {
+	t.Parallel()
+	l, _ := newTestLog(t, 30)
+	if _, _, err := l.QueryPage(t.Context(), 10, "garbage", "", "", "", ""); !errors.Is(err, ErrBadCursor) {
+		t.Fatalf("bad cursor err = %v, want ErrBadCursor", err)
+	}
+	got, next, err := l.QueryPage(t.Context(), 10, "", "", "", "", "")
+	if err != nil || len(got) != 0 || next != "" {
+		t.Fatalf("empty log = %v %q %v, want no entries and no cursor", got, next, err)
+	}
+	if got == nil {
+		t.Fatal("entries must be an empty slice, not nil (JSON [] not null)")
 	}
 }

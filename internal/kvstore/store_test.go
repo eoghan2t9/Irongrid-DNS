@@ -1,6 +1,7 @@
 package kvstore
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -301,5 +302,83 @@ func TestPersistsAcrossReopen(t *testing.T) {
 	}
 	if st := s.Stream("log"); st.Len() != 3 {
 		t.Fatalf("stream length after reopen = %d, want 3", st.Len())
+	}
+}
+
+func TestStreamWalkBeforePagesBackwardsWithoutGapsOrRepeats(t *testing.T) {
+	st := openTest(t).Stream("log")
+	appendN(t, st, 25)
+
+	var all []string
+	if err := st.Walk(true, 0, 0, func(id string, _ []byte) bool { all = append(all, id); return true }); err != nil {
+		t.Fatal(err)
+	}
+
+	// Page through in chunks of 10 using each page's last ID as the cursor.
+	var paged []string
+	cursor := ""
+	for range 10 {
+		var page []string
+		var err error
+		if cursor == "" {
+			err = st.Walk(true, 0, 10, func(id string, _ []byte) bool { page = append(page, id); return true })
+		} else {
+			err = st.WalkBefore(cursor, 0, 10, func(id string, _ []byte) bool { page = append(page, id); return true })
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page) == 0 {
+			break
+		}
+		paged = append(paged, page...)
+		cursor = page[len(page)-1]
+	}
+	if len(paged) != len(all) {
+		t.Fatalf("paged %d records, want %d", len(paged), len(all))
+	}
+	for i := range all {
+		if paged[i] != all[i] {
+			t.Fatalf("record %d: paged %s, want %s", i, paged[i], all[i])
+		}
+	}
+}
+
+func TestStreamWalkBeforeExcludesCursorAndHandlesMissingKey(t *testing.T) {
+	st := openTest(t).Stream("log")
+	appendN(t, st, 3)
+	var ids []string
+	_ = st.Walk(false, 0, 0, func(id string, _ []byte) bool { ids = append(ids, id); return true })
+
+	var before []string
+	_ = st.WalkBefore(ids[2], 0, 0, func(id string, _ []byte) bool { before = append(before, id); return true })
+	if len(before) != 2 || before[0] != ids[1] || before[1] != ids[0] {
+		t.Fatalf("WalkBefore(newest) = %v, want [%s %s]", before, ids[1], ids[0])
+	}
+
+	// A cursor whose record no longer exists (trimmed or expired) still
+	// resumes at the next older record.
+	var ms, seq uint64
+	if _, err := fmt.Sscanf(ids[1], "%d-%d", &ms, &seq); err != nil {
+		t.Fatal(err)
+	}
+	ghost := fmt.Sprintf("%d-%d", ms, seq+1) // between ids[1] and ids[2]
+	var got []string
+	_ = st.WalkBefore(ghost, 0, 0, func(id string, _ []byte) bool { got = append(got, id); return true })
+	if len(got) == 0 || got[0] != ids[1] {
+		t.Fatalf("WalkBefore(missing key) = %v, want to start at %s", got, ids[1])
+	}
+
+	if err := st.WalkBefore(ids[0], 0, 0, func(string, []byte) bool { t.Fatal("oldest cursor must yield nothing"); return true }); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestStreamWalkBeforeRejectsMalformedID(t *testing.T) {
+	st := openTest(t).Stream("log")
+	for _, bad := range []string{"", "nope", "12", "a-b", "12-", "-5"} {
+		if err := st.WalkBefore(bad, 0, 0, func(string, []byte) bool { return true }); !errors.Is(err, ErrBadID) {
+			t.Errorf("WalkBefore(%q) err = %v, want ErrBadID", bad, err)
+		}
 	}
 }

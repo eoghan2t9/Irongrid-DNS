@@ -2,12 +2,14 @@ package api
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"runtime"
 	"strconv"
 	"time"
 
+	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/version"
 )
@@ -175,6 +177,23 @@ func (h *Handler) getLog(ctx context.Context, w http.ResponseWriter, r *http.Req
 		limit = 100
 	}
 	offset, _ := strconv.Atoi(q.Get("offset"))
+	// Cursor paging is the default: "next" in the response is passed back as
+	// "before" to fetch the following (older) page at constant cost. The older
+	// "offset" form is kept for existing callers; it rescans from the newest
+	// entry, so it only reaches the newest few thousand matches.
+	if offset <= 0 {
+		entries, next, err := h.Log.QueryPage(ctx, limit, q.Get("before"), q.Get("action"), q.Get("domain"), q.Get("qtype"), q.Get("client"))
+		if err != nil {
+			status := http.StatusInternalServerError
+			if errors.Is(err, querylog.ErrBadCursor) {
+				status = http.StatusBadRequest
+			}
+			writeJSON(w, status, map[string]string{"error": err.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"entries": entries, "next": next})
+		return
+	}
 	entries, err := h.Log.Query(ctx, limit, offset, q.Get("action"), q.Get("domain"), q.Get("qtype"), q.Get("client"))
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})

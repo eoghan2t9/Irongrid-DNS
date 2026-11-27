@@ -736,7 +736,7 @@ The dashboard uses a JSON REST API (HTTP Basic auth):
 ```
 GET  /api/status            server, listeners, cache, tunnel, root-hints status + system tuning (fd limit, socket buffers, sysctls, Go runtime)
 GET  /api/stats             counters, protocol split, top blocked, cache (L1 hits/misses + L2 hits/misses/disk size/keys), query_today (since-midnight log stats), query_hourly (24 per-hour buckets for the dashboard sparkline)
-GET  /api/log?limit&action&domain&qtype&client   query log (embedded-store stream, newest first, in-memory filters; client is an exact source-IP match used by the dashboard's click-through top-client rows)
+GET  /api/log?limit&before&action&domain&qtype&client   query log (embedded-store stream, newest first, in-memory filters; client is an exact source-IP match used by the dashboard's click-through top-client rows). Cursor paging: the response carries `next` — pass it back as `before` for the following, older page; it costs the same at any depth, so the whole retained log (up to 250,000 entries) is reachable. Each request examines at most 20,000 entries, so a rarely-matching filter can return a short page that still has a `next` — keep following it until `next` is empty. The older `offset` form still works but only reaches the newest few thousand matches
 GET  /api/log/hostnames?ips=a,b,c   reverse-DNS (PTR) names for client IPs, cached (positive 1h / negative 15m), resolved via the configured upstreams
 GET  /api/log/asn?ips=a,b,c   BGP/ISP owner (ASN, registrant, prefix) for client IPs, cached 24h, via free RIPEstat — feeds the query log ISP column and the dashboard blocked-clients card
 DELETE /api/log             clear query log
