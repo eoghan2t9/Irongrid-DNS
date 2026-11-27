@@ -633,7 +633,7 @@ func questionOf(rr dns.RR) dnsname.Question {
 
 func newReply(r *dns.Msg) *dns.Msg {
 	m := getMsg()
-	dnsutil.SetReply(m, r)
+	dnsname.SetReply(m, r)
 	m.RecursionAvailable = true
 	return m
 }

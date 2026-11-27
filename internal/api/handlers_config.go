@@ -1017,6 +1017,17 @@ func (h *Handler) applyPayload(p configPayload) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Validate needs the login accounts (it requires at least one admin), but
+	// the payload builder leaves Web.Users empty. Resolve them now so the check
+	// sees the real list; the authoritative resolve below re-runs under the
+	// long-held lock and replaces this provisional one.
+	h.cfgMu.Lock()
+	provisional, uerr := resolveWebUsers(h.Cfg.Web.Users, p.Web.Users)
+	h.cfgMu.Unlock()
+	if uerr != nil {
+		return nil, uerr
+	}
+	cfg.Web.Users = provisional
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}

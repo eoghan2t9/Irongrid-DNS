@@ -13,8 +13,8 @@ import (
 	"time"
 
 	"codeberg.org/miekg/dns"
-	"codeberg.org/miekg/dns/dnsutil"
 	"codeberg.org/miekg/dns/rdata"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 )
 
 // TestLogHostnames verifies the batch endpoint resolves PTR records through
@@ -73,7 +73,7 @@ func TestResolveHostnameCoalescesConcurrentLookups(t *testing.T) {
 			hits.Add(1)
 			time.Sleep(300 * time.Millisecond) // keep the lookups overlapping
 			m := new(dns.Msg)
-			dnsutil.SetReply(m, r)
+			dnsname.SetReply(m, r)
 			m.Answer = append(m.Answer, &dns.PTR{
 				Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 300},
 				PTR: rdata.PTR{Ptr: "host.example.net."},

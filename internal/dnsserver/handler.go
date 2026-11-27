@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"codeberg.org/miekg/dns"
-	"codeberg.org/miekg/dns/dnsutil"
 	"codeberg.org/miekg/dns/rdata"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/vpn"
@@ -320,7 +319,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			h.Stats.Errors.Add(1)
 			if r != nil && len(r.Question) > 0 {
 				m := new(dns.Msg)
-				dnsutil.SetReply(m, r)
+				dnsname.SetReply(m, r)
 				m.Rcode = dns.RcodeServerFailure
 				_ = h.write(w, m, r, proto)
 			}
@@ -380,7 +379,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			return
 		}
 		refused := getMsg()
-		dnsutil.SetReply(refused, r)
+		dnsname.SetReply(refused, r)
 		refused.Rcode = dns.RcodeRefused
 		_ = h.write(w, refused, r, proto)
 		putMsg(refused)
@@ -445,7 +444,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			return
 		}
 		refused := getMsg()
-		dnsutil.SetReply(refused, r)
+		dnsname.SetReply(refused, r)
 		refused.Rcode = dns.RcodeRefused
 		_ = h.write(w, refused, r, proto)
 		putMsg(refused)
@@ -461,7 +460,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			return
 		}
 		refused := getMsg()
-		dnsutil.SetReply(refused, r)
+		dnsname.SetReply(refused, r)
 		refused.Rcode = dns.RcodeRefused
 		_ = h.write(w, refused, r, proto)
 		putMsg(refused)
@@ -476,7 +475,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			return
 		}
 		refused := getMsg()
-		dnsutil.SetReply(refused, r)
+		dnsname.SetReply(refused, r)
 		refused.Rcode = dns.RcodeRefused
 		_ = h.write(w, refused, r, proto)
 		putMsg(refused)
@@ -546,7 +545,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 				reason = "asn-blocked"
 			}
 			refused := getMsg()
-			dnsutil.SetReply(refused, r)
+			dnsname.SetReply(refused, r)
 			refused.Rcode = dns.RcodeRefused
 			h.record(client, qname, q, action, reason, "", start, refused)
 			out := refused
@@ -608,7 +607,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			return
 		}
 		refused := getMsg()
-		dnsutil.SetReply(refused, r)
+		dnsname.SetReply(refused, r)
 		refused.Rcode = dns.RcodeRefused
 		_ = h.write(w, refused, r, proto)
 		putMsg(refused)
@@ -698,7 +697,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	if h.DHCPHosts != nil {
 		if ips, ok := h.DHCPHosts.LookupHost(q.Name); ok && len(ips) > 0 {
 			m := getMsg()
-			dnsutil.SetReply(m, r)
+			dnsname.SetReply(m, r)
 			m.Authoritative = true
 			for _, ip := range ips {
 				switch {
@@ -738,7 +737,7 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 			if ip := reverseNameIP(q.Name); ip != nil {
 				if host, ok := h.DHCPHosts.LookupPTR(ip.String()); ok {
 					m := getMsg()
-					dnsutil.SetReply(m, r)
+					dnsname.SetReply(m, r)
 					m.Authoritative = true
 					m.Answer = append(m.Answer, &dns.PTR{
 						Hdr: dns.Header{Name: q.Name, Class: dns.ClassINET, TTL: dhcpHostTTL},

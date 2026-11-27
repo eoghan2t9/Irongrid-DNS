@@ -11,6 +11,7 @@ import (
 	"codeberg.org/miekg/dns"
 	"codeberg.org/miekg/dns/dnsutil"
 	"codeberg.org/miekg/dns/rdata"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 )
 
 func TestConnLimiterCapsPerIP(t *testing.T) {
@@ -74,7 +75,7 @@ func startLimitedTCPServer(t *testing.T, max int) string {
 		NotifyStartedFunc: func(context.Context) { close(started) },
 		Handler: dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 			m := new(dns.Msg)
-			dnsutil.SetReply(m, r)
+			dnsname.SetReply(m, r)
 			m.Answer = append(m.Answer, &dns.A{
 				Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
 				A:   rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},

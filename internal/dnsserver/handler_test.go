@@ -45,7 +45,7 @@ func startUDPTestServer(t *testing.T, ip string, delay time.Duration) string {
 			time.Sleep(delay)
 		}
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
 			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
 			A:   rdata.A{Addr: netip.MustParseAddr(ip)},
@@ -148,7 +148,7 @@ func TestHandlerUpstreamQuerySingleOPT(t *testing.T) {
 		optCounts = append(optCounts, n)
 		mu.Unlock()
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -195,7 +195,7 @@ func startUDPCountingServer(t *testing.T, ip string, count *atomic.Int32) string
 	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		count.Add(1)
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
 			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
 			A:   rdata.A{Addr: netip.MustParseAddr(ip)},
@@ -229,7 +229,7 @@ func startSERVFAILServer(t *testing.T) string {
 	started := make(chan struct{})
 	srv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		m.Rcode = dns.RcodeServerFailure
 		_, _ = m.WriteTo(w)
 	})}
@@ -436,7 +436,7 @@ func TestHandlerCoalescesConcurrentIdenticalQueries(t *testing.T) {
 		// so a slowly-scheduled goroutine under CI load still joins).
 		time.Sleep(500 * time.Millisecond)
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
 			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
 			A:   rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
@@ -518,7 +518,7 @@ func TestHandlerCoalescesMergedFailure(t *testing.T) {
 		hits.Add(1)
 		time.Sleep(300 * time.Millisecond) // keep the burst joined
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		m.Rcode = dns.RcodeServerFailure
 		_, _ = m.WriteTo(w)
 	})
@@ -574,7 +574,7 @@ func TestHandlerCoalescesBackgroundResolutions(t *testing.T) {
 		hits.Add(1)
 		time.Sleep(300 * time.Millisecond) // keep the burst joined
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
 			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
 			A:   rdata.A{Addr: netip.MustParseAddr("5.6.7.8")},
@@ -629,7 +629,7 @@ func startCountingSERVFAILServer(t *testing.T, hits *atomic.Int32) string {
 	srv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		hits.Add(1)
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		m.Rcode = dns.RcodeServerFailure
 		_, _ = m.WriteTo(w)
 	})}
@@ -716,7 +716,7 @@ func TestHandlerDoesNotCoalesceDistinctQuestions(t *testing.T) {
 		hits.Add(1)
 		time.Sleep(100 * time.Millisecond) // keep the window open so they'd overlap if merged
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		_, _ = m.WriteTo(w)
 	})
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -825,7 +825,7 @@ func TestHandlerTruncatesOversizedUDPResponse(t *testing.T) {
 	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		_ = r.Unpack()
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		for i := range 8 {
 			m.Answer = append(m.Answer, &dns.TXT{
 				Hdr: dns.Header{Name: fmt.Sprintf("txt%d.example.com.", i), Class: dns.ClassINET, TTL: 60},
@@ -1581,7 +1581,7 @@ func startCNAMETestServer(t *testing.T, owner, target, targetIP string) string {
 	t.Helper()
 	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		m.Answer = append(m.Answer,
 			&dns.CNAME{Hdr: dns.Header{Name: owner, Class: dns.ClassINET, TTL: 60}, Target: target},
 			&dns.A{Hdr: dns.Header{Name: target, Class: dns.ClassINET, TTL: 60}, A: rdata.A{Addr: netip.MustParseAddr(targetIP)}},
@@ -2190,7 +2190,7 @@ func startNXDOMAINServer(t *testing.T) string {
 	t.Helper()
 	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		m.Rcode = dns.RcodeNameError
 		_, _ = m.WriteTo(w)
 	})
@@ -2264,7 +2264,7 @@ func BenchmarkHandlerUpstreamMiss(b *testing.B) {
 	// *testing.B).
 	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
 			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
 			A:   rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},

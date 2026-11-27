@@ -26,6 +26,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -42,6 +43,7 @@ import (
 	"codeberg.org/miekg/dns/svcb"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 )
 
 // ---------- helpers ----------
@@ -106,7 +108,7 @@ func fakeUpstream(t *testing.T, ip string) int {
 	h := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		_ = r.Unpack()
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		if len(r.Question) > 0 && dns.RRToType(r.Question[0]) == dns.TypeA {
 			m.Answer = append(m.Answer, &dns.A{
 				Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
@@ -198,10 +200,13 @@ func bootSmoke(t *testing.T, shared bool) *smokeEnv {
 	env.udp, env.tcp, env.dot, env.doh = freePort(t), freePort(t), freePort(t), freePort(t)
 	env.web = freeTCPPort(t)
 
-	listPath := filepath.Join(work, "blocklist.txt")
-	if err := os.WriteFile(listPath, []byte("0.0.0.0 blocked.smoke.test\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	// The config API only accepts http(s) blocklist URLs (even for lists
+	// already saved), so serve the list over a loopback HTTP server rather
+	// than file://.
+	listSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "0.0.0.0 blocked.smoke.test\n")
+	}))
+	t.Cleanup(listSrv.Close)
 
 	cfg := config.Default()
 	cfg.Server.ListenUDP = fmt.Sprintf("127.0.0.1:%d", env.udp)
@@ -227,7 +232,7 @@ func bootSmoke(t *testing.T, shared bool) *smokeEnv {
 	cfg.Web.Username = "admin"
 	cfg.Web.Password = smokePassword
 	cfg.Filter.AutoUpdate = 0
-	cfg.Filter.Blocklists = []config.BlocklistSpec{{ID: "smoke", Name: "smoke", URL: "file://" + listPath, Enabled: true}}
+	cfg.Filter.Blocklists = []config.BlocklistSpec{{ID: "smoke", Name: "smoke", URL: listSrv.URL + "/blocklist.txt", Enabled: true}}
 	cfgPath := filepath.Join(work, "irongrid.yaml")
 	if err := cfg.Save(cfgPath); err != nil {
 		t.Fatal(err)

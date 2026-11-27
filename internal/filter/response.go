@@ -4,8 +4,8 @@ import (
 	"net/netip"
 
 	"codeberg.org/miekg/dns"
-	"codeberg.org/miekg/dns/dnsutil"
 	"codeberg.org/miekg/dns/rdata"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 )
 
 // BuildBlockResponse crafts the response a blocked query receives.
@@ -17,7 +17,7 @@ func BuildBlockResponse(req *dns.Msg, mode string, ttl uint32) *dns.Msg {
 		return nil
 	}
 	q := req.Question[0]
-	m := dnsutil.SetReply(new(dns.Msg), req)
+	m := dnsname.SetReply(new(dns.Msg), req)
 	m.RecursionAvailable = true
 
 	switch mode {

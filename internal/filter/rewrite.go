@@ -9,6 +9,7 @@ import (
 	"codeberg.org/miekg/dns"
 	"codeberg.org/miekg/dns/dnsutil"
 	"codeberg.org/miekg/dns/rdata"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 )
 
 // RewriteSpec mirrors config.RewriteSpec (see ListSpec for why this package
@@ -126,7 +127,7 @@ func (rw *Rewriter) Lookup(qname string) (rules []RewriteRule, ok bool) {
 // left to the caller to render as an empty NOERROR. A CNAME rule answers any
 // query type, matching normal DNS semantics.
 func BuildAnswer(r *dns.Msg, rules []RewriteRule, qname string, qtype uint16) *dns.Msg {
-	m := dnsutil.SetReply(new(dns.Msg), r)
+	m := dnsname.SetReply(new(dns.Msg), r)
 	m.Authoritative = true
 	hdr := func(ttl uint32) dns.Header {
 		return dns.Header{Name: dnsutil.Fqdn(qname), Class: dns.ClassINET, TTL: ttl}

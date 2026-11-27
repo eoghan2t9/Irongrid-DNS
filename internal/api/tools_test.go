@@ -17,6 +17,7 @@ import (
 	"codeberg.org/miekg/dns/rdata"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
@@ -45,7 +46,7 @@ func zoneHandler(rrs map[string][]dns.RR) dns.Handler {
 	return dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, req *dns.Msg) {
 		_ = req.Unpack()
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, req)
+		dnsname.SetReply(m, req)
 		q := req.Question[0]
 		key := strings.ToLower(q.Header().Name) + "|" + dnsutil.TypeToString(dns.RRToType(q))
 		if got, ok := rrs[key]; ok {
@@ -294,7 +295,7 @@ func startAXFRSrv(t *testing.T, zone string, records []dns.RR, refuse bool) stri
 		_ = req.Unpack()
 		if dns.RRToType(req.Question[0]) != dns.TypeAXFR || refuse {
 			m := new(dns.Msg)
-			dnsutil.SetReply(m, req)
+			dnsname.SetReply(m, req)
 			m.Rcode = dns.RcodeRefused
 			_ = m.Pack()
 			_, _ = m.WriteTo(w)
@@ -302,7 +303,7 @@ func startAXFRSrv(t *testing.T, zone string, records []dns.RR, refuse bool) stri
 		}
 		for _, rr := range records {
 			m := new(dns.Msg)
-			dnsutil.SetReply(m, req)
+			dnsname.SetReply(m, req)
 			m.Authoritative = true
 			m.Answer = []dns.RR{rr}
 			_ = m.Pack()
@@ -563,7 +564,7 @@ func startDelayedUDPDNS(t *testing.T, delay time.Duration) string {
 			_ = req.Unpack()
 			time.Sleep(delay)
 			m := new(dns.Msg)
-			dnsutil.SetReply(m, req)
+			dnsname.SetReply(m, req)
 			m.Answer = []dns.RR{&dns.A{Hdr: dns.Header{Name: req.Question[0].Header().Name, Class: dns.ClassINET, TTL: 300}, A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")}}}
 			_ = m.Pack()
 			_, _ = m.WriteTo(w)

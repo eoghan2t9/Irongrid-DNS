@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/netip"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -27,6 +27,7 @@ import (
 	"github.com/quic-go/quic-go"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cert"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 )
 
 func aQuery() *dns.Msg {
@@ -73,10 +74,10 @@ func serveOneAnswer(conn net.Conn, ip string) {
 			return
 		}
 		resp := new(dns.Msg)
-		dnsutil.SetReply(resp, req)
+		dnsname.SetReply(resp, req)
 		resp.Answer = append(resp.Answer, &dns.A{
 			Hdr: dns.Header{Name: req.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
-			A: rdata.A{Addr: netip.MustParseAddr(ip)},
+			A:   rdata.A{Addr: netip.MustParseAddr(ip)},
 		})
 		if err := resp.Pack(); err != nil {
 			return
@@ -185,14 +186,14 @@ func startDoQTestServer(t *testing.T) (addr string, clientTLS *tls.Config, accep
 						}
 						req := new(dns.Msg)
 						req.Data = reqBytes
-		if err := req.Unpack(); err != nil {
+						if err := req.Unpack(); err != nil {
 							return
 						}
 						resp := new(dns.Msg)
-						dnsutil.SetReply(resp, req)
+						dnsname.SetReply(resp, req)
 						resp.Answer = append(resp.Answer, &dns.A{
 							Hdr: dns.Header{Name: req.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
-							A: rdata.A{Addr: netip.MustParseAddr("9.9.9.9")},
+							A:   rdata.A{Addr: netip.MustParseAddr("9.9.9.9")},
 						})
 						if err := resp.Pack(); err != nil {
 							return
@@ -269,10 +270,10 @@ func TestUDPUpstreamReusesSocket(t *testing.T) {
 	started := make(chan struct{})
 	srv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
 			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
-			A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
+			A:   rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
 		})
 		_, _ = m.WriteTo(w)
 	})}
@@ -398,14 +399,14 @@ func startDoQTestServerWithHang(t *testing.T) (addr string, clientTLS *tls.Confi
 						defer stream.Close()
 						req := new(dns.Msg)
 						req.Data = reqBytes
-		if err := req.Unpack(); err != nil {
+						if err := req.Unpack(); err != nil {
 							return
 						}
 						resp := new(dns.Msg)
-						dnsutil.SetReply(resp, req)
+						dnsname.SetReply(resp, req)
 						resp.Answer = append(resp.Answer, &dns.A{
 							Hdr: dns.Header{Name: req.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
-							A: rdata.A{Addr: netip.MustParseAddr("9.9.9.9")},
+							A:   rdata.A{Addr: netip.MustParseAddr("9.9.9.9")},
 						})
 						if err := resp.Pack(); err != nil {
 							return
@@ -475,11 +476,11 @@ func TestRecursiveUpstreamDispatches(t *testing.T) {
 	started := make(chan struct{})
 	srv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		m.Authoritative = true
 		m.Answer = append(m.Answer, &dns.A{
 			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
-			A: rdata.A{Addr: netip.MustParseAddr("203.0.113.9")},
+			A:   rdata.A{Addr: netip.MustParseAddr("203.0.113.9")},
 		})
 		_, _ = m.WriteTo(w)
 	})}
@@ -605,10 +606,10 @@ func TestDoHRetriesStaleConnection(t *testing.T) {
 		req.Data = body
 		_ = req.Unpack()
 		resp := new(dns.Msg)
-		dnsutil.SetReply(resp, req)
+		dnsname.SetReply(resp, req)
 		resp.Answer = append(resp.Answer, &dns.A{
 			Hdr: dns.Header{Name: req.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
-			A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
+			A:   rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
 		})
 		_ = resp.Pack()
 		packed := resp.Data
@@ -810,7 +811,7 @@ func TestUDPTruncatedFallsBackToTCP(t *testing.T) {
 	started := make(chan struct{})
 	udpSrv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		m.Truncated = true
 		_, _ = m.WriteTo(w)
 	})}
@@ -849,7 +850,7 @@ func TestUDPQueryAdvertisesEDNS1232(t *testing.T) {
 			gotSize.Store(int32(r.UDPSize))
 		}
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		_, _ = m.WriteTo(w)
 	})}
 	go func() { _ = srv.ListenAndServe() }()
@@ -923,10 +924,10 @@ func TestDoHTransportNegotiatesHTTP2(t *testing.T) {
 		req.Data = body
 		_ = req.Unpack()
 		resp := new(dns.Msg)
-		dnsutil.SetReply(resp, req)
+		dnsname.SetReply(resp, req)
 		resp.Answer = append(resp.Answer, &dns.A{
 			Hdr: dns.Header{Name: req.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
-			A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
+			A:   rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
 		})
 		_ = resp.Pack()
 		packed := resp.Data

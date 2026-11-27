@@ -122,7 +122,7 @@ func (h *blockingDNSHandler) ServeDNS(_ context.Context, w dns.ResponseWriter, r
 	}
 	<-h.release
 	m := new(dns.Msg)
-	dnsutil.SetReply(m, r)
+	dnsname.SetReply(m, r)
 	_ = m.Pack()
 	_, _ = w.Write(m.Data)
 }

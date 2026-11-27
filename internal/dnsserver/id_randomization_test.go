@@ -11,6 +11,7 @@ import (
 	"codeberg.org/miekg/dns"
 	"codeberg.org/miekg/dns/dnsutil"
 	"codeberg.org/miekg/dns/rdata"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
@@ -27,7 +28,7 @@ func TestHandlerRandomizesUpstreamQueryIDButRestoresClientID(t *testing.T) {
 	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		upstreamSawID.Store(uint32(r.ID))
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r) // echoes r.ID back, exactly like a real resolver
+		dnsname.SetReply(m, r) // echoes r.ID back, exactly like a real resolver
 		m.Answer = append(m.Answer, &dns.A{
 			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
 			A:   rdata.A{Addr: netip.MustParseAddr("93.184.216.34")},

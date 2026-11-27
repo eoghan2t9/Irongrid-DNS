@@ -11,10 +11,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 	"codeberg.org/miekg/dns"
 	"codeberg.org/miekg/dns/dnsutil"
 	"codeberg.org/miekg/dns/rdata"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
 
 // zoneKey is one test zone's signing key (a single combined KSK/ZSK, flags
@@ -106,7 +107,7 @@ func startDNSSECTestUpstream(t *testing.T, z dnssecTestZones) *upstream.Upstream
 	handler := dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		q := r.Question[0]
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		switch {
 		case q.Header().Name == "." && dns.RRToType(q) == dns.TypeDNSKEY:
 			rrset := []dns.RR{z.root.dnsk}
@@ -150,7 +151,7 @@ func startDNSSECTestUpstreamCounting(t *testing.T, z dnssecTestZones, dnskeyQuer
 	handler := dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		q := r.Question[0]
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		switch {
 		case q.Header().Name == "." && dns.RRToType(q) == dns.TypeDNSKEY:
 			dnskeyQueries.Add(1)

@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"codeberg.org/miekg/dns"
-	"codeberg.org/miekg/dns/dnsutil"
 	"codeberg.org/miekg/dns/rdata"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
@@ -27,7 +27,7 @@ func startCountingUDPTestServer(t *testing.T) (addr string, count *atomic.Int64,
 		qname := r.Question[0].Header().Name
 		lastQname.Store(qname)
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
 			Hdr: dns.Header{Name: qname, Class: dns.ClassINET, TTL: 60},
 			A:   rdata.A{Addr: netip.MustParseAddr("93.184.216.34")},

@@ -191,11 +191,12 @@ func (a *app) reload() error {
 			slog.Error("vpn: reconcile failed", "error", err)
 		}
 	}()
-	mu := a.apiHandler.ConfigMu()
-	mu.Lock()
+	// The caller (Handler.reloadConfig) already holds the config mutex for the
+	// whole reload, so these fields are written under it without re-locking:
+	// sync.Mutex is not reentrant, and taking it again here deadlocked every
+	// POST /api/config/reload.
 	a.apiHandler.Cache = newCache
 	a.apiHandler.Upstreams = newUps
-	mu.Unlock()
 	a.cacheMu.Lock()
 	oldCache := a.cache
 	a.cache = newCache

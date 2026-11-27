@@ -96,7 +96,7 @@ func startFakeServer(t *testing.T, listenAddr string, z *fakeZone) (string, func
 	srv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		qname, qtype := dnsutil.Question(r)
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		name := strings.ToLower(qname)
 		if z.onQuery != nil {
 			z.onQuery(name, qtype)
@@ -303,7 +303,7 @@ func TestResolveQNameMinimizationFallsBackOnUnexpectedResponse(t *testing.T) {
 		qname, qtype := dnsutil.Question(r)
 		name := strings.ToLower(qname)
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		if name == "example.com." && qtype == dns.TypeNS {
 			m.Authoritative = true
 			m.Rcode = dns.RcodeNameError
@@ -740,7 +740,7 @@ func TestResolveCoalescesNSAddressLookups(t *testing.T) {
 		nsHits.Add(1)
 		time.Sleep(300 * time.Millisecond)
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		a, _ := dns.New("ns1.dnshost.invalid. 300 IN A 127.0.0.4")
 		m.Answer = []dns.RR{a}
 		m.Authoritative = true
@@ -900,7 +900,7 @@ func TestResolverAdvertisesEDNS1232(t *testing.T) {
 			gotSize.Store(int32(r.UDPSize))
 		}
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		m.Authoritative = true
 		m.Answer = append(m.Answer, &dns.A{
 			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
@@ -940,7 +940,7 @@ func TestResolverConnPoolReuse(t *testing.T) {
 	started := make(chan struct{})
 	srv := &dns.Server{PacketConn: pc, NotifyStartedFunc: func(context.Context) { close(started) }, Handler: dns.HandlerFunc(func(ctx context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		writeTestMsg(w, m)
 	})}
 	go func() { _ = srv.ListenAndServe() }()

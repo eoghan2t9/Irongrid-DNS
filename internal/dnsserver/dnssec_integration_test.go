@@ -11,6 +11,7 @@ import (
 	"codeberg.org/miekg/dns"
 	"codeberg.org/miekg/dns/dnsutil"
 	"codeberg.org/miekg/dns/rdata"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnssec"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
@@ -99,7 +100,7 @@ func dnssecIntegrationFixture(t *testing.T, tamperA bool) (addr string, anchor d
 	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		q := questionOf(r.Question[0])
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		switch {
 		case q.Name == "." && q.Qtype == dns.TypeDNSKEY:
 			rrset := []dns.RR{root.dnsk}
@@ -205,7 +206,7 @@ func TestHandlerLocalDNSSECValidationFailsOpenOnInfrastructureError(t *testing.T
 	handler := dns.HandlerFunc(func(_ context.Context, w dns.ResponseWriter, r *dns.Msg) {
 		q := questionOf(r.Question[0])
 		m := new(dns.Msg)
-		dnsutil.SetReply(m, r)
+		dnsname.SetReply(m, r)
 		if q.Name == "example." && q.Qtype == dns.TypeA {
 			m.Answer = append(m.Answer, a, aSig)
 			m.AuthenticatedData = true
