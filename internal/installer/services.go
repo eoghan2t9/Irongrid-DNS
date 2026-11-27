@@ -9,8 +9,6 @@ import (
 	"runtime"
 	"strings"
 	"time"
-
-	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
 // writeServiceFiles emits the platform service definition chosen during the
@@ -321,7 +319,6 @@ func writeDockerCompose(w *wizard, dir, configPath string) ([]string, error) {
 	// The compose file lives in deploy/ while the config is one level up,
 	// so the mount path is relative (../<config>).
 	cfgName := filepath.Base(configPath)
-	dfly := tuning.AutoDragonflyFlags()
 	compose := fmt.Sprintf(`services:
   irongrid-dns:
     image: irongrid:latest
@@ -336,26 +333,13 @@ func writeDockerCompose(w *wizard, dir, configPath string) ([]string, error) {
       - "8080:8080/tcp"  # web dashboard + API
     volumes:
       - ../%s:/app/%s:ro
-      - irongrid-data:/data
-    depends_on:
-      - dragonfly
+      - irongrid-data:/data   # query log, response cache, lists, certs
     cap_add:
       - NET_BIND_SERVICE   # allow binding to port 53 as non-root
 
-  dragonfly:
-    image: docker.dragonflydb.io/dragonfly/dragonfly
-    container_name: irongrid-dragonfly
-    restart: unless-stopped
-    command: --cache_mode=true --maxmemory=%s --proactor_threads=%d --port=6379
-    ports:
-      - "127.0.0.1:6379:6379"
-    volumes:
-      - dragonfly-data:/data
-
 volumes:
   irongrid-data:
-  dragonfly-data:
-`, cfgName, cfgName, dfly.MaxMemory, dfly.ProactorThreads)
+`, cfgName, cfgName)
 	f := filepath.Join(dir, "docker-compose.yml")
 	if err := os.WriteFile(f, []byte(compose), 0o600); err != nil {
 		return nil, err
@@ -376,7 +360,7 @@ func (w *wizard) printNextSteps(configPath, dataDir string) {
 
 	if a.deploy == "docker" {
 		fmt.Fprintln(w.out, "  1. Build the image:  docker build -t irongrid .")
-		fmt.Fprintf(w.out, "  2. Start:            cd %s && docker compose up -d\n", filepath.Join(filepath.Dir(configPath), "deploy"))
+		fmt.Fprintf(w.out, "  2. Start:            cd %s && docker compose up -d --remove-orphans\n", filepath.Join(filepath.Dir(configPath), "deploy"))
 		if a.webOnDoHPort {
 			fmt.Fprintln(w.out, "  3. Dashboard:       https://host  (port 443, shared with DoH — login with the credentials you chose)")
 		} else {
@@ -394,14 +378,7 @@ func (w *wizard) printNextSteps(configPath, dataDir string) {
 			fmt.Fprintf(w.out, "  2. Run it manually: %s -config %s -data %s\n", binaryPath(), configPath, dataDir)
 		}
 	default:
-		if w.dflyStarted {
-			fmt.Fprintf(w.out, "  1. ✓ Dragonfly cache running at %s\n", a.cacheAddr)
-		} else if a.deploy == "native" && a.installDragonfly {
-			fmt.Fprintln(w.out, "  1. Dragonfly did not start automatically — run:")
-			fmt.Fprintln(w.out, "       docker run -d --name dragonfly -p 6379:6379 docker.dragonflydb.io/dragonfly/dragonfly")
-		} else {
-			fmt.Fprintf(w.out, "  1. Make sure a Redis-compatible server (e.g. Dragonfly) answers at %s\n", a.cacheAddr)
-		}
+		fmt.Fprintf(w.out, "  1. ✓ Cache and query log are built in (stored under %s)\n", filepath.Join(dataDir, "kv"))
 		if a.service != "none" {
 			fmt.Fprintf(w.out, "  2. Service install attempted (see deploy/ for manual steps if it did not start)\n")
 		} else {

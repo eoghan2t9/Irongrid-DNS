@@ -7,9 +7,8 @@
 # Downloads the latest Irongrid DNS release binary for your platform, verifies
 # its SHA-256 checksum against the published SHA256SUMS.txt, and installs it.
 # It also:
-#   - installs and starts DragonflyDB (the required cache): a native binary +
-#     systemd service on Linux, or a Docker container on macOS/Windows
-#     (Dragonfly publishes no native builds for those platforms)
+#   - removes the old DragonflyDB cache service when upgrading from a release
+#     that needed one (the cache is embedded in the binary now)
 #   - writes a default irongrid.yaml if none exists
 #   - installs Irongrid itself as a startup service when possible
 #     (systemd on Linux, launchd on macOS)
@@ -22,7 +21,8 @@
 #   --no-service        do not install Irongrid as a startup service
 #   --no-wizard         skip the interactive setup wizard (TUI)
 #   --skip-verify       skip checksum verification (not recommended)
-#   --skip-dragonfly    do not install/start Dragonfly
+#   --skip-dragonfly    leave any existing Dragonfly service/container alone
+#                        (default on upgrade: remove the one this installer made)
 #   --configure-resolver point this host's own DNS resolver at Irongrid
 #                        (Linux only, off by default — most installs serve
 #                        other devices on the network rather than the host)
@@ -32,16 +32,13 @@
 #
 # In an interactive terminal the script launches the interactive TUI setup
 # wizard (`irongrid install`), which now handles the whole install itself:
-# Dragonfly, the config, binary placement and the startup service. In
-# non-interactive contexts (piped curl|bash in CI, --no-wizard, or an existing
-# config) the script keeps its built-in Dragonfly + default-config + service
-# steps instead.
+# the config, binary placement and the startup service. In non-interactive
+# contexts (piped curl|bash in CI, --no-wizard, or an existing config) the
+# script keeps its built-in default-config + service steps instead.
 #
 set -euo pipefail
 
 REPO="eoghan2t9/Irongrid-DNS"
-DFLY_REPO="dragonflydb/dragonfly"
-DFLY_IMAGE="docker.dragonflydb.io/dragonfly/dragonfly"
 VERSION=""
 INSTALL_DIR=""
 CONFIG_PATH="irongrid.yaml"
@@ -64,11 +61,10 @@ Irongrid DNS - one-line installer (Linux / macOS, and Windows via Git Bash)
 
   curl -fsSL https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.sh | bash
 
-Installs Irongrid DNS + DragonflyDB (the required cache), writes a default
-config, and installs Irongrid as a startup service:
-  - Linux:    native Dragonfly binary + systemd service
-  - macOS:    Dragonfly in Docker (no native macOS build exists)
-  - Windows:  Dragonfly in Docker (no native Windows build exists)
+Installs Irongrid DNS, writes a default config, and installs Irongrid as a
+startup service. The cache and query log are built in (an embedded store in
+the data directory) - there is nothing else to install. Upgrading from a
+release that used a separate DragonflyDB removes that service for you.
 
 Options:
   --version <tag>     install a specific release tag (default: latest)
@@ -78,7 +74,7 @@ Options:
   --no-service        do not install Irongrid as a startup service
   --no-wizard         skip the interactive setup wizard (TUI)
   --skip-verify       skip checksum verification (not recommended)
-  --skip-dragonfly    do not install/start Dragonfly
+  --skip-dragonfly    leave any existing Dragonfly service/container alone
   --configure-resolver point this host's own DNS resolver at Irongrid
                        (Linux only, off by default — most installs serve
                        other devices on the network rather than the host)
@@ -211,8 +207,8 @@ abs_path() {
 CONFIG_ABS="$(abs_path "$CONFIG_PATH")"
 DATA_ABS="$(abs_path "$DATA_DIR")"
 
-# If the interactive wizard is going to run, it owns Dragonfly, the config and
-# the startup service — the script only has to install the binary. Existing
+# If the interactive wizard is going to run, it owns the config and the
+# startup service — the script only has to install the binary. Existing
 # configs are always left untouched (the wizard is skipped for them).
 CONFIG_EXISTED=0
 [ -f "$CONFIG_ABS" ] && CONFIG_EXISTED=1
@@ -291,259 +287,30 @@ echo "==> installed to $DEST/irongrid${EXT}"
 VERSION_OUT="$("$DEST/irongrid${EXT}" -version 2>/dev/null || true)"
 [ -n "$VERSION_OUT" ] && echo "    $VERSION_OUT"
 
-# ---- Dragonfly: the cache Irongrid requires ----
-# Linux gets a native binary + systemd service. macOS/Windows have no native
-# Dragonfly build, so a Docker container is used when Docker is available.
-DFLY_STARTED=0
-# Auto-compute Dragonfly flags from system specs: 25% of host RAM for
-# maxmemory (clamped to 256mb-32gb), proactor_threads = min(CPUs, 8) floor 2.
-# Dragonfly requires >= 256MiB per proactor thread at startup.
-detect_dragonfly_flags() {
-  local cpus mem_bytes mem_pct maxmem threads min_per_thread=268435456  # 256 MiB
-
-  # CPU count: nproc (Linux), sysctl (macOS), fallback 2
-  cpus=$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)
-  [ "$cpus" -lt 2 ] && cpus=2
-  [ "$cpus" -gt 8 ] && cpus=8
-  threads=$cpus
-
-  # Memory: /proc/meminfo (Linux), sysctl hw.memsize (macOS), fallback 512 MiB
-  if [ -r /proc/meminfo ]; then
-    mem_bytes=$(awk '/^MemTotal:/{print $2 * 1024}' /proc/meminfo 2>/dev/null)
-  elif command -v sysctl >/dev/null 2>&1; then
-    mem_bytes=$(sysctl -n hw.memsize 2>/dev/null)
-  fi
-  [ -z "$mem_bytes" ] || [ "$mem_bytes" -eq 0 ] && mem_bytes=$((512 * 1024 * 1024))
-
-  # 25% of host RAM, clamped to 256 MiB - 32 GiB
-  mem_pct=$((mem_bytes / 4))
-  [ "$mem_pct" -lt $((256 * 1024 * 1024)) ] && mem_pct=$((256 * 1024 * 1024))
-  [ "$mem_pct" -gt $((32 * 1024 * 1024 * 1024)) ] && mem_pct=$((32 * 1024 * 1024 * 1024))
-
-  # Ensure maxmemory >= 256 MiB x proactor_threads
-  min_for_threads=$((threads * min_per_thread))
-  [ "$mem_pct" -lt "$min_for_threads" ] && mem_pct=$min_for_threads
-
-  # Format as "512mb" / "2gb"
-  if [ $((mem_pct % (1024 * 1024 * 1024))) -eq 0 ]; then
-    maxmem="$((mem_pct / (1024 * 1024 * 1024)))gb"
-  else
-    maxmem="$((mem_pct / (1024 * 1024)))mb"
-  fi
-
-  DFLY_MAXMEM="$maxmem"
-  DFLY_THREADS="$threads"
-}
-detect_dragonfly_flags
-
-DFLY_FLAGS="--port=6379 --bind=127.0.0.1 --cache_mode=true --maxmemory=$DFLY_MAXMEM --proactor_threads=$DFLY_THREADS --snapshot_cron=\"0 * * * \"\" --dbfilename=irongrid-dump"
-# In Docker the container must NOT bind to 127.0.0.1 -- docker-proxy reaches
-# the container via its eth0 IP, so --bind would make the published port
-# refuse connections. The host-side -p 127.0.0.1:6379:6379 mapping already
-# keeps the port private.
-# --snapshot_cron + --dbfilename give hourly persistence (the query log and
-# cache survive a hard crash; a graceful restart snapshots anyway).
-DFLY_DOCKER_FLAGS="--port=6379 --cache_mode=true --maxmemory=$DFLY_MAXMEM --proactor_threads=$DFLY_THREADS --snapshot_cron=\"0 * * * \"\" --dbfilename=irongrid-dump"
-
-# 1 if a Redis-compatible server answers PING on the given local port.
-# The read is bounded (-t) so a socket that accepts but is still initialising
-# cannot hang the probe.
-port_answers_redis() {
-  # The reply is "+PONG\r\n"; read -r keeps the trailing CR, so match a
-  # prefix with [[ == ]] instead of exact equality. pong is pre-initialised
-  # so a timed-out read can't hit an unbound-variable error under set -u.
-  local pong=""
-  (exec 3<>"/dev/tcp/127.0.0.1/$1" \
-      && printf 'PING\r\n' >&3 \
-      && IFS= read -t 1 -r pong <&3 \
-      && [[ "$pong" == +PONG* ]]) 2>/dev/null
-}
-# 1 if anything at all is listening on the given local port.
-port_busy() { (exec 3<>"/dev/tcp/127.0.0.1/$1") 2>/dev/null; }
-install_dragonfly() {
-  [ "$SKIP_DRAGONFLY" -eq 1 ] && { echo "==> Dragonfly skipped (--skip-dragonfly)"; return 0; }
-  # If a Redis-compatible server already answers on 6379 (servers often run
-  # Redis/KeyDB/Dragonfly already), just use it — never leave a crash-looping
-  # unit fighting over the port. If it's our own Dragonfly unit specifically,
-  # also check whether its maxmemory/proactor_threads still match this host's
-  # current CPU/RAM (e.g. the box was resized since install) and correct them
-  # — irongrid itself can never do this at runtime (see ValidateDragonfly's
-  # doc comment: its own systemd hardening sandboxes it away from /etc), so
-  # re-running this installer is the supported way to pick up a resize.
-  if port_answers_redis 6379; then
-    if has_root && systemd_available && is_our_dragonfly_unit; then
-      resync_dragonfly_flags
-    else
-      echo "==> a Redis-compatible server already answers on 127.0.0.1:6379 — using it"
-    fi
-    DFLY_STARTED=1
-    return 0
-  fi
-  if port_busy 6379; then
-    echo "!! port 6379 is in use by a process that is not a Redis server."
-    echo "   Set cache.addr to a free port in irongrid.yaml (or free 6379 and re-run)."
-    return 0
-  fi
-  case "$OS" in
-    linux) install_dragonfly_linux ;;
-    darwin|windows) install_dragonfly_docker ;;
-  esac
-}
-
-install_dragonfly_linux() {
-  echo "==> installing Dragonfly (native binary + service) ..."
-  case "$ARCH" in
-    amd64) DFLY_ARCH=x86_64 ;;
-    arm64) DFLY_ARCH=aarch64 ;;
-  esac
-  DFLY_VERSION="$(latest_tag "$DFLY_REPO")" || true
-  if [ -z "$DFLY_VERSION" ]; then
-    echo "!! could not resolve the latest Dragonfly release; falling back to Docker"
-    install_dragonfly_docker
-    return 0
-  fi
-
-  DFLY_URL="https://github.com/$DFLY_REPO/releases/download/$DFLY_VERSION/dragonfly-$DFLY_ARCH.tar.gz"
-  echo "==> downloading Dragonfly $DFLY_VERSION ($DFLY_ARCH) ..."
-  need tar
-  if ! curl -fsSL -o "$TMP/dragonfly.tar.gz" "$DFLY_URL"; then
-    echo "!! native Dragonfly download failed; falling back to Docker"
-    install_dragonfly_docker
-    return 0
-  fi
-  tar -xzf "$TMP/dragonfly.tar.gz" -C "$TMP"
-
-  if has_root; then
-    DFLY_BIN="/usr/local/bin/dragonfly"
-    DFLY_DATA="/var/lib/dragonfly"
-  else
-    DFLY_BIN="$DEST/dragonfly"
-    DFLY_DATA="$HOME/.local/share/dragonfly"
-  fi
-
-  run_root install -m 0755 "$TMP/dragonfly-$DFLY_ARCH" "$DFLY_BIN"
-  run_root mkdir -p "$DFLY_DATA"
-  echo "    $(run_root "$DFLY_BIN" --version 2>/dev/null | head -1 || echo "dragonfly installed")"
-
-  if has_root && systemd_available; then
-    echo "==> installing systemd service ..."
-    # Reset any stale failed/auto-restarting instance before swapping the unit.
-    run_root systemctl stop dragonfly >/dev/null 2>&1 || true
-    run_root systemctl reset-failed dragonfly >/dev/null 2>&1 || true
-    run_root tee /etc/systemd/system/dragonfly.service >/dev/null <<EOF
-[Unit]
-Description=DragonflyDB - Redis-compatible cache for Irongrid DNS
-After=network.target
-
-[Service]
-ExecStart=$DFLY_BIN $DFLY_FLAGS --dir=$DFLY_DATA
-Restart=on-failure
-RestartSec=2
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    run_root systemctl daemon-reload
-    run_root systemctl enable dragonfly >/dev/null 2>&1 || true
-    run_root systemctl restart dragonfly
-    if wait_for_dragonfly; then
-      DFLY_STARTED=1
-      echo "==> Dragonfly service enabled and running (systemctl status dragonfly)"
-    else
-      echo "!! Dragonfly service installed but did not answer PING — check: systemctl status dragonfly"
-    fi
-    return 0
-  fi
-
-  echo "==> starting Dragonfly in the background (no root/systemd service) ..."
-  mkdir -p "$DFLY_DATA"
-  nohup "$DFLY_BIN" $DFLY_FLAGS --dir="$DFLY_DATA" >"$DFLY_DATA/dragonfly.log" 2>&1 &
-  if wait_for_dragonfly; then DFLY_STARTED=1; fi
-}
-
-install_dragonfly_docker() {
-  if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-    echo "==> starting Dragonfly in Docker (no native $OS build exists) ..."
-    docker rm -f dragonfly >/dev/null 2>&1 || true
-    docker run -d --name dragonfly --restart unless-stopped \
-      -p 127.0.0.1:6379:6379 \
-      -v "$DFLY_DATA:/data" \
-      "$DFLY_IMAGE" $DFLY_DOCKER_FLAGS >/dev/null
-    if wait_for_dragonfly; then DFLY_STARTED=1; fi
-  else
-    echo "!! Dragonfly has no native $OS build and Docker was not found."
-    if [ "$OS" = darwin ]; then
-      echo "   Install Docker Desktop: https://www.docker.com/products/docker-desktop/"
-    else
-      echo "   Install Docker Desktop (WSL2 backend): https://www.docker.com/products/docker-desktop/"
-    fi
-    echo "   then run:  docker run -d --name dragonfly --restart unless-stopped -p 127.0.0.1:6379:6379 -v \"\$DFLY_DATA:/data\" $DFLY_IMAGE $DFLY_DOCKER_FLAGS"
-  fi
-}
-
+# ---- upgrades: remove the old Dragonfly cache ----
+# Releases before the embedded cache ran a separate DragonflyDB service. The
+# binary's `cleanup-legacy` command stops and removes only what this installer
+# created (the systemd unit is matched by its Description, containers by name +
+# image); Dragonfly's data directory is always left in place. With root it
+# removes the service directly, otherwise it prints the sudo command to run.
+# --skip-dragonfly leaves everything alone; when the wizard runs it does this
+# itself.
 systemd_available() { [ -d /run/systemd/system ] || command -v systemctl >/dev/null 2>&1; }
 
-# PING over the Redis protocol: a bare TCP connect is not enough — the
-# listen socket can open moments before a startup failure kills the process.
-wait_for_dragonfly() {
-  for _ in $(seq 1 30); do
-    if port_answers_redis 6379; then return 0; fi
-    sleep 0.5
-  done
-  echo "!! Dragonfly did not answer PING on 127.0.0.1:6379 — check its logs"
-  return 1
+remove_legacy_dragonfly() {
+  [ "$SKIP_DRAGONFLY" -eq 1 ] && { echo "==> leaving any existing Dragonfly in place (--skip-dragonfly)"; return 0; }
+  # Older binaries (--version of a pre-embedded release) have no such command.
+  "$DEST/irongrid${EXT}" cleanup-legacy 2>/dev/null || true
 }
 
-# 0 (true) if /etc/systemd/system/dragonfly.service exists and is the unit
-# this installer writes (matched by its Description=), not some unrelated
-# Redis/KeyDB/Dragonfly service an operator already had running on 6379.
-is_our_dragonfly_unit() {
-  [ -f /etc/systemd/system/dragonfly.service ] || return 1
-  grep -q "DragonflyDB - Redis-compatible cache for Irongrid DNS" /etc/systemd/system/dragonfly.service 2>/dev/null
-}
-
-# Re-detects this host's current CPU/RAM and, if our dragonfly.service's
-# maxmemory/proactor_threads have drifted from what that now computes to
-# (e.g. the VM was resized since install), rewrites ExecStart and restarts.
-# A no-op when the flags already match.
-resync_dragonfly_flags() {
-  local unit=/etc/systemd/system/dragonfly.service
-  local cur_exec cur_maxmem cur_threads
-
-  cur_exec="$(grep '^ExecStart=' "$unit" | head -1)"
-  cur_maxmem="$(printf '%s\n' "$cur_exec" | grep -oE -- '--maxmemory=[^ ]+' | cut -d= -f2)"
-  cur_threads="$(printf '%s\n' "$cur_exec" | grep -oE -- '--proactor_threads=[^ ]+' | cut -d= -f2)"
-
-  detect_dragonfly_flags
-  if [ "$cur_maxmem" = "$DFLY_MAXMEM" ] && [ "$cur_threads" = "$DFLY_THREADS" ]; then
-    echo "==> Dragonfly already running with correct flags (maxmemory=$DFLY_MAXMEM proactor_threads=$DFLY_THREADS)"
-    return 0
-  fi
-
-  echo "==> Dragonfly config outdated for this host — updating: maxmemory=${cur_maxmem:-?} -> $DFLY_MAXMEM, proactor_threads=${cur_threads:-?} -> $DFLY_THREADS"
-  run_root sed -i \
-    -e "s/--maxmemory=[^ ]*/--maxmemory=$DFLY_MAXMEM/" \
-    -e "s/--proactor_threads=[^ ]*/--proactor_threads=$DFLY_THREADS/" \
-    "$unit"
-  run_root systemctl daemon-reload
-  run_root systemctl restart dragonfly
-  if wait_for_dragonfly; then
-    echo "==> Dragonfly restarted with corrected flags"
-  else
-    echo "!! Dragonfly did not come back up after the flag update — check: systemctl status dragonfly"
-  fi
-}
-
-if [ "$WIZARD_WILL_RUN" -eq 1 ]; then
-  echo "==> Dragonfly install deferred to the interactive wizard"
-else
-  install_dragonfly
+if [ "$WIZARD_WILL_RUN" -eq 0 ]; then
+  remove_legacy_dragonfly
 fi
 
 # ---- default config ----
 # Write a ready-to-run default config when none exists, so the server can be
-# started straight after installing. cache.addr always points at localhost:6379
-# (where the Dragonfly above is served). When the interactive wizard is about
+# started straight after installing. The cache needs no settings: its embedded
+# store lives under the data directory. When the interactive wizard is about
 # to run, it writes the config itself.
 if [ "$WIZARD_WILL_RUN" -eq 1 ]; then
   echo "==> config will be written by the interactive wizard"
@@ -570,9 +337,6 @@ upstreams:
   - "udp://8.8.8.8:53"
 
 cache:
-  addr: "localhost:6379"       # Dragonfly endpoint (installed by this script)
-  password: ""
-  db: 0
   ttl: 6h
   negative_ttl: 1m
   failure_ttl: 5s
@@ -594,7 +358,7 @@ filter:
   blacklist: []
 
 log:
-  query_log_file: "data/querylog.db"  # legacy; the log lives in Dragonfly (stream irongrid:log)
+  query_log_file: "data/querylog.db"  # legacy; the log lives in the embedded store (<data>/kv)
   retention_days: 30
   verbose: true
 
@@ -906,8 +670,8 @@ else
 fi
 
 # ---- interactive setup wizard (TUI) ----
-# Launch `irongrid install`, which handles the whole install (Dragonfly, the
-# config, binary placement and the startup service). This needs a real
+# Launch `irongrid install`, which handles the whole install (the config,
+# binary placement and the startup service). This needs a real
 # terminal: when piped via `curl | bash` stdin is the (already drained) pipe,
 # so we re-open /dev/tty for the wizard — and when no terminal exists at all
 # (CI, Docker, etc.) we skip it and keep the default config written above.
@@ -928,7 +692,7 @@ run_wizard() {
   fi
   echo
   echo "==> launching the interactive setup wizard ..."
-  echo "    it handles Dragonfly, the config, and the startup service"
+  echo "    it handles the config and the startup service"
   # Re-open stdin from the terminal so the wizard works even when this script
   # was piped via `curl ... | bash`. IMPORTANT: no stderr redirect on this
   # exec — an exec redirection persists for the whole shell, so 2>/dev/null
@@ -937,9 +701,8 @@ run_wizard() {
     echo "!! could not open the terminal - keeping the default config"
     return 0
   fi
-  # The wizard installs Dragonfly itself when asked, so --with-dragonfly is not
-  # passed here (older release binaries don't define that flag anyway).
-  # Propagate the script's skip flags into the wizard.
+  # The wizard removes a leftover Dragonfly service itself (unless
+  # --skip-dragonfly). Propagate the script's skip flags into the wizard.
   export IRONGRID_SKIP_DRAGONFLY=0 IRONGRID_NO_SERVICE=0
   [ "$SKIP_DRAGONFLY" -eq 1 ] && export IRONGRID_SKIP_DRAGONFLY=1
   [ "$INSTALL_SERVICE" -eq 0 ] && export IRONGRID_NO_SERVICE=1
@@ -982,20 +745,11 @@ run_wizard() {
 }
 run_wizard
 
-# If the wizard just ran, reflect whether it left a cache running at 6379.
-if [ "$WIZARD_WILL_RUN" -eq 1 ] && port_answers_redis 6379; then
-  DFLY_STARTED=1
-fi
-
 configure_host_resolver
 
 echo
 echo "Next steps:"
-if [ "$DFLY_STARTED" -eq 1 ]; then
-  echo "  ✓ Dragonfly cache is running on 127.0.0.1:6379"
-else
-  echo "  ! Start Dragonfly (required cache) - see the notes above or docker-compose.yml"
-fi
+echo "  ✓ Cache and query log are built in (stored under $DATA_ABS/kv)"
 if [ -f "$CONFIG_ABS" ]; then
   echo "  ✓ Config: $CONFIG_ABS"
 else

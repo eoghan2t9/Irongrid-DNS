@@ -95,13 +95,6 @@ export default function Updates() {
 
   const install = async (tool) => {
     if (busy) return
-    if (
-      tool.id === 'dragonfly' &&
-      !confirm(
-        `Update Dragonfly to ${tool.latest_version}?\n\nThe cache restarts for a few seconds. Cached answers reload from a snapshot taken just before.`,
-      )
-    )
-      return
     // A running tunnel keeps the old binary until it is relaunched, so the
     // update restarts it (running_version is only set while it is running).
     const tunnelRunning = tool.id === 'cloudflared' && !!tool.running_version
@@ -123,12 +116,6 @@ export default function Updates() {
           return
         }
         say('irongrid', res?.note || 'Installed. Restart Irongrid manually to run the new version.')
-      } else if (tool.id === 'dragonfly') {
-        const res = await api.updatesDragonflyInstall()
-        if (!res.installed) toast(res.note || 'Dragonfly is already up to date')
-        else if (res.restarting) toast(`Dragonfly updated to ${res.running_version || res.new_version}`)
-        else toast(res.note || 'Dragonfly installed — restart it to apply', 'error')
-        if (res.note) say('dragonfly', res.note)
       } else if (tool.id === 'cloudflared') {
         const res = await api.tunnelCheckCloudflaredUpdate(tunnelRunning)
         toast(
@@ -160,21 +147,6 @@ export default function Updates() {
       } else {
         toast(res.note || 'The tunnel was not restarted', 'error')
       }
-      await load()
-    } catch (e) {
-      toast('Restart failed: ' + e.message, 'error')
-    }
-    setBusy('')
-  }
-
-  const restartDragonfly = async () => {
-    if (busy) return
-    if (!confirm('Restart Dragonfly now? The cache is unavailable for a few seconds.')) return
-    setBusy('dragonfly')
-    try {
-      const res = await api.updatesDragonflyRestart()
-      if (res.restarting) toast(`Dragonfly restarted${res.running_version ? ` (${res.running_version})` : ''}`)
-      else toast(res.note || 'Restart did not run', 'error')
       await load()
     } catch (e) {
       toast('Restart failed: ' + e.message, 'error')
@@ -224,11 +196,6 @@ export default function Updates() {
                   <a className="btn tiny ghost" href={t.release_url} target="_blank" rel="noreferrer">
                     Release notes ↗
                   </a>
-                )}
-                {t.restart_pending && t.id === 'dragonfly' && (
-                  <button className="btn small" onClick={restartDragonfly} disabled={!!busy}>
-                    {working ? 'Restarting…' : 'Restart Dragonfly'}
-                  </button>
                 )}
                 {t.restart_pending && t.id === 'cloudflared' && (
                   <button className="btn small" onClick={restartTunnel} disabled={!!busy}>

@@ -35,14 +35,11 @@ func Default() *Config {
 		},
 		UpstreamMode: "race",
 		Cache: CacheConfig{
-			Addr:          "localhost:6379",
-			DB:            0,
-			TTL:           6 * time.Hour,
-			NegativeTTL:   60 * time.Second,
-			L1Entries:     0, // 0 = auto-size the L1 cache from available RAM
-			ServeStale:    5 * time.Minute,
-			Prefetch:      true,
-			LookupTimeout: 150 * time.Millisecond,
+			TTL:         6 * time.Hour,
+			NegativeTTL: 60 * time.Second,
+			L1Entries:   0, // 0 = auto-size the L1 cache from available RAM
+			ServeStale:  5 * time.Minute,
+			Prefetch:    true,
 			// Failure cache is deliberately much shorter than negative_ttl:
 			// a cached SERVFAIL must not keep a recovered upstream invisible
 			// for a full minute. 5s means retries re-probe upstream about as

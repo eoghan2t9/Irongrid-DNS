@@ -387,8 +387,8 @@ func (h *Handler) resolveAndCache(ctx context.Context, q dnsname.Question) error
 		return fmt.Errorf("upstream returned no response")
 	}
 	// The cache write is bounded like the handler's hot path (3s): the
-	// caller's context may be the warmer's whole pass, and a stuck
-	// Dragonfly must not be able to block a worker (or a prefetch) behind
+	// caller's context may be the warmer's whole pass, and a stalled
+	// cache write must not be able to block a worker (or a prefetch) behind
 	// it — the entry is disposable either way.
 	wctx, wcancel := context.WithTimeout(ctx, 3*time.Second)
 	defer wcancel()

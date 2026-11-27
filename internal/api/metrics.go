@@ -21,7 +21,7 @@ import (
 //
 // Deliberately lighter than /api/stats: it skips the query-log stream walk
 // (StatsBundle) entirely, since a Prometheus scrape (typically every
-// 10-15s) should never add load to Dragonfly for data that isn't
+// 10-15s) should never add load to the store for data that isn't
 // itself a metric.
 func (h *Handler) Metrics(ctx context.Context, w http.ResponseWriter) {
 	var b strings.Builder
@@ -64,13 +64,10 @@ func (h *Handler) Metrics(ctx context.Context, w http.ResponseWriter) {
 		writeCounter("irongrid_cache_l1_hits_total", "L1 (in-process) cache hits since restart.", l1h)
 		writeCounter("irongrid_cache_l1_misses_total", "L1 (in-process) cache misses since restart.", l1m)
 		if ls, err := c.L2Stats(ctx); err == nil {
-			writeCounter("irongrid_cache_l2_hits_total", "L2 (Dragonfly) cache hits since Dragonfly started.", ls.Hits)
-			writeCounter("irongrid_cache_l2_misses_total", "L2 (Dragonfly) cache misses since Dragonfly started.", ls.Misses)
-			writeCounter("irongrid_cache_l2_expired_total", "L2 keys expired since Dragonfly started.", ls.Expired)
-			writeCounter("irongrid_cache_l2_evicted_total", "L2 keys evicted for memory pressure since Dragonfly started.", ls.Evicted)
-			writeGauge("irongrid_cache_l2_used_bytes", "L2 memory currently in use.", float64(ls.UsedBytes))
-			writeGauge("irongrid_cache_l2_max_bytes", "L2 configured memory budget.", float64(ls.MaxBytes))
-			writeGauge("irongrid_cache_l2_keys", "L2 key count.", float64(ls.Keys))
+			writeCounter("irongrid_cache_l2_hits_total", "L2 (embedded store) lookups that found a key since restart.", ls.Hits)
+			writeCounter("irongrid_cache_l2_misses_total", "L2 (embedded store) lookups that missed since restart.", ls.Misses)
+			writeGauge("irongrid_cache_l2_used_bytes", "L2 on-disk size.", float64(ls.UsedBytes))
+			writeGauge("irongrid_cache_l2_keys", "L2 key count (approximate).", float64(ls.Keys))
 		}
 	}
 

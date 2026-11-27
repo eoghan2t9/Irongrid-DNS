@@ -266,15 +266,11 @@ type serverPayload struct {
 }
 
 type cachePayload struct {
-	Addr          string `json:"addr"`
-	Password      string `json:"password"`
-	DB            int    `json:"db"`
-	TTL           string `json:"ttl"`
-	NegativeTTL   string `json:"negative_ttl"`
-	L1Entries     int    `json:"l1_entries"`
-	ServeStale    string `json:"serve_stale"`
-	Prefetch      bool   `json:"prefetch"`
-	LookupTimeout string `json:"lookup_timeout"` // cache-read budget on the hot path; "" = default 150ms
+	TTL         string `json:"ttl"`
+	NegativeTTL string `json:"negative_ttl"`
+	L1Entries   int    `json:"l1_entries"`
+	ServeStale  string `json:"serve_stale"`
+	Prefetch    bool   `json:"prefetch"`
 	// FailureTTL is how long a resolution failure is negatively cached as
 	// SERVFAIL; "" = use negative_ttl.
 	FailureTTL string `json:"failure_ttl"`
@@ -417,16 +413,12 @@ func payloadFromConfig(c *config.Config) configPayload {
 			return routes
 		}(),
 		Cache: cachePayload{
-			Addr:          c.Cache.Addr,
-			Password:      c.Cache.Password,
-			DB:            c.Cache.DB,
-			TTL:           c.Cache.TTL.String(),
-			NegativeTTL:   c.Cache.NegativeTTL.String(),
-			L1Entries:     c.Cache.L1Entries,
-			ServeStale:    durationOrEmpty(c.Cache.ServeStale),
-			Prefetch:      c.Cache.Prefetch,
-			LookupTimeout: durationOrEmpty(c.Cache.LookupTimeout),
-			FailureTTL:    durationOrEmpty(c.Cache.FailureTTL),
+			TTL:         c.Cache.TTL.String(),
+			NegativeTTL: c.Cache.NegativeTTL.String(),
+			L1Entries:   c.Cache.L1Entries,
+			ServeStale:  durationOrEmpty(c.Cache.ServeStale),
+			Prefetch:    c.Cache.Prefetch,
+			FailureTTL:  durationOrEmpty(c.Cache.FailureTTL),
 		},
 		Warmer: warmerPayload{
 			Enabled:     c.Warmer.Enabled,
@@ -684,18 +676,17 @@ func parseDurations(bindings []durationBinding) error {
 
 func buildConfigFromPayload(p configPayload) (*config.Config, error) {
 	var (
-		ttl, negTTL, serveStale, lookupTimeout, failureTTL time.Duration
-		recursiveTimeout, blocklistAutoUpdate              time.Duration
-		blockFor, nxWindow, nxBlockFor                     time.Duration
-		rqWindow, rqBlockFor, rqUDPBlockFor                time.Duration
-		geoAutoUpdate, geoUDPBlock                         time.Duration
-		leaseTime, warmerInterval, warmerLookback          time.Duration
+		ttl, negTTL, serveStale, failureTTL       time.Duration
+		recursiveTimeout, blocklistAutoUpdate     time.Duration
+		blockFor, nxWindow, nxBlockFor            time.Duration
+		rqWindow, rqBlockFor, rqUDPBlockFor       time.Duration
+		geoAutoUpdate, geoUDPBlock                time.Duration
+		leaseTime, warmerInterval, warmerLookback time.Duration
 	)
 	if err := parseDurations([]durationBinding{
 		{"cache.ttl", p.Cache.TTL, &ttl},
 		{"cache.negative_ttl", p.Cache.NegativeTTL, &negTTL},
 		{"cache.serve_stale", p.Cache.ServeStale, &serveStale},
-		{"cache.lookup_timeout", p.Cache.LookupTimeout, &lookupTimeout},
 		{"cache.failure_ttl", p.Cache.FailureTTL, &failureTTL},
 		{"recursive.server_timeout", p.Recursive.ServerTimeout, &recursiveTimeout},
 		{"filter.auto_update", p.Filter.AutoUpdate, &blocklistAutoUpdate},
@@ -758,16 +749,12 @@ func buildConfigFromPayload(p configPayload) (*config.Config, error) {
 		UpstreamMode:   p.UpstreamMode,
 		UpstreamRoutes: routes,
 		Cache: config.CacheConfig{
-			Addr:          p.Cache.Addr,
-			Password:      p.Cache.Password,
-			DB:            p.Cache.DB,
-			TTL:           ttl,
-			NegativeTTL:   negTTL,
-			L1Entries:     p.Cache.L1Entries,
-			ServeStale:    serveStale,
-			Prefetch:      p.Cache.Prefetch,
-			LookupTimeout: lookupTimeout,
-			FailureTTL:    failureTTL,
+			TTL:         ttl,
+			NegativeTTL: negTTL,
+			L1Entries:   p.Cache.L1Entries,
+			ServeStale:  serveStale,
+			Prefetch:    p.Cache.Prefetch,
+			FailureTTL:  failureTTL,
 		},
 		TLS: config.TLSConfig{
 			CertFile:           p.TLS.CertFile,
@@ -995,7 +982,6 @@ func (h *Handler) liveApplyConfig(cfg *config.Config, parsedRoutes []dnsserver.U
 	// recursive.server_timeout is a package-level default read at query time
 	// by every recursive:// resolver (existing, reloaded and per-client-group).
 	recursive.SetDefaultServerTimeout(cfg.Recursive.ServerTimeout)
-	h.Cache.SetLookupTimeout(cfg.Cache.LookupTimeout)
 	h.Cfg.Filter.Whitelist = cfg.Filter.Whitelist
 	h.Cfg.Filter.Blacklist = cfg.Filter.Blacklist
 	h.applyUserLists()
@@ -1117,7 +1103,6 @@ func (h *Handler) getConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func redactConfigSecrets(p *configPayload) {
-	p.Cache.Password = ""
 	p.TLS.ACME.DNS01.CloudflareToken = ""
 	p.TLS.ACME.DNS01.DigitalOceanToken = ""
 	p.TLS.ACME.DNS01.HetznerToken = ""

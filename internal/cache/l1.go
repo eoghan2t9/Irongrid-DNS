@@ -9,9 +9,9 @@ import (
 )
 
 // L1 is a small in-process, TTL-based response cache layered in front of the
-// Dragonfly/Redis L2. Cache hits become a single sharded map lookup instead
-// of a network round-trip to Redis — the same design CoreDNS uses (fast
-// in-memory cache, optional shared L2). It is purely an accelerator: entries
+// persistent L2. Cache hits become a single sharded map lookup instead of a
+// store read — the same design CoreDNS uses (fast in-memory cache, optional
+// second tier). It is purely an accelerator: entries
 // are never authoritative and losing it is harmless (it just re-warms from
 // L2).
 const l1Shards = 256
@@ -31,7 +31,7 @@ type l1Key struct {
 // for positive entries) plus its expiry so reads can rebase TTLs. staleUntil
 // extends the entry's life beyond expiry so RFC 8767-style serve-stale can
 // answer from it during an upstream outage; the stale window only ever keeps
-// data that was previously cached locally — Dragonfly expires its copies at
+// data that was previously cached locally — the L2 store expires its copies at
 // the same TTL, so an expired L1 entry is never stale-able again after this
 // window passes and the next cold miss just resolves upstream.
 // ttlOff holds the byte offsets (relative to the packed message, after the

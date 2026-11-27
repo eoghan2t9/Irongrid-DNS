@@ -12,9 +12,7 @@ services:
       - "8080:8080/tcp"  # web dashboard + API
     volumes:
       - ./irongrid.yaml:/app/irongrid.yaml:ro
-      - irongrid-data:/data
-    depends_on:
-      - dragonfly
+      - irongrid-data:/data   # query log, response cache (embedded store), lists, certs
     environment:
       - TZ=UTC
     cap_add:
@@ -33,21 +31,5 @@ services:
         soft: 65536
         hard: 65536
 
-  dragonfly:
-    image: docker.dragonflydb.io/dragonfly/dragonfly
-    container_name: irongrid-dragonfly
-    restart: unless-stopped
-    # --maxmemory must be >= 256MiB per proactor thread (2 x 256MiB = 512mb)
-    command: >-
-      --cache_mode=true
-      --maxmemory=512mb
-      --proactor_threads=2
-      --port=6379
-    ports:
-      - "127.0.0.1:6379:6379"   # only reachable from the host / other containers
-    volumes:
-      - dragonfly-data:/data
-
 volumes:
   irongrid-data:
-  dragonfly-data:

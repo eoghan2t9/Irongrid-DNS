@@ -18,7 +18,7 @@ web:
 build:
 	CGO_ENABLED=0 go build -trimpath -ldflags "$(LDFLAGS)" -o irongrid ./cmd/irongrid
 
-## smoke: boot the real binary against a throwaway Dragonfly and check DNS/DoT/DoH(h2)/dashboard/reload/shutdown
+## smoke: boot the real binary against fake upstreams and check DNS/DoT/DoH(h2)/dashboard/reload/shutdown
 smoke:
 	go test -tags smoke -count=1 -run TestSmoke -v ./cmd/irongrid/
 
@@ -112,7 +112,7 @@ bench-udp-sockets:
 docker:
 	docker compose build
 
-## docker-up: run Irongrid DNS + Dragonfly with docker compose
+## docker-up: run Irongrid DNS with docker compose
 docker-up:
 	docker compose up -d --build
 

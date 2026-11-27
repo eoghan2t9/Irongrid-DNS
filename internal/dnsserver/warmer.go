@@ -40,8 +40,8 @@ const (
 	// auto-refresh goroutine) instead of on the previous — possibly never —
 	// cadence.
 	idleWarmRecheck = time.Hour
-	// warmPassTimeout bounds a single pass so a slow upstream or a stuck
-	// Dragonfly can't tie up the loop (and defer every later pass) for hours.
+	// warmPassTimeout bounds a single pass so a slow upstream or a stalled
+	// cache write can't tie up the loop (and defer every later pass) for hours.
 	// Whatever wasn't warmed is picked up on the next pass.
 	warmPassTimeout = 15 * time.Minute
 )

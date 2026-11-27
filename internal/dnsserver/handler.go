@@ -798,17 +798,15 @@ func (h *Handler) serve(w dns.ResponseWriter, r *dns.Msg, client, proto string) 
 	//    the ID of the original query, so rebase to this request's ID.
 	// Lookup hashes the question once and checks positive then negative
 	// entries, instead of two independent Get/GetNegative calls that each
-	// re-derived the same key. The budget is deliberately short: if
-	// Dragonfly is slow or down, the query must reach the upstream rather
-	// than stall. A hit may also be stale (RFC 8767): an entry past its TTL
+	// re-derived the same key. The L2 read is a local, in-process store
+	// lookup (no network hop), so it needs no timeout of its own. A hit may
+	// also be stale (RFC 8767): an entry past its TTL
 	// but still within its serve-stale window, which we only answer from if
 	// re-resolution below fails.
 	var stale cache.LookupResult
 	if cch != nil && !isMetaQuery(q) {
 		// Lookup is context-free: the L1 hit path allocates nothing, and the
-		// L2 read is bounded by the cache's own lookup budget (see
-		// cache.defaultLookupTimeout), so a slow or down cache tier can't
-		// stall the query. A fresh hit is served straight from the stored
+		// L2 read is a local read of the embedded store. A fresh hit is served straight from the stored
 		// packed bytes — writeRaw patches the query ID and rebases the
 		// answer TTLs in a private copy, so no Unpack and no re-pack ever
 		// happens on the hit path.
@@ -1228,7 +1226,7 @@ func (h *Handler) finishResolve(
 	//    trade-off: on a stream transport the cache write now waits for the
 	//    client write to finish, but DNS responses are small and that write
 	//    virtually never blocks. Zero TTLs fall back to the configured
-	//    Dragonfly cache lifetimes.
+	//    cache lifetimes.
 	if cch != nil && !isMetaQuery(q) {
 		// Bounded by cacheWriteSlots like the failure path above — same
 		// rationale: a miss flood must not spawn unbounded goroutines.

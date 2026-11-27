@@ -5,8 +5,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/kvstore"
 )
+
+// testStore opens an in-memory kvstore that is closed with the test.
+func testStore(tb testing.TB) *kvstore.Store {
+	tb.Helper()
+	st, err := kvstore.Open(kvstore.Options{InMemory: true})
+	if err != nil {
+		tb.Fatalf("kvstore.Open: %v", err)
+	}
+	tb.Cleanup(func() { _ = st.Close() })
+	return st
+}
 
 func entry(domain, action string) Entry {
 	return Entry{
@@ -16,18 +27,18 @@ func entry(domain, action string) Entry {
 	}
 }
 
-// newTestLog starts an in-memory Redis-compatible server (miniredis) and
-// returns a stream-backed Log pointing at it plus the server, so tests can
-// recreate a Log over the same data (mimicking a restart).
-func newTestLog(t *testing.T, retentionDays int) (*Log, *miniredis.Miniredis) {
+// newTestLog opens an in-memory kvstore and returns a stream-backed Log over
+// it plus the store, so tests can recreate a Log over the same data
+// (mimicking a restart).
+func newTestLog(t *testing.T, retentionDays int) (*Log, *kvstore.Store) {
 	t.Helper()
-	mr := miniredis.RunT(t)
-	l, err := New(mr.Addr(), "", 0, retentionDays, 0)
+	store := testStore(t)
+	l, err := New(store, retentionDays, 0)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { _ = l.Close() })
-	return l, mr
+	return l, store
 }
 
 // waitFor polls until n entries are visible or the deadline passes (the
@@ -72,11 +83,11 @@ func TestEntryASNField(t *testing.T) {
 
 // TestRecordFlushesOnClose verifies entries enqueued before Close are flushed
 // to the stream — the final partial batch must not be lost at shutdown — and
-// that a reopened log over the same server sees them.
+// that a reopened log over the same store sees them.
 func TestRecordFlushesOnClose(t *testing.T) {
 	t.Parallel()
-	mr := miniredis.RunT(t)
-	l, err := New(mr.Addr(), "", 0, 30, 0)
+	store := testStore(t)
+	l, err := New(store, 30, 0)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -87,8 +98,8 @@ func TestRecordFlushesOnClose(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Reopen over the same (still running) server and count what persisted.
-	r, err := New(mr.Addr(), "", 0, 30, 0)
+	// Reopen over the same store and count what persisted.
+	r, err := New(store, 30, 0)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
@@ -109,12 +120,11 @@ func TestRecordFlushesOnClose(t *testing.T) {
 
 // BenchmarkQueryLogRecord exercises the full hot-path call: Record's enqueue
 // onto the bounded, drop-on-full entries channel (see logQueueCap) drained
-// by the single runWriter goroutine, backed by a real miniredis instance so
-// the writer actually flushes batches instead of hitting a nil client. Each
+// by the single runWriter goroutine, backed by an in-memory kvstore so the
+// writer actually flushes batches instead of hitting a nil stream. Each
 // parallel iteration logs a distinct domain, mirroring real traffic.
 func BenchmarkQueryLogRecord(b *testing.B) {
-	mr := miniredis.RunT(b)
-	l, err := New(mr.Addr(), "", 0, 30, 0)
+	l, err := New(testStore(b), 30, 0)
 	if err != nil {
 		b.Fatalf("New: %v", err)
 	}
@@ -193,10 +203,9 @@ func TestQueryOrderAndFilters(t *testing.T) {
 	}
 }
 
-// TestWalkStreamStrictBound verifies walkStream's scan bound is enforced
-// inside the page: even when a single page holds more messages than the
-// bound, exactly max messages are handed to the callback — the shared helper
-// behind Query/Stats/Hourly/StatsBundle must never overshoot by a page.
+// TestWalkStreamStrictBound verifies walkStream's scan bound is enforced:
+// exactly max messages are handed to the callback — the shared helper behind
+// Query/Stats/Hourly/StatsBundle must never overshoot.
 func TestWalkStreamStrictBound(t *testing.T) {
 	t.Parallel()
 	l, _ := newTestLog(t, 30)
@@ -205,10 +214,9 @@ func TestWalkStreamStrictBound(t *testing.T) {
 	}
 	waitFor(t, l, 30)
 
-	// Bound of 10 with a page of 1000: the single page holds all 30
-	// messages, yet the loop must see exactly 10.
+	// Bound of 10 over 30 stored messages: the loop must see exactly 10.
 	count := 0
-	for _, err := range l.walkStream(t.Context(), true, "+", "-", 10, 1000) {
+	for _, err := range l.walkStream(t.Context(), true, 0, 10) {
 		if err != nil {
 			t.Fatalf("walkStream: %v", err)
 		}
@@ -220,7 +228,7 @@ func TestWalkStreamStrictBound(t *testing.T) {
 
 	// Breaking out of the loop also stops the walk early.
 	stopped := 0
-	for _, err := range l.walkStream(t.Context(), true, "+", "-", 1000, 1000) {
+	for _, err := range l.walkStream(t.Context(), true, 0, 1000) {
 		if err != nil {
 			t.Fatalf("walkStream early-exit: %v", err)
 		}
@@ -650,8 +658,8 @@ func TestStatsBundleNonstandardWindow(t *testing.T) {
 // the new log's aggregate without any fresh writes.
 func TestAggregateSeededAtStartup(t *testing.T) {
 	t.Parallel()
-	mr := miniredis.RunT(t)
-	l, err := New(mr.Addr(), "", 0, 30, 0)
+	store := testStore(t)
+	l, err := New(store, 30, 0)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -662,7 +670,7 @@ func TestAggregateSeededAtStartup(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	l2, err := New(mr.Addr(), "", 0, 30, 0) // restart over the same stream
+	l2, err := New(store, 30, 0) // restart over the same stream
 	if err != nil {
 		t.Fatalf("New (restart): %v", err)
 	}

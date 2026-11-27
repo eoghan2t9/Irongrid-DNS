@@ -42,11 +42,11 @@ commercial ad-blocking DNS with sub-millisecond local responses.
 
 | ⚡ **Sub-millisecond** | 🛡️ **Ad blocking** | 🌐 **All protocols** | 🕵️ **Private by design** |
 |---|---|---|---|
-| Dragonfly-backed response cache, typical answers served in < 1 ms | hosts, Adblock & wildcard lists with one-click allow-list overrides | DNS over **UDP · TCP · DoT · DoH · DoQ** on one server | `recursive://` resolves from the root servers itself — no third-party resolver ever sees your queries |
+| Built-in response cache (in-memory + embedded on-disk store), typical answers served in < 1 ms | hosts, Adblock & wildcard lists with one-click allow-list overrides | DNS over **UDP · TCP · DoT · DoH · DoQ** on one server | `recursive://` resolves from the root servers itself — no third-party resolver ever sees your queries |
 
 | 📊 **Full dashboard** | 🔐 **TLS made easy** | 🧩 **One binary** | 🐳 **Runs anywhere** |
 |---|---|---|---|
-| Live stats, query log, per-client policy, geo blocking, threat intel | Self-signed or Let's Encrypt auto-issuance (HTTP-01 **and** DNS-01) | Dashboard + ACME compiled in; cloudflared auto-installed and kept updated — no manual installs | Linux, macOS, Windows (static binary) plus Docker + Dragonfly Compose |
+| Live stats, query log, per-client policy, geo blocking, threat intel | Self-signed or Let's Encrypt auto-issuance (HTTP-01 **and** DNS-01) | Dashboard + ACME compiled in; cloudflared auto-installed and kept updated — no manual installs | Linux, macOS, Windows (static binary) plus Docker Compose |
 
 ## Screenshots
 
@@ -75,7 +75,7 @@ hostnames that resolve in the local DNS.
 
 - [Screenshots](#screenshots)
 - [Quick start](#quick-start)
-  - [Dragonfly is included](#dragonfly-is-included)
+  - [The cache is built in](#the-cache-is-built-in)
   - [What the one-line installer does](#what-the-one-line-installer-does)
   - [After installing](#after-installing)
 - [Update in one line](#update-in-one-line)
@@ -85,11 +85,11 @@ hostnames that resolve in the local DNS.
 - [Performance](#performance)
 - [Installation options](#installation-options)
   - [1. Interactive TUI wizard (recommended)](#1-interactive-tui-wizard-recommended)
-  - [2. Docker Compose (Dragonfly included)](#2-docker-compose-dragonfly-included)
+  - [2. Docker Compose](#2-docker-compose)
   - [3. Native (Go 1.26+)](#3-native-go-126)
   - [Dashboard on port 443, shared with DoH](#dashboard-on-port-443-shared-with-doh)
   - [Pre-made blocklist & allow-list presets](#pre-made-blocklist--allow-list-presets)
-  - [Wizard: auto-start Dragonfly](#wizard-auto-start-dragonfly)
+  - [Upgrading from the Dragonfly-based releases](#upgrading-from-the-dragonfly-based-releases)
   - [Scripted / unattended installs](#scripted--unattended-installs)
 - [Built-in updater](#built-in-updater)
 - [Building releases](#building-releases)
@@ -106,10 +106,9 @@ hostnames that resolve in the local DNS.
 ## Quick start
 
 **Linux / macOS** (amd64 & arm64 — downloads the latest release, verifies the
-SHA-256 checksum, installs to `/usr/local/bin`, installs + starts
-**Dragonfly** — the required cache — for you, and then **launches the
+SHA-256 checksum, installs to `/usr/local/bin`, and then **launches the
 interactive setup wizard** so you can configure upstreams, blocklists,
-dashboard login, TLS, and more):
+dashboard login, TLS, and more — there is no separate cache server to set up):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.sh | bash
@@ -122,7 +121,7 @@ followed by the interactive setup wizard):
 irm https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install.ps1 | iex
 ```
 
-**Docker** (compose bundle with Dragonfly included):
+**Docker** (compose bundle — one container, one data volume):
 
 ```bash
 curl -fsSL -o docker-compose.yml https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/docker-compose.yml
@@ -131,41 +130,41 @@ cp irongrid.example.yaml irongrid.yaml
 docker compose up -d
 ```
 
-Or pull the pre-built image straight from GHCR (needs a separate Dragonfly):
+Or pull the pre-built image straight from GHCR (keep a volume on `/data` so the
+cache and query log survive restarts):
 
 ```bash
-docker run -d --name dragonfly --restart unless-stopped \
-  -p 127.0.0.1:6379:6379 \
-  docker.dragonflydb.io/dragonfly/dragonfly --cache_mode=true --maxmemory=512mb --proactor_threads=2
 docker run -d --name irongrid --restart unless-stopped \
   -p 53:53/udp -p 53:53/tcp -p 853:853/tcp -p 853:853/udp -p 443:443/tcp -p 8080:8080 \
   -v "$PWD/irongrid.yaml:/app/irongrid.yaml:ro" \
+  -v irongrid-data:/data \
   ghcr.io/eoghan2t9/irongrid-dns:latest
 ```
 
 > [!NOTE]
-> **DragonflyDB is a hard requirement** — the server refuses to start without
-> it. The one-line installers install and start it for you, so you don't have
-> to think about it.
+> **Nothing else to install.** The response cache and the query log live in an
+> embedded key/value store ([BadgerDB](https://github.com/dgraph-io/badger),
+> pure Go) compiled into the binary and kept in the data directory. Older
+> releases required a separate DragonflyDB server — see
+> [Upgrading from the Dragonfly-based releases](#upgrading-from-the-dragonfly-based-releases).
 
-### Dragonfly is included
+### The cache is built in
 
-The one-line installers set up **DragonflyDB** (the required cache) for you:
+Answers are held in two layers: a fast in-process **L1** map (hits are a single
+sharded lookup) and a persistent **L2** on disk, so the cache — and your recent
+query-log history — is still warm after a restart. The L2 lives in
+`<data>/kv/` (`data/kv/` by default, `/data/kv/` in Docker). There is no address,
+password or port to configure, and no extra process to monitor; the dashboard's
+**Cache** card shows L1/L2 hit rates, size on disk and key count.
 
-| Platform | How Dragonfly is installed |
-|---|---|
-| **Linux** | Native binary from the official Dragonfly release + a **systemd service** (falls back to a background process without root/systemd) |
-| **macOS** | Docker container (`docker run -d --name dragonfly …`) — Dragonfly has no native macOS build |
-| **Windows** | Docker container (WSL2) — Dragonfly has no native Windows build |
-
-It listens on `127.0.0.1:6379`, matching the default `cache.addr` in the
-config. Skip it with `--skip-dragonfly` if you already run a Redis-compatible
-server — a live Redis/KeyDB/Dragonfly on 6379 is detected and used as-is.
+Only one Irongrid process can use a data directory at a time (the store locks
+it), so running a second instance needs its own `-data`.
 
 ### What the one-line installer does
 
 1. Installs the **Irongrid binary** (checksum-verified) to `/usr/local/bin` (or `~/.local/bin`).
-2. Installs and starts **Dragonfly** (see above).
+2. On an upgrade from a Dragonfly-based release, **stops and removes the old
+   Dragonfly service** (see [Upgrading](#upgrading-from-the-dragonfly-based-releases)).
 3. Writes a **default `irongrid.yaml`** (skipped if one already exists).
 4. Installs **Irongrid as a startup service** — systemd on Linux,
    launchd on macOS, an elevated logon scheduled task on Windows
@@ -173,8 +172,8 @@ server — a live Redis/KeyDB/Dragonfly on 6379 is detected and used as-is.
    `--no-service` to skip).
 5. In an interactive terminal, hands the whole install to the **setup
    wizard** (`irongrid install`), which asks you to configure everything and
-   then installs Dragonfly, writes the config, places the binary and installs
-   + starts the startup service itself. Skipped automatically when no
+   then writes the config, places the binary and installs + starts the
+   startup service itself. Skipped automatically when no
    terminal is available, a config already exists, or with `--no-wizard`
    (`-NoWizard` on Windows).
 
@@ -185,28 +184,25 @@ curl -fsSL https://raw.githubusercontent.com/eoghan2t9/Irongrid-DNS/main/install
 ```
 
 > [!TIP]
-> The wizard handles the **whole install** — Dragonfly, the config, binary
+> The wizard handles the **whole install** — the config, binary
 > placement and the startup service — and launches automatically whenever an
 > interactive terminal is detected (it re-opens `/dev/tty`, so it also works
 > when piped via `curl … | bash` from a terminal). In non-interactive
 > contexts (CI, Docker) — or with `--no-wizard` / `-NoWizard` — it is skipped
-> and the installer's built-in Dragonfly + default-config + service steps run
-> instead.
+> and the installer's built-in default-config + service steps run instead.
 
 ### After installing
 
-1. **Dragonfly and the service are already running** — the dashboard is at
+1. **The service is already running** — the dashboard is at
    **http://localhost:8080** (default login `admin` / `irongrid`).
-2. If you finished the wizard, everything is already in place: Dragonfly, the
-   config, and the startup service. Re-run `irongrid install` anytime to
+2. If you finished the wizard, everything is already in place: the
+   config and the startup service. Re-run `irongrid install` anytime to
    reconfigure.
 
 `irongrid install` alone is a complete installer — it asks about deployment
 (Docker Compose or native), listeners, upstreams, blocklists, dashboard
-credentials and TLS, then installs Dragonfly (native binary on Linux, Docker
-on macOS/Windows; an already-running Redis-compatible server is reused),
-writes the config, places the binary and installs + starts the chosen
-startup service (systemd / launchd / Windows task).
+credentials and TLS, then writes the config, places the binary and installs +
+starts the chosen startup service (systemd / launchd / Windows task).
 
 ## Update in one line
 
@@ -222,7 +218,7 @@ startup service (systemd / launchd / Windows task).
 
 | | |
 |---|---|
-| ⚡ **Performance** | DragonflyDB-backed response cache (hard requirement), typical answers served in < 1 ms |
+| ⚡ **Performance** | Two-layer response cache (in-process L1 + persistent embedded L2, no external server), typical answers served in < 1 ms |
 | 🌐 **All protocols** | DNS over **UDP**, **TCP**, **TLS (DoT)**, **HTTPS (DoH, RFC 8484)**, **HTTP/3 (DoH3, RFC 9114)** and **QUIC (DoQ, RFC 9250)** |
 | 🍪 **DNS cookies** | RFC 7873 server cookies on the public UDP/DoQ listeners — an HMAC-signed server cookie bound to the client IP, with forged cookies answered **BADCOOKIE** to blunt off-path spoofing (`server.cookies`, hot-swappable) |
 | 🪪 **DoH client ID** | DoH behind a reverse proxy sees the real client, not the proxy: `server.trusted_proxies` (IPs/CIDRs) widens who may stamp `X-Forwarded-For` beyond loopback/private peers, `server.xff_hop_limit` walks proxy chains (Nth entry from the right), and `server.doh_asn_header` echoes the client's resolved ASN as `X-Irongrid-Client-ASN` on responses |
@@ -231,14 +227,14 @@ startup service (systemd / launchd / Windows task).
 | ✅ **Allow list** | Whitelist entries override *any* blocklist, including IP addresses |
 | 🔎 **Fix a broken site** | Paste a URL; Irongrid scans the page's HTML for the domains your blocklists are blocking and whitelists them in one click |
 | 📜 **Blocklists** | Add unlimited remote/local lists, a global auto-update interval, one-click refresh, curated one-click presets |
-| 🪵 **Full query log** | Every allowed/blocked/cached request with client, reason, upstream, latency — stored in Dragonfly (Redis stream `irongrid:log`), sharing the cache tier |
+| 🪵 **Full query log** | Every allowed/blocked/cached request with client, reason, upstream, latency — stored in the same embedded key/value store as the cache (no separate database) |
 | 📊 **Dashboard** | Modern React UI: live stats, protocol breakdown, top blocked domains, log explorer, live config editing |
 | 🔄 **Built-in updater** | Checks GitHub Releases, pops up the changelog, offers the download |
 | 🔐 **TLS manager** | In-dashboard certificate management: view, generate self-signed, upload CA certs, download — applied live to DoT/DoH/DoQ |
 | 🪪 **Let's Encrypt (ACME)** | Zero-config auto-issuance + renewal for your domains via HTTP-01, or run the dashboard itself over HTTPS (`web_tls`) |
 | 🔗 **Cloudflare Tunnel** | cloudflared runs as a managed subprocess — Irongrid downloads, verifies and updates the binary automatically, no manual install, managed from the dashboard |
 | 📱 **Android Private DNS** | DoT/DoH on your own domain via the tunnel, with auto-generated or custom TLS certificates |
-| 🐳 **Cross-platform** | Linux, macOS, Windows (single static binary) plus Docker + Dragonfly Compose |
+| 🐳 **Cross-platform** | Linux, macOS, Windows (single static binary) plus Docker Compose |
 | 🏠 **Local DNS records** | Answer a domain yourself (`nas.home → 192.168.1.10`) — A/AAAA/CNAME, exact or `*.subtree` wildcard, wins over blocklists and the cache |
 | 🖧 **Built-in DHCP** | Run the LAN's DHCP server (v4 + optional v6): dynamic pool, MAC/DUID-pinned static leases, and client hostnames that resolve in the local DNS (`printer.lan`) with reverse (PTR) answers — dashboard page shows live leases |
 | 🔀 **Split-horizon routes** | `upstream_routes` sends a domain subtree to its own upstream set — e.g. `lan →` your local resolver so internal names never leak to public resolvers; longest match wins, overrides client groups |
@@ -255,12 +251,12 @@ startup service (systemd / launchd / Windows task).
                     │                                                                    │
   UDP:53 ─────────► │  ┌──────────┐   ┌────────────┐   ┌───────────┐   ┌───────────────┐  │
   TCP:53 ─────────► │  │  Listener │──►│  Filter    │──►│  Cache    │──►│  Upstreams    │  │
-  DoT:853 ────────► │  │  (5 protos)│  │  engine    │  │  Dragonfly│  │  udp/tcp/tls/  │  │
-  DoH:443 ────────► │  └──────────┘   └────────────┘  │  (Redis)   │  │  https/quic/   │  │
+  DoT:853 ────────► │  │  (5 protos)│  │  engine    │  │  L1 + L2   │  │  udp/tcp/tls/  │  │
+  DoH:443 ────────► │  └──────────┘   └────────────┘  │  (embedded)│  │  https/quic/   │  │
   DoQ:853 ────────► │                      ▲          │            │  │  recursive     │  │
                     │                      │ whitelist│            │  └───────────────┘  │
                     │                      └──────────┘            │                     │
-                    │         Query log (Dragonfly) ◄────────────────┘                   │
+                    │         Query log (embedded store) ◄───────────┘                   │
                     │  Dashboard (React, embedded) ◄── REST API ◄── cloudflared (managed) │
                     └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -403,12 +399,11 @@ The wizard supports **Linux, macOS, Windows and Docker** targets:
 
 | Choice | What it sets |
 |---|---|
-| Deployment | `docker` (container + bundled Dragonfly) or `native` (binary on this machine) |
+| Deployment | `docker` (container + persistent data volume) or `native` (binary on this machine) |
 | Service manager | systemd unit, launchd plist, Windows elevated logon task (Go binaries don't speak the SCM protocol, so a scheduled task with `/RL HIGHEST` is used instead of `sc.exe`), or none |
 | Protocols | UDP/TCP on :53, DoT on :853, DoH on :443, DoQ on :853 |
 | Dashboard port | Optional: serve the dashboard on the same HTTPS port as DoH (`https://host`, no `:8080` suffix) |
 | Upstreams | Cloudflare, Google, Quad9 presets or custom (`udp://`, `tls://`, `https://`, `quic://`, `recursive://`) |
-| Cache | Dragonfly address (+ optional password) |
 | Blocklists | Pick curated presets: OISD, Hagezi, StevenBlack, AdGuard, EasyList, 1Hosts… |
 | Allow lists | One-click whitelist presets: OS updates, dev/CI, cloud, banking, IoT, news |
 | Dashboard | Web UI username + password (bcrypt-hashed on save) |
@@ -422,7 +417,7 @@ prints the exact install command for your platform:
 - **Windows** — run `deploy/install-irongrid-service.bat` as Administrator (installs an elevated logon scheduled task — plain Go binaries don't implement the SCM protocol, so `sc.exe` would leave the service stuck in START_PENDING; the task runs while you're logged in)
 - **Docker** — `cd deploy && docker compose up -d`
 
-### 2. Docker Compose (Dragonfly included)
+### 2. Docker Compose
 
 ```bash
 cp irongrid.example.yaml irongrid.yaml
@@ -433,10 +428,7 @@ docker compose up -d --build
 ### 3. Native (Go 1.26+)
 
 ```bash
-# 1. Start Dragonfly (Redis protocol) — required
-docker run -d --name dragonfly -p 6379:6379 docker.dragonflydb.io/dragonfly/dragonfly
-
-# 2. Build and run
+# 1. Build and run (the cache and query log are built in — nothing else to start)
 make web      # build the dashboard (embedded into the binary)
 make build    # single binary: ./irongrid
 ./irongrid -config irongrid.yaml -data data
@@ -487,12 +479,30 @@ In the **Blocklists** page, presets appear as quick-add buttons; in the
 **Lists** page, allow-list presets add their domains to the Allow list with one
 click (they override every blocklist).
 
-### Wizard: auto-start Dragonfly
+### Upgrading from the Dragonfly-based releases
 
-`irongrid install --with-dragonfly` probes the configured `cache.addr` and,
-if nothing answers, starts Dragonfly for you (native binary + background
-process on Linux, Docker on macOS/Windows). Combine it with the scripted mode
-for a fully unattended install.
+Earlier releases kept the cache and query log in a separate **DragonflyDB**
+server. That server is gone; what changes when you upgrade:
+
+- **The old Dragonfly service is removed for you.** Re-running the one-line
+  installer (or `irongrid install`) stops and removes the `dragonfly.service`
+  unit and `/usr/local/bin/dragonfly` that the old installer created, plus any
+  Docker container it started (`irongrid-dragonfly` / `dragonfly`). Only things
+  the Irongrid installer itself created are touched — a Redis/KeyDB/Dragonfly of
+  your own is left alone. Pass `--skip-dragonfly` to leave everything as it is,
+  or run the cleanup on its own with `irongrid cleanup-legacy`.
+- **Cached answers and query-log history are not migrated.** The cache simply
+  re-warms; the query log starts empty in the new store. The old Dragonfly data
+  (`/var/lib/dragonfly`, or the `dragonfly-data` Docker volume) is left in place
+  — delete it once you no longer need it.
+- **Config keys are ignored, not rejected.** `cache.addr`, `cache.password`,
+  `cache.db` and `cache.lookup_timeout` in an existing `irongrid.yaml` are
+  dropped the next time the config is saved; nothing needs editing by hand.
+- **Docker Compose:** pull the new `docker-compose.yml` and run
+  `docker compose up -d --remove-orphans` so the leftover `dragonfly` service is
+  removed. Keep the `irongrid-data` volume — it now holds the cache and query
+  log.
+- **Port 6379** is no longer used by Irongrid.
 
 ### Scripted / unattended installs
 
@@ -501,13 +511,13 @@ terminal, and `IRONGRID_ACCESSIBLE=1` forces that mode even on a TTY — which
 makes the installer fully scriptable for CI or unattended provisioning:
 
 ```bash
-printf '2\n4\n0\n0.0.0.0\n1\n\nlocalhost:6379\n\n0\n0\nadmin\ntestpass123\ntestpass123\nlocalhost\ny\n' | \
+printf '2\n4\n0\n0.0.0.0\n1\n\n0\n0\nadmin\ntestpass123\ntestpass123\nlocalhost\ny\n' | \
   IRONGRID_ACCESSIBLE=1 ./irongrid install -config irongrid.yaml -data data
 ```
 
 Each line answers one prompt in order: deployment (1=Docker, 2=Native),
 service manager, protocols, listen address, upstream preset, custom
-upstreams, Dragonfly address/password, blocklists, allow lists, username,
+upstreams, blocklists, allow lists, username,
 password + confirmation, TLS hosts, and the final confirm (`y`). The same
 path is covered by an end-to-end test in `internal/installer`.
 
@@ -569,9 +579,9 @@ written automatically on first launch. Key options:
 | `server.listen_*` | Per-protocol listen addresses; empty string disables |
 | `upstreams` | Forwarders — `udp://`, `tcp://`, `tls://`, `https://`, `quic://`, or `recursive://` (resolves from the root servers itself, no forwarder involved — seeded with IANA's PGP-verified `named.root` hints; see [Recursive resolution](#recursive-resolution-recursive)) |
 | `upstream_routes` | Conditional (split-horizon) forwarding: `[{domain, upstreams}]` — queries for that domain subtree go to its own upstream set instead of the global list (e.g. `lan` → a local resolver so internal names never reach public resolvers). Matches the domain and every subdomain; the longest match wins, and a route overrides both the global upstreams and a client group's upstream override |
-| `cache.addr` | Dragonfly endpoint — **server will not start without it** |
-| `cache.l1_entries` | Per-shard depth of the in-process L1 cache in front of Dragonfly (default `0` = auto-sized from the detected memory ceiling, cgroup-aware; `-1` disables it; `N` = exact per-shard cap). The dashboard's **Dragonfly cache** card shows L1/L2 hit rates and memory live |
-| `log.retention_days` | Query-log retention; old entries are pruned hourly from the Dragonfly stream. The log itself lives in Dragonfly (stream `irongrid:log`) — `log.query_log_file` is kept only for backward compatibility and ignored. **Upgrading from a SQLite-based build:** the log starts fresh in the stream; the old `data/querylog.db` file is left untouched on disk but no longer read |
+| `cache.ttl` / `cache.negative_ttl` | Maximum lifetime of cached positive answers / cached NXDOMAIN and SERVFAIL. The persistent L2 needs no connection settings — it is stored in `<data>/kv/` (the old `cache.addr`, `cache.password`, `cache.db` and `cache.lookup_timeout` keys are ignored and dropped on the next save) |
+| `cache.l1_entries` | Per-shard depth of the in-process L1 cache in front of the on-disk L2 (default `0` = auto-sized from the detected memory ceiling, cgroup-aware; `-1` disables it; `N` = exact per-shard cap). The dashboard's **Cache** card shows L1/L2 hit rates, size on disk and key count live |
+| `log.retention_days` | Query-log retention; old entries are pruned hourly from the embedded store (and expire on their own shortly after). The log lives in the same store as the cache (`<data>/kv/`) — `log.query_log_file` is kept only for backward compatibility and ignored. **Upgrading from a SQLite-based build:** the log starts fresh in the stream; the old `data/querylog.db` file is left untouched on disk but no longer read |
 | `filter.blocklists` | Remote URLs or `file://` paths |
 | `filter.auto_update` | How often every enabled blocklist refreshes — one global interval, not per-list |
 | `filter.whitelist` | Always-allow entries (override blocklists, incl. IPs) |
@@ -725,8 +735,8 @@ The dashboard uses a JSON REST API (HTTP Basic auth):
 
 ```
 GET  /api/status            server, listeners, cache, tunnel, root-hints status + system tuning (fd limit, socket buffers, sysctls, Go runtime)
-GET  /api/stats             counters, protocol split, top blocked, cache (L1 hits/misses + Dragonfly L2 hits/misses/memory/keys), query_today (since-midnight log stats), query_hourly (24 per-hour buckets for the dashboard sparkline)
-GET  /api/log?limit&action&domain&qtype&client   query log (Dragonfly stream, newest first, in-memory filters; client is an exact source-IP match used by the dashboard's click-through top-client rows)
+GET  /api/stats             counters, protocol split, top blocked, cache (L1 hits/misses + L2 hits/misses/disk size/keys), query_today (since-midnight log stats), query_hourly (24 per-hour buckets for the dashboard sparkline)
+GET  /api/log?limit&action&domain&qtype&client   query log (embedded-store stream, newest first, in-memory filters; client is an exact source-IP match used by the dashboard's click-through top-client rows)
 GET  /api/log/hostnames?ips=a,b,c   reverse-DNS (PTR) names for client IPs, cached (positive 1h / negative 15m), resolved via the configured upstreams
 GET  /api/log/asn?ips=a,b,c   BGP/ISP owner (ASN, registrant, prefix) for client IPs, cached 24h, via free RIPEstat — feeds the query log ISP column and the dashboard blocked-clients card
 DELETE /api/log             clear query log
@@ -746,7 +756,7 @@ POST /api/tools/rbl         reputation check of an IPv4 against DNS-based blockl
 POST /api/tools/axfr        zone-transfer (AXFR) check against a domain's nameservers
 POST /api/tools/subdomains  enumerate a domain's subdomains via crt.sh and flag blocked ones
 POST /api/tools/fastest     benchmark the configured + popular public resolvers (1.1.1.1, 8.8.8.8, …) and report latency percentiles
-POST /api/cache/flush       clear Dragonfly cache
+POST /api/cache/flush       clear the L1 and L2 caches
 POST /api/cache/warm        run a cache-warmer pass now (needs warmer enabled)
 GET  /api/rate/blocked      clients currently under an auto-block
 POST /api/rate/unblock      lift an auto-blocked client early
@@ -769,9 +779,7 @@ GET  /api/dhcp/leases       live DHCPv4/v6 leases + static reservations (built-i
 GET  /api/diag/dns?name=…   resolve through your upstreams
 GET  /api/update/check      check GitHub Releases for a newer version + changelog
 GET  /api/update/changelog  changelog for the newest release
-GET  /api/updates           update status for Irongrid, Dragonfly and cloudflared
-POST /api/updates/dragonfly/install  verify + install the latest Dragonfly, then restart it
-POST /api/updates/dragonfly/restart  restart Dragonfly to apply an already-installed binary
+GET  /api/updates           update status for Irongrid and cloudflared
 POST /api/update/install    download + install the newest release (native installs)
 GET  /api/tls               current certificate details (subject, SANs, expiry, fingerprint)
 POST /api/tls/generate      generate a self-signed cert (hosts, key type/bits, validity) and apply it

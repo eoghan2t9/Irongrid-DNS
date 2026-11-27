@@ -155,14 +155,13 @@ warmer:
   concurrency: 8             # parallel upstream resolutions per pass
 
 cache:
-  # Dragonfly is a HARD requirement: the server refuses to start without it.
-  addr: "localhost:6379"
-  password: ""                 # set if Dragonfly requires auth
-  db: 0
+  # The persistent cache tier is an embedded key/value store kept under the
+  # data directory (-data flag, default ./data/kv) — there is nothing to install
+  # or point at. Older configs may still carry addr/password/db; they are ignored.
   ttl: 6h                      # positive answer cache lifetime
   negative_ttl: 1m             # cached NXDOMAIN/SERVFAIL lifetime
-  # In-process L1 cache in front of Dragonfly (an accelerator — hits skip the
-  # Redis round-trip). 0 = auto-sized from the detected memory ceiling (the
+  # In-process L1 cache in front of the on-disk store (an accelerator — hits
+  # skip the store read). 0 = auto-sized from the detected memory ceiling (the
   # default); -1 disables it; N = exact per-shard entry cap.
   l1_entries: 0
   serve_stale: 5m             # RFC 8767: keep entries answerable this long past
@@ -170,9 +169,6 @@ cache:
                               # known good answer instead of SERVFAIL (0 disables)
   prefetch: true              # refresh hot entries in the background just before
                               # they expire, so the next query hits the cache
-  lookup_timeout: 150ms       # max time a cache read may take on the DNS hot path
-                              # before the query proceeds to the upstream
-                              # (0 = built-in 150ms default)
   failure_ttl: 5s             # how long a resolution failure (upstream
                               # unreachable, no stale data) is cached as SERVFAIL so
                               # retries don't re-pay the full per-query timeout
@@ -265,7 +261,7 @@ filter:
   cname_cloaking_protection: false
 
 log:
-  # The query log lives in Dragonfly (stream "irongrid:log"), not a file —
+  # The query log lives in the embedded key/value store (under <data>/kv), not a file —
   # query_log_file is kept only for backward compatibility and is ignored.
   query_log_file: "data/querylog.db"
   retention_days: 30

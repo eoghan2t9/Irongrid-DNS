@@ -26,9 +26,9 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/firewall"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/kvstore"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/recursive"
-	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tunnel"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/version"
@@ -45,7 +45,8 @@ type app struct {
 	configPath string
 	dataDir    string
 
-	dfly      *cache.Cache
+	kv        *kvstore.Store // embedded key/value store: cache L2 + query log
+	cache     *cache.Cache
 	hintsMgr  *recursive.HintsManager
 	upstreams []*upstream.Upstream
 	engine    *filter.Engine
@@ -81,29 +82,35 @@ type app struct {
 	webTLSServing bool
 	redirectMu    sync.Mutex
 	redirectSrv   *http.Server
-	dflyMu        sync.Mutex
+	cacheMu       sync.Mutex
 }
 
-// setupCache connects to Dragonfly, the hard requirement for the DNS cache.
-func (a *app) setupCache() {
-	var err error
-	// ---- Dragonfly cache (hard requirement) ----
-	a.dfly, err = cache.New(a.cfg.Cache.Addr, a.cfg.Cache.Password, a.cfg.Cache.DB, a.cfg.Cache.TTL, a.cfg.Cache.NegativeTTL, a.cfg.Cache.ServeStale, resolveL1Entries(a.cfg.Cache.L1Entries))
+// setupKV opens the embedded key/value store under the data directory. It is
+// opened exactly once per process (the engine locks its directory) and shared
+// by the cache and the query log; main() closes it last, after both have
+// stopped writing.
+func (a *app) setupKV() {
+	dir := filepath.Join(a.dataDir, "kv")
+	kv, err := kvstore.Open(kvstore.Options{Dir: dir})
 	if err != nil {
-		slog.Error("cache init failed — Dragonfly is a hard requirement, start it (see docker-compose.yml) and retry", "error", err)
+		slog.Error("key/value store init failed — is another irongrid instance using this data directory?", "dir", dir, "error", err)
 		os.Exit(1)
 	}
-	// The client is closed by main() at process exit, not here: a defer in
-	// this helper would run as soon as setupCache returns and leave every
-	// later cache call failing with "redis: client is closed".
-	slog.Info("Dragonfly caching enabled", "positive_ttl", a.cfg.Cache.TTL, "negative_ttl", a.cfg.Cache.NegativeTTL)
+	a.kv = kv
+	slog.Info("key/value store opened", "dir", dir, "engine", kv.Version())
+}
 
-	// ---- validate Dragonfly config against system specs ----
-	// Warns (never rewrites or restarts Dragonfly — see ValidateDragonfly's
-	// doc comment) if its maxmemory/proactor_threads don't match what this
-	// host's resources call for, e.g. after a resize. Async since it shells
-	// out to python3 for a Redis INFO call; no reason boot should wait on it.
-	go tuning.ValidateDragonfly(a.cfg.Cache.Addr)
+// setupCache builds the DNS response cache over the embedded store.
+func (a *app) setupCache() {
+	var err error
+	a.cache, err = cache.New(a.kv, a.cfg.Cache.TTL, a.cfg.Cache.NegativeTTL, a.cfg.Cache.ServeStale, resolveL1Entries(a.cfg.Cache.L1Entries))
+	if err != nil {
+		slog.Error("cache init failed", "error", err)
+		os.Exit(1)
+	}
+	// The cache is closed by main() at process exit, not here: a defer in
+	// this helper would run as soon as setupCache returns.
+	slog.Info("caching enabled", "positive_ttl", a.cfg.Cache.TTL, "negative_ttl", a.cfg.Cache.NegativeTTL)
 }
 
 // setupRootHints seeds recursive:// upstreams with the authoritative root hints.
@@ -188,11 +195,12 @@ func (a *app) setupFilter() {
 	}()
 }
 
-// setupQueryLog opens the query log (a Dragonfly stream) and starts its pruner.
+// setupQueryLog opens the query log (a stream in the embedded store) and
+// starts its pruner.
 func (a *app) setupQueryLog() {
 	var err error
-	// ---- query log (Dragonfly stream, same tier as the DNS cache) ----
-	a.ql, err = querylog.New(a.cfg.Cache.Addr, a.cfg.Cache.Password, a.cfg.Cache.DB, a.cfg.Log.RetentionDays, a.cfg.Log.BatchSize)
+	// ---- query log (kvstore stream, same store as the DNS cache) ----
+	a.ql, err = querylog.New(a.kv, a.cfg.Log.RetentionDays, a.cfg.Log.BatchSize)
 	if err != nil {
 		slog.Error("query log init failed", "error", err)
 		os.Exit(1)
@@ -217,7 +225,7 @@ func (a *app) setupTLS() {
 func (a *app) setupHandler() {
 	// ---- DNS handler + listeners ----
 	a.handler = dnsserver.NewHandler(
-		a.engine, a.dfly, a.upstreams, a.ql,
+		a.engine, a.cache, a.upstreams, a.ql,
 		a.cfg.Filter.BlockResponse, a.cfg.Filter.BlockTTL,
 		time.Duration(a.cfg.Server.TimeoutSec)*time.Second,
 	)
@@ -225,10 +233,8 @@ func (a *app) setupHandler() {
 	// before they expire, resolving through the handler's current upstreams
 	// (which reload swaps atomically). Gated on cache.prefetch.
 	if a.cfg.Cache.Prefetch {
-		a.dfly.EnablePrefetch(a.handler.Refresh)
+		a.cache.EnablePrefetch(a.handler.Refresh)
 	}
-	// Cache-read budget on the hot path (cache.lookup_timeout; 0 = default).
-	a.dfly.SetLookupTimeout(a.cfg.Cache.LookupTimeout)
 	// Failure-cache lifetime for unreachable upstreams (cache.failure_ttl;
 	// 0 = use cache.negative_ttl; default 5s so a recovery is visible
 	// quickly).
@@ -492,7 +498,7 @@ func (a *app) setupAPI() {
 		ConfigPath: a.configPath,
 		SaveConfig: saveConfig,
 		WebFS:      webFS,
-		KV:         a.dfly,
+		KV:         a.cache,
 	}
 	a.apiHandler = &api.Handler{
 		Cfg:        a.cfg,
@@ -500,7 +506,7 @@ func (a *app) setupAPI() {
 		SaveConfig: saveConfig,
 		Engine:     a.engine,
 		Lists:      a.lists,
-		Cache:      a.dfly,
+		Cache:      a.cache,
 		Log:        a.ql,
 		DNS:        a.handler,
 		DNSManager: a.dnsMgr,

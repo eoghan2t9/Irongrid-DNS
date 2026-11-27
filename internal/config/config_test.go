@@ -140,7 +140,7 @@ func validBase() *Config {
 			WebListen:  "0.0.0.0:8080",
 			TimeoutSec: 5,
 		},
-		Cache:     CacheConfig{Addr: "localhost:6379", TTL: 6 * 3600e9, NegativeTTL: 60e9},
+		Cache:     CacheConfig{TTL: 6 * 3600e9, NegativeTTL: 60e9},
 		Upstreams: []string{"udp://1.1.1.1:53"},
 		Log:       LogConfig{RetentionDays: 30},
 		Web:       WebConfig{Username: "admin"},

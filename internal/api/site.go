@@ -31,7 +31,7 @@ var siteFetchClient = newSiteScanClient()
 // newSiteScanClient returns an HTTP client whose DialContext refuses
 // connections to loopback, private (RFC 1918 / CGNAT / ULA), link-local,
 // multicast and unspecified addresses — the scanner must not become an SSRF
-// probe into the host's LAN or this very server (Dragonfly, the API, …).
+// probe into the host's LAN or this very server (the API, …).
 // The hostname is resolved once and the validated address dialed directly,
 // so a DNS-rebinding resolver can't hand out a public address for the check
 // and a private one for the connection; the same dial-time check guards every

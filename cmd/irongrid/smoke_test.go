@@ -1,7 +1,8 @@
 //go:build smoke
 
-// Boot smoke test: runs the real irongrid binary end to end against an isolated
-// Dragonfly and fake upstreams, and checks what an operator depends on —
+// Boot smoke test: runs the real irongrid binary end to end against fake
+// upstreams (its embedded store lives in a throwaway data dir), and checks
+// what an operator depends on —
 // plain DNS, DoT, DoH over HTTP/2, the dashboard + API, filtering, an
 // in-process config reload that rebinds listeners, and clean shutdown.
 //
@@ -10,11 +11,10 @@
 //
 //	go test -tags smoke -count=1 -run TestSmoke ./cmd/irongrid/
 //
-// Needs a `dragonfly` binary (PATH, or IRONGRID_SMOKE_DRAGONFLY); skips without
-// one. IRONGRID_SMOKE_BIN reuses a prebuilt binary instead of building one;
+// IRONGRID_SMOKE_BIN reuses a prebuilt binary instead of building one;
 // IRONGRID_SMOKE_PPROF=1 enables /debug/pprof on the test instance.
 // Nothing here touches a running production instance: every port is an
-// ephemeral loopback port and Dragonfly is a private throwaway process.
+// ephemeral loopback port and the data directory is a private temp dir.
 package main
 
 import (
@@ -132,36 +132,6 @@ func fakeUpstream(t *testing.T, ip string) int {
 	return port
 }
 
-func startDragonfly(t *testing.T) string {
-	t.Helper()
-	bin := os.Getenv("IRONGRID_SMOKE_DRAGONFLY")
-	if bin == "" {
-		var err error
-		if bin, err = exec.LookPath("dragonfly"); err != nil {
-			t.Skip("no dragonfly binary (set IRONGRID_SMOKE_DRAGONFLY)")
-		}
-	}
-	port := freeTCPPort(t)
-	dir := t.TempDir()
-	cmd := exec.Command(bin, fmt.Sprintf("--port=%d", port), "--bind=127.0.0.1",
-		"--dir="+dir, "--proactor_threads=1", "--maxmemory=256mb", "--cache_mode=true",
-		"--logtostderr=false", "--alsologtostderr=false", "--log_dir="+dir)
-	if err := cmd.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
-	waitFor(t, "dragonfly", 15*time.Second, func() bool {
-		c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond)
-		if err == nil {
-			c.Close()
-			return true
-		}
-		return false
-	})
-	return addr
-}
-
 func buildBinary(t *testing.T) string {
 	t.Helper()
 	if b := os.Getenv("IRONGRID_SMOKE_BIN"); b != "" {
@@ -219,7 +189,6 @@ const smokePassword = "smoke-pass"
 
 func bootSmoke(t *testing.T, shared bool) *smokeEnv {
 	t.Helper()
-	dflyAddr := startDragonfly(t)
 	bin := buildBinary(t)
 	work := t.TempDir()
 
@@ -253,7 +222,6 @@ func bootSmoke(t *testing.T, shared bool) *smokeEnv {
 		env.webScheme = "https"
 	}
 	cfg.Upstreams = []string{fmt.Sprintf("udp://127.0.0.1:%d", env.upA)}
-	cfg.Cache.Addr = dflyAddr
 	cfg.TLS.CertDir = filepath.Join(work, "certs")
 	cfg.TLS.SelfSignedHosts = []string{"localhost", "127.0.0.1"}
 	cfg.Web.Username = "admin"

@@ -32,7 +32,7 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 )
 
-// KVStore is an optional Dragonfly-backed key/value store for persisting
+// KVStore is an optional embedded key/value store for persisting
 // dashboard enrichment caches and login lockouts across restarts.
 type KVStore interface {
 	GetKV(ctx context.Context, key string) ([]byte, bool)

@@ -14,8 +14,8 @@ import (
 // TestMetricsShape verifies the Prometheus scrape response is well-formed
 // text-exposition format (every metric line preceded by its HELP/TYPE
 // comments) and carries the counters the dashboard's /api/stats also
-// exposes. A local-only cache (no Redis) keeps the test free of a live
-// Dragonfly server — L2 lines are expected to be absent in that case.
+// exposes. A local-only cache (no L2 store) keeps the test free of a real
+// store — L2 lines are expected to be absent in that case.
 func TestMetricsShape(t *testing.T) {
 	t.Parallel()
 	h := &Handler{
@@ -44,7 +44,7 @@ func TestMetricsShape(t *testing.T) {
 			t.Fatalf("metrics output missing %q; got:\n%s", want, body)
 		}
 	}
-	// No Redis client behind the local-only cache, so L2Stats fails and
+	// No L2 store behind the local-only cache, so L2Stats fails and
 	// those series must be omitted rather than emitted as zeros (which
 	// would misreport "L2 is up but idle" instead of "L2 is absent").
 	if strings.Contains(body, "irongrid_cache_l2_hits_total") {

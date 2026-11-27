@@ -15,8 +15,8 @@ import (
 
 // TestGetStatsShape verifies the stats response carries the cache block (L1
 // counters, best-effort L2) and the query_today window that the dashboard's
-// Dragonfly-cache and query-log cards read. A disabled log and local-only
-// cache keep the test free of a live Redis server.
+// cache and query-log cards read. A disabled log and local-only cache keep
+// the test free of a real store.
 func TestGetStatsShape(t *testing.T) {
 	t.Parallel()
 	ql := querylog.NewDisabled(30)

@@ -28,9 +28,9 @@ func (a *app) reload() error {
 	// by an unrelated config problem elsewhere.
 	slog.SetDefault(newLogger(a.cfg.Logging))
 
-	// 1. Cache: connect to the new endpoint first; keep the old one on
-	//    failure so a bad config never takes the server down.
-	newCache, err := cache.New(a.cfg.Cache.Addr, a.cfg.Cache.Password, a.cfg.Cache.DB, a.cfg.Cache.TTL, a.cfg.Cache.NegativeTTL, a.cfg.Cache.ServeStale, resolveL1Entries(a.cfg.Cache.L1Entries))
+	// 1. Cache: build the replacement over the shared store first; keep the
+	//    old one on failure so a bad config never takes the server down.
+	newCache, err := cache.New(a.kv, a.cfg.Cache.TTL, a.cfg.Cache.NegativeTTL, a.cfg.Cache.ServeStale, resolveL1Entries(a.cfg.Cache.L1Entries))
 	if err != nil {
 		return fmt.Errorf("cache: %w", err)
 	}
@@ -124,7 +124,6 @@ func (a *app) reload() error {
 	a.handler.SetBlockPolicy(a.cfg.Filter.BlockResponse, a.cfg.Filter.BlockTTL)
 	a.handler.SetTimeout(time.Duration(a.cfg.Server.TimeoutSec) * time.Second)
 	a.handler.SetFailureTTL(a.cfg.Cache.FailureTTL)
-	newCache.SetLookupTimeout(a.cfg.Cache.LookupTimeout)
 	a.handler.SetRewriter(dnsserver.BuildRewriter(a.cfg.Rewrites))
 	// Reload picks up client-group ASN changes (and the data itself) from
 	// the freshly re-read config, like every other hot knob below.
@@ -197,10 +196,10 @@ func (a *app) reload() error {
 	a.apiHandler.Cache = newCache
 	a.apiHandler.Upstreams = newUps
 	mu.Unlock()
-	a.dflyMu.Lock()
-	oldCache := a.dfly
-	a.dfly = newCache
-	a.dflyMu.Unlock()
+	a.cacheMu.Lock()
+	oldCache := a.cache
+	a.cache = newCache
+	a.cacheMu.Unlock()
 	_ = oldCache.Close()
 
 	// 6. Rebind the web server if its address or TLS mode changed. Shutdown

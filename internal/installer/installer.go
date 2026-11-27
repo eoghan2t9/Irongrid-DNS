@@ -2,10 +2,12 @@
 // install`). It walks the user through listeners, upstreams, cache, blocklist
 // and whitelist presets (from the shared catalog), web credentials and TLS,
 // then completes the whole install: it writes a validated irongrid.yaml,
-// installs and starts Dragonfly (the required cache) when asked, places the
-// binary at the canonical path, writes platform service files (systemd /
-// launchd / Windows service / Docker Compose) and installs + starts the
-// chosen service where possible.
+// places the binary at the canonical path, writes platform service files
+// (systemd / launchd / Windows service / Docker Compose) and installs + starts
+// the chosen service where possible. The response cache and query log live in
+// an embedded key/value store inside the data directory, so there is no cache
+// server to install; upgrades from older versions get their leftover Dragonfly
+// service removed (see RemoveLegacyDragonfly).
 //
 // The wizard renders with the Catppuccin theme on a real TTY and falls back
 // to accessible (line-based) rendering when stdin is not a terminal, which
@@ -35,18 +37,13 @@ type Options struct {
 	DataDir    string    // runtime data directory (querylog, lists, certs)
 	In         io.Reader // wizard input; nil = os.Stdin
 	Out        io.Writer // wizard output; nil = os.Stdout
-	// WithDragonfly forces Dragonfly installation even when the wizard's
-	// "Install and start Dragonfly now?" question is declined. Without it,
-	// the wizard asks (native deployments) whether to install Dragonfly.
-	WithDragonfly bool
 }
 
 // wizard carries the answers plus the IO streams for one interactive run.
 type wizard struct {
-	a           *answers
-	in          io.Reader
-	out         io.Writer
-	dflyStarted bool // a cache answered PING after EnsureDragonfly ran
+	a   *answers
+	in  io.Reader
+	out io.Writer
 }
 
 // answers collects every wizard choice before the config is built.
@@ -57,8 +54,6 @@ type answers struct {
 	listenHost     string
 	upstreamPreset string // "cloudflare" | "google" | "quad9" | "custom"
 	customUpstream string
-	cacheAddr      string
-	cachePass      string
 	blocklists     []string // catalog IDs
 	whitelists     []string // catalog IDs
 	webUser        string
@@ -66,10 +61,9 @@ type answers struct {
 	webConfirm     string
 	// webOnDoHPort serves the dashboard on the same HTTPS port as DoH
 	// (https://host, no :8080 suffix) when DoH is enabled.
-	webOnDoHPort     bool
-	tlsHosts         string
-	installDragonfly bool // native mode: install and start Dragonfly after writing the config
-	confirm          bool
+	webOnDoHPort bool
+	tlsHosts     string
+	confirm      bool
 }
 
 // Run presents the wizard, writes the config and service files, and prints
@@ -100,12 +94,6 @@ func Run(opts Options) error {
 		return err
 	}
 	if err := w.askUpstreams(); err != nil {
-		return err
-	}
-	if err := w.askCache(); err != nil {
-		return err
-	}
-	if err := w.askDragonfly(); err != nil {
 		return err
 	}
 	if err := w.askLists(cat); err != nil {
@@ -153,17 +141,13 @@ func Run(opts Options) error {
 		fmt.Fprintf(w.out, "   Service files written to %s\n", filepath.Dir(files[0]))
 	}
 
-	// Dragonfly: bundled in Docker deployments (in the compose file); on
-	// native deployments it is installed/started when the user opted in (or
-	// --with-dragonfly was passed). An already-running Redis-compatible
-	// server on the address is detected and reused.
-	if w.a.deploy == "native" && (w.a.installDragonfly || opts.WithDragonfly) {
-		fmt.Fprintln(w.out)
-		if err := EnsureDragonfly(cfg.Cache.Addr, w.out); err != nil {
-			fmt.Fprintf(w.out, "  ⚠ Dragonfly: %v\n", err)
-		} else {
-			w.dflyStarted = true
-		}
+	// Upgrades: older versions ran the cache as a separate Dragonfly service.
+	// Remove what their installer created — the cache is embedded now.
+	// IRONGRID_SKIP_PRIVILEGED=1 (tests) keeps this to file generation only;
+	// IRONGRID_SKIP_DRAGONFLY=1 (install.sh --skip-dragonfly) leaves any
+	// existing Dragonfly alone.
+	if w.a.deploy == "native" && os.Getenv("IRONGRID_SKIP_PRIVILEGED") != "1" && os.Getenv("IRONGRID_SKIP_DRAGONFLY") != "1" {
+		RemoveLegacyDragonfly(w.out)
 	}
 
 	// Complete the install: put the binary where the generated service
@@ -213,11 +197,11 @@ func (w *wizard) askBasics() error {
 		huh.NewGroup(
 			huh.NewNote().
 				Title("How will you run Irongrid DNS?").
-				Description("Native runs the single binary on this machine. Docker runs the container alongside a bundled Dragonfly cache."),
+				Description("Native runs the single binary on this machine. Docker runs it as a container with a persistent data volume. Either way the cache and query log are built in — nothing else to install."),
 			huh.NewSelect[string]().
 				Title("Deployment").
 				Options(
-					huh.NewOption("Docker Compose (container + Dragonfly cache)", "docker"),
+					huh.NewOption("Docker Compose (container)", "docker"),
 					huh.NewOption("Native binary (on this machine)", "native"),
 				).
 				Value(&w.a.deploy),
@@ -225,7 +209,7 @@ func (w *wizard) askBasics() error {
 	).Run(); err != nil {
 		return err
 	}
-	// Docker deployments always get a compose file with the bundled cache.
+	// Docker deployments always get a compose file.
 	if w.a.deploy == "docker" {
 		w.a.service = "docker"
 		return nil
@@ -339,73 +323,6 @@ func (w *wizard) askUpstreams() error {
 	).Run()
 }
 
-func (w *wizard) askCache() error {
-	// Docker deployments get the compose service hostname; native gets localhost.
-	addrDefault := "localhost:6379"
-	if w.a.deploy == "docker" {
-		addrDefault = "dragonfly:6379"
-	}
-	return w.newForm(
-		huh.NewGroup(
-			huh.NewNote().
-				Title("Dragonfly cache").
-				Description("Irongrid DNS uses a Dragonfly (Redis-compatible) server as its response cache — it is a hard requirement. In Docker mode the installer adds it to the compose file automatically."),
-			huh.NewInput().
-				Title("Dragonfly address").
-				Placeholder(addrDefault).
-				Value(&w.a.cacheAddr).
-				Validate(func(s string) error {
-					if strings.TrimSpace(s) == "" {
-						return fmt.Errorf("dragonfly address is required")
-					}
-					return nil
-				}), huh.NewInput().
-				Title("Dragonfly password").
-				Description("Leave empty if Dragonfly has no auth.").
-				Placeholder("(optional)").
-				EchoMode(huh.EchoModePassword).
-				Value(&w.a.cachePass),
-		),
-	).Run()
-}
-
-// askDragonfly offers to install and start Dragonfly (native deployments
-// only). Docker deployments bundle Dragonfly in the compose file, so there is
-// nothing to install on the host.
-func (w *wizard) askDragonfly() error {
-	if w.a.deploy != "native" {
-		w.a.installDragonfly = false
-		return nil
-	}
-	// The one-line installer sets IRONGRID_SKIP_DRAGONFLY=1 for
-	// --skip-dragonfly (the user runs their own cache).
-	if os.Getenv("IRONGRID_SKIP_DRAGONFLY") == "1" {
-		w.a.installDragonfly = false
-		return nil
-	}
-	addr := w.a.cacheAddr
-	if addr == "" {
-		addr = "localhost:6379"
-	}
-	install := true
-	if err := w.newForm(
-		huh.NewGroup(
-			huh.NewConfirm().
-				Title("Install and start Dragonfly now?").
-				Description("Irongrid DNS needs a Redis-compatible cache answering at " + addr + ". " +
-					"The installer can download and start Dragonfly for you (native binary on Linux, " +
-					"Docker on macOS/Windows). Choose no if you already run a Redis-compatible server there.").
-				Affirmative("Install Dragonfly").
-				Negative("I already have a cache").
-				Value(&install),
-		),
-	).Run(); err != nil {
-		return err
-	}
-	w.a.installDragonfly = install
-	return nil
-}
-
 func (w *wizard) askLists(cat *catalog.Catalog) error {
 	blockOpts := make([]huh.Option[string], 0, len(cat.Blocklists))
 	for _, b := range cat.Blocklists {
@@ -494,11 +411,7 @@ func (w *wizard) askConfirm() error {
 	fmt.Fprintf(&summary, "Service    : %s\n", a.service)
 	fmt.Fprintf(&summary, "Protocols  : %s\n", strings.Join(a.protos, ", "))
 	fmt.Fprintf(&summary, "Upstreams  : %s\n", strings.Join(a.upstreams(), ", "))
-	cacheLine := a.cacheAddr
-	if a.deploy == "native" && a.installDragonfly {
-		cacheLine += " (Dragonfly will be installed & started)"
-	}
-	fmt.Fprintf(&summary, "Cache      : %s\n", cacheLine)
+	fmt.Fprintf(&summary, "Cache      : built in (stored in the data directory)\n")
 	fmt.Fprintf(&summary, "Blocklists : %d selected\n", len(a.blocklists))
 	fmt.Fprintf(&summary, "Whitelists : %d presets\n", len(a.whitelists))
 	dashURL := "http://host:8080"
@@ -567,11 +480,6 @@ func (a *answers) buildConfig(cat *catalog.Catalog) (*config.Config, error) {
 	}
 
 	cfg.Upstreams = a.upstreams()
-
-	if a.cacheAddr != "" {
-		cfg.Cache.Addr = a.cacheAddr
-	}
-	cfg.Cache.Password = a.cachePass
 
 	// Map selected catalog presets onto the filter config.
 	blockByID := make(map[string]catalog.Blocklist, len(cat.Blocklists))

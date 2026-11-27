@@ -5,25 +5,23 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
 )
 
-func updatesHandler(cacheAddr string) *Handler {
-	cfg := &config.Config{}
-	cfg.Cache.Addr = cacheAddr
-	return &Handler{Cfg: cfg, Version: "v1.0.0"}
+func updatesHandler() *Handler {
+	return &Handler{Cfg: &config.Config{}, Version: "v1.0.0"}
 }
 
-// TestGetUpdatesShape verifies the combined status lists Irongrid and Dragonfly
-// (cloudflared is omitted without a tunnel manager) and that an unreachable
-// upstream is reported per tool instead of failing the whole response. A
-// cancelled context makes every release lookup fail fast, offline.
+// TestGetUpdatesShape verifies the combined status lists only Irongrid
+// (cloudflared is omitted without a tunnel manager, and the cache is embedded
+// so there is nothing else to update) and that an unreachable upstream is
+// reported per tool instead of failing the whole response. A cancelled
+// context makes every release lookup fail fast, offline.
 func TestGetUpdatesShape(t *testing.T) {
 	t.Parallel()
-	h := updatesHandler("dragonfly:6379")
+	h := updatesHandler()
 
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
@@ -42,8 +40,8 @@ func TestGetUpdatesShape(t *testing.T) {
 	for _, tool := range out.Tools {
 		byID[tool.ID] = tool
 	}
-	if len(byID) != 2 || byID["irongrid"].ID == "" || byID["dragonfly"].ID == "" {
-		t.Fatalf("tools = %+v, want irongrid + dragonfly only", out.Tools)
+	if len(byID) != 1 || byID["irongrid"].ID == "" {
+		t.Fatalf("tools = %+v, want irongrid only", out.Tools)
 	}
 	if byID["irongrid"].Current != "v1.0.0" {
 		t.Fatalf("irongrid current = %q, want v1.0.0", byID["irongrid"].Current)
@@ -53,39 +51,14 @@ func TestGetUpdatesShape(t *testing.T) {
 	}
 }
 
-// TestManagedDragonflyBinRefusesRemoteCache verifies Irongrid will not offer to
-// swap a binary on this machine when the cache lives elsewhere (for example
-// Docker Compose's internal "dragonfly" host).
-func TestManagedDragonflyBinRefusesRemoteCache(t *testing.T) {
-	t.Parallel()
-	for _, addr := range []string{"dragonfly:6379", "redis://10.0.0.5:6379", "cache.example.net:6379"} {
-		bin, why := updatesHandler(addr).managedDragonflyBin()
-		if bin != "" || !strings.Contains(why, "not this machine") {
-			t.Fatalf("addr %q: bin=%q why=%q, want refusal for a non-local cache", addr, bin, why)
-		}
-	}
-}
-
-func TestDragonflyInstallRefusedForRemoteCache(t *testing.T) {
-	t.Parallel()
-	h := updatesHandler("dragonfly:6379")
-	for _, path := range []string{"/api/updates/dragonfly/install", "/api/updates/dragonfly/restart"} {
-		rr := httptest.NewRecorder()
-		h.HandleAPI(rr, httptest.NewRequest(http.MethodPost, path, nil))
-		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "not this machine") {
-			t.Fatalf("POST %s = %d %s, want 400 refusal", path, rr.Code, rr.Body.String())
-		}
-	}
-}
-
-// TestUpdatesRoutesRejectWrongMethod keeps the install endpoints POST-only and
-// the status endpoint GET-only.
+// TestUpdatesRoutesRejectWrongMethod keeps the status endpoint GET-only, and
+// confirms the removed Dragonfly endpoints are really gone.
 func TestUpdatesRoutesRejectWrongMethod(t *testing.T) {
 	t.Parallel()
-	h := updatesHandler("dragonfly:6379")
+	h := updatesHandler()
 	for _, tc := range []struct{ method, path string }{
-		{http.MethodGet, "/api/updates/dragonfly/install"},
-		{http.MethodGet, "/api/updates/dragonfly/restart"},
+		{http.MethodPost, "/api/updates/dragonfly/install"},
+		{http.MethodPost, "/api/updates/dragonfly/restart"},
 		{http.MethodPost, "/api/updates"},
 	} {
 		rr := httptest.NewRecorder()

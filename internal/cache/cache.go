@@ -1,6 +1,6 @@
-// Package cache provides the DNS response cache backed by Dragonfly
-// (Redis protocol). Dragonfly is a hard dependency: the server refuses to
-// start when it cannot be reached.
+// Package cache provides the DNS response cache: a fast in-process L1 in
+// front of a persistent L2 held in the embedded kvstore (BadgerDB), so cached
+// answers survive restarts without any external cache server.
 package cache
 
 import (
@@ -8,31 +8,22 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log/slog"
-	"net"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"codeberg.org/miekg/dns"
-	"github.com/redis/rueidis"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/kvstore"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
 
-// defaultLookupTimeout is the budget for the L2 (Dragonfly) read on the DNS
-// hot path when the config leaves cache.lookup_timeout at 0. Dragonfly is an
-// accelerator, not the source of truth: if it can't answer within this
-// budget the query proceeds straight to the upstream instead of stalling
-// behind a slow or down cache tier.
-const defaultLookupTimeout = 150 * time.Millisecond
-
 // l2Write is one queued L2 cache write: a key, its value and TTL. The hot
-// path enqueues these and a single writer goroutine commits them to
-// Dragonfly in pipelined batches, so a cache miss costs one channel send
-// instead of a fresh goroutine plus one Redis round trip per write.
+// path enqueues these and a pool of writer goroutines commits them to the
+// store in batches, so a cache miss costs one channel send instead of a
+// store transaction per write.
 type l2Write struct {
 	key string
 	val []byte
@@ -41,7 +32,7 @@ type l2Write struct {
 
 // writeQueueCap bounds the pending-write queue. The enqueue path never
 // blocks on it: when the queue is full the write falls back to a
-// synchronous SET — batching is a throughput optimization, never a reason to
+// synchronous write — batching is a throughput optimization, never a reason to
 // drop a cache entry. Derived from the tuned core count (tuning.ScaleByCores)
 // so a fast box that misses often doesn't fall back to synchronous writes
 // far more often than the batching path was meant to allow.
@@ -51,28 +42,21 @@ const (
 	// writeBatchSize flushes the writer once this many writes have queued.
 	writeBatchSize = 256
 	// writeFlushInterval is the maximum age of a queued write before the
-	// writer commits it in one pipelined round trip. 20ms keeps writes
+	// writer commits it in one batch. 20ms keeps writes
 	// visible almost immediately while still coalescing bursts.
 	writeFlushInterval = 20 * time.Millisecond
-	// writeFlushTimeout bounds each pipelined flush so a stuck Dragonfly
-	// can't wedge the writer goroutine.
-	writeFlushTimeout = 2 * time.Second
 )
 
 // Cache is a two-layer response cache: a fast in-process L1 in front of the
-// Dragonfly/Redis L2. The L2 is authoritative for the fleet (and survives
-// restarts); the L1 makes local hits a pure map lookup.
+// persistent kvstore L2. The L2 survives restarts; the L1 makes local hits a
+// pure map lookup. The store is owned by the caller (it is shared with the
+// query log), so Close never closes it.
 type Cache struct {
-	client      rueidis.Client
+	store       *kvstore.Store
 	l1          *l1Cache // carries the serve-stale window (l1Cache.staleTTL)
 	prefix      string
 	ttl         time.Duration
 	negativeTTL time.Duration
-	// lookupTimeout bounds the L2 read on the lookup path (see
-	// defaultLookupTimeout); 0 means the default. Set via SetLookupTimeout
-	// (config live-apply, from the API goroutine) and read lock-free on the
-	// hot path — an atomic keeps that race-free.
-	lookupTimeout atomic.Int64 // nanoseconds
 
 	// prefetch, when set, is invoked in the background for hot positive
 	// entries near the end of their cache lifetime so the next query finds a
@@ -90,10 +74,10 @@ type Cache struct {
 	prefetchMu     sync.RWMutex
 	prefetchWG     sync.WaitGroup
 
-	// L2 write batching: Set/SetNegative enqueue their Dragonfly writes and
-	// a pool of writer goroutines commits them in pipelined batches (see
+	// L2 write batching: Set/SetNegative enqueue their store writes and
+	// a pool of writer goroutines commits them in batches (see
 	// runWriter), so the per-write cost on the miss path is one channel
-	// send instead of a Dragonfly round trip. writes is sharded by question
+	// send instead of a store transaction. writes is sharded by question
 	// hash (writeShard) the same way l1Cache shards reads — writes for a
 	// given key always land on the same shard, preserving per-key ordering,
 	// while different keys parallelize across shards instead of serializing
@@ -103,10 +87,15 @@ type Cache struct {
 	wdone   chan struct{}
 	wwg     sync.WaitGroup
 	wclosed atomic.Bool
-	// lastWriteErr rate-limits the batch-write failure log line so a down
-	// Dragonfly can't spam the journal (the writer flushes on a ticker even
-	// when nothing is queued).
+	// lastWriteErr rate-limits the batch-write failure log line so a failing
+	// store can't spam the journal.
 	lastWriteErr atomic.Int64
+
+	// keyCount memoizes the L2 key count shown on the dashboard: counting is
+	// O(keys), so the 10s status poll must not trigger it every time.
+	keyCountMu  sync.Mutex
+	keyCountAt  time.Time
+	keyCountVal int64
 
 	// l1Hits/l1Misses count lookups answered (or missed) by the in-process
 	// L1 layer since process start, for the dashboard's cache card. They are
@@ -122,8 +111,8 @@ func (c *Cache) initPrefetch() {
 }
 
 // NewLocalOnly returns a Cache backed only by the in-process L1 layer, with
-// no Dragonfly connection — for tests in other packages that need a working
-// Cache without standing up a real Redis-compatible server. serveStale is
+// no L2 store — for tests in other packages that need a working Cache without
+// opening a kvstore. serveStale is
 // the RFC 8767 stale window (0 disables serve-stale); prefetch is off until
 // EnablePrefetch is called.
 func NewLocalOnly(ttl, negativeTTL time.Duration, l1Entries int, serveStale time.Duration) *Cache {
@@ -132,42 +121,27 @@ func NewLocalOnly(ttl, negativeTTL time.Duration, l1Entries int, serveStale time
 	return c
 }
 
-// New connects to Dragonfly. It returns an error if the instance is
-// unreachable, enforcing the hard dependency. l1Entries is the per-shard
-// capacity of the in-process L1 cache; <= 0 disables the L1 layer. The
-// "auto" sizing (config 0) is resolved at the call site via AutoPerShard,
-// which needs the tuning package's memory detection. serveStale is how long
-// an L1 entry remains answerable past its expiry (RFC 8767); 0 disables
-// serve-stale.
-func New(addr, password string, db int, ttl, negativeTTL, serveStale time.Duration, l1Entries int) (*Cache, error) {
-	client, err := connectUntilReady(rueidis.ClientOption{
-		InitAddress:      []string{addr},
-		Password:         password,
-		SelectDB:         db,
-		Dialer:           net.Dialer{Timeout: 5 * time.Second},
-		ConnWriteTimeout: 5 * time.Second,
-		DisableCache:     true,
-	}, pingLoadingBudget)
-	if err != nil {
-		return nil, fmt.Errorf("dragonfly cache unreachable at %s: %w", addr, err)
+// New builds a cache over an open kvstore. store must stay open for the
+// cache's lifetime and is not closed by Close. l1Entries is the per-shard
+// capacity of the in-process L1 cache; <= 0 disables the L1 layer. The "auto"
+// sizing (config 0) is resolved at the call site via AutoPerShard, which needs
+// the tuning package's memory detection. serveStale is how long an L1 entry
+// remains answerable past its expiry (RFC 8767); 0 disables serve-stale.
+func New(store *kvstore.Store, ttl, negativeTTL, serveStale time.Duration, l1Entries int) (*Cache, error) {
+	if store == nil {
+		return nil, fmt.Errorf("cache: a kvstore is required")
 	}
-
-	// Sanity check that the connected server is actually Dragonfly or Redis.
-	infoCtx, infoCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	info, err := client.Do(infoCtx, client.B().Info().Section("server").Build()).ToString()
-	infoCancel()
-	if err != nil {
-		client.Close()
-		return nil, fmt.Errorf("dragonfly cache info failed: %w", err)
+	if err := store.Ping(); err != nil {
+		return nil, fmt.Errorf("cache store unavailable: %w", err)
 	}
-	slog.Info("cache connected", "server", summarizeServerInfo(info))
+	slog.Info("cache store ready", "engine", store.Version())
 
 	var l1 *l1Cache
 	if l1Entries > 0 {
 		l1 = newL1(l1Entries, serveStale)
 	}
 	c := &Cache{
-		client:      client,
+		store:       store,
 		l1:          l1,
 		prefix:      "irongrid:dns:",
 		ttl:         ttl,
@@ -178,44 +152,12 @@ func New(addr, password string, db int, ttl, negativeTTL, serveStale time.Durati
 	return c, nil
 }
 
-// pingLoadingBudget bounds how long New retries a Dragonfly instance that
-// reports it is still loading its dataset from disk — a normal, transient
-// state right after Dragonfly itself starts (e.g. both processes launched
-// together at boot). Any other ping failure (wrong address, auth, refused
-// connection) still fails immediately below.
-const pingLoadingBudget = 20 * time.Second
-
-// connectUntilReady connects and pings, retrying on a "LOADING" response for
-// up to budget before giving up (rueidis also runs HELLO/AUTH inside NewClient,
-// which Dragonfly rejects with LOADING while restoring). Any non-LOADING error
-// returns immediately.
-func connectUntilReady(opt rueidis.ClientOption, budget time.Duration) (rueidis.Client, error) {
-	deadline := time.Now().Add(budget)
-	for {
-		client, err := rueidis.NewClient(opt)
-		if err == nil {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			err = client.Do(ctx, client.B().Ping().Build()).Error()
-			cancel()
-			if err == nil {
-				return client, nil
-			}
-			client.Close()
-		}
-		if !strings.Contains(err.Error(), "LOADING") || time.Now().After(deadline) {
-			return nil, err
-		}
-		slog.Warn("dragonfly still loading dataset, retrying", "error", err)
-		time.Sleep(500 * time.Millisecond)
-	}
-}
-
 // writerShardCount is how many parallel L2 write-behind goroutines run.
 // A single writer's throughput is bounded by how fast one goroutine can
 // build and flush batches — roughly writeBatchSize/writeFlushInterval
 // writes/sec, regardless of how large writeQueueCap is raised — so on a big
-// box under heavy miss traffic that ceiling is reached well before Dragonfly
-// or the network has any trouble keeping up. Derived from the tuned core
+// box under heavy miss traffic that ceiling is reached well before the
+// disk has any trouble keeping up. Derived from the tuned core
 // count like the other hot-path pools.
 func writerShardCount() int {
 	return tuning.ScaleByCores(1, 1, 16)
@@ -230,10 +172,10 @@ func (c *Cache) writeShard(h uint64) chan l2Write {
 }
 
 // startWriter launches the batched L2 writer pool (see writerShardCount).
-// Only called when there is a real L2 (client != nil); the LocalOnly test
+// Only called when there is a real L2 (store != nil); the LocalOnly test
 // cache has no writer, and its Set/SetNegative skip the L2 path entirely.
 func (c *Cache) startWriter() {
-	if c.client == nil {
+	if c.store == nil {
 		return
 	}
 	n := writerShardCount()
@@ -248,36 +190,29 @@ func (c *Cache) startWriter() {
 }
 
 // enqueueL2 queues a write for the batched writer pool, falling back to a
-// direct synchronous SET when the writer hasn't started, is shutting down,
+// direct synchronous write when the writer hasn't started, is shutting down,
 // or the target shard's queue is full — batching is an optimization and
 // must never lose an entry. h is the question hash (already computed by the
 // caller) used to pick the shard; it need not match the key being written
 // (the caller ensures it does).
-func setCmd(client rueidis.Client, key string, val []byte, ttl time.Duration) rueidis.Completed {
-	if ttl > 0 {
-		return client.B().Set().Key(key).Value(rueidis.BinaryString(val)).Ex(ttl).Build()
-	}
-	return client.B().Set().Key(key).Value(rueidis.BinaryString(val)).Build()
-}
-
-func (c *Cache) enqueueL2(ctx context.Context, h uint64, key string, val []byte, ttl time.Duration) {
-	if c.client == nil {
+func (c *Cache) enqueueL2(h uint64, key string, val []byte, ttl time.Duration) {
+	if c.store == nil {
 		return
 	}
 	if c.writes == nil || c.wclosed.Load() {
-		_ = c.client.Do(ctx, setCmd(c.client, key, val, ttl)).Error()
+		_ = c.store.Set(key, val, ttl)
 		return
 	}
 	select {
 	case c.writeShard(h) <- l2Write{key: key, val: val, ttl: ttl}:
 	default:
-		_ = c.client.Do(ctx, setCmd(c.client, key, val, ttl)).Error()
+		_ = c.store.Set(key, val, ttl)
 	}
 }
 
 // runWriter drains write shard `shard`, committing batches of writeBatchSize
 // or everything queued every writeFlushInterval, whichever comes first — one
-// pipelined Dragonfly round trip per flush instead of one per write. Each
+// store transaction per flush instead of one per write. Each
 // shard runs fully independently: a slow flush on one shard never blocks
 // writes routed to another. Close() signals via wdone so every shard commits
 // whatever is still queued before exiting. The writes channels are
@@ -323,50 +258,34 @@ func (c *Cache) runWriter(shard int) {
 	}
 }
 
-// writeBatchL2 commits queued writes to Dragonfly in a single pipelined
-// round trip. A failed flush drops the batch — the entries just re-warm on
-// the next miss — and logs at most once a minute so a down cache tier can't
-// spam the journal.
+// writeBatchL2 commits queued writes to the store in one batch. A failed
+// flush drops the batch — the entries just re-warm on the next miss — and
+// logs at most once a minute so a failing store can't spam the journal.
 func (c *Cache) writeBatchL2(batch []l2Write) {
-	if c.client == nil || len(batch) == 0 {
+	if c.store == nil || len(batch) == 0 {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), writeFlushTimeout)
-	defer cancel()
-	cmds := make([]rueidis.Completed, len(batch))
+	ws := make([]kvstore.Write, len(batch))
 	for i := range batch {
-		cmds[i] = setCmd(c.client, batch[i].key, batch[i].val, batch[i].ttl)
+		ws[i] = kvstore.Write{Key: batch[i].key, Val: batch[i].val, TTL: batch[i].ttl}
 	}
-	for _, res := range c.client.DoMulti(ctx, cmds...) {
-		if err := res.Error(); err != nil {
-			now := time.Now().UnixNano()
-			last := c.lastWriteErr.Load()
-			if last == 0 || now-last > int64(time.Minute) {
-				c.lastWriteErr.Store(now)
-				slog.Error("cache L2 batch write failed", "entries", len(batch), "error", err)
-			}
-			break
+	if err := c.store.SetBatch(ws); err != nil {
+		now := time.Now().UnixNano()
+		last := c.lastWriteErr.Load()
+		if last == 0 || now-last > int64(time.Minute) {
+			c.lastWriteErr.Store(now)
+			slog.Error("cache L2 batch write failed", "entries", len(batch), "error", err)
 		}
 	}
 }
 
-func summarizeServerInfo(info string) string {
-	server := strings.ToLower(info)
-	switch {
-	case strings.Contains(server, "dragonfly"):
-		return "DragonflyDB"
-	case strings.Contains(server, "redis_version"):
-		return "Redis-compatible server"
-	default:
-		return "unknown Redis-protocol server"
-	}
-}
-
-// Close stops the batched writer (committing whatever is queued) and then
-// terminates the connection pool. Safe to call more than once: the CAS
-// guarantees only the first caller shuts the writer down, and enqueueL2
-// racing the shutdown sees wclosed and falls back to a direct synchronous
-// SET instead of sending on a channel the writer has stopped draining.
+// Close stops the batched writer (committing whatever is queued). It does not
+// close the kvstore, which the caller owns (it is shared with the query log
+// and must outlive a cache swap on config reload). Safe to call more than
+// once: the CAS guarantees only the first caller shuts the writer down, and
+// enqueueL2 racing the shutdown sees wclosed and falls back to a direct
+// synchronous write instead of sending on a channel the writer has stopped
+// draining.
 func (c *Cache) Close() error {
 	c.prefetchMu.Lock()
 	firstClose := c.wclosed.CompareAndSwap(false, true)
@@ -381,148 +300,85 @@ func (c *Cache) Close() error {
 			c.wwg.Wait()
 		}
 	}
-	if c.client != nil {
-		c.client.Close()
-	}
 	return nil
 }
 
-// Ping returns an error if the cache is not reachable right now.
-func (c *Cache) Ping(ctx context.Context) error {
-	return c.client.Do(ctx, c.client.B().Ping().Build()).Error()
+// Ping returns an error if the L2 store is not usable right now.
+func (c *Cache) Ping(context.Context) error {
+	if c == nil || c.store == nil {
+		return fmt.Errorf("no L2 cache")
+	}
+	return c.store.Ping()
 }
 
-// GetKV reads a raw value from Dragonfly (returns nil, false on miss, error,
-// or when running local-only without an L2 client).
-func (c *Cache) GetKV(ctx context.Context, key string) ([]byte, bool) {
-	if c == nil || c.client == nil {
+// GetKV reads a raw value from the store (returns nil, false on miss, error,
+// or when running local-only without an L2 store).
+func (c *Cache) GetKV(_ context.Context, key string) ([]byte, bool) {
+	if c == nil || c.store == nil {
 		return nil, false
 	}
-	b, err := c.client.Do(ctx, c.client.B().Get().Key(c.prefix+key).Build()).AsBytes()
-	if err != nil {
-		return nil, false
-	}
-	return b, true
+	b, _, ok := c.store.Get(c.prefix + key)
+	return b, ok
 }
 
-// SetKV writes a raw value to Dragonfly with ttl. Best-effort; errors are
+// SetKV writes a raw value to the store with ttl. Best-effort; errors are
 // ignored and calls on a local-only cache are no-ops.
-func (c *Cache) SetKV(ctx context.Context, key string, val []byte, ttl time.Duration) {
-	if c == nil || c.client == nil {
+func (c *Cache) SetKV(_ context.Context, key string, val []byte, ttl time.Duration) {
+	if c == nil || c.store == nil {
 		return
 	}
-	_ = c.client.Do(ctx, setCmd(c.client, c.prefix+key, val, ttl)).Error()
+	_ = c.store.Set(c.prefix+key, val, ttl)
 }
 
-// DelKV removes a key from Dragonfly. Best-effort; calls on a local-only
+// DelKV removes a key from the store. Best-effort; calls on a local-only
 // cache are no-ops.
-func (c *Cache) DelKV(ctx context.Context, key string) {
-	if c == nil || c.client == nil {
+func (c *Cache) DelKV(_ context.Context, key string) {
+	if c == nil || c.store == nil {
 		return
 	}
-	_ = c.client.Do(ctx, c.client.B().Del().Key(c.prefix+key).Build()).Error()
+	_ = c.store.Delete(c.prefix + key)
 }
 
-// Stats returns basic usage counters for the dashboard.
-func (c *Cache) Stats(ctx context.Context) (map[string]string, error) {
-	info, err := c.client.Do(ctx, c.client.B().Info().Section("stats").Build()).ToString()
-	if err != nil {
-		return nil, err
-	}
-	out := map[string]string{}
-	for line := range strings.SplitSeq(info, "\n") {
-		line = strings.TrimSpace(line)
-		if i := strings.Index(line, ":"); i > 0 {
-			out[strings.TrimSpace(line[:i])] = strings.TrimSpace(line[i+1:])
-		}
-	}
-	return out, nil
-}
-
-// L2Stats is a snapshot of Dragonfly's cumulative keyspace counters plus its
-// current memory and key count. Hits/misses/expired/evicted are cumulative
-// since the Dragonfly process started, not since this Irongrid process.
+// L2Stats is a snapshot of the persistent tier: lookup counters since this
+// process started, its on-disk footprint and its (approximate) key count.
 type L2Stats struct {
 	Hits      int64
 	Misses    int64
-	Expired   int64
-	Evicted   int64
 	UsedBytes int64
-	MaxBytes  int64
 	Keys      int64
 }
 
-// L2Stats fetches the live Dragonfly INFO counters and DBSIZE.
-func (c *Cache) L2Stats(ctx context.Context) (L2Stats, error) {
+// keyCountTTL is how long a counted L2 key total is reused: counting walks
+// every key, and the dashboard polls every few seconds.
+const keyCountTTL = 30 * time.Second
+
+// L2Stats reads the store's counters. The key count walks the keyspace, so it
+// is memoized for keyCountTTL.
+func (c *Cache) L2Stats(context.Context) (L2Stats, error) {
 	var s L2Stats
-	if c.client == nil {
+	if c == nil || c.store == nil {
 		return s, fmt.Errorf("no L2 cache")
 	}
-	info, err := c.client.Do(ctx, c.client.B().Info().Build()).ToString()
-	if err != nil {
-		return s, err
+	st := c.store.Stats()
+	s.Hits, s.Misses, s.UsedBytes = st.Hits, st.Misses, st.DiskBytes
+
+	c.keyCountMu.Lock()
+	if time.Since(c.keyCountAt) > keyCountTTL {
+		c.keyCountVal = c.store.CountPrefix(c.prefix)
+		c.keyCountAt = time.Now()
 	}
-	fields := map[string]*int64{
-		"keyspace_hits":   &s.Hits,
-		"keyspace_misses": &s.Misses,
-		"expired_keys":    &s.Expired,
-		"evicted_keys":    &s.Evicted,
-		"used_memory":     &s.UsedBytes,
-		"maxmemory":       &s.MaxBytes,
-	}
-	for line := range strings.SplitSeq(info, "\n") {
-		line = strings.TrimSpace(line)
-		if i := strings.Index(line, ":"); i > 0 {
-			if dst, ok := fields[strings.TrimSpace(line[:i])]; ok {
-				if v, err := strconv.ParseInt(strings.TrimSpace(line[i+1:]), 10, 64); err == nil {
-					*dst = v
-				}
-			}
-		}
-	}
-	if n, err := c.client.Do(ctx, c.client.B().Dbsize().Build()).AsInt64(); err == nil {
-		s.Keys = n
-	}
+	s.Keys = c.keyCountVal
+	c.keyCountMu.Unlock()
 	return s, nil
 }
 
-// ServerVersion returns the release tag of the running L2 server (e.g.
-// "v2.0.2" for Dragonfly), parsed from INFO's dragonfly_version/redis_version
-// field, or "" when it reports neither. It reflects the process that is
-// actually running, which differs from the binary on disk after an update
-// that has not been restarted yet.
-func (c *Cache) ServerVersion(ctx context.Context) (string, error) {
-	if c.client == nil {
-		return "", fmt.Errorf("no L2 cache")
-	}
-	info, err := c.client.Do(ctx, c.client.B().Info().Section("server").Build()).ToString()
-	if err != nil {
-		return "", err
-	}
-	var redisVer string
-	for line := range strings.SplitSeq(info, "\n") {
-		k, v, ok := strings.Cut(strings.TrimSpace(line), ":")
-		if !ok {
-			continue
-		}
-		switch k {
-		case "dragonfly_version":
-			// "df-v2.0.2" -> "v2.0.2"
-			return strings.TrimPrefix(v, "df-"), nil
-		case "redis_version":
-			redisVer = v
-		}
-	}
-	return redisVer, nil
-}
-
-// Snapshot asks the L2 server to write its dataset to disk now, so a restart
-// (for example after a binary update) reloads a current copy.
-func (c *Cache) Snapshot(ctx context.Context) error {
-	if c.client == nil {
+// Sync flushes the L2 store's buffered writes to disk now, so a restart
+// reloads a current copy.
+func (c *Cache) Sync(context.Context) error {
+	if c == nil || c.store == nil {
 		return fmt.Errorf("no L2 cache")
 	}
-	return c.client.Do(ctx, c.client.B().Save().Build()).Error()
+	return c.store.Sync()
 }
 
 // L1Counters returns the in-process cache layer's hit/miss counts since
@@ -531,26 +387,12 @@ func (c *Cache) L1Counters() (hits, misses int64) {
 	return c.l1Hits.Load(), c.l1Misses.Load()
 }
 
-// SetLookupTimeout hot-swaps the L2 read budget (config live-apply); <= 0
-// restores the built-in default.
-func (c *Cache) SetLookupTimeout(d time.Duration) {
-	c.lookupTimeout.Store(int64(d))
-}
-
-// budget returns the effective L2 read budget for the lookup path.
-func (c *Cache) budget() time.Duration {
-	if d := time.Duration(c.lookupTimeout.Load()); d > 0 {
-		return d
-	}
-	return defaultLookupTimeout
-}
-
 // ---- key handling ----
 
 // keyHash is a fast, deterministic 64-bit fingerprint of a question. It must
-// stay deterministic across processes and restarts since Dragonfly is a
-// shared L2 cache for the whole fleet — unlike hash/maphash's per-process
-// random seed, FNV-1a gives every instance the same key for the same query.
+// stay deterministic across processes and restarts since the persistent L2
+// outlives the process — unlike hash/maphash's per-process random seed,
+// FNV-1a gives every run the same key for the same query.
 // SHA-256 bought nothing here (this is a private cache namespace, not
 // adversarial input) and cost real CPU on every single query; hashing the
 // name byte-by-byte also skips the strings.ToLower + concatenation
@@ -660,7 +502,7 @@ func skipPackedName(msg []byte, off int) (int, bool) {
 const cacheEntryPrefixLen = 8
 
 // Get returns a cached response for q, or nil when absent/expired. The L1
-// memory cache is consulted first; L2 (Dragonfly) only on an L1 miss, and a
+// memory cache is consulted first; L2 (the embedded store) only on an L1 miss, and a
 // hit is then re-warmed into L1.
 func (c *Cache) Get(ctx context.Context, q dnsname.Question) *dns.Msg {
 	return c.getPositive(ctx, keyHash(q))
@@ -668,7 +510,7 @@ func (c *Cache) Get(ctx context.Context, q dnsname.Question) *dns.Msg {
 
 func (c *Cache) getPositive(ctx context.Context, h uint64) *dns.Msg {
 	if c.l1 == nil {
-		if raw, _, ok := c.l2Get(ctx, c.msgKey(h)); ok {
+		if raw, _, ok := c.l2Get(c.msgKey(h)); ok {
 			return unpackEntry(raw, time.Now())
 		}
 		return nil
@@ -679,11 +521,11 @@ func (c *Cache) getPositive(ctx context.Context, h uint64) *dns.Msg {
 		return unpackEntry(raw, now)
 	}
 	c.l1Misses.Add(1)
-	raw, ttl, ok := c.l2Get(ctx, c.msgKey(h))
+	raw, ttl, ok := c.l2Get(c.msgKey(h))
 	if !ok {
 		return nil
 	}
-	// ttl is the record's real remaining lifetime (from Redis), not c.ttl —
+	// ttl is the record's real remaining lifetime (from the store), not c.ttl —
 	// see l2Get's doc. A zero ttl means it isn't trustworthy, so this read
 	// isn't cached in L1; the answer is still served from what L2 has.
 	if ttl > 0 {
@@ -840,10 +682,8 @@ func (c *Cache) negPrefetchLead() time.Duration {
 // packed bytes are returned as-is (LookupResult.Raw) so the handler can
 // patch the ID and TTLs and write them straight to the client. Only when
 // nothing fresh is found locally does this touch L2, and then it fetches
-// both keys in a single Redis MGET (instead of two sequential GETs) bounded
-// by the configured lookup budget — a domain this instance has never seen
-// before (an L1 miss on both) would otherwise pay for two round trips to
-// Dragonfly before the query ever reaches upstream.
+// both keys in one read snapshot of the embedded store (a local, in-process
+// read — no network round trip).
 //
 // A fresh positive hit near the end of its lifetime also schedules a
 // background prefetch so the next query finds a warm entry (see
@@ -900,19 +740,11 @@ func (c *Cache) LookupAt(q dnsname.Question, now time.Time) LookupResult {
 		}
 		c.l1Misses.Add(1)
 	}
-	if c.client == nil {
+	if c.store == nil {
 		return stale
 	}
-	// L1 miss: one MGET to Dragonfly for both keys. The budget context is
-	// created only here — never on the hit path — so a slow or down cache
-	// tier can't stall the query beyond the budget.
-	ctx, cancel := context.WithTimeout(context.Background(), c.budget())
-	defer cancel()
-	vals := c.client.DoMulti(ctx,
-		c.client.B().Get().Key(c.msgKey(h)).Build(),
-		c.client.B().Get().Key(c.negKey(h)).Build(),
-	)
-	posRaw, negRaw, ok := decodeMGetResult(vals)
+	// L1 miss: one read snapshot of the store for both keys.
+	posRaw, negRaw, ok := decodeMGetResult(c.store.GetMany(c.msgKey(h), c.negKey(h)))
 	if !ok {
 		return stale
 	}
@@ -1017,65 +849,41 @@ func (c *Cache) Fresh(q dnsname.Question) bool {
 			return true
 		}
 	}
-	if c.client == nil {
+	if c.store == nil {
 		return false
 	}
-	// L1 miss: one budgeted MGET for both keys, exactly like Lookup — a
-	// present L2 key is fresh by construction (Redis expires it at its TTL).
-	ctx, cancel := context.WithTimeout(context.Background(), c.budget())
-	defer cancel()
-	vals := c.client.DoMulti(ctx,
-		c.client.B().Get().Key(c.msgKey(h)).Build(),
-		c.client.B().Get().Key(c.negKey(h)).Build(),
-	)
-	for _, v := range vals {
-		if err := v.Error(); err == nil {
-			return true
-		}
-	}
-	return false
+	// L1 miss: probe both keys exactly like Lookup — a present L2 key is
+	// fresh by construction (the store expires it at its TTL).
+	return c.store.Has(c.msgKey(h), c.negKey(h))
 }
 
-// decodeMGetResult interprets the [positive, negative] result of a pipelined
-// GET pair against the two keys for one question: a present key has AsBytes()
-// error == nil, while a missing key returns rueidis.Nil. ok is false when
-// neither key was present, or the result didn't have the expected shape.
-func decodeMGetResult(vals []rueidis.RedisResult) (posRaw, negRaw []byte, ok bool) {
+// decodeMGetResult interprets the [positive, negative] result of a GetMany
+// against the two keys for one question: a present key has a non-nil value, a
+// missing key is nil. ok is false when neither key was present, or the result
+// didn't have the expected shape.
+func decodeMGetResult(vals [][]byte) (posRaw, negRaw []byte, ok bool) {
 	if len(vals) != 2 {
 		return nil, nil, false
 	}
-	if b, err := vals[0].AsBytes(); err == nil {
-		return b, nil, true
+	if vals[0] != nil {
+		return vals[0], nil, true
 	}
-	if b, err := vals[1].AsBytes(); err == nil {
-		return nil, b, true
+	if vals[1] != nil {
+		return nil, vals[1], true
 	}
 	return nil, nil, false
 }
 
-// l2Get fetches raw bytes from Dragonfly/Redis, plus the key's remaining
-// TTL (fetched in the same pipelined round trip) so a caller rehydrating L1
-// can honor the record's actual remaining lifetime instead of guessing. A
-// nil client (unit tests) is a clean miss; ttl is 0 whenever it can't be
-// trusted (miss, or Redis reports no/expired TTL) — callers must treat that
-// as "don't cache in L1", not "cache forever".
-func (c *Cache) l2Get(ctx context.Context, key string) ([]byte, time.Duration, bool) {
-	if c.client == nil {
+// l2Get fetches raw bytes from the store, plus the key's remaining TTL so a
+// caller rehydrating L1 can honor the record's actual remaining lifetime
+// instead of guessing. A nil store (unit tests) is a clean miss; ttl is 0
+// whenever it can't be trusted (miss, or the key carries no expiry) — callers
+// must treat that as "don't cache in L1", not "cache forever".
+func (c *Cache) l2Get(key string) ([]byte, time.Duration, bool) {
+	if c.store == nil {
 		return nil, 0, false
 	}
-	resps := c.client.DoMulti(ctx,
-		c.client.B().Get().Key(key).Build(),
-		c.client.B().Pttl().Key(key).Build(),
-	)
-	raw, err := resps[0].AsBytes()
-	if err != nil {
-		return nil, 0, false
-	}
-	var ttl time.Duration
-	if ms, err := resps[1].AsInt64(); err == nil && ms > 0 {
-		ttl = time.Duration(ms) * time.Millisecond
-	}
-	return raw, ttl, true
+	return c.store.Get(key)
 }
 
 // unpackEntry decodes a stored positive entry (8-byte store timestamp +
@@ -1143,7 +951,7 @@ func (c *Cache) Set(ctx context.Context, q dnsname.Question, m *dns.Msg, capTTL 
 		// every L1 hit can rebase TTLs on the raw bytes without unpacking.
 		c.l1.set(h, false, buf, ttl, now, ttlOffsets(packed))
 	}
-	c.enqueueL2(ctx, h, c.msgKey(h), buf, ttl)
+	c.enqueueL2(h, c.msgKey(h), buf, ttl)
 }
 
 // ---- negative answers ----
@@ -1183,7 +991,7 @@ func (c *Cache) SetNegative(ctx context.Context, q dnsname.Question, m *dns.Msg,
 	if c.l1 != nil {
 		c.l1.set(h, true, raw, ttl, now, nil)
 	}
-	c.enqueueL2(ctx, h, c.negKey(h), raw, ttl)
+	c.enqueueL2(h, c.negKey(h), raw, ttl)
 }
 
 // GetNegative returns a cached empty response, if any (L1 first, then L2).
@@ -1193,7 +1001,7 @@ func (c *Cache) GetNegative(ctx context.Context, q dnsname.Question) *dns.Msg {
 
 func (c *Cache) getNegative(ctx context.Context, h uint64) *dns.Msg {
 	if c.l1 == nil {
-		if raw, _, ok := c.l2Get(ctx, c.negKey(h)); ok {
+		if raw, _, ok := c.l2Get(c.negKey(h)); ok {
 			return unpackNegative(raw)
 		}
 		return nil
@@ -1204,11 +1012,11 @@ func (c *Cache) getNegative(ctx context.Context, h uint64) *dns.Msg {
 		return unpackNegative(raw)
 	}
 	c.l1Misses.Add(1)
-	raw, ttl, ok := c.l2Get(ctx, c.negKey(h))
+	raw, ttl, ok := c.l2Get(c.negKey(h))
 	if !ok {
 		return nil
 	}
-	// ttl is the entry's real remaining lifetime (from Redis), not
+	// ttl is the entry's real remaining lifetime (from the store), not
 	// c.negativeTTL — see l2Get's doc. Using the configured default here
 	// would let a short custom TTL (e.g. failure_ttl) be re-cached in L1
 	// for far longer than it was ever meant to live.
@@ -1219,7 +1027,7 @@ func (c *Cache) getNegative(ctx context.Context, h uint64) *dns.Msg {
 }
 
 // unpackNegative decodes a stored negative entry (no TTL rebasing needed;
-// the Redis expiry already bounds it).
+// the store expiry already bounds it).
 func unpackNegative(raw []byte) *dns.Msg {
 	m := &dns.Msg{Data: raw}
 	if err := m.Unpack(); err != nil {
@@ -1229,36 +1037,17 @@ func unpackNegative(raw []byte) *dns.Msg {
 }
 
 // FlushAll clears every cached entry in L1 and L2 (used by the UI "clear
-// cache" action).
-func (c *Cache) FlushAll(ctx context.Context) (int64, error) {
+// cache" action). It returns the number of L2 entries removed.
+func (c *Cache) FlushAll(context.Context) (int64, error) {
 	if c.l1 != nil {
 		c.l1.flush()
 	}
-	if c.client == nil {
+	if c.store == nil {
 		return 0, nil
 	}
-	var n int64
-	var cursor uint64
-	for {
-		entry, err := c.client.Do(ctx, c.client.B().Scan().Cursor(cursor).Match(c.prefix+"*").Count(1000).Build()).AsScanEntry()
-		if err != nil {
-			return n, err
-		}
-		if len(entry.Elements) > 0 {
-			cmds := make([]rueidis.Completed, len(entry.Elements))
-			for i, k := range entry.Elements {
-				cmds[i] = c.client.B().Del().Key(k).Build()
-			}
-			for _, r := range c.client.DoMulti(ctx, cmds...) {
-				if deleted, err := r.AsInt64(); err == nil {
-					n += deleted
-				}
-			}
-		}
-		cursor = entry.Cursor
-		if cursor == 0 {
-			break
-		}
-	}
-	return n, nil
+	n, err := c.store.DeletePrefix(c.prefix)
+	c.keyCountMu.Lock()
+	c.keyCountAt = time.Time{}
+	c.keyCountMu.Unlock()
+	return n, err
 }

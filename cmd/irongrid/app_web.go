@@ -259,7 +259,7 @@ func (a *app) startRedirect() {
 func (a *app) setupTLSReload() {
 	// ---- TLS-only reload: used after the dashboard generates/uploads a
 	// certificate. Rebinds the DNS listeners with the new cert; leaves the
-	// cache and upstreams untouched so it works even while Dragonfly is down.
+	// cache and upstreams untouched so it works regardless of cache state.
 	a.apiHandler.ReloadTLS = func() error {
 		newTLS, err := cert.LoadOrGenerate(a.cfg.TLS.CertFile, a.cfg.TLS.KeyFile, a.cfg.TLS.CertDir, a.cfg.TLS.SelfSignedHosts)
 		if err != nil {

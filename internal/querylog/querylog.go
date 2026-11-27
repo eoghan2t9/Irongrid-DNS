@@ -1,9 +1,8 @@
 // Package querylog stores every DNS request with its allow/block outcome in
-// a Dragonfly Redis Stream. The stream replaces the old SQLite database so
-// the query log shares the same cache tier as DNS responses: one server to
-// run, one place to look when diagnosing, and cheap sharing across multiple
-// Irongrid instances. Entries are written asynchronously in batches so the
-// DNS hot path never blocks on a round trip.
+// an append-only, time-ordered stream inside the embedded kvstore (BadgerDB).
+// The stream shares the store with the DNS response cache: one data
+// directory, no separate server to run. Entries are written asynchronously in
+// batches so the DNS hot path never blocks on a disk write.
 package querylog
 
 import (
@@ -13,17 +12,15 @@ import (
 	"fmt"
 	"iter"
 	"log/slog"
-	"net"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/goccy/go-json"
-	"github.com/redis/rueidis"
 
+	"github.com/eoghan2t9/Irongrid-DNS/internal/kvstore"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/safego"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/tuning"
 )
@@ -39,17 +36,17 @@ const (
 	// logBatchSize flushes the writer once this many entries have queued.
 	logBatchSize = 256
 	// logFlushInterval is the maximum age of a queued entry before the
-	// writer flushes it in one pipelined round trip.
+	// writer flushes it in one batch.
 	logFlushInterval = 100 * time.Millisecond
-	// streamKey is the single Dragonfly stream holding every logged query.
-	// XADD auto-IDs are "<ms>-<seq>", so entries are time-ordered and the
-	// newest ID is also the latest query.
-	streamKey = "irongrid:log"
+	// streamName is the kvstore stream holding every logged query. Stream IDs
+	// are "<ms>-<seq>", so entries are time-ordered and the newest ID is also
+	// the latest query.
+	streamName = "log"
 	// maxStreamEntries hard-caps the stream length so the log can never grow
-	// unbounded in Dragonfly's cache mode (which evicts under memory
-	// pressure) even if the hourly retention pruner is delayed. 250k entries
-	// covers roughly a day or two of heavy traffic — well past the
-	// dashboard's needs, and the retention pruner usually keeps it far lower.
+	// unbounded on disk even if the hourly retention pruner is delayed.
+	// 250k entries covers roughly a day or two of heavy traffic — well past
+	// the dashboard's needs, and the retention pruner usually keeps it far
+	// lower.
 	maxStreamEntries = 250000
 	// maxQueryScan bounds how far Query walks back when its filters match
 	// nothing recent: worst case it reads this many stream entries before
@@ -64,15 +61,6 @@ const (
 	// a pass should see as much of the active set as the stream retains, so
 	// it is the full stream cap rather than the stats poll's budget.
 	maxWarmScan = maxStreamEntries
-	// queryPage is the fetch size for the interactive query-log walk: it
-	// only ever needs up to a page of entries, so a small page keeps each
-	// request's response small.
-	queryPage = 1000
-	// aggPage is the fetch size for the aggregate walks (Stats, Hourly,
-	// StatsBundle): those scan deep into the stream (up to maxStatsScan
-	// entries), so a bigger page means fewer round trips — 100k/5000 = 20
-	// worst case, vs 100 at the old 1000-entry page.
-	aggPage = 5000
 
 	// aggCacheTTL and aggCacheBucket back the Stats/Hourly/StatsBundle
 	// result cache. Each /api/stats poll used to trigger up to three full
@@ -88,7 +76,7 @@ const (
 	aggCacheBucket = 30 * time.Second
 )
 
-// Entry is a single logged query. ID is the Dragonfly stream ID, assigned on
+// Entry is a single logged query. ID is the stream ID, assigned on
 // read; it is a stable unique key (the dashboard uses it as the React list
 // key) rather than a monotonically increasing integer.
 type Entry struct {
@@ -117,12 +105,12 @@ type Entry struct {
 	ASN uint32 `json:"asn,omitempty"`
 }
 
-// Log is a concurrency-safe query logger backed by a Dragonfly stream.
+// Log is a concurrency-safe query logger backed by a kvstore stream.
 // Entries are enqueued and written by a single background goroutine in
-// pipelined batches (one round trip per flush), so per-query Redis traffic
-// never sits on the DNS hot path.
+// batches (one store transaction per flush), so per-query disk writes never
+// sit on the DNS hot path.
 type Log struct {
-	client    rueidis.Client
+	stream    *kvstore.Stream
 	retention time.Duration
 	batchSize int
 
@@ -131,9 +119,8 @@ type Log struct {
 	closed  atomic.Bool
 	wg      sync.WaitGroup
 
-	// lastFlushErr gates the flush-failure log line so a Dragonfly outage
-	// produces at most one line per minute instead of one every ~100ms (the
-	// writer flushes on a ticker even when the server is down).
+	// lastFlushErr gates the flush-failure log line so a failing store
+	// produces at most one line per minute instead of one every ~100ms.
 	lastFlushErr atomic.Int64
 
 	// agg is the writer-maintained rolling aggregate serving StatsBundle
@@ -151,35 +138,24 @@ type Log struct {
 	bundleCache aggCache[StatsBundle]
 }
 
-// New connects to Dragonfly and returns a stream-backed query log. It shares
-// the same endpoint as the DNS cache but owns its connection pool, so a
-// cache reload (which closes and replaces the cache's client) can never kill
-// the log. batchSize is the number of entries committed per pipelined flush;
-// <= 0 uses the default.
-func New(addr, password string, db, retentionDays, batchSize int) (*Log, error) {
-	client, err := rueidis.NewClient(rueidis.ClientOption{
-		InitAddress:      []string{addr},
-		Password:         password,
-		SelectDB:         db,
-		Dialer:           net.Dialer{Timeout: 5 * time.Second},
-		ConnWriteTimeout: 5 * time.Second,
-		DisableCache:     true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("dragonfly query log unreachable at %s: %w", addr, err)
+// New returns a stream-backed query log over an open kvstore. The store is
+// shared with the DNS cache and owned by the caller: Close stops the writer but
+// never closes it, so a cache reload can't pull the rug out from under the log.
+// batchSize is the number of entries committed per flush; <= 0 uses the
+// default.
+func New(store *kvstore.Store, retentionDays, batchSize int) (*Log, error) {
+	if store == nil {
+		return nil, fmt.Errorf("querylog: a kvstore is required")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := client.Do(ctx, client.B().Ping().Build()).Error(); err != nil {
-		client.Close()
-		return nil, fmt.Errorf("dragonfly query log unreachable at %s: %w", addr, err)
+	if err := store.Ping(); err != nil {
+		return nil, fmt.Errorf("query log store unavailable: %w", err)
 	}
 	bs := logBatchSize
 	if batchSize > 0 {
 		bs = batchSize
 	}
 	l := &Log{
-		client:    client,
+		stream:    store.Stream(streamName),
 		retention: time.Duration(retentionDays) * 24 * time.Hour,
 		batchSize: bs,
 		entries:   make(chan Entry, logQueueCap),
@@ -190,14 +166,14 @@ func New(addr, password string, db, retentionDays, batchSize int) (*Log, error) 
 	// must keep showing the last 24h, not zeros until the window refills).
 	// Runs before the writer starts, so the single-threaded add path never
 	// races a live flush.
-	l.seedAggregate(ctx)
+	l.seedAggregate(context.Background())
 	l.wg.Go(l.runWriter)
 	return l, nil
 }
 
 // NewDisabled returns a logger with no backing store: Record drops entries
 // and Query/Stats return empty results. It exists for tests (and any caller
-// that needs the full Log API without a Redis-compatible server); the writer
+// that needs the full Log API without a kvstore); the writer
 // goroutine is still started so Close behaves identically.
 func NewDisabled(retentionDays int) *Log {
 	l := &Log{
@@ -253,8 +229,8 @@ func (c *aggCache[T]) clear() {
 }
 
 // Record enqueues one query entry. It never blocks or slows query serving:
-// the background writer batches entries and commits them in one pipelined
-// round trip. If the queue is full (or the log is closed), the entry is
+// the background writer batches entries and commits them in one batch. If the
+// queue is full (or the log is closed), the entry is
 // dropped — logging must never break DNS.
 func (l *Log) Record(e Entry) {
 	if l.closed.Load() {
@@ -310,44 +286,40 @@ func (l *Log) runWriter() {
 	}
 }
 
-// writeBatch appends entries to the stream in a single pipelined round trip.
-// Each entry is stored as one JSON field ("v") so a read is a single
-// Unmarshal. A failed flush (Dragonfly down, connection reset) logs the
-// error and moves on — the log must never break DNS, and at most the last
+// writeBatch appends entries to the stream in one batch. Each entry is stored
+// as a single JSON value so a read is a single Unmarshal. A failed flush logs
+// the error and moves on — the log must never break DNS, and at most the last
 // ~100ms of entries are at risk.
 func (l *Log) writeBatch(entries []Entry) {
-	if l.client == nil || len(entries) == 0 {
+	if l.stream == nil || len(entries) == 0 {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	cmds := make([]rueidis.Completed, 0, len(entries)+1)
+	vals := make([][]byte, 0, len(entries))
+	written := make([]Entry, 0, len(entries))
 	for i := range entries {
 		v, err := json.Marshal(&entries[i])
 		if err != nil {
 			continue
 		}
-		cmds = append(cmds, l.client.B().Xadd().Key(streamKey).Id("*").FieldValue().FieldValue("v", string(v)).Build())
+		vals = append(vals, v)
+		written = append(written, entries[i])
 	}
-	// Keep the stream bounded even if the hourly retention pruner is
-	// delayed; in Dragonfly's cache mode an unbounded stream could otherwise
-	// eat the whole 512MB budget.
-	cmds = append(cmds, l.client.B().Xtrim().Key(streamKey).Maxlen().Threshold(strconv.Itoa(maxStreamEntries)).Build())
-	var flushErr error
-	for _, r := range l.client.DoMulti(ctx, cmds...) {
-		if err := r.Error(); err != nil {
-			flushErr = err
-			break
-		}
+	// Records expire on their own once past retention (plus an hour of slack
+	// so the hourly pruner, not the TTL, is what normally removes them), and
+	// the stream is length-capped so a delayed pruner can't let it grow
+	// unbounded.
+	var ttl time.Duration
+	if l.retention > 0 {
+		ttl = l.retention + time.Hour
 	}
-	if flushErr != nil {
-		// Rate-limited: a down Dragonfly would otherwise log every ~100ms.
+	if err := l.stream.Append(vals, ttl, maxStreamEntries); err != nil {
+		// Rate-limited: a failing store would otherwise log every ~100ms.
 		// The entries are dropped either way — logging must never break DNS.
 		now := time.Now().UnixNano()
 		last := l.lastFlushErr.Load()
 		if last == 0 || now-last > int64(time.Minute) {
 			l.lastFlushErr.Store(now)
-			slog.Error("querylog stream flush failed", "error", flushErr)
+			slog.Error("querylog stream flush failed", "error", err)
 		}
 		return
 	}
@@ -356,8 +328,8 @@ func (l *Log) writeBatch(entries []Entry) {
 	// the aggregate always equals the stream (a failed flush's entries are
 	// in neither).
 	if l.agg != nil {
-		for i := range entries {
-			l.agg.add(entries[i])
+		for i := range written {
+			l.agg.add(written[i])
 		}
 	}
 }
@@ -373,8 +345,8 @@ func (l *Log) seedAggregate(ctx context.Context) {
 	}
 	// Walk forward from an hour before the window so the far edge is
 	// covered; addLocked skips anything older than the window itself.
-	start := strconv.FormatInt(time.Now().Add(-25*time.Hour).UnixMilli(), 10) + "-0"
-	for m, err := range l.walkStream(ctx, false, start, "+", maxStatsScan, aggPage) {
+	start := time.Now().Add(-25 * time.Hour).UnixMilli()
+	for m, err := range l.walkStream(ctx, false, start, maxStatsScan) {
 		if err != nil {
 			slog.Error("querylog aggregate seed failed", "error", err)
 			return
@@ -387,80 +359,63 @@ func (l *Log) seedAggregate(ctx context.Context) {
 	}
 }
 
+// streamMsg is one record read from the stream: its ID and JSON payload. The
+// payload is only valid until the next record is produced, so entryFromMessage
+// must decode it immediately.
+type streamMsg struct {
+	ID    string
+	Value []byte
+}
+
 // entryFromMessage decodes a stream message into an Entry. The message ID
 // becomes the entry's stable ID; the payload is the JSON body stored at
 // write time. ok is false for malformed messages, which are skipped.
-func entryFromMessage(e *Entry, m rueidis.XRangeEntry) bool {
-	if m.ID == "" {
+func entryFromMessage(e *Entry, m streamMsg) bool {
+	if m.ID == "" || len(m.Value) == 0 {
 		return false
 	}
-	raw, ok := m.FieldValues["v"]
-	if !ok {
-		return false
-	}
-	if err := json.Unmarshal([]byte(raw), e); err != nil {
+	if err := json.Unmarshal(m.Value, e); err != nil {
 		return false
 	}
 	e.ID = m.ID
 	return true
 }
 
-// walkStream returns an iterator that pages through the stream from start
-// towards stop (reverse for a newest-first walk, forward otherwise), yielding
-// every message in range. Range-over-func stops the walk when the loop body
-// breaks (the caller found what it needed), the stream is exhausted, max
-// messages have been scanned, or a Redis error is yielded — the scan bound is
-// strict, enforced inside the page so a single oversized page can't overshoot
-// by up to page entries. The boundary message shared between consecutive
-// pages is skipped (each page asks for page+1 messages so a short page proves
-// exhaustion). Every walk in this file shares this one paging shape; they
-// differ only in direction, bounds and what the caller does per message.
-// Callers on a disabled log (nil client) never reach here — the public
-// methods guard first — but the guard is kept so the helper itself can't
-// nil-deref. A yielded error is always the last value the iterator produces;
-// callers must check it before using the message.
-func (l *Log) walkStream(ctx context.Context, reverse bool, start, stop string, max, page int) iter.Seq2[rueidis.XRangeEntry, error] {
-	return func(yield func(rueidis.XRangeEntry, error) bool) {
-		if l.client == nil {
+// ctxCheckEvery is how many records a walk visits between context checks.
+const ctxCheckEvery = 256
+
+// walkStream returns an iterator over the stream's records with a timestamp of
+// sinceMs or later (0 = from the beginning): oldest-first, or newest-first when
+// reverse is set. Range-over-func stops the walk when the loop body breaks (the
+// caller found what it needed), the stream is exhausted, max records have been
+// scanned, the context is cancelled, or the store errors — the scan bound is
+// strict. Every walk in this file shares this one shape; they differ only in
+// direction, bounds and what the caller does per record. A yielded error is
+// always the last value the iterator produces; callers must check it before
+// using the message. Callers on a disabled log (nil stream) never reach here —
+// the public methods guard first — but the guard is kept so the helper itself
+// can't nil-deref.
+func (l *Log) walkStream(ctx context.Context, reverse bool, sinceMs int64, max int) iter.Seq2[streamMsg, error] {
+	return func(yield func(streamMsg, error) bool) {
+		if l.stream == nil {
 			return
 		}
-		first := true
-		scanned := 0
-		for scanned < max {
-			var (
-				msgs []rueidis.XRangeEntry
-				err  error
-			)
-			if reverse {
-				msgs, err = l.client.Do(ctx, l.client.B().Xrevrange().Key(streamKey).End(start).Start(stop).Count(int64(page+1)).Build()).AsXRange()
-			} else {
-				msgs, err = l.client.Do(ctx, l.client.B().Xrange().Key(streamKey).Start(start).End(stop).Count(int64(page+1)).Build()).AsXRange()
-			}
-			if err != nil {
-				yield(rueidis.XRangeEntry{}, err)
-				return
-			}
-			begin := 0
-			if !first && len(msgs) > 0 && msgs[0].ID == start {
-				begin = 1
-			}
-			if len(msgs) <= begin {
-				return
-			}
-			first = false
-			for _, m := range msgs[begin:] {
-				scanned++
-				if !yield(m, nil) {
-					return
-				}
-				if scanned >= max {
-					return
+		n := 0
+		var stopErr error
+		err := l.stream.Walk(reverse, sinceMs, max, func(id string, val []byte) bool {
+			n++
+			if n%ctxCheckEvery == 0 {
+				if stopErr = ctx.Err(); stopErr != nil {
+					return false
 				}
 			}
-			if len(msgs) <= page { // fewer than a full page: the stream is exhausted
-				return
-			}
-			start = msgs[len(msgs)-1].ID
+			return yield(streamMsg{ID: id, Value: val}, nil)
+		})
+		if stopErr == nil {
+			stopErr = err
+		}
+		if stopErr != nil {
+			yield(streamMsg{}, stopErr)
 		}
 	}
 }
@@ -497,7 +452,7 @@ func matchesFilter(e Entry, action, domainLower, qtype, client string) bool {
 // walking back from the newest entry until offset+limit matches are found or
 // the scan bound is hit.
 func (l *Log) Query(ctx context.Context, limit, offset int, action, domain, qtype, client string) ([]Entry, error) {
-	if l.client == nil {
+	if l.stream == nil {
 		return nil, nil
 	}
 	if limit <= 0 || limit > 1000 {
@@ -514,7 +469,7 @@ func (l *Log) Query(ctx context.Context, limit, offset int, action, domain, qtyp
 	// Walk newest-first, stopping as soon as the wanted page is full — the
 	// old loop kept decoding the rest of the page it had already fetched, so
 	// a default 100-row view decoded up to 1000 entries every request.
-	for m, err := range l.walkStream(ctx, true, "+", "-", maxQueryScan, queryPage) {
+	for m, err := range l.walkStream(ctx, true, 0, maxQueryScan) {
 		if err != nil {
 			return nil, err
 		}
@@ -617,7 +572,7 @@ func topN(counts map[string]int64, n int) []TopDomain {
 // rather than stall the dashboard's poll.
 func (l *Log) Stats(ctx context.Context, since time.Time) (map[string]any, error) {
 	stats := emptyStats()
-	if l.client == nil {
+	if l.stream == nil {
 		return stats, nil
 	}
 	// Serve a recent result for the same (quantized) window instead of
@@ -631,8 +586,7 @@ func (l *Log) Stats(ctx context.Context, since time.Time) (map[string]any, error
 	var rtSum float64
 	blockedCnt := map[string]int64{}
 	clientCnt := map[string]int64{}
-	start := strconv.FormatInt(since.UnixMilli(), 10) + "-0"
-	for m, err := range l.walkStream(ctx, false, start, "+", maxStatsScan, aggPage) {
+	for m, err := range l.walkStream(ctx, false, since.UnixMilli(), maxStatsScan) {
 		if err != nil {
 			return nil, err
 		}
@@ -681,7 +635,7 @@ type HourBucket struct {
 // receives a fixed-length series.
 func (l *Log) Hourly(ctx context.Context, since time.Time) ([]HourBucket, error) {
 	out := []HourBucket{}
-	if l.client == nil {
+	if l.stream == nil {
 		return out, nil
 	}
 	sinceKey := since.Unix() / int64(aggCacheBucket/time.Second)
@@ -696,8 +650,7 @@ func (l *Log) Hourly(ctx context.Context, since time.Time) ([]HourBucket, error)
 
 	// Newest-first walk from "+" down to the since ID (inclusive), so the
 	// current hour's bar is always complete even if the scan is bounded.
-	min := strconv.FormatInt(since.UnixMilli(), 10) + "-0"
-	for m, err := range l.walkStream(ctx, true, "+", min, maxStatsScan, aggPage) {
+	for m, err := range l.walkStream(ctx, true, since.UnixMilli(), maxStatsScan) {
 		if err != nil {
 			return nil, err
 		}
@@ -744,7 +697,7 @@ type StatsBundle struct {
 // the 24h window bound and today the since-midnight bound (local midnight,
 // supplied by the caller — querylog doesn't know the server's timezone).
 func (l *Log) StatsBundle(ctx context.Context, since, today time.Time) (*StatsBundle, error) {
-	if l.client == nil {
+	if l.stream == nil {
 		return &StatsBundle{Stats: emptyStats(), Today: emptyStats(), Hourly: []HourBucket{}}, nil
 	}
 	// Fast path: the standard dashboard window, served live and uncached —
@@ -803,8 +756,7 @@ func (l *Log) statsBundleWalk(ctx context.Context, since, today time.Time) (*Sta
 
 	// Newest-first walk from "+" down to the 24h bound (inclusive), same
 	// shape as Hourly: a scan bound can only miss the oldest entries.
-	min := strconv.FormatInt(since.UnixMilli(), 10) + "-0"
-	for m, err := range l.walkStream(ctx, true, "+", min, maxStatsScan, aggPage) {
+	for m, err := range l.walkStream(ctx, true, since.UnixMilli(), maxStatsScan) {
 		if err != nil {
 			return nil, err
 		}
@@ -889,12 +841,11 @@ func (l *Log) statsBundleWalk(ctx context.Context, since, today time.Time) (*Sta
 // answered locally without touching the cache, and errors have nothing to
 // cache. This is the cache warmer's source of "currently active domains".
 func (l *Log) ActiveDomains(ctx context.Context, since time.Time, limit int) ([]TopDomain, error) {
-	if l.client == nil {
+	if l.stream == nil {
 		return []TopDomain{}, nil
 	}
 	counts := map[string]int64{}
-	start := strconv.FormatInt(since.UnixMilli(), 10) + "-0"
-	for m, err := range l.walkStream(ctx, false, start, "+", maxWarmScan, aggPage) {
+	for m, err := range l.walkStream(ctx, false, since.UnixMilli(), maxWarmScan) {
 		if err != nil {
 			return nil, err
 		}
@@ -919,9 +870,9 @@ func (l *Log) ActiveDomains(ctx context.Context, since time.Time, limit int) ([]
 	return topN(counts, limit), nil
 }
 
-// Clear deletes the entire stream (the UI "clear log" action).
+// Clear deletes every record in the stream (the UI "clear log" action).
 func (l *Log) Clear(ctx context.Context) error {
-	if l.client == nil {
+	if l.stream == nil {
 		return nil
 	}
 	// Drop cached aggregates and reset the rolling aggregate too, or the
@@ -932,18 +883,17 @@ func (l *Log) Clear(ctx context.Context) error {
 	if l.agg != nil {
 		l.agg.clear()
 	}
-	return l.client.Do(ctx, l.client.B().Del().Key(streamKey).Build()).Error()
+	return l.stream.Clear()
 }
 
 // Prune removes entries older than the retention window. The stream's
-// time-ordered IDs make "delete everything before cutoff" a single XTRIM
-// MINID command.
-func (l *Log) Prune(ctx context.Context) {
-	if l.retention <= 0 || l.client == nil {
+// time-ordered keys make "delete everything before cutoff" a single forward
+// scan from the oldest record.
+func (l *Log) Prune(context.Context) {
+	if l.retention <= 0 || l.stream == nil {
 		return
 	}
-	cutoff := fmt.Sprintf("%d-0", time.Now().Add(-l.retention).UnixMilli())
-	if err := l.client.Do(ctx, l.client.B().Xtrim().Key(streamKey).Minid().Threshold(cutoff).Build()).Error(); err != nil {
+	if _, err := l.stream.TrimBefore(time.Now().Add(-l.retention)); err != nil {
 		slog.Error("querylog prune failed", "error", err)
 	}
 }
@@ -965,16 +915,13 @@ func (l *Log) StartPruner(ctx context.Context) {
 	}()
 }
 
-// Close stops the writer (flushing any pending entries) and closes the
-// connection pool. Safe to call more than once.
+// Close stops the writer (flushing any pending entries). It does not close the
+// kvstore, which the caller owns. Safe to call more than once.
 func (l *Log) Close() error {
 	if !l.closed.CompareAndSwap(false, true) {
 		return nil
 	}
 	close(l.done) // writer drains the queue and flushes the final batch
 	l.wg.Wait()
-	if l.client != nil {
-		l.client.Close()
-	}
 	return nil
 }

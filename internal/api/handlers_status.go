@@ -110,21 +110,19 @@ func (h *Handler) getStats(ctx context.Context, w http.ResponseWriter) {
 		proto[k] = v.Load()
 	}
 	// Cache utilisation for the dashboard card: L1 is the in-process layer
-	// (counters reset on restart), L2 is Dragonfly's cumulative INFO counters
-	// (since the Dragonfly process started).
+	// (counters reset on restart), L2 is the embedded persistent store (lookup
+	// counters since this process started, on-disk size, approximate key
+	// count).
 	cacheStats := map[string]any{"l1": nil, "l2": nil}
 	if c := h.cacheSnapshot(); c != nil {
 		l1h, l1m := c.L1Counters()
 		cacheStats["l1"] = map[string]any{"hits": l1h, "misses": l1m}
 		if s, err := c.L2Stats(ctx); err == nil {
 			cacheStats["l2"] = map[string]any{
-				"hits":        s.Hits,
-				"misses":      s.Misses,
-				"expired":     s.Expired,
-				"evicted":     s.Evicted,
-				"used_memory": s.UsedBytes,
-				"max_memory":  s.MaxBytes,
-				"keys":        s.Keys,
+				"hits":       s.Hits,
+				"misses":     s.Misses,
+				"disk_bytes": s.UsedBytes,
+				"keys":       s.Keys,
 			}
 		}
 	}
@@ -186,7 +184,7 @@ func (h *Handler) getLog(ctx context.Context, w http.ResponseWriter, r *http.Req
 }
 
 func (h *Handler) clearLog(ctx context.Context, w http.ResponseWriter) {
-	// Drop the whole stream: the query log now lives in Dragonfly.
+	// Drop the whole stream: the query log lives in the embedded store.
 	if err := h.Log.Clear(ctx); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return

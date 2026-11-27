@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"codeberg.org/miekg/dns"
 	"codeberg.org/miekg/dns/dnsutil"
 	"codeberg.org/miekg/dns/rdata"
@@ -20,9 +19,22 @@ import (
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/filter"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/geoip"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/kvstore"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/querylog"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/upstream"
 )
+
+// newTestKV opens an in-memory kvstore closed with the test, backing the real
+// (queryable) query log used by these tests.
+func newTestKV(t testing.TB) *kvstore.Store {
+	t.Helper()
+	st, err := kvstore.Open(kvstore.Options{InMemory: true})
+	if err != nil {
+		t.Fatalf("kvstore.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	return st
+}
 
 // startUDPTestServer runs a tiny UDP DNS server on a random loopback port
 // that answers every query with an A record of ip (after delay).
@@ -36,7 +48,7 @@ func startUDPTestServer(t *testing.T, ip string, delay time.Duration) string {
 		dnsutil.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
 			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
-			A: rdata.A{Addr: netip.MustParseAddr(ip)},
+			A:   rdata.A{Addr: netip.MustParseAddr(ip)},
 		})
 		_, _ = m.WriteTo(w)
 	})
@@ -72,6 +84,7 @@ func (f *fakeWriter) RemoteAddr() net.Addr {
 	}
 	return &net.UDPAddr{IP: ip, Port: 12345}
 }
+
 // Write receives the raw packed bytes the handler's pack-once fast path
 // sends (a real transport writes them to the wire verbatim), so unpacking
 // them into f.msg mirrors what a real client receives. A malformed payload
@@ -185,7 +198,7 @@ func startUDPCountingServer(t *testing.T, ip string, count *atomic.Int32) string
 		dnsutil.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
 			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
-			A: rdata.A{Addr: netip.MustParseAddr(ip)},
+			A:   rdata.A{Addr: netip.MustParseAddr(ip)},
 		})
 		_, _ = m.WriteTo(w)
 	})
@@ -426,7 +439,7 @@ func TestHandlerCoalescesConcurrentIdenticalQueries(t *testing.T) {
 		dnsutil.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
 			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
-			A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
+			A:   rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
 		})
 		_, _ = m.WriteTo(w)
 	})
@@ -564,7 +577,7 @@ func TestHandlerCoalescesBackgroundResolutions(t *testing.T) {
 		dnsutil.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
 			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
-			A: rdata.A{Addr: netip.MustParseAddr("5.6.7.8")},
+			A:   rdata.A{Addr: netip.MustParseAddr("5.6.7.8")},
 		})
 		_, _ = m.WriteTo(w)
 	})
@@ -1122,8 +1135,7 @@ func TestHandlerGeoBlockedClientRefusedEveryTransport(t *testing.T) {
 // a country-only client is REFUSED with the country-blocked reason.
 func TestHandlerASNBlockedClientRefused(t *testing.T) {
 	addr := startUDPTestServer(t, "1.1.1.1", 0)
-	mr := miniredis.RunT(t)
-	ql, err := querylog.New(mr.Addr(), "", 0, 30, 0)
+	ql, err := querylog.New(newTestKV(t), 30, 0)
 	if err != nil {
 		t.Fatalf("querylog: %v", err)
 	}
@@ -1386,10 +1398,9 @@ func TestHandlerAllowlistedClientNotHoneypotBlocked(t *testing.T) {
 // dashboard surfaces auto-blocked clients via /api/geo/blocked instead.
 func TestHandlerHoneypotNotLogged(t *testing.T) {
 	addr := startUDPTestServer(t, "1.1.1.1", 0)
-	// The query log now lives in a Dragonfly stream; miniredis provides the
-	// in-process Redis-compatible store so the log is real and queryable.
-	mr := miniredis.RunT(t)
-	ql, err := querylog.New(mr.Addr(), "", 0, 30, 0)
+	// The query log lives in the embedded kvstore; an in-memory store keeps
+	// the log real and queryable.
+	ql, err := querylog.New(newTestKV(t), 30, 0)
 	if err != nil {
 		t.Fatalf("querylog: %v", err)
 	}
@@ -2256,7 +2267,7 @@ func BenchmarkHandlerUpstreamMiss(b *testing.B) {
 		dnsutil.SetReply(m, r)
 		m.Answer = append(m.Answer, &dns.A{
 			Hdr: dns.Header{Name: r.Question[0].Header().Name, Class: dns.ClassINET, TTL: 60},
-			A: rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
+			A:   rdata.A{Addr: netip.MustParseAddr("1.2.3.4")},
 		})
 		_, _ = m.WriteTo(w)
 	})

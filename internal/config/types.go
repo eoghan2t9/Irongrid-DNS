@@ -587,16 +587,16 @@ type ServerConfig struct {
 	AllowFrom []string `yaml:"allow_from"`
 }
 
-// CacheConfig points at the Dragonfly instance that is the authoritative
-// response cache. Irongrid DNS will not start if it cannot reach it.
+// CacheConfig controls the DNS response cache. The persistent tier lives in
+// the embedded key/value store under the data directory (see the -data flag),
+// so there is nothing to point at or install. Config files written by older
+// versions may still carry cache.addr/password/db/lookup_timeout; they are
+// ignored and dropped the next time the config is saved.
 type CacheConfig struct {
-	Addr        string        `yaml:"addr"`         // host:port of Dragonfly
-	Password    string        `yaml:"password"`     // optional auth
-	DB          int           `yaml:"db"`           // logical db index
 	TTL         time.Duration `yaml:"ttl"`          // positive answer cache TTL
 	NegativeTTL time.Duration `yaml:"negative_ttl"` // cached NXDOMAIN/SERVFAIL TTL
 	// L1Entries is the per-shard entry capacity of the in-process L1 cache
-	// layered in front of Dragonfly. -1 disables the L1 layer entirely;
+	// layered in front of the persistent store. -1 disables the L1 layer entirely;
 	// 0 (the default) auto-sizes it from the detected memory ceiling (see
 	// cache.AutoPerShard) so a small Pi and a big server get proportionally
 	// sized caches; N is an explicit per-shard entry cap.
@@ -611,11 +611,6 @@ type CacheConfig struct {
 	// expire, so the next query finds a warm answer instead of paying an
 	// upstream round trip.
 	Prefetch bool `yaml:"prefetch"`
-	// LookupTimeout bounds the L2 (Dragonfly) cache read on the DNS hot
-	// path: if the cache can't answer within this budget the query proceeds
-	// straight to the upstream instead of stalling behind a slow cache tier.
-	// 0 uses the built-in default (150ms).
-	LookupTimeout time.Duration `yaml:"lookup_timeout"`
 	// FailureTTL is how long a resolution failure — an upstream that never
 	// answered (timeout, dial error, circuit-breaker cooldown) with no
 	// serve-stale entry to fall back on — is negatively cached as SERVFAIL,
@@ -699,15 +694,15 @@ type BlocklistSpec struct {
 	LastUpdated time.Time `yaml:"-"`       // runtime state, not persisted here
 }
 
-// LogConfig controls the query log. The log lives in Dragonfly (Redis stream
-// "irongrid:log") — QueryLogFile is kept only for backward compatibility
-// with older configs and is ignored.
+// LogConfig controls the query log. The log lives in the embedded key/value
+// store — QueryLogFile is kept only for backward compatibility with older
+// configs and is ignored.
 type LogConfig struct {
 	QueryLogFile  string `yaml:"query_log_file"`
 	RetentionDays int    `yaml:"retention_days"`
 	Verbose       bool   `yaml:"verbose"`
 	// BatchSize is how many entries the async query-log writer commits per
-	// pipelined stream flush. 0 uses the built-in default (256).
+	// stream flush. 0 uses the built-in default (256).
 	BatchSize int `yaml:"batch_size"`
 }
 

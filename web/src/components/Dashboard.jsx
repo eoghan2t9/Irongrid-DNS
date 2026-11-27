@@ -540,11 +540,11 @@ function UpstreamsCard({ upstreams }) {
 }
 
 // CacheCard shows how hard the two cache layers are working: the in-process
-// L1 (counters reset on restart) and Dragonfly's L2 (cumulative counters since
-// the Dragonfly process started, plus its memory/keys). This is what the
-// "Cache: online" sidebar dot doesn't tell you.
+// L1 and the persistent on-disk L2 (both count from process start; L2 also
+// reports its size on disk and key count). This is what the "Cache: online"
+// sidebar dot doesn't tell you.
 function CacheCard({ cache }) {
-  // First-seen L2 snapshot (cumulative since Dragonfly started): the delta
+  // First-seen L2 snapshot (cumulative since the server started): the delta
   // against it is the hit-rate of traffic since THIS page loaded, which is
   // what the card should reflect — the all-time ratio is dominated by the
   // DDoS flood's write-once queries. The base is snapshotted in an effect
@@ -575,15 +575,12 @@ function CacheCard({ cache }) {
   const dM = l2Delta ? l2Delta.misses : null
   const l2Rate = pct(dH, dM)
   const l2AllTime = pct(l2?.hits, l2?.misses)
-  const memUsed = l2?.used_memory || 0
-  const memMax = l2?.max_memory || 0
-  const memPct = memMax ? Math.min(100, Math.round((100 * memUsed) / memMax)) : null
   const mb = (n) => (n ? (n / 1048576).toFixed(1) : '0')
   return (
     <div className="card">
       <div className="row-between">
-        <h3 style={{ margin: 0 }}>Dragonfly cache</h3>
-        <span className="dim small">L1 in-process · L2 DragonflyDB</span>
+        <h3 style={{ margin: 0 }}>Cache</h3>
+        <span className="dim small">L1 in-process · L2 on disk</span>
       </div>
       <div className="kv-grid" style={{ marginTop: 8 }}>
         <div className="kv-row">
@@ -605,32 +602,19 @@ function CacheCard({ cache }) {
           </span>
         </div>
         <div className="kv-row">
-          <span className="kv-label">Memory</span>
-          <span className="kv-value">
-            {mb(memUsed)} MB of {mb(memMax)} MB
-          </span>
+          <span className="kv-label">Size on disk</span>
+          <span className="kv-value">{mb(l2?.disk_bytes)} MB</span>
         </div>
         <div className="kv-row">
-          <span className="kv-label">Keys · expired · evicted</span>
-          <span className="kv-value">
-            {fmt(l2?.keys)} · {fmt(l2?.expired)} · {fmt(l2?.evicted)}
-          </span>
+          <span className="kv-label">Keys</span>
+          <span className="kv-value">{fmt(l2?.keys)}</span>
         </div>
       </div>
-      {memPct != null && (
-        <div
-          className="proto-track"
-          style={{ marginTop: 8 }}
-          title={`${memPct}% of the Dragonfly memory budget in use`}
-        >
-          <div className="proto-fill" style={{ width: `${memPct}%` }} />
-        </div>
-      )}
       <div className="card-hint">
         The L2 rate above is for traffic since this page loaded; all-time it is{' '}
-        {l2AllTime == null ? '—' : `${l2AllTime}%`} (since Dragonfly started). A low all-time rate is normal — the flood
-        wrote millions of one-off queries — and most repeat queries are absorbed by L1 anyway. L2 is the shared,
-        restart-surviving layer, and the query log lives here too.
+        {l2AllTime == null ? '—' : `${l2AllTime}%`} (since the server started). A low all-time rate is normal — the
+        flood wrote millions of one-off queries — and most repeat queries are absorbed by L1 anyway. L2 is the
+        restart-surviving layer, stored in the data directory alongside the query log.
       </div>
     </div>
   )
@@ -715,7 +699,7 @@ function WarmerCard({ warmer, onWarmed }) {
       )}
       <div className="card-hint">
         Each pass takes the domains queried in the lookback window from the query log and re-resolves them (A + AAAA)
-        through your upstreams into Dragonfly.
+        through your upstreams into the cache.
         <strong>Skipped</strong> covers blocked / rewritten domains plus questions the cache already answers fresh;{' '}
         <strong>failed</strong> is upstream or cache write errors. Fresh probes don&apos;t count toward the cache
         hit-rate cards above.
@@ -724,7 +708,7 @@ function WarmerCard({ warmer, onWarmed }) {
   )
 }
 
-// QueryLogCard summarises what the Dragonfly query-log stream recorded: the
+// QueryLogCard summarises what the query-log stream recorded: the
 // volume and outcome split since local midnight, a 24h volume sparkline, and
 // the busiest clients — all computed server-side from the same stream the
 // Query Log page reads. Top-client rows deep-link to the query log filtered
@@ -737,7 +721,7 @@ function QueryLogCard({ today, q24, hourly, onNavigate }) {
     <div className="card">
       <div className="row-between">
         <h3 style={{ margin: 0 }}>Query log</h3>
-        <span className="dim small">live from Dragonfly</span>
+        <span className="dim small">live from the local store</span>
       </div>
       <div className="kv-grid" style={{ marginTop: 8 }}>
         <div className="kv-row">

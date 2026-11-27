@@ -1,26 +1,24 @@
-// CacheTab is the "Cache & log" sub page of Settings: the Dragonfly cache,
+// CacheTab is the "Cache & log" sub page of Settings: the response cache,
 // the proactive warmer and the query log's retention. Live utilisation is
-// shown on the dashboard's Dragonfly cache card.
+// shown on the dashboard's Cache card.
 export default function CacheTab({ f }) {
   const { text, number, toggle } = f
   return (
     <>
       <div className="card">
-        <h3>Cache (Dragonfly)</h3>
+        <h3>Cache</h3>
         <p className="dim small" style={{ marginTop: -6 }}>
-          Dragonfly is the response cache <em>and</em> the query log's home. Watch live utilisation on the dashboard's{' '}
-          <strong>Dragonfly cache</strong> card.
+          Answers are cached in memory (L1) and persisted to an embedded on-disk store (L2) in the data directory, so
+          they survive restarts — there is no separate cache server to run. Watch live utilisation on the dashboard's{' '}
+          <strong>Cache</strong> card.
         </p>
         <div className="form-grid">
-          {text('Address', 'cache.addr', null, 'localhost:6379')}
-          {text('Password', 'cache.password', 'optional auth')}
-          {number('DB index', 'cache.db')}
           {text('Positive TTL', 'cache.ttl', 'e.g. 6h, 30m, 1h30m')}
           {text('Negative TTL', 'cache.negative_ttl', 'e.g. 1m')}
           {number(
             'L1 entries (per shard)',
             'cache.l1_entries',
-            'in-process cache in front of Dragonfly; 0 = auto-sized from available RAM (default), -1 disables it, N = exact per-shard cap',
+            'in-process cache in front of the on-disk store; 0 = auto-sized from available RAM (default), -1 disables it, N = exact per-shard cap',
           )}
           {text(
             'Serve stale',
@@ -29,12 +27,6 @@ export default function CacheTab({ f }) {
             '5m',
           )}
           {toggle('Prefetch hot entries', 'cache.prefetch')}
-          {text(
-            'Cache lookup timeout',
-            'cache.lookup_timeout',
-            'how long a Dragonfly read may take on the hot path before the query goes straight upstream; empty = 150ms default',
-            '150ms',
-          )}
           {text(
             'Failure cache TTL',
             'cache.failure_ttl',
@@ -69,9 +61,9 @@ export default function CacheTab({ f }) {
       <div className="card">
         <h3>Query log</h3>
         <p className="dim small" style={{ marginTop: -6 }}>
-          The query log lives in <strong>Dragonfly</strong> (stream <code>irongrid:log</code>) alongside the DNS cache —
-          no separate database file. View and filter it on the <strong>Query Log</strong> page; retention below prunes
-          old entries automatically (hourly).
+          The query log is stored in the same embedded store as the DNS cache (under <code>kv/</code> in the data
+          directory). View and filter it on the <strong>Query Log</strong> page; retention below prunes old entries
+          automatically (hourly).
         </p>
         <div className="form-grid">
           {number('Retention (days)', 'log.retention_days')}

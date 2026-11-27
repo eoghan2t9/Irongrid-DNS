@@ -57,16 +57,24 @@ func main() {
 		installFlags := flag.NewFlagSet("irongrid install", flag.ExitOnError)
 		instConfig := installFlags.String("config", "irongrid.yaml", "path to write the YAML configuration file")
 		instData := installFlags.String("data", "data", "runtime data directory (querylog, lists, certs)")
-		instDfly := installFlags.Bool("with-dragonfly", false, "detect and start Dragonfly if no cache answers at cache.addr")
+		// Deprecated no-op kept so existing scripts that pass it keep working:
+		// the cache is embedded now, so there is no Dragonfly to start.
+		_ = installFlags.Bool("with-dragonfly", false, "deprecated and ignored: the cache is built in")
 		_ = installFlags.Parse(os.Args[2:])
 		if err := installer.Run(installer.Options{
-			ConfigPath:    *instConfig,
-			DataDir:       *instData,
-			WithDragonfly: *instDfly,
+			ConfigPath: *instConfig,
+			DataDir:    *instData,
 		}); err != nil {
 			slog.Error("install failed", "error", err)
 			os.Exit(1)
 		}
+		return
+	}
+
+	// `irongrid cleanup-legacy` removes the Dragonfly service that versions
+	// before the embedded cache installed (used by install.sh upgrades).
+	if len(os.Args) > 1 && os.Args[1] == "cleanup-legacy" {
+		installer.RemoveLegacyDragonfly(os.Stdout)
 		return
 	}
 
@@ -107,12 +115,16 @@ func main() {
 	defer stop()
 
 	a := &app{cfg: cfg, ctx: ctx, configPath: *configPath, dataDir: *dataDir}
+	a.setupKV()
+	// Registered first so it runs last: the store must outlive the cache and
+	// the query log, which both flush pending writes into it on Close.
+	defer func() { _ = a.kv.Close() }()
 	a.setupCache()
 	// Note: closes the *current* cache, which reload may have swapped.
 	defer func() {
-		a.dflyMu.Lock()
-		c := a.dfly
-		a.dflyMu.Unlock()
+		a.cacheMu.Lock()
+		c := a.cache
+		a.cacheMu.Unlock()
 		if c != nil {
 			_ = c.Close()
 		}

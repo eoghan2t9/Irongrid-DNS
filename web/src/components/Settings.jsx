@@ -54,7 +54,7 @@ export default function Settings() {
     { id: 'server', label: 'Server', desc: 'Listeners, upstreams, DNSSEC, TLS' },
     { id: 'security', label: 'Security', desc: 'Rate limit, geo block, abuse reporting' },
     { id: 'filtering', label: 'Filtering', desc: 'Block response, lists, CNAME cloaking' },
-    { id: 'cache', label: 'Cache & log', desc: 'Dragonfly cache, warmer, query log' },
+    { id: 'cache', label: 'Cache & log', desc: 'Response cache, warmer, query log' },
     { id: 'network', label: 'Network', desc: 'Tunnel, DHCP server' },
     { id: 'system', label: 'System', desc: 'Credentials, backup, diagnostics' },
   ]

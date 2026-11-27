@@ -1,7 +1,6 @@
 package installer
 
 import (
-	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,7 +18,6 @@ func testAnswers() *answers {
 		protos:         []string{"UDP", "DoH"},
 		listenHost:     "0.0.0.0",
 		upstreamPreset: "quad9",
-		cacheAddr:      "dragonfly:6379",
 		blocklists:     []string{"oisd-big", "stevenblack"},
 		whitelists:     []string{"os-updates", "cloud"},
 		webUser:        "admin",
@@ -112,31 +110,6 @@ func TestBuildConfigNoProtocolsFails(t *testing.T) {
 	}
 }
 
-// The one-line installer sets IRONGRID_SKIP_DRAGONFLY=1 for --skip-dragonfly;
-// the wizard must then not offer (or run) the Dragonfly install.
-func TestAskDragonflySkipEnv(t *testing.T) {
-	t.Setenv("IRONGRID_SKIP_DRAGONFLY", "1")
-	w := &wizard{a: &answers{deploy: "native", cacheAddr: "localhost:6379"}, in: strings.NewReader(""), out: io.Discard}
-	if err := w.askDragonfly(); err != nil {
-		t.Fatalf("askDragonfly: %v", err)
-	}
-	if w.a.installDragonfly {
-		t.Error("installDragonfly should be false with IRONGRID_SKIP_DRAGONFLY=1")
-	}
-}
-
-// Default behaviour (no skip env) is to ask, defaulting to yes.
-func TestAskDragonflyDefaultsYes(t *testing.T) {
-	t.Setenv("IRONGRID_ACCESSIBLE", "1")
-	w := &wizard{a: &answers{deploy: "native", cacheAddr: "localhost:6379"}, in: strings.NewReader("y\n"), out: io.Discard}
-	if err := w.askDragonfly(); err != nil {
-		t.Fatalf("askDragonfly: %v", err)
-	}
-	if !w.a.installDragonfly {
-		t.Error("installDragonfly should default to true when the user confirms")
-	}
-}
-
 // TestGeneratedUnitsNoTrailingComments guards against systemd/launchd unit
 // generators emitting inline comments after a directive value. systemd treats
 // the whole line as the value, so `WorkingDirectory=/data   # note` breaks
@@ -201,7 +174,10 @@ func TestWriteDockerCompose(t *testing.T) {
 	if !strings.Contains(body, "../irongrid.yaml:/app/irongrid.yaml:ro") {
 		t.Errorf("compose volume should mount ../irongrid.yaml, got:\n%s", body)
 	}
-	if !strings.Contains(body, "dragonfly") {
-		t.Errorf("compose should bundle dragonfly:\n%s", body)
+	if strings.Contains(strings.ToLower(body), "dragonfly") {
+		t.Errorf("compose must not bundle a Dragonfly service any more:\n%s", body)
+	}
+	if !strings.Contains(body, "irongrid-data:/data") {
+		t.Errorf("compose must keep a persistent /data volume (it holds the embedded store):\n%s", body)
 	}
 }

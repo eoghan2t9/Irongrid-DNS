@@ -5,9 +5,11 @@
 # Downloads the latest release binary for your architecture, verifies its
 # SHA-256 checksum, and installs it. In an interactive console the TUI setup
 # wizard (`irongrid install`) is then launched and handles the whole install
-# itself: Dragonfly, the config, and the startup task. Non-interactive runs
-# (e.g. `irm ... | iex` in CI), -NoWizard, or an existing config keep the
-# script's built-in Dragonfly + startup-task steps instead.
+# itself: the config and the startup task. Non-interactive runs (e.g.
+# `irm ... | iex` in CI), -NoWizard, or an existing config keep the script's
+# built-in startup-task step instead. The cache is embedded in the binary, so
+# there is nothing else to install; an upgrade removes the old Dragonfly
+# container if a previous release started one.
 # Optional parameters:
 #
 #   -Version "v1.0.1"   install a specific release tag (default: latest)
@@ -77,8 +79,8 @@ $configFile = Join-Path $Dir "irongrid.yaml"
 $dataDir = Join-Path $Dir "data"
 $sumsFile = Join-Path $Dir "SHA256SUMS.txt"
 $configExists = Test-Path $configFile
-# The interactive wizard handles the whole install: Dragonfly, the config and
-# the startup task. It only runs in a real console with no existing config
+# The interactive wizard handles the whole install: the config and the
+# startup task. It only runs in a real console with no existing config
 # (an existing config is always left untouched).
 $wizardRuns = (-not $NoWizard) -and (-not [Console]::IsInputRedirected) -and (-not $configExists)
 
@@ -122,51 +124,14 @@ Write-Host ""
 Write-Host "Installed: $exe"
 & $exe -version
 
-# ---- Dragonfly: the cache Irongrid requires ----------------
-# Dragonfly has no native Windows build; it runs in Docker (WSL2 backend).
-# When the interactive wizard is about to run, it installs Dragonfly itself.
-if ($wizardRuns) {
+# ---- Upgrades: remove the old Dragonfly container ---------
+# Releases before the embedded cache ran Dragonfly in a Docker container. The
+# binary's `cleanup-legacy` command removes only the containers the old
+# installer created (matched by name and Dragonfly image); the volume with the
+# old data is left in place. The wizard does this itself when it runs.
+if (-not $wizardRuns) {
   Write-Host ""
-  Write-Host "==> Dragonfly install deferred to the interactive wizard"
-} else {
-Write-Host ""
-Write-Host "==> installing Dragonfly (required cache) ..."
-
-# If a Redis-compatible server already answers on 6379, just use it.
-$existing = $false
-try {
-  $tcp = New-Object System.Net.Sockets.TcpClient
-  $tcp.Connect("127.0.0.1", 6379)
-  $stream = $tcp.GetStream()
-  $writer = New-Object System.IO.StreamWriter($stream)
-  $writer.Write("PING`r`n"); $writer.Flush()
-  $reader = New-Object System.IO.StreamReader($stream)
-  $pong = $reader.ReadLine()
-  $tcp.Close()
-  if ($pong -like "+PONG*") { $existing = $true }
-} catch { }
-
-$docker = Get-Command docker -ErrorAction SilentlyContinue
-if ($existing) {
-  Write-Host "==> a Redis-compatible server already answers on 127.0.0.1:6379 - using it"
-  $dflyStarted = $true
-} elseif (-not $docker) {
-  Write-Host "!! Dragonfly has no native Windows build and Docker was not found." -ForegroundColor Yellow
-  Write-Host "   Install Docker Desktop (WSL2 backend): https://www.docker.com/products/docker-desktop/"
-  Write-Host "   then run:  docker run -d --name dragonfly --restart unless-stopped -p 127.0.0.1:6379:6379 docker.dragonflydb.io/dragonfly/dragonfly --cache_mode=true --maxmemory=512mb --proactor_threads=2"
-} else {
-  Write-Host "==> starting Dragonfly in Docker ..."
-  docker rm -f dragonfly 2>$null | Out-Null
-  docker run -d --name dragonfly --restart unless-stopped `
-    -p 127.0.0.1:6379:6379 `
-    docker.dragonflydb.io/dragonfly/dragonfly --cache_mode=true --maxmemory=512mb --proactor_threads=2 --port=6379 | Out-Null
-  if ($LASTEXITCODE -eq 0) {
-    Write-Host "==> Dragonfly running on 127.0.0.1:6379"
-    $dflyStarted = $true
-  } else {
-    Write-Host "!! Docker failed to start Dragonfly - check that Docker Desktop is running." -ForegroundColor Yellow
-  }
-}
+  try { & $exe cleanup-legacy } catch { }
 }
 
 # ---- Install Irongrid as a Windows scheduled task ---------------
@@ -206,8 +171,8 @@ try {
 }
 
 # ---- Interactive setup wizard (TUI) -------------------------
-# Launch `irongrid install`, which handles the whole install: Dragonfly, the
-# config, binary placement and the startup task. It needs a real console:
+# Launch `irongrid install`, which handles the whole install: the config,
+# binary placement and the startup task. It needs a real console:
 # when run via `irm ... | iex` stdin is redirected (a pipe), so it is
 # skipped. The config path is double-quoted explicitly for PowerShell 5.1's
 # native argument passing (paths under %LOCALAPPDATA% can contain spaces).
@@ -222,9 +187,7 @@ if ($NoWizard) {
   Write-Host "    (re-run it anytime with: $exe install)"
 } else {
   Write-Host "==> launching the interactive setup wizard ..."
-  Write-Host "    it handles Dragonfly, the config, and the startup task"
-  # The wizard installs Dragonfly itself when asked, so --with-dragonfly is
-  # not passed here (older release binaries don't define that flag anyway).
+  Write-Host "    it handles the config and the startup task"
   & $exe install --config "`"$configFile`"" --data "`"$dataDir`""
   if ($LASTEXITCODE -ne 0) {
     Write-Host "!! wizard did not complete - the config at $configFile may be incomplete" -ForegroundColor Yellow
@@ -233,12 +196,9 @@ if ($NoWizard) {
 
 Write-Host ""
 Write-Host "Next steps:"
-if ($dflyStarted) {
-  Write-Host "  - Dragonfly cache is running on 127.0.0.1:6379"
-} elseif ($wizardRuns) {
-  Write-Host "  - Dragonfly + startup task were handled by the wizard"
-} else {
-  Write-Host "  1. Start Dragonfly (required cache) - see the notes above"
+Write-Host "  - Cache and query log are built in (stored under $dataDir\kv)"
+if ($wizardRuns) {
+  Write-Host "  - The startup task was handled by the wizard"
 }
 Write-Host "  2. Edit the config:       $configFile"
 Write-Host "  3. Re-run the setup wizard anytime:  $exe install"

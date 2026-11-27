@@ -221,8 +221,8 @@ const NAV = [
     id: 'updates',
     label: 'Updates',
     section: 'System',
-    desc: 'Check and install updates for Irongrid, Dragonfly and cloudflared',
-    keywords: ['upgrade', 'version', 'dragonfly', 'cloudflared', 'redis', 'cache', 'install', 'outdated'],
+    desc: 'Check and install updates for Irongrid and cloudflared',
+    keywords: ['upgrade', 'version', 'cloudflared', 'install', 'outdated'],
     icon: navSvg(
       <>
         <path d="M12 3v12" />

@@ -575,7 +575,7 @@ func parseSemver(s string) (semver, error) {
 	if before, after, ok := strings.Cut(s, "-"); ok {
 		core, pre = before, after
 	}
-	// Accept "v2.1" as well as "v2.1.0": some projects (Dragonfly's v2.1)
+	// Accept "v2.1" as well as "v2.1.0": some projects
 	// tag releases with only major.minor, and the missing parts are zero.
 	// Rejecting them made Newer() report "no update" for every such tag.
 	parts := strings.Split(core, ".")

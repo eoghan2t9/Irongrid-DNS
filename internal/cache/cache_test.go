@@ -14,32 +14,26 @@ import (
 	"codeberg.org/miekg/dns"
 	"codeberg.org/miekg/dns/dnsutil"
 	"codeberg.org/miekg/dns/rdata"
-	"github.com/alicebob/miniredis/v2"
-	"github.com/redis/rueidis"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/dnsname"
+	"github.com/eoghan2t9/Irongrid-DNS/internal/kvstore"
 )
 
-func testRueidisOption(addr string) rueidis.ClientOption {
-	return rueidis.ClientOption{
-		InitAddress:  []string{addr},
-		DisableCache: true,
-	}
-}
-
-func testRueidisClient(tb testing.TB, addr string) rueidis.Client {
+// testStore opens an in-memory kvstore that is closed with the test.
+func testStore(tb testing.TB) *kvstore.Store {
 	tb.Helper()
-	client, err := rueidis.NewClient(testRueidisOption(addr))
+	st, err := kvstore.Open(kvstore.Options{InMemory: true})
 	if err != nil {
-		tb.Fatalf("rueidis.NewClient: %v", err)
+		tb.Fatalf("kvstore.Open: %v", err)
 	}
-	return client
+	tb.Cleanup(func() { _ = st.Close() })
+	return st
 }
 
-// l1onlyCache builds a Cache with only the in-memory L1 layer (nil Redis
-// client), so the fast path is fully exercised offline.
+// l1onlyCache builds a Cache with only the in-memory L1 layer (no L2 store),
+// so the fast path is fully exercised offline.
 func l1onlyCache(ttl, negTTL time.Duration) *Cache {
-	return &Cache{client: nil, l1: newL1(512, 0), prefix: "irongrid:dns:", ttl: ttl, negativeTTL: negTTL}
+	return &Cache{store: nil, l1: newL1(512, 0), prefix: "irongrid:dns:", ttl: ttl, negativeTTL: negTTL}
 }
 
 func aQuestion() dnsname.Question {
@@ -228,10 +222,10 @@ func TestL1Counters(t *testing.T) {
 }
 
 // BenchmarkL1Get measures the hot path: a pure in-memory cache hit with no
-// Redis round-trip.
+// store read.
 // TestCloseFlushesAllWriterShards verifies Close's wwg.Wait() actually
 // blocks until every write-writer shard (see writerShardCount/writeShard),
-// not just one, has committed its queued writes to Dragonfly — the risk a
+// not just one, has committed its queued writes to the store — the risk a
 // sharded writer pool adds over the single-writer version, where "wait for
 // the writer" meant waiting for the only one there was. One question is
 // deliberately picked per shard (searching by suffix until keyHash(q) lands
@@ -239,9 +233,9 @@ func TestL1Counters(t *testing.T) {
 // Close is called.
 func TestCloseFlushesAllWriterShards(t *testing.T) {
 	t.Parallel()
-	mr := miniredis.RunT(t)
+	store := testStore(t)
 	c := &Cache{
-		client:      testRueidisClient(t, mr.Addr()),
+		store:       store,
 		l1:          newL1(64, 0),
 		prefix:      "irongrid:dns:",
 		ttl:         6 * time.Hour,
@@ -270,11 +264,10 @@ func TestCloseFlushesAllWriterShards(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 
-	// Reopen over the same (still running) miniredis with a fresh Cache (no
-	// L1) so every read is forced through L2 — a get straight from this
-	// process's own L1 would prove nothing about whether the write actually
-	// reached Dragonfly.
-	verify := &Cache{client: testRueidisClient(t, mr.Addr()), prefix: "irongrid:dns:", ttl: 6 * time.Hour}
+	// Read back through a fresh Cache (no L1) over the same store so every
+	// read is forced through L2 — a get straight from this process's own L1
+	// would prove nothing about whether the write actually reached the store.
+	verify := &Cache{store: store, prefix: "irongrid:dns:", ttl: 6 * time.Hour}
 	t.Cleanup(func() { _ = verify.Close() })
 	for shard, q := range questions {
 		if got := verify.Get(t.Context(), q); got == nil {
@@ -283,85 +276,40 @@ func TestCloseFlushesAllWriterShards(t *testing.T) {
 	}
 }
 
-func TestPingUntilReadySucceedsImmediately(t *testing.T) {
+func TestNewRequiresOpenStore(t *testing.T) {
 	t.Parallel()
-	mr := miniredis.RunT(t)
-
-	start := time.Now()
-	client, err := connectUntilReady(testRueidisOption(mr.Addr()), 5*time.Second)
+	if _, err := New(nil, time.Hour, time.Minute, 0, 64); err == nil {
+		t.Fatal("New(nil store) succeeded, want an error")
+	}
+	closed, err := kvstore.Open(kvstore.Options{InMemory: true})
 	if err != nil {
-		t.Fatalf("connectUntilReady: %v", err)
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { client.Close() })
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Errorf("took %v to succeed against a healthy server — should return on the first ping", elapsed)
+	_ = closed.Close()
+	if _, err := New(closed, time.Hour, time.Minute, 0, 64); err == nil {
+		t.Fatal("New(closed store) succeeded, want an error")
 	}
-}
-
-func TestPingUntilReadyRetriesOnLoading(t *testing.T) {
-	t.Parallel()
-	mr := miniredis.RunT(t)
-	mr.SetError("LOADING Redis is loading the dataset in memory")
-
-	go func() {
-		time.Sleep(600 * time.Millisecond)
-		mr.SetError("")
-	}()
-
-	start := time.Now()
-	client, err := connectUntilReady(testRueidisOption(mr.Addr()), 5*time.Second)
+	c, err := New(testStore(t), time.Hour, time.Minute, 0, 64)
 	if err != nil {
-		t.Fatalf("connectUntilReady: %v", err)
+		t.Fatalf("New(open store): %v", err)
 	}
-	t.Cleanup(func() { client.Close() })
-	if elapsed := time.Since(start); elapsed < 600*time.Millisecond {
-		t.Errorf("succeeded after %v — expected it to keep retrying until the LOADING error cleared", elapsed)
-	}
-}
-
-func TestPingUntilReadyFailsFastOnNonLoadingError(t *testing.T) {
-	t.Parallel()
-	mr := miniredis.RunT(t)
-	mr.SetError("NOAUTH Authentication required")
-
-	start := time.Now()
-	_, err := connectUntilReady(testRueidisOption(mr.Addr()), 5*time.Second)
-	if err == nil || !strings.Contains(err.Error(), "NOAUTH") {
-		t.Fatalf("connectUntilReady: got %v, want a NOAUTH error", err)
-	}
-	if elapsed := time.Since(start); elapsed > time.Second {
-		t.Errorf("took %v to fail on a non-LOADING error — should give up on the first ping instead of retrying for the full budget", elapsed)
-	}
-}
-
-func TestPingUntilReadyGivesUpAfterBudget(t *testing.T) {
-	t.Parallel()
-	mr := miniredis.RunT(t)
-	mr.SetError("LOADING Redis is loading the dataset in memory")
-
-	start := time.Now()
-	_, err := connectUntilReady(testRueidisOption(mr.Addr()), 700*time.Millisecond)
-	elapsed := time.Since(start)
-	if err == nil || !strings.Contains(err.Error(), "LOADING") {
-		t.Fatalf("connectUntilReady: got %v, want a LOADING error once the budget is exhausted", err)
-	}
-	if elapsed < 700*time.Millisecond || elapsed > 3*time.Second {
-		t.Errorf("gave up after %v — expected roughly the 700ms budget, not immediately and not much longer", elapsed)
+	t.Cleanup(func() { _ = c.Close() })
+	if err := c.Ping(t.Context()); err != nil {
+		t.Fatalf("Ping: %v", err)
 	}
 }
 
 // BenchmarkCacheSetThroughput exercises the full miss-path write: L1 set
 // plus enqueuing onto the L2 batched-writer channel (see writeQueueCap and
-// Cache.runWriter), backed by a real miniredis instance so the writer
-// goroutine actually flushes batches instead of hitting a nil client. Each
+// Cache.runWriter), backed by an in-memory kvstore so the writer goroutine
+// actually flushes batches instead of hitting a nil store. Each
 // parallel iteration uses a distinct question so writes spread across L1
 // shards — this is the baseline for comparing a single writer goroutine
 // against a sharded writer pool (see cache.go's runWriter doc comment on the
 // planned sharding).
 func BenchmarkCacheSetThroughput(b *testing.B) {
-	mr := miniredis.RunT(b)
 	c := &Cache{
-		client:      testRueidisClient(b, mr.Addr()),
+		store:       testStore(b),
 		l1:          newL1(4096, 0),
 		prefix:      "irongrid:dns:",
 		ttl:         6 * time.Hour,
@@ -393,7 +341,7 @@ func BenchmarkL1Get(b *testing.B) {
 }
 
 // BenchmarkLookupL1Hit measures the handler's actual cache path (Lookup): a
-// pure L1 hit — no key-string building, no context, no Redis. The hit path
+// pure L1 hit — no key-string building, no context, no store read. The hit path
 // returns the stored packed bytes without decoding them into a dns.Msg, so
 // it stays allocation-free (the handler writes those bytes straight out).
 func BenchmarkLookupL1Hit(b *testing.B) {
@@ -437,7 +385,7 @@ func TestLookupL1Negative(t *testing.T) {
 }
 
 // TestLookupMissWithNilClient verifies Lookup degrades to a clean miss (no
-// panic) when neither L1 nor L2 (nil Redis client, as in every test in this
+// panic) when neither L1 nor L2 (nil store, as in every test in this
 // file) has anything — the path a genuinely new domain takes before ever
 // reaching upstream.
 func TestLookupMissWithNilClient(t *testing.T) {
@@ -720,38 +668,27 @@ func TestNegativePrefetch(t *testing.T) {
 	})
 }
 
-// TestDecodeMGetResult exercises the pipelined GET pair response parsing
-// (posKey, negKey order, as Lookup calls DoMulti) against miniredis — rueidis
-// returns a present key with AsBytes() err == nil and a missing key with
-// rueidis.Nil.
+// TestDecodeMGetResult exercises the GetMany pair parsing (posKey, negKey
+// order, as Lookup calls it) against a real store: a present key comes back
+// as its bytes and a missing key as nil.
 func TestDecodeMGetResult(t *testing.T) {
 	t.Parallel()
-	mr := miniredis.RunT(t)
-	client := testRueidisClient(t, mr.Addr())
-	t.Cleanup(func() { client.Close() })
-
-	_ = mr.Set("pos", "pos-bytes")
-	_ = mr.Set("neg", "neg-bytes")
-
-	mget := func(k1, k2 string) []rueidis.RedisResult {
-		return client.DoMulti(t.Context(),
-			client.B().Get().Key(k1).Build(),
-			client.B().Get().Key(k2).Build(),
-		)
-	}
+	store := testStore(t)
+	_ = store.Set("pos", []byte("pos-bytes"), time.Hour)
+	_ = store.Set("neg", []byte("neg-bytes"), time.Hour)
 
 	cases := []struct {
 		name    string
-		vals    []rueidis.RedisResult
+		vals    [][]byte
 		wantPos []byte
 		wantNeg []byte
 		wantOK  bool
 	}{
-		{"both missing", mget("miss1", "miss2"), nil, nil, false},
-		{"positive present", mget("pos", "miss"), []byte("pos-bytes"), nil, true},
-		{"negative present", mget("miss", "neg"), nil, []byte("neg-bytes"), true},
-		{"both present positive wins", mget("pos", "neg"), []byte("pos-bytes"), nil, true},
-		{"wrong length", []rueidis.RedisResult{{}}, nil, nil, false},
+		{"both missing", store.GetMany("miss1", "miss2"), nil, nil, false},
+		{"positive present", store.GetMany("pos", "miss"), []byte("pos-bytes"), nil, true},
+		{"negative present", store.GetMany("miss", "neg"), nil, []byte("neg-bytes"), true},
+		{"both present positive wins", store.GetMany("pos", "neg"), []byte("pos-bytes"), nil, true},
+		{"wrong length", [][]byte{nil}, nil, nil, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -902,20 +839,19 @@ func TestLookupRawStaleKeepsRaw(t *testing.T) {
 // miss + L2 hit used to re-seed L1 with the cache's configured maximum
 // (c.ttl, e.g. 6h) instead of the record's actual remaining lifetime,
 // letting L1 confidently serve an already-near-expiry answer as "fresh"
-// for hours. It seeds Dragonfly (via miniredis) directly with a record
-// that has a real 5s remaining TTL — far under the 6h cap — as if written
-// earlier by this or another instance in the fleet, then confirms
+// for hours. It seeds the store directly with a record that has a real 5s
+// remaining TTL — far under the 6h cap — as if written earlier by a
+// previous run of this process, then confirms
 // getPositive's L2-rehydration path stores that same ~5s TTL in L1, not
 // the 6h cap.
 func TestL1RehydrationHonorsRealRemainingTTL(t *testing.T) {
 	t.Parallel()
-	mr := miniredis.RunT(t)
-	// Built directly (like l1onlyCache) rather than via New: New's startup
-	// probe runs "INFO server", which miniredis doesn't implement. This
-	// test seeds L2 directly and never calls Set, so the batched writer
-	// New would start is unneeded.
+	store := testStore(t)
+	// Built directly (like l1onlyCache) rather than via New: this test seeds
+	// L2 directly and never calls Set, so the batched writer New would start
+	// is unneeded.
 	c := &Cache{
-		client:      testRueidisClient(t, mr.Addr()),
+		store:       store,
 		l1:          newL1(64, 0),
 		prefix:      "irongrid:dns:",
 		ttl:         6 * time.Hour,
@@ -934,10 +870,9 @@ func TestL1RehydrationHonorsRealRemainingTTL(t *testing.T) {
 	buf := make([]byte, cacheEntryPrefixLen+len(packed))
 	binary.BigEndian.PutUint64(buf[:cacheEntryPrefixLen], uint64(time.Now().Unix()))
 	copy(buf[cacheEntryPrefixLen:], packed)
-	if err := mr.Set(c.msgKey(h), string(buf)); err != nil {
+	if err := store.Set(c.msgKey(h), buf, 5*time.Second); err != nil {
 		t.Fatalf("seed L2: %v", err)
 	}
-	mr.SetTTL(c.msgKey(h), 5*time.Second)
 
 	if got := c.getPositive(t.Context(), h); got == nil {
 		t.Fatal("expected a hit on L2 rehydration")
@@ -961,10 +896,10 @@ func TestL1RehydrationHonorsRealRemainingTTL(t *testing.T) {
 // with its TTL clamped to 1, long after it should have been re-resolved.
 func TestL1RewarmFromL2HonoursRecordTTL(t *testing.T) {
 	t.Parallel()
-	mr := miniredis.RunT(t)
+	store := testStore(t)
 	mk := func() *Cache {
 		c := &Cache{
-			client:      testRueidisClient(t, mr.Addr()),
+			store:       store,
 			l1:          newL1(64, 0),
 			prefix:      "irongrid:dns:",
 			ttl:         6 * time.Hour,

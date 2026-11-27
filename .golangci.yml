@@ -52,7 +52,7 @@ linters:
           - gosec
         text: "weak random number generator"
       # Test helpers intentionally exercise odd patterns (fuzzing payloads,
-      # miniredis, fake servers) — don't flag them.
+      # in-memory stores, fake servers) — don't flag them.
       - path: (.+)_test\.go
         linters:
           - gosec

@@ -152,7 +152,7 @@ export default function SystemTab({ f }) {
         <h3>Cache &amp; maintenance</h3>
         <div className="quick-actions">
           <button className="btn" onClick={f.flush}>
-            Flush DNS cache (Dragonfly)
+            Flush DNS cache
           </button>
           <button
             className="btn"

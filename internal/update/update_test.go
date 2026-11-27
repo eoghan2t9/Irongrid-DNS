@@ -31,7 +31,7 @@ func TestParseSemver(t *testing.T) {
 		{"v1.1.0-rc.1", true, 1, 1, 0, "rc.1"},
 		{"v0.1.0+build.5", true, 0, 1, 0, ""},
 		{"dev", false, 0, 0, 0, ""},
-		{"v1.2", true, 1, 2, 0, ""}, // major.minor tags (Dragonfly v2.1): patch is zero
+		{"v1.2", true, 1, 2, 0, ""}, // major.minor tags (e.g. v2.1): patch is zero
 		{"v2.1-abc123", true, 2, 1, 0, "abc123"},
 		{"v1.2.3.4", false, 0, 0, 0, ""},
 		{"v1.x", false, 0, 0, 0, ""},
@@ -68,7 +68,7 @@ func TestNewer(t *testing.T) {
 		{"v1.1.0-rc.1", "v1.1.0", false}, // pre-release is not newer than its release
 		{"v1.1.0", "v1.1.0-rc.1", true},  // release beats pre-release
 		{"v1.1.0-rc.2", "v1.1.0-rc.1", true},
-		{"v2.1", "v2.0.2", true},  // two-part tag (Dragonfly v2.1) is newer than v2.0.2
+		{"v2.1", "v2.0.2", true},  // two-part tag (v2.1) is newer than v2.0.2
 		{"v2.1", "v2.1", false},   // ...and equal to itself
 		{"v2.1", "v2.1.0", false}, // a missing patch part means zero
 		{"v2.0.2", "v2.1", false}, // an older three-part tag is not newer

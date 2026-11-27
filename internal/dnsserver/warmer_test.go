@@ -6,7 +6,6 @@ import (
 
 	"codeberg.org/miekg/dns"
 	"codeberg.org/miekg/dns/dnsutil"
-	"github.com/alicebob/miniredis/v2"
 
 	"github.com/eoghan2t9/Irongrid-DNS/internal/cache"
 	"github.com/eoghan2t9/Irongrid-DNS/internal/config"
@@ -46,12 +45,11 @@ func waitLogEntries(t *testing.T, ql *querylog.Log, n int) {
 }
 
 // newWarmerHarness wires a handler (real upstream DNS server, in-memory
-// Dragonfly-compatible query log, local-only cache) plus a warmer over it.
+// kvstore-backed query log, local-only cache) plus a warmer over it.
 func newWarmerHarness(t *testing.T) (*Handler, *querylog.Log, *Warmer) {
 	t.Helper()
 	addr := startUDPTestServer(t, "1.1.1.1", 0)
-	mr := miniredis.RunT(t)
-	ql, err := querylog.New(mr.Addr(), "", 0, 30, 0)
+	ql, err := querylog.New(newTestKV(t), 30, 0)
 	if err != nil {
 		t.Fatalf("querylog: %v", err)
 	}
@@ -140,7 +138,7 @@ func TestWarmerSkipsFreshEntries(t *testing.T) {
 	}
 }
 
-// TestWarmerDisabledLogIsNoOp verifies a warmer over a disabled log (no Redis
+// TestWarmerDisabledLogIsNoOp verifies a warmer over a disabled log (no store
 // backing) completes a pass cleanly with nothing to warm.
 func TestWarmerDisabledLogIsNoOp(t *testing.T) {
 	addr := startUDPTestServer(t, "1.1.1.1", 0)

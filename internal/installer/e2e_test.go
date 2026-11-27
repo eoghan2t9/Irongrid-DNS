@@ -18,26 +18,16 @@ import (
 )
 
 // TestRunEndToEnd drives the full wizard in accessible mode over a real PTY
-// with scripted answers, declining the Dragonfly install (offline), then
-// verifies the written config and service files.
+// with scripted answers, then verifies the written config and service files.
+// There is no cache step: the cache is embedded, so the wizard asks nothing
+// about it.
+//
+// IRONGRID_ACCESSIBLE=1 forces line-based rendering even though stdin is a
+// TTY, which is exactly how CI/non-interactive installs run. The PTY is
+// required so the password fields can read from a real terminal fd.
+// IRONGRID_SKIP_PRIVILEGED=1 keeps the run offline and side effect free (no
+// binary placement, no system service, no legacy-Dragonfly cleanup).
 func TestRunEndToEnd(t *testing.T) {
-	runEndToEnd(t, false)
-}
-
-// TestRunEndToEndWithDragonfly is the same flow but answers "yes" to the
-// "Install and start Dragonfly now?" question. A fake Redis (the same one
-// the dragonfly tests use) answers PING on the configured address, so
-// EnsureDragonfly takes its reuse path — no downloads, no side effects.
-func TestRunEndToEndWithDragonfly(t *testing.T) {
-	runEndToEnd(t, true)
-}
-
-// runEndToEnd drives the wizard once. IRONGRID_ACCESSIBLE=1 forces line-based
-// rendering even though stdin is a TTY, which is exactly how CI/non-interactive
-// installs run. The PTY is required so the password fields can read from a
-// real terminal fd. IRONGRID_SKIP_PRIVILEGED=1 keeps the run offline and side
-// effect free (no binary placement, no system service).
-func runEndToEnd(t *testing.T, withDragonfly bool) {
 	if testing.Short() {
 		t.Skip("skipping interactive wizard E2E in -short mode")
 	}
@@ -49,11 +39,6 @@ func runEndToEnd(t *testing.T, withDragonfly bool) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = os.Unsetenv("IRONGRID_SKIP_PRIVILEGED") })
-
-	dragonflyAddr := "localhost:6379"
-	if withDragonfly {
-		dragonflyAddr = fakeRedis(t)
-	}
 
 	dir := t.TempDir()
 	configPath := filepath.Join(dir, "irongrid.yaml")
@@ -81,7 +66,7 @@ func runEndToEnd(t *testing.T, withDragonfly bool) {
 	//
 	// Matching uses a cursor over the ANSI-stripped stream: each expect() only
 	// searches the output appended since the previous match, so an earlier
-	// prompt ("Dragonfly password") can never satisfy a later expect() for
+	// prompt ("Confirm password") can never satisfy a later expect() for
 	// "Password".
 	var output bytes.Buffer
 	consumed := 0 // index into stripANSI(output.String()) already matched
@@ -129,29 +114,19 @@ func runEndToEnd(t *testing.T, withDragonfly bool) {
 	expect("Upstream preset", "1")
 	// 6. Custom upstreams (empty).
 	expect("Custom upstreams", "")
-	// 7. Dragonfly address.
-	expect("Dragonfly address", dragonflyAddr)
-	// 8. Dragonfly password (empty).
-	expect("Dragonfly password", "")
-	// 9. Install Dragonfly now? -> yes (offline path answers no).
-	answer := "n"
-	if withDragonfly {
-		answer = "y"
-	}
-	expect("Install and start Dragonfly now?", answer)
-	// 10. Blocklists: toggle OISD Big (1), then confirm (0).
+	// 7. Blocklists: toggle OISD Big (1), then confirm (0).
 	expect("Blocklists", "1", "0")
-	// 11. Whitelist presets: toggle OS updates (1), then confirm (0).
+	// 8. Whitelist presets: toggle OS updates (1), then confirm (0).
 	expect("Always-allow presets", "1", "0")
-	// 12. Username.
+	// 9. Username.
 	expect("Username", "admin")
-	// 13. Password.
+	// 10. Password.
 	expect("Password", "testpass123")
-	// 14. Confirm password.
+	// 11. Confirm password.
 	expect("Confirm password", "testpass123")
-	// 15. TLS hosts.
+	// 12. TLS hosts.
 	expect("Self-signed certificate hosts", "localhost, dns.example.com")
-	// 16. Final confirm -> Install (y).
+	// 13. Final confirm -> Install (y).
 	expect("Write configuration and service files?", "y")
 
 	select {
@@ -182,8 +157,10 @@ func runEndToEnd(t *testing.T, withDragonfly bool) {
 			t.Errorf("config missing %q:\n%s", want, cfg)
 		}
 	}
-	if !strings.Contains(cfg, dragonflyAddr) {
-		t.Errorf("config cache addr should be %q:\n%s", dragonflyAddr, cfg)
+	for _, gone := range []string{"6379", "dragonfly", "Dragonfly"} {
+		if strings.Contains(cfg, gone) {
+			t.Errorf("config must not mention %q any more (the cache is embedded):\n%s", gone, cfg)
+		}
 	}
 
 	// systemd service file was generated next to the config.
@@ -191,10 +168,6 @@ func runEndToEnd(t *testing.T, withDragonfly bool) {
 	if _, err := os.Stat(svc); err != nil {
 		t.Errorf("systemd unit not written: %v", err)
 	}
-	// The "already running" reuse logic itself is covered by
-	// TestEnsureDragonflyAlreadyRunning in dragonfly_test.go; here we only
-	// verify the wizard accepts the Dragonfly install step and writes the
-	// chosen cache address into the config.
 }
 
 // stripANSI removes ANSI escape sequences from captured output so prompts can

@@ -52,17 +52,11 @@ func (c *Config) validate() error {
 	if err := c.validateVPN(); err != nil {
 		return err
 	}
-	if c.Cache.Addr == "" {
-		return fmt.Errorf("cache.addr is required (Dragonfly endpoint)")
-	}
 	if c.Cache.L1Entries < -1 {
 		return fmt.Errorf("cache.l1_entries must be >= -1 (-1 disables the in-process cache, 0 auto-sizes it from available RAM, N is an exact per-shard cap)")
 	}
 	if c.Cache.ServeStale < 0 {
 		return fmt.Errorf("cache.serve_stale must be >= 0 (0 disables serve-stale)")
-	}
-	if c.Cache.LookupTimeout < 0 {
-		return fmt.Errorf("cache.lookup_timeout must be >= 0 (0 uses the built-in default)")
 	}
 	if c.Cache.FailureTTL < 0 {
 		return fmt.Errorf("cache.failure_ttl must be >= 0 (0 uses cache.negative_ttl)")
